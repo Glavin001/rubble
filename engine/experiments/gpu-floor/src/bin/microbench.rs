@@ -120,6 +120,14 @@ fn main() -> anyhow::Result<()> {
         let (pre, body) = regs(n);
         rows.push((format!("{n} live registers, each updated a phase, 32 warps"), pre, body, tgb, 32, 0));
     }
+    // Values alive across every barrier and not touched until the last phase: does a
+    // barrier cost by what is live across it?
+    for n in [1usize, 16, 32, 48, 64, 96, 128] {
+        let pre = (0..n).map(|i| format!("float q{i} = acc * {}.5f;", i + 1)).collect::<Vec<_>>().join("\n");
+        let sum = (0..n).map(|i| format!("q{i}")).collect::<Vec<_>>().join(" + ");
+        let body = format!("acc = acc * 0.9999f + 0.5f;\nif (r + 1u == p.rounds) {{ acc += {sum}; }}");
+        rows.push((format!("{n} values live across the barrier, untouched, 32 warps"), pre, body, tgb, 32, 0));
+    }
     // Work in half the warps: does an idle warp cost?
     rows.push(("128 dependent fma in 16 of 32 warps".into(), String::new(), fma(128), tgb, 16, 0));
     // Threadgroup loads with no modulo in the index (a mask): what a load itself costs.

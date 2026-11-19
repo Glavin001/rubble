@@ -5,6 +5,18 @@ use engine_softbody::explicit_beams::JbeamWheels;
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
 use gpu_floor::{car, floor::*, gpu::Gpu};
 
+/// `--def NAME=V ...`: kernel switches, for an A/B from one binary.
+fn defs() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .filter(|w| w[0] == "--def")
+        .map(|w| {
+            let (k, v) = w[1].split_once('=').unwrap_or((w[1].as_str(), "1"));
+            format!("#define {k} {v}\n")
+        })
+        .collect()
+}
+
 fn arg(k: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
     a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned())
@@ -29,7 +41,8 @@ fn main() -> anyhow::Result<()> {
         st.pair = 2;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/gpu-floor/emu-pair");
         let by_step = std::env::args().any(|a| a == "--by-step");
-        let xa = arg("--xatom").map_or(String::new(), |m| format!("#define XATOM {m}\n"));
+        let mut xa = arg("--xatom").map_or(String::new(), |m| format!("#define XATOM {m}\n"));
+        xa += &defs();
         let mut e = Emu::new(l, &st, &format!("{}{xa}", if by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" }), &dir)?;
         e.reverse = std::env::args().any(|a| a == "--reverse");
         for c in 0..2 {
@@ -90,6 +103,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(m) = arg("--xatom") {
             extra += &format!("#define XATOM {m}\n");
         }
+        extra += &defs();
         let by_step = flag("--by-step");
         let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
         if by_step || prof.is_some() {
@@ -111,11 +125,17 @@ fn main() -> anyhow::Result<()> {
         if let Some(fr) = prof {
             // --profile F: where frame F + 1's time goes (floor.rs profile).
             let mut groups = GROUPS.to_vec();
-            groups.push(("pair: boxes, publish, partner's nodes, triangle cull", 1 << 12));
+            groups.push(("pair: nodes and cluster boxes published", 1 << 12));
+            groups.push(("pair: the partner's nodes copied", 1 << 29));
+            groups.push(("pair: triangles' cull", 1 << 30));
             groups.push(("pair: triangles x clusters (in the cull's phase)", 1 << 17));
             groups.push(("pair: cluster points' box test", 1 << 18));
             groups.push(("pair: candidates' rule", 1 << 19));
-            groups.push(("pair: hit counts, owners' turns", 1 << 20));
+            groups.push(("pair: hit counts, the turns' meetings", 1 << 20));
+            groups.push(("pair: turns: slots filled, hits counted", 1 << 11));
+            groups.push(("pair: turns: first pass", 1 << 7));
+            groups.push(("pair: turns: residual pass", 1 << 9));
+            groups.push(("pair: turns: work guard, sums", 1 << 10));
             profile(&f, 2 * pairs, fr, time.max(9), &groups);
             return Ok(());
         }
@@ -240,6 +260,34 @@ fn main() -> anyhow::Result<()> {
         println!("phases ({pairs} pair(s); ms a frame at the last state): whole {all:.4}");
         for (bit, name) in [(12u32, "contact pass (boxes meet)"), (0, "S0 node pass"), (1, "S1 centred scalars"), (2, "C1+C2 centred gather"), (3, "S3 beams"), (4, "S4 force gather"), (5, "S4 pair rows"), (8, "hit passes")] {
             println!("  {name:26} {:.4} ms", all - med(1 << bit));
+        }
+        // The contact pass taken apart on whole frames: the frame from the same state with
+        // the pass cut short after one more stage (each stage's cost is the difference).
+        let cuts: [(u32, &str); 15] = [
+            (12, "the second meeting"),
+            (16, "nodes published"),
+            (31, "cluster boxes published"),
+            (29, "the partner's nodes copied"),
+            (30, "triangles' cull"),
+            (17, "triangles x clusters"),
+            (18, "cluster points' box test"),
+            (19, "candidates' rule, hits recorded"),
+            (20, "hit counts, three meetings"),
+            (11, "turns: hits' lanes fill and count"),
+            (24, "turns: nodes' lanes fill their slots"),
+            (7, "turns: first pass"),
+            (25, "turns: first pass's shifts"),
+            (9, "turns: residual pass"),
+            (10, "turns: work guard, sums"),
+        ];
+        let mut mask: u32 = cuts.iter().fold(0, |m, c| m | 1 << c.0);
+        let mut prev = med(mask);
+        println!("the contact pass by stage (whole frames, cut short after each): without it {prev:.4}");
+        for c in cuts {
+            mask &= !(1 << c.0);
+            let now = med(mask);
+            println!("  {:46} {:.4} ms", c.1, now - prev);
+            prev = now;
         }
         return Ok(());
     }
