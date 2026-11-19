@@ -256,4 +256,25 @@ fn levels_across_the_gpu_are_bit_for_bit(column: &dyn Fn(usize, f32) -> Vec<Expl
         let Some([grouped, _, hits, _]) = fleet_matches("two columns of six", two, 30, 17, mask, true) else { return };
         assert!(grouped > 10 && hits > 0, "groups formed and hit ({grouped} frames, {hits} hits)");
     }
+    // Each hit worked out once in the group's levels (`explicit_plan::PERF_LEVELS_ONCE`,
+    // fleetLevelsOnce, with PERF_FLEET_HITLAT on: the default), against it off: the column of
+    // ten (at least 3 levels deep), with and without self split, and the two columns of six.
+    use engine_exec::explicit_plan::PERF_LEVELS_ONCE;
+    for self_split in [true, false] {
+        let Some([grouped, largest, hits, top]) =
+            fleet_matches("a column of ten, hits once", column(10, 15.0), 40, 17, PERF_LEVELS_ONCE, self_split)
+        else {
+            return;
+        };
+        assert!(grouped > 10 && largest > 8 && hits > 0 && top >= 3, "a deep group formed and hit ({grouped} frames, largest {largest}, {hits} hits, level {top})");
+    }
+    let mut two = column(6, 15.0);
+    for mut v in column(6, 12.0) {
+        for n in &mut v.nodes {
+            n.pos.x += 10.0;
+        }
+        two.push(v);
+    }
+    let Some([grouped, _, hits, _]) = fleet_matches("two columns of six, hits once", two, 30, 17, PERF_LEVELS_ONCE, true) else { return };
+    assert!(grouped > 10 && hits > 0, "groups formed and hit ({grouped} frames, {hits} hits)");
 }
