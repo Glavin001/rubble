@@ -443,7 +443,9 @@ def _matrix_row(spec: dict, shard: dict, runs: list[dict], base: dict, deadline:
     if cuda:
         env["REPLAY_BIN"] = lab["exec"]
     lines: list[str] = []
-    cmd = ["python3", MATRIX_PY, *spec["matrix_args"], row]
+    # (The rows named on the command line are the shards: this container's is `row` alone.)
+    picked = set(spec["matrix_rows"])
+    cmd = ["python3", MATRIX_PY, *[a for a in spec["matrix_args"] if a not in picked], row]
     _say(f"=== row {row}: {' '.join(cmd[2:])}")
     code, secs = _run(cmd, "/repo/engine", env, deadline, spec["monitor"], keep=lines)
     if make and code == 0 and (states / f"{row}.fx").is_file():

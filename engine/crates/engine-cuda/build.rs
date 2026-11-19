@@ -244,6 +244,9 @@ fn explicit_kernels(
             "{}: the CUDA source has no loop caps (explicit_loop_cap.slang)",
             name
         );
+        // A second entry for indirect dispatches, the workgroup counts read on the GPU
+        // (`{entry}_gs`, grid_stride_entry): the host launches it without waiting.
+        std::fs::write(&cu, engine_slang_build::cuda_layout::grid_stride_entry(&text, entry)?)?;
         let nvcc = nvcc.filter(|_| wanted(name));
         if let Some(nvcc) = nvcc {
             let threads = kernel.threads.iter().product();

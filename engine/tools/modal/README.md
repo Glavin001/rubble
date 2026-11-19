@@ -179,6 +179,16 @@ modules doing the same arithmetic can differ in the last bit. Measured 2026-11-1
 bit, the contact rows 3 to 20 times faster with it. A run: about 4 minutes of local build
 after a kernel edit, then 50 to 120 container-seconds (2 to 4 cents) for the 12 rows.
 
+`PROFILE_SPLIT=1` adds each row's frame on CUDA (`explicit_replay --ab-profile`, both
+halves): wall and GPU time, the kernels' sum, the gaps between launches (GPU minus
+kernels), the host (wall minus GPU), and launches, bank writes and argument reads a frame,
+then each kernel's time. Indirect dispatches read their workgroup counts on the GPU
+(each module's `{entry}_gs`, engine-slang-build `grid_stride_entry`), so a frame has no
+wait for the host; switch `devindirect` (or `RUBBLE_CUDA_HOST_INDIRECT=1`) reads them
+back instead. Measured 2026-11-19 (T4, strict floats): every row bit for bit, 10 to 32 %
+faster (pile32 1 %); the gaps went from 0.5 to 5.7 ms a frame to none, the host's share is
+under 0.2 ms (pile32 0.5 ms), and what remains is the kernels' own time.
+
 ## Cold kernel compiles (WebGPU route; read this first)
 
 wgpu creates each compute pipeline from SPIR-V, and NVIDIA's driver compiles it on the

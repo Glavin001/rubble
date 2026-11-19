@@ -14,7 +14,9 @@
 //! Switches (vehicle_lab's `--ab-switch` names): `perf=MASK` (the planner's perf flags
 //! with MASK set or cleared), `groupsplit` (the split group path and self split),
 //! `selfsplit`, `widelist` (the wide passes with their reused pair list), `fused` (its
-//! fused aux pass), `wide` (the wide passes). Exit 0 when the halves end bit for bit.
+//! fused aux pass), `wide` (the wide passes); this host's own `devindirect` (indirect
+//! launches read their counts on the GPU, off: the host reads them back).
+//! `--ab-profile`: each half's frame by kernel, gaps and host work, after the A/B. Exit 0 when the halves end bit for bit.
 //!
 //! `--modules FILE ...`: only print the modules a replay of those fixtures may launch.
 
@@ -76,7 +78,9 @@ fn main() -> anyhow::Result<()> {
             "wide" => {
                 x.set_wide(on);
             }
-            other => anyhow::bail!("switch {other} is not on this host (perf=MASK, groupsplit, selfsplit, widelist, fused, wide)"),
+            // The host's own: indirect launches' counts read on the GPU, or read back.
+            "devindirect" => x.set_device_indirect(on),
+            other => anyhow::bail!("switch {other} is not on this host (perf=MASK, groupsplit, selfsplit, widelist, fused, wide, devindirect)"),
         }
         Ok(())
     };
@@ -165,5 +169,72 @@ fn main() -> anyhow::Result<()> {
         ms(1)
     );
     println!("   frames on a split path: {}; argument reads (waits): {}", x.split_frames, x.args_syncs);
+    if args.iter().any(|a| a == "--ab-profile") {
+        profile(&mut x, &snap, steps, &p, "on", |x| apply(x, true))?;
+        profile(&mut x, &snap, steps, &p, "off", |x| apply(x, false))?;
+    }
     std::process::exit(i32::from(!same));
+}
+
+/// `--ab-profile` (matrix.py PROFILE_SPLIT=1): where the frame's time goes with the switch
+/// on (`side`), then off, from the state. 10 frames: wall (launch to finish) and GPU
+/// (events around the frame) medians, and the host's work a frame (launches, bank writes,
+/// argument reads); then 10 more with an event pair around every launch: each kernel's GPU
+/// time a frame. GPU minus the kernels is the stream's gaps between launches; wall minus
+/// GPU the host.
+fn profile(
+    x: &mut CudaExplicitBeams,
+    snap: &engine_cuda::CudaSnapshot,
+    steps: u32,
+    p: &Portable,
+    side: &str,
+    on: impl Fn(&mut CudaExplicitBeams) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    const N: usize = 10;
+    let med = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    x.restore(snap)?;
+    on(x)?;
+    x.frame(steps)?;
+    x.wait()?;
+    x.restore(snap)?;
+    let (l0, b0, s0) = (x.launches, x.bank_writes, x.args_syncs);
+    x.enable_frame_timing(N as u32);
+    let mut wall = Vec::with_capacity(N);
+    for _ in 0..N {
+        let t = Instant::now();
+        x.frame(steps)?;
+        x.wait()?;
+        wall.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let gpu = med(x.frame_times_ms()?);
+    let wall = med(wall);
+    let per = |a: u64, b: u64| (a - b) as f64 / N as f64;
+    let (launches, banks, syncs) = (per(x.launches, l0), per(x.bank_writes, b0), per(x.args_syncs, s0));
+    x.restore(snap)?;
+    x.set_phase_timing(true);
+    for _ in 0..N {
+        x.frame(steps)?;
+    }
+    let phases = x.phase_times_ms()?;
+    x.set_phase_timing(false);
+    let kernels: f64 = phases.iter().map(|k| k.1).sum::<f64>() / N as f64;
+    println!(
+        "   profile at t {:.1} ({side}): wall {wall:.3} ms, GPU {gpu:.3} ms a frame (medians of {N}); kernels {kernels:.3} ms, \
+         gaps {:.3} ms, host {:.3} ms; a frame: {launches:.0} launches, {banks:.0} bank writes, {syncs:.1} argument reads",
+        p.header.t,
+        gpu - kernels,
+        wall - gpu
+    );
+    for (k, ms, n) in &phases {
+        let ms = ms / N as f64;
+        println!(
+            "     {k:<44} {ms:>8.3} ms {:>6.1}x {:>6.1}%",
+            f64::from(*n) / N as f64,
+            100.0 * ms / gpu.max(1e-9)
+        );
+    }
+    Ok(())
 }

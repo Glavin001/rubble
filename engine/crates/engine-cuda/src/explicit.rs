@@ -8,10 +8,13 @@
 //! memory, fills each module's `SLANG_globalParams` bank and replays the launches on
 //! one stream.
 //!
-//! CUDA has no indirect dispatch: before an indirect launch whose argument buffer a
-//! launch since may have written (the contact plan's passes, the sleep list, the split
-//! paths' kernels), the host reads that buffer back (a wait for the stream) and
-//! launches the counted grid. The wide passes' per-step parameter
+//! CUDA has no indirect dispatch. Each module has a second entry, `{entry}_gs`
+//! (engine-slang-build `grid_stride_entry`), whose blocks walk the workgroups the GPU wrote
+//! in the argument buffer: an indirect launch is that entry over a fixed grid (the blocks
+//! one launch keeps resident) with a pointer to its counts, queued without waiting. With
+//! [`CudaExplicitBeams::set_device_indirect`] off (measurement), the host reads the
+//! argument buffer back instead (a wait for the stream) when a launch since may have
+//! written it, and launches the counted grid. The wide passes' per-step parameter
 //! copies are a pointer rewrite in the bank, stream-ordered between launches.
 //! Loop caps: the kernel caps its loops in its Slang source (`EB_LOOP_CAP`), so the
 //! CUDA modules have them too; [`CudaExplicitBeams::wait`] fails on the loop-cap
@@ -52,6 +55,10 @@ pub use table::{ExplicitCudaKernel, CUDA_EXPLICIT_KERNELS, CUDA_LOOP_CAP_TEST};
 struct Kernel_ {
     module: sys::CUmodule,
     function: sys::CUfunction,
+    /// The indirect entry (`{entry}_gs`) and the blocks a launch of it runs: as many as
+    /// the device keeps resident at once (none: a module without it, e.g. another build's
+    /// from `RUBBLE_CUDA_EXPLICIT_DIR`; the host reads the counts back).
+    indirect: Option<(sys::CUfunction, u32)>,
     globals: sys::CUdeviceptr,
     /// Byte offset of the parameters pointer in the bank, and the copy it points at.
     params: Option<(u32, u32)>,
@@ -73,7 +80,7 @@ enum Key {
 /// Load module `t` and fill its bank from `bufs` (binding 11 none until a launch binds
 /// it). `RUBBLE_CUDA_EXPLICIT_DIR=dir` (measurement only) loads `dir/NAME.fatbin` in place
 /// of this build's: another build's device code of the same module, same bindings.
-fn load_kernel(t: &'static ExplicitCudaKernel, bufs: &[sys::CUdeviceptr], sizes: &[u64]) -> anyhow::Result<Kernel_> {
+fn load_kernel(t: &'static ExplicitCudaKernel, bufs: &[sys::CUdeviceptr], sizes: &[u64], sms: u32) -> anyhow::Result<Kernel_> {
     let name = t.name;
     anyhow::ensure!(
         !t.image.is_empty(),
@@ -94,6 +101,16 @@ fn load_kernel(t: &'static ExplicitCudaKernel, bufs: &[sys::CUdeviceptr], sizes:
         .map_err(|e| anyhow::anyhow!("CUDA: load module {name}: {e:?}"))?;
     let function = unsafe { result::module::get_function(module, CString::new(t.entry)?) }
         .map_err(|e| anyhow::anyhow!("CUDA: function {name}: {e:?}"))?;
+    let indirect = match unsafe {
+        result::module::get_function(module, CString::new(format!("{}{}", t.entry, plan_gs_suffix()))?)
+    } {
+        Ok(f) => {
+            let per_sm = unsafe { result::occupancy::max_active_block_per_multiprocessor(f, t.threads[0] as i32, 0) }
+                .map_err(|e| anyhow::anyhow!("CUDA: occupancy {name}: {e:?}"))?;
+            Some((f, (per_sm.max(1) as u32) * sms.max(1)))
+        }
+        Err(_) => None,
+    };
     let (globals, bytes) = unsafe { result::module::get_global(module, CString::new("SLANG_globalParams")?) }
         .map_err(|e| anyhow::anyhow!("CUDA: {name} globals: {e:?}"))?;
     anyhow::ensure!(
@@ -120,7 +137,20 @@ fn load_kernel(t: &'static ExplicitCudaKernel, bufs: &[sys::CUdeviceptr], sizes:
     }
     unsafe { result::memcpy_htod_sync(globals, &bank) }.map_err(|e| anyhow::anyhow!("CUDA: {e:?}"))?;
     let at = |slot: usize| bufs.get(slot).copied().unwrap_or(0);
-    Ok(Kernel_ { module, function, globals, params, threads: t.threads[0], binds: t.binds, bound: [at(10), at(11)] })
+    Ok(Kernel_ { module, function, indirect, globals, params, threads: t.threads[0], binds: t.binds, bound: [at(10), at(11)] })
+}
+
+/// The indirect entry's suffix (build.rs: `grid_stride_entry`).
+fn plan_gs_suffix() -> &'static str {
+    "_gs"
+}
+
+/// A launch's grid: workgroups the host knows, or the counts the GPU wrote at a device
+/// address (the indirect entry).
+#[derive(Clone, Copy)]
+enum Launch {
+    Groups((u32, u32, u32)),
+    Indirect(sys::CUdeviceptr),
 }
 
 pub struct CudaExplicitBeams {
@@ -147,8 +177,17 @@ pub struct CudaExplicitBeams {
     wide_list: bool,
     wide_fused: bool,
     vv_grid: bool,
+    /// Indirect launches read their counts on the GPU (default); off, the host reads
+    /// them back (a wait).
+    device_indirect: bool,
+    /// The device's multiprocessors (an indirect launch's blocks).
+    sms: u32,
     /// Host reads of the indirect arguments (each one waits for the stream).
     pub args_syncs: u64,
+    /// Kernel launches queued, and writes of a module's bank between them (a parameter
+    /// copy's or an argument buffer's pointer): the host's per-frame work (profiles).
+    pub launches: u64,
+    pub bank_writes: u64,
     /// Frames that ran a split path ([`schedule::FrameKind::split`]): tests see the
     /// switches took effect.
     pub split_frames: u64,
@@ -276,6 +315,8 @@ impl CudaExplicitBeams {
         let ctx = unsafe { result::primary_ctx::retain(dev) }.map_err(map)?;
         unsafe { result::ctx::set_current(ctx) }.map_err(map)?;
         let stream = result::stream::create(result::stream::StreamKind::NonBlocking).map_err(map)?;
+        let sms = unsafe { result::device::get_attribute(dev, sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) }
+            .map_err(map)? as u32;
 
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         let mut sizes = Vec::with_capacity(BIND_COUNT);
@@ -311,7 +352,7 @@ impl CudaExplicitBeams {
                 "explicit module {name} has no device code in this build: add it to \
                  ENGINE_CUDA_EXPLICIT_MODULES (or unset that variable to build every module)"
             );
-            kernels.insert(Key::Plan(k), load_kernel(t, &bufs, &sizes)?);
+            kernels.insert(Key::Plan(k), load_kernel(t, &bufs, &sizes, sms)?);
         }
         // The split paths' argument buffers, zeroed (as WebGPU's are).
         let mut arg_bufs = HashMap::new();
@@ -345,7 +386,11 @@ impl CudaExplicitBeams {
             wide_list: false,
             wide_fused: false,
             vv_grid: true,
+            device_indirect: std::env::var("RUBBLE_CUDA_HOST_INDIRECT").as_deref() != Ok("1"),
+            sms,
             args_syncs: 0,
+            launches: 0,
+            bank_writes: 0,
             split_frames: 0,
             status_due: false,
             timing_left: 0,
@@ -445,7 +490,7 @@ impl CudaExplicitBeams {
         for l in &frame.launches {
             match l.op {
                 Op::Cmd(Cmd::Dispatch { kernel, groups, param_copy }) => {
-                    self.launch(Key::Plan(kernel), (groups, 1, 1), param_copy, [None, None])?;
+                    self.launch(Key::Plan(kernel), Launch::Groups((groups, 1, 1)), param_copy, [None, None])?;
                     // The contact plan's passes and vehicle sleep's awake list write the
                     // plan's arguments (the frames that follow read them).
                     if matches!(kernel, Kernel::Vv(_) | Kernel::Sleep) {
@@ -453,7 +498,7 @@ impl CudaExplicitBeams {
                     }
                 }
                 Op::Cmd(Cmd::Indirect { kernel, offset }) => {
-                    let grid = self.indirect(ArgBuf::Plan, offset)?;
+                    let grid = self.indirect(Key::Plan(kernel), ArgBuf::Plan, offset)?;
                     self.launch(Key::Plan(kernel), grid, 0, [None, None])?;
                 }
                 Op::Cmd(Cmd::Copy { src, src_offset, dst, dst_offset, size }) => unsafe {
@@ -467,11 +512,12 @@ impl CudaExplicitBeams {
                 },
                 ref op => {
                     let sl = schedule::split_launch(op, aero, lanes, &frame.kind).expect("a split path launch");
+                    let key = Key::Split(sl.module);
                     let grid = match sl.grid {
-                        Grid::Groups(n) => (n, 1, 1),
-                        Grid::Indirect(buf, offset) => self.indirect(buf, offset)?,
+                        Grid::Groups(n) => Launch::Groups((n, 1, 1)),
+                        Grid::Indirect(buf, offset) => self.indirect(key.clone(), buf, offset)?,
                     };
-                    self.launch(Key::Split(sl.module), grid, sl.copy, [sl.binding10, sl.binding11])?;
+                    self.launch(key, grid, sl.copy, [sl.binding10, sl.binding11])?;
                     // (A split path's kernels write the arguments of the dispatches after
                     // them: the groups', the fleet's, self split's.)
                     self.args_dirty = true;
@@ -497,10 +543,17 @@ impl CudaExplicitBeams {
         }
     }
 
-    /// The workgroups at byte `offset` of argument buffer `buf`. CUDA has no indirect
-    /// launch: the buffer is read back (a wait for the stream) when any launch was
-    /// queued since it was last read.
-    fn indirect(&mut self, buf: ArgBuf, offset: u64) -> Result<(u32, u32, u32), ExecError> {
+    /// The grid of `key`'s indirect launch from byte `offset` of argument buffer `buf`:
+    /// that address, for the indirect entry to read on the GPU, or (device indirect off,
+    /// or a module without the entry) the workgroups read back, a wait for the stream
+    /// when any launch was queued since the buffer was last read.
+    fn indirect(&mut self, key: Key, buf: ArgBuf, offset: u64) -> Result<Launch, ExecError> {
+        if self.device_indirect {
+            self.load(&key)?;
+            if self.kernels[&key].indirect.is_some() {
+                return Ok(Launch::Indirect(self.arg_buf(buf).0 + offset));
+            }
+        }
         if self.args_dirty {
             self.args.clear();
             self.args_dirty = false;
@@ -517,13 +570,12 @@ impl CudaExplicitBeams {
         }
         let a = &self.args[&buf];
         let w = (offset / 4) as usize;
-        Ok((a[w], a[w + 1], a[w + 2]))
+        Ok(Launch::Groups((a[w], a[w + 1], a[w + 2])))
     }
 
-    fn launch(&mut self, key: Key, grid: (u32, u32, u32), param_copy: u32, args: [Option<ArgBuf>; 2]) -> Result<(), ExecError> {
-        let stream = self.stream;
-        let params = self.bufs[BIND_PARAMS as usize];
-        if !self.kernels.contains_key(&key) {
+    /// Load `key`'s module if it is not yet.
+    fn load(&mut self, key: &Key) -> Result<(), ExecError> {
+        if !self.kernels.contains_key(key) {
             // A module the fleet's first frames did not need (a split path's, vehicle
             // sleep's list, the surface segments), loaded at its first launch.
             let name = match &key {
@@ -534,9 +586,16 @@ impl CudaExplicitBeams {
                 .iter()
                 .find(|t| t.name == name.as_str())
                 .ok_or_else(|| ExecError::Backend(format!("CUDA: explicit module {name} not built")))?;
-            let k = load_kernel(t, &self.bufs, &self.sizes).map_err(|e| ExecError::Backend(e.to_string()))?;
+            let k = load_kernel(t, &self.bufs, &self.sizes, self.sms).map_err(|e| ExecError::Backend(e.to_string()))?;
             self.kernels.insert(key.clone(), k);
         }
+        Ok(())
+    }
+
+    fn launch(&mut self, key: Key, grid: Launch, param_copy: u32, args: [Option<ArgBuf>; 2]) -> Result<(), ExecError> {
+        let stream = self.stream;
+        let params = self.bufs[BIND_PARAMS as usize];
+        self.load(&key)?;
         let bound: Vec<Option<(sys::CUdeviceptr, u64)>> = args.iter().map(|a| a.map(|b| self.arg_buf(b))).collect();
         let k = self
             .kernels
@@ -549,6 +608,7 @@ impl CudaExplicitBeams {
                 unsafe { result::memcpy_htod_async(k.globals + u64::from(*offset), &ptr.to_le_bytes(), stream) }
                     .map_err(backend)?;
                 *bound = param_copy;
+                self.bank_writes += 1;
             }
         }
         // Bindings 10 and 11 of a split path's launch: its argument buffers.
@@ -564,14 +624,17 @@ impl CudaExplicitBeams {
                         field.extend_from_slice(&(bytes / 4).to_le_bytes());
                     }
                     unsafe { result::memcpy_htod_async(k.globals + u64::from(offset), &field, stream) }.map_err(backend)?;
+                    self.bank_writes += 1;
                 }
             }
             k.bound[i] = ptr;
         }
-        if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
-            return Ok(());
+        if let Launch::Groups(g) = grid {
+            if g.0 == 0 || g.1 == 0 || g.2 == 0 {
+                return Ok(());
+            }
         }
-        let (function, threads) = (k.function, k.threads);
+        let (function, threads, indirect) = (k.function, k.threads, k.indirect);
         let stamps = if self.phase_timing {
             let a = result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT).map_err(backend)?;
             unsafe { result::event::record(a, stream) }.map_err(backend)?;
@@ -579,8 +642,16 @@ impl CudaExplicitBeams {
         } else {
             None
         };
-        unsafe { result::launch_kernel(function, grid, (threads, 1, 1), 0, stream, &mut []) }
-            .map_err(|e| ExecError::Backend(format!("CUDA: launch {key:?}: {e:?}")))?;
+        match grid {
+            Launch::Groups(g) => unsafe { result::launch_kernel(function, g, (threads, 1, 1), 0, stream, &mut []) },
+            Launch::Indirect(mut counts) => {
+                let (f, blocks) = indirect.expect("an indirect launch of a module with the indirect entry");
+                let mut params = [&mut counts as *mut sys::CUdeviceptr as *mut c_void];
+                unsafe { result::launch_kernel(f, (blocks, 1, 1), (threads, 1, 1), 0, stream, &mut params) }
+            }
+        }
+        .map_err(|e| ExecError::Backend(format!("CUDA: launch {key:?}: {e:?}")))?;
+        self.launches += 1;
         if let Some(a) = stamps {
             let b = result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT).map_err(backend)?;
             unsafe { result::event::record(b, stream) }.map_err(backend)?;
@@ -608,6 +679,15 @@ impl CudaExplicitBeams {
     }
     pub fn set_wide_fused(&mut self, on: bool) {
         self.wide_fused = on;
+    }
+
+    /// Indirect launches read their workgroup counts on the GPU (on by default; the same
+    /// workgroups, bit for bit) or, off, the host reads them back first (a wait for the
+    /// stream per argument buffer a launch since wrote; measurement, and
+    /// `RUBBLE_CUDA_HOST_INDIRECT=1`).
+    pub fn set_device_indirect(&mut self, on: bool) {
+        self.device_indirect = on;
+        self.args_dirty = true;
     }
 
     /// Time every launch (measurement: an event pair around each, which serialises
