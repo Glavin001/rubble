@@ -49,6 +49,9 @@ fn main() -> anyhow::Result<()> {
         // --by-step: one substep a run, compared after each (finds the first differing step).
         let by_step = flag("--by-step");
         extra += if flag("--runtime-sizes") || by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
+        if flag("--no-hoist") {
+            extra += "#define HOIST 0\n";
+        }
         let mut e = Emu::new(l, &st, &extra, &dir)?;
         e.reverse = flag("--reverse");
         e.upload(&state_of(&cpu, &e.l, &st));
@@ -104,6 +107,10 @@ fn main() -> anyhow::Result<()> {
     // --per-step: one dispatch a substep (34 a frame), the state reloaded each time.
     if flag("--per-step") {
         extra += "#define PER_STEP 1\n";
+    }
+    // --no-hoist: the records' static words loaded every substep (a ledger measurement).
+    if flag("--no-hoist") {
+        extra += "#define HOIST 0\n";
     }
     let extra = extra.as_str();
     let mut f = Floor::new(gpu, l, &st, cars.max(2), fast, extra)?;

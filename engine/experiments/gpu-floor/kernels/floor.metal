@@ -528,6 +528,22 @@ struct Params
 #define Z_NG NG
 #define Z_RS RS
 #endif
+#ifndef HOIST
+#define HOIST 1
+#endif
+#if HOIST
+#define LD_A(s, r) hA[s]
+#define LD_K(s, r) hK[s]
+#define LD_B(s, r) hB[s]
+#define LD_ENT(s, r) hEnt[s]
+#define LD_CEN(s, r) hCen[s]
+#else
+#define LD_A(s, r) recA[r]
+#define LD_K(s, r) recK[r]
+#define LD_B(s, r) recB[r]
+#define LD_ENT(s, r) recEnt[r]
+#define LD_CEN(s, r) recCen[r]
+#endif
 #ifndef FAST_SUMS
 #define FAST_SUMS 0
 #endif
@@ -625,10 +641,18 @@ kernel void floorFrame(
     // Record registers.
     uint rec[RS];
     float4 s0[RS], s1[RS], ax[RS];
+#if HOIST
+    // The records' static words, loaded once a dispatch and kept in registers.
+    uint4 hA[RS], hEnt[RS], hCen[RS];
+    float4 hK[RS], hB[RS];
+#endif
     for (uint s = 0; s < Z_RS; s++)
     {
         rec[s] = perm[s * Z_LANES + lid];
         uint r = rec[s] == NONE ? 0u : rec[s];
+#if HOIST
+        hA[s] = recA[r]; hEnt[s] = recEnt[r]; hCen[s] = recCen[r]; hK[s] = recK[r]; hB[s] = recB[r];
+#endif
         s0[s] = recState[r * 3];
         s1[s] = recState[r * 3 + 1];
         ax[s] = recState[r * 3 + 2];
@@ -760,10 +784,10 @@ kernel void floorFrame(
         {
             uint r = rec[s];
             if (r == NONE) continue;
-            uint4 a = recA[r];
+            uint4 a = LD_A(s, r);
             uint kind = a.z & 0xFFu;
             if (kind == K_JATRI) continue; // aero: no slope, its entries stay zero
-            uint4 ce = recCen[r];
+            uint4 ce = LD_CEN(s, r);
             float slope = s1[s].z;
             if (kind == K_JTORSION)
             {
@@ -857,8 +881,8 @@ kernel void floorFrame(
         {
             uint r = rec[s];
             if (r == NONE) continue;
-            uint4 a = recA[r];
-            uint4 ent = recEnt[r];
+            uint4 a = LD_A(s, r);
+            uint4 ent = LD_ENT(s, r);
             uint kind = a.z & 0xFFu;
             uint ty = (a.z >> 8) & 0xFFu;
             bool ext = ((a.z >> 16) & 1u) != 0u;
@@ -877,8 +901,8 @@ kernel void floorFrame(
             V3 pb = v3(tgPos[a.y * 3], tgPos[a.y * 3 + 1], tgPos[a.y * 3 + 2]);
             V3 va = v3(tgVel[a.x * 3], tgVel[a.x * 3 + 1], tgVel[a.x * 3 + 2]);
             V3 vb = v3(tgVel[a.y * 3], tgVel[a.y * 3 + 1], tgVel[a.y * 3 + 2]);
-            float4 kc = recK[r];
-            float4 bb = recB[r];
+            float4 kc = LD_K(s, r);
+            float4 bb = LD_B(s, r);
             if (kind == K_JATRI)
             {
                 float4 e1 = recE[r * 2];
@@ -993,96 +1017,8 @@ kernel void floorFrame(
             lastPush[s] = push;
 #endif
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-
-        // ---- S4: node sums of the beam pass; break groups set off ----
-        const bool anyFired = tgFlags[1] != 0u;
-#if FAST_SUMS
-        if (anyFired)
-        {
-            // Beams after a group's first break in this pass were skipped: take theirs back.
-            for (uint s = 0; s < Z_RS; s++)
-            {
-                uint r = rec[s];
-                if (r == NONE) continue;
-                uint4 a = recA[r];
-                int group = as_type<int>(a.w);
-                if (group == 0) continue;
-                uint m = atomic_load_explicit(&tgMaster[abs(group)], memory_order_relaxed);
-                if (m != NONE && r > m && (a.z & 0xFFu) != K_JTORSION)
-                {
-                    PUT_ADD(0, a.x, -lastPush[s]);
-                    PUT_ADD(0, a.y, lastPush[s]);
-                }
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-        }
-#endif
-        if (isNode && !SKIP(4))
-        {
-            uint n = min(nr.y, (uint)NODE_MAX_ADD);
-            V3 f = F0;
-#if FAST_SUMS
-            n = 0;
-            f = f + v3(atomic_exchange_explicit(&fAcc[ni * 3], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&fAcc[ni * 3 + 1], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&fAcc[ni * 3 + 2], 0.0f, memory_order_relaxed));
-#endif
-            for (uint k = 0; k < n; k++)
-            {
-                float4 e = addEnt[nr.x + k];
-                if (as_type<uint>(e.x) == SENT) continue;
-                if (anyFired)
-                {
-                    uint2 info = addInfo[nr.x + k];
-                    int g = as_type<int>(info.y);
-                    if (g != 0)
-                    {
-                        uint m = atomic_load_explicit(&tgMaster[abs(g)], memory_order_relaxed);
-                        if (m != NONE && info.x > m) continue;
-                    }
-                }
-                f = f + v3(e);
-            }
-            F0 = f;
 #if COLLIDE
-            tgF[ni * 3] = F0.x; tgF[ni * 3 + 1] = F0.y; tgF[ni * 3 + 2] = F0.z;
-#endif
-        }
-        for (uint s = 0; s < Z_RS && !SKIP(10); s++)
-        {
-            uint r = rec[s];
-            if (r == NONE) continue;
-            uint4 a = recA[r];
-            int group = as_type<int>(a.w);
-            bool ext = ((a.z >> 16) & 1u) != 0u;
-            uint emask = ext ? as_type<uint>(recB[r].w) : 0u;
-            bool trig = deformReq[s];
-            if (anyFired && group != 0)
-            {
-                uint m = atomic_load_explicit(&tgMaster[abs(group)], memory_order_relaxed);
-                if (m != NONE)
-                {
-                    // cascade(): every member broken; one after the first to break this pass
-                    // was skipped (no force, no slope, no yield-triggered deform).
-                    if (r > m) { s1[s].z = 0.0f; trig = false; }
-                    s1[s].w = 1.0f;
-                    // cascade_ext(): a member with an extension record triggers its deform groups.
-                    if ((emask & EXT_DEFORM) != 0u) trig = true;
-                }
-            }
-            if (trig)
-            {
-                uint d0 = (emask >> 8) & 0xFFu, d1 = (emask >> 16) & 0xFFu;
-                if (d0 != 0u) deform[d0 - 1u] = 1u;
-                if (d1 != 0u) deform[d1 - 1u] = 1u;
-            }
-            // The broken flag for the next step's triangle breaks.
-            recState[r * 3 + 1].w = s1[s].w;
-            if ((a.z & 0xFFu) == K_JTORSION) recState[(r + 1) * 3 + 1].w = s1[s].w;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-
-#if COLLIDE
-        // ---- S5: self-collision ----
+        // (Beside the beams, which they do not depend on.)
         // S5a: each triangle's frames and boxes; whether the pair list still holds.
         const float vmax = as_type<float>(atomic_load_explicit(&tgCount[0], memory_order_relaxed));
         for (uint t = lid; t < Z_NT && !SKIP(5); t += Z_LANES)
@@ -1134,7 +1070,9 @@ kernel void floorFrame(
             if (!(need <= LIST_REACH)) tgFlags[2] = 1u;
             if (tgFlags[2] != 0u) atomic_store_explicit(&tgCount[1], 0u, memory_order_relaxed);
         }
+#endif
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+#if COLLIDE
         if (tgFlags[2] != 0u)
         {
             // S5b: the list built: every allowed pair inside the list box.
@@ -1160,6 +1098,94 @@ kernel void floorFrame(
                 if (atomic_load_explicit(&tgCount[1], memory_order_relaxed) > PAIR_CAP) tgFlags[6] |= 1u;
             }
         }
+#endif
+
+        // ---- S4: node sums of the beam pass; break groups set off ----
+        const bool anyFired = tgFlags[1] != 0u;
+#if FAST_SUMS
+        if (anyFired)
+        {
+            // Beams after a group's first break in this pass were skipped: take theirs back.
+            for (uint s = 0; s < Z_RS; s++)
+            {
+                uint r = rec[s];
+                if (r == NONE) continue;
+                uint4 a = LD_A(s, r);
+                int group = as_type<int>(a.w);
+                if (group == 0) continue;
+                uint m = atomic_load_explicit(&tgMaster[abs(group)], memory_order_relaxed);
+                if (m != NONE && r > m && (a.z & 0xFFu) != K_JTORSION)
+                {
+                    PUT_ADD(0, a.x, -lastPush[s]);
+                    PUT_ADD(0, a.y, lastPush[s]);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+        }
+#endif
+        if (isNode && !SKIP(4))
+        {
+            uint n = min(nr.y, (uint)NODE_MAX_ADD);
+            V3 f = F0;
+#if FAST_SUMS
+            n = 0;
+            f = f + v3(atomic_exchange_explicit(&fAcc[ni * 3], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&fAcc[ni * 3 + 1], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&fAcc[ni * 3 + 2], 0.0f, memory_order_relaxed));
+#endif
+            for (uint k = 0; k < n; k++)
+            {
+                float4 e = addEnt[nr.x + k];
+                if (as_type<uint>(e.x) == SENT) continue;
+                if (anyFired)
+                {
+                    uint2 info = addInfo[nr.x + k];
+                    int g = as_type<int>(info.y);
+                    if (g != 0)
+                    {
+                        uint m = atomic_load_explicit(&tgMaster[abs(g)], memory_order_relaxed);
+                        if (m != NONE && info.x > m) continue;
+                    }
+                }
+                f = f + v3(e);
+            }
+            F0 = f;
+#if COLLIDE
+            tgF[ni * 3] = F0.x; tgF[ni * 3 + 1] = F0.y; tgF[ni * 3 + 2] = F0.z;
+#endif
+        }
+        for (uint s = 0; s < Z_RS && !SKIP(10); s++)
+        {
+            uint r = rec[s];
+            if (r == NONE) continue;
+            uint4 a = LD_A(s, r);
+            int group = as_type<int>(a.w);
+            bool ext = ((a.z >> 16) & 1u) != 0u;
+            uint emask = ext ? as_type<uint>(LD_B(s, r).w) : 0u;
+            bool trig = deformReq[s];
+            if (anyFired && group != 0)
+            {
+                uint m = atomic_load_explicit(&tgMaster[abs(group)], memory_order_relaxed);
+                if (m != NONE)
+                {
+                    // cascade(): every member broken; one after the first to break this pass
+                    // was skipped (no force, no slope, no yield-triggered deform).
+                    if (r > m) { s1[s].z = 0.0f; trig = false; }
+                    s1[s].w = 1.0f;
+                    // cascade_ext(): a member with an extension record triggers its deform groups.
+                    if ((emask & EXT_DEFORM) != 0u) trig = true;
+                }
+            }
+            if (trig)
+            {
+                uint d0 = (emask >> 8) & 0xFFu, d1 = (emask >> 16) & 0xFFu;
+                if (d0 != 0u) deform[d0 - 1u] = 1u;
+                if (d1 != 0u) deform[d1 - 1u] = 1u;
+            }
+            // The broken flag for the next step's triangle breaks.
+            recState[r * 3 + 1].w = s1[s].w;
+            if ((a.z & 0xFFu) == K_JTORSION) recState[(r + 1) * 3 + 1].w = s1[s].w;
+        }
+#if COLLIDE
+        // (Beside the node sums, which they do not depend on.)
         // S5c: the listed pairs: the box test, then anti-clip's hit test.
         const uint npairs = min(atomic_load_explicit(&tgCount[1], memory_order_relaxed), (uint)PAIR_CAP);
         for (uint k = lid; k < npairs && !SKIP(7); k += Z_LANES)
@@ -1246,7 +1272,9 @@ kernel void floorFrame(
             atomic_fetch_add_explicit(&tgSplit[tn.y], 1u, memory_order_relaxed);
             atomic_fetch_add_explicit(&tgSplit[tn.z], 1u, memory_order_relaxed);
         }
+#endif
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+#if COLLIDE
         const uint nhits = atomic_load_explicit(&tgCount[2], memory_order_relaxed);
         if (nhits != 0u && !SKIP(8))
         {

@@ -122,6 +122,10 @@ fn main() -> anyhow::Result<()> {
     }
     // Work in half the warps: does an idle warp cost?
     rows.push(("128 dependent fma in 16 of 32 warps".into(), String::new(), fma(128), tgb, 16, 0));
+    // A branch the lanes of a warp disagree on (odd and even lanes), against one they agree on.
+    let two = |cond: &str| format!("if ({cond}) {{ {} }} else {{ {} }}", fma(64), fma(64).replace("0.001f", "0.002f"));
+    rows.push(("64 fma in one of two branches, warps agree".into(), String::new(), two("(lid & 32u) != 0u"), tgb, 32, 0));
+    rows.push(("64 fma in one of two branches, lanes of a warp disagree".into(), String::new(), two("(lid & 1u) != 0u"), tgb, 32, 0));
     // sqrt and divide.
     rows.push(("16 dependent sqrt, 32 warps".into(), String::new(), (0..16).map(|_| "acc = sqrt(acc + 1.5f);".to_string()).collect::<Vec<_>>().join("\n"), tgb, 32, 0));
     rows.push(("16 dependent divides, 32 warps".into(), String::new(), (0..16).map(|_| "acc = 1.5f / (acc + 0.25f);".to_string()).collect::<Vec<_>>().join("\n"), tgb, 32, 0));
