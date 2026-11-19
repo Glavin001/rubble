@@ -39,6 +39,20 @@ struct Params
 #endif
 #define HOTS(s) hot[lid * 6 + (s)]
 #define BAR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
+#ifndef EMU
+#define TGDECL(type, name, count) threadgroup type name[count]
+#endif
+#ifndef PAIR
+#define PAIR 0
+#endif
+#if PAIR && !defined(EMU)
+// A barrier across the workgroups of a contact pair (each on its own core; Metal has
+// none): after this group's own barrier its lane 0 adds one to a device counter and waits,
+// a bounded number of loads, until every group has; the other lanes wait at the group's
+// barrier. Hitting the bound (a group that did not run beside the others) is a status bit.
+#define XBAR { BAR; if (lid == 0u) { xround++; atomic_fetch_add_explicit(xcnt, 1u, memory_order_relaxed); const uint want_ = NGROUPS * xround; uint i_ = 0u; for (; i_ < XCAP; i_++) { if (atomic_load_explicit(xcnt, memory_order_relaxed) >= want_) break; } if (i_ >= XCAP) xlate = 1u; } BAR; }
+#define KRETURN return
+#endif
 // TGVEC: a node's position (velocity, a vector slot) as one three-float element of
 // threadgroup memory: one address and one load in place of three.
 #ifndef TGVEC
@@ -152,19 +166,19 @@ kernel void floorFrame(
     uint car [[threadgroup_position_in_grid]])
 {
 #if TGVEC
-    threadgroup packed_float3 tgPos[NN];
-    threadgroup packed_float3 tgVel[NN];
-    threadgroup packed_float3 tgVec[NV];
+    TGDECL(packed_float3, tgPos, NN);
+    TGDECL(packed_float3, tgVel, NN);
+    TGDECL(packed_float3, tgVec, NV);
 #else
-    threadgroup float tgPos[NN * 3];
-    threadgroup float tgVel[NN * 3];
-    threadgroup float tgVec[NV * 3];
+    TGDECL(float, tgPos, NN * 3);
+    TGDECL(float, tgVel, NN * 3);
+    TGDECL(float, tgVec, NV * 3);
 #endif
-    threadgroup float tgG[NGS];
-    threadgroup uchar tgHeld[NN];
-    threadgroup atomic_uint tgCount[4]; // [0] the fastest node (bits), [2] hits
-    threadgroup uint tgFlags[TG_FLAGS];
-    threadgroup float tgPB[4];
+    TGDECL(float, tgG, NGS);
+    TGDECL(uchar, tgHeld, NN);
+    TGDECL(atomic_uint, tgCount, 4); // [0] the fastest node (bits), [2] hits
+    TGDECL(uint, tgFlags, TG_FLAGS);
+    TGDECL(float, tgPB, 4);
 
     // One derived pointer a lane (a pointer a buffer was twenty live registers, past the
     // spill cliff: every operation then cost three times its price).
@@ -193,6 +207,17 @@ kernel void floorFrame(
     #define liftBuf ((device float*)(cb + O_CAND + 3072))
     #define ent4 ((device const uint4*)(tab + T_ENT))
 
+#if PAIR
+    TGDECL(atomic_int, tgX, 16);
+    uint xround = 0u, xlate = 0u;
+    device atomic_uint* const xcnt = (device atomic_uint*)(big + NCARS * CAR_WORDS + O_MISC + 14);
+    if (car >= NCARS)
+    {
+//@PAIR_ROLE
+        if (lid == 0 && xlate != 0u) misc[1] = misc[1] | 8u;
+        KRETURN;
+    }
+#endif
     // This lane's roles.
     const uint nd = tab[T_LANE + lid * 4];
     const uint entStart = tab[T_LANE + lid * 4 + 1];
@@ -1234,6 +1259,28 @@ kernel void floorFrame(
             }
             BAR;
         }
+#endif
+#if PAIR
+        // Lockstep with the pair's contact group: this body's nodes published; the contact
+        // pass runs between the two barriers; what it left for this body picked up.
+        if (isNode)
+        {
+            nodeState[ni * 3] = f4(TGP(ni), 0);
+            nodeState[ni * 3 + 1] = f4(TGV(ni), 0);
+            nodeState[ni * 3 + 2] = f4(F0, 0);
+        }
+        XBAR;
+        XBAR;
+        if (lid == 0)
+        {
+            const uint xf = misc[12];
+            if ((xf & 1u) != 0u) tgFlags[F_HITS] = 1u;
+            if ((xf & 2u) != 0u) tgFlags[F_SHIFT] = 1u;
+            if ((xf & 4u) != 0u) tgFlags[F_REC] = 1u;
+            misc[12] = 0u;
+            if (xlate != 0u) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 8u;
+        }
+        BAR;
 #endif
     }
 

@@ -58,6 +58,8 @@ pub struct Statics {
     pub v2_tab: Vec<u32>,
     pub v2_defs: String,
     pub v2_off: V2Off,
+    /// Bodies stepped in lockstep with one contact group after them (0: none; 2: a pair).
+    pub pair: usize,
 }
 
 /// The second layout's one buffer a car: each part's offset in 4-byte words.
@@ -294,7 +296,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default() },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0 },
     ))
 }
 
@@ -396,7 +398,12 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
         return format!(
             "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define LANES {}\n#define STEPS {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define HITW {HITW}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n#ifndef RUNTIME_SIZES\n#define RUNTIME_SIZES 0\n#endif\n{}\n{}\n{}\n{}",
             l.nn, l.nr, l.nt, l.ng, l.nd, LANES, STEPS / per_frame, (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(),
-            extra, st.v2_defs, helpers, unroll_slots(include_str!("../kernels/floor2.metal"))
+            extra, st.v2_defs, helpers,
+            unroll_slots(&if st.pair != 0 {
+                format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 4194304u\n{}", st.pair, st.pair + 1, include_str!("../kernels/floor2.metal").replace("//@PAIR_ROLE", include_str!("../kernels/pair.metal")))
+            } else {
+                include_str!("../kernels/floor2.metal").to_string()
+            })
         );
     }
     format!(
@@ -714,6 +721,8 @@ pub struct Emu {
     pub reverse: bool,
     v2: bool,
     off: V2Off,
+    /// Workgroups (bodies, then a pair's contact group): each a block of the one buffer.
+    pub groups: usize,
     /// Substeps a run (RUNTIME_SIZES kernels only; else STEPS).
     pub steps: usize,
 }
@@ -761,17 +770,13 @@ impl Emu {
         bufs[27] = z(l.nn * 16);
         bufs[29] = z(HIT_CAP * HITW * 16);
         bufs[30] = z(l.nn * 48);
-        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), off: st.v2_off.clone(), steps: STEPS })
+        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), off: st.v2_off.clone(), groups: if st.pair != 0 { st.pair + 1 } else { 1 }, steps: STEPS })
     }
 
     pub fn upload(&mut self, s: &State) {
         let b = |v: &[u8]| v.to_vec();
         if self.v2 {
-            self.bufs[1] = vec![0u8; self.off.words * 4];
-            v2_put(&mut self.bufs[1], &self.off, s);
-            for i in [8, 11, 15, 16, 18, 19, 20, 21, 28] {
-                self.bufs[i] = vec![0u8; 16];
-            }
+            self.upload_at(0, s);
             return;
         }
         self.bufs[1] = b(bytemuck::cast_slice(&s.node));
@@ -790,9 +795,26 @@ impl Emu {
         self.bufs[30].fill(0);
     }
 
+    /// Body `car`'s state into its block (the second layout).
+    pub fn upload_at(&mut self, car: usize, s: &State) {
+        let n = self.off.words * 4;
+        if self.bufs[1].len() != self.groups * n {
+            self.bufs[1] = vec![0u8; self.groups * n];
+            for i in [8, 11, 15, 16, 18, 19, 20, 21, 28] {
+                self.bufs[i] = vec![0u8; 16];
+            }
+        }
+        v2_put(&mut self.bufs[1][car * n..(car + 1) * n], &self.off, s);
+    }
+
+    pub fn download_at(&self, car: usize) -> State {
+        let n = self.off.words * 4;
+        v2_get(&self.bufs[1][car * n..(car + 1) * n], &self.off, &self.l)
+    }
+
     pub fn download(&self) -> State {
         if self.v2 {
-            return v2_get(&self.bufs[1], &self.off, &self.l);
+            return self.download_at(0);
         }
         fn g<T: bytemuck::Pod>(v: &[u8]) -> Vec<T> {
             v.chunks_exact(std::mem::size_of::<T>()).map(bytemuck::pod_read_unaligned).collect()
@@ -813,7 +835,13 @@ impl Emu {
 
     pub fn run(&mut self, frames: u32) -> anyhow::Result<()> {
         let l = &self.l;
-        let p: [u32; 12] = [1, frames, 0.0f32.to_bits(), 0, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, self.steps as u32, l.ng as u32, l.rs as u32, 1];
+        if self.v2 && self.groups > 1 {
+            // (The cross-group barrier's counter starts at zero each dispatch.)
+            let n = self.off.words * 4;
+            let at = (self.groups - 1) * n + (self.off.misc + 14) * 4;
+            self.bufs[1][at..at + 4].fill(0);
+        }
+        let p: [u32; 12] = [self.groups as u32, frames, 0.0f32.to_bits(), 0, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, self.steps as u32, l.ng as u32, l.rs as u32, 1];
         self.bufs[0] = bytemuck::cast_slice(&p).to_vec();
         self.bufs[0].resize(64, 0);
         let (fin, fout) = (self.dir.join("in.blob"), self.dir.join("out.blob"));
@@ -959,9 +987,27 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     let t_lane = 0usize;
     let t_vidx = t_lane + LANES * 4;
     let t_clu = (t_vidx + nr + 3) & !3;
-    let t_ent = t_clu + nclu * 32;
+    // For a contact pair: every contact point in clusters (the partner's cull), and each
+    // node's neighbours (the side vote), as the reference's `finish_contact` lists them.
+    let mut cps: Vec<u32> = s.contact_points.clone();
+    cps.sort_by(|&x, &y| s.nodes[x as usize].pos[axis].total_cmp(&s.nodes[y as usize].pos[axis]).then(x.cmp(&y)));
+    let nclp = cps.len().div_ceil(28).max(1);
+    let mut pcl = vec![NONE; nclp * 32];
+    for (i, &h) in cps.iter().enumerate() {
+        pcl[(i / 28) * 32 + i % 28] = h;
+    }
+    let t_pcl = t_clu + nclu * 32;
+    let t_nb = t_pcl + nclp * 32;
+    let t_nbl = t_nb + nn + 1;
+    let nbl = if s.neighbour_start.len() == nn + 1 { s.neighbours.len() } else { 0 };
+    let t_ent = (t_nbl + nbl + 3) & !3;
     let mut tab = vec![0u32; t_ent];
     tab[t_clu..t_clu + nclu * 32].copy_from_slice(&clu);
+    tab[t_pcl..t_pcl + nclp * 32].copy_from_slice(&pcl);
+    if nbl != 0 || s.neighbour_start.len() == nn + 1 {
+        tab[t_nb..t_nb + nn + 1].copy_from_slice(&s.neighbour_start);
+        tab[t_nbl..t_nbl + nbl].copy_from_slice(&s.neighbours);
+    }
     tab[t_vidx..t_vidx + nr].copy_from_slice(&vidx);
     let mut maxent = 0;
     for lane in 0..LANES {
@@ -1023,7 +1069,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words
     ) + &format!(
-        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n#define HAS_IMMOVABLE {}\n#define FULL_PLAIN_SLOTS {}\n#define NCLU {nclu}\n#define T_CLU {t_clu}\n",
+        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n#define HAS_IMMOVABLE {}\n#define FULL_PLAIN_SLOTS {}\n#define NCLU {nclu}\n#define T_CLU {t_clu}\n#define NCLP {nclp}\n#define T_PCL {t_pcl}\n#define T_NB {t_nb}\n#define T_NBL {t_nbl}\n",
         nv.max(1), s.nodes.iter().any(|n| n.flags & 2 != 0) as u32,
         (0..3).take_while(|&sl| (0..LANES).all(|ln| st.perm[sl * LANES + ln] != NONE && s.beams[st.perm[sl * LANES + ln] as usize].kind == K::JbeamPlain)).count()
     );

@@ -72,3 +72,57 @@ pub fn place(template: &ExplicitBeams, lift: f32, speed: f32) -> ExplicitBeams {
     car.ground = 0.0;
     car
 }
+
+/// As [`place`], turned by `quarter` quarter turns about +y (exact), its node box centred
+/// at (`x`, `z`), moving at `speed` along its own forward axis.
+pub fn place_at(template: &ExplicitBeams, lift: f32, speed: f32, quarter: i32, x: f32, z: f32) -> ExplicitBeams {
+    let mut car = place(template, lift, 0.0);
+    let rot = |p: Vec3| match quarter.rem_euclid(4) {
+        0 => p,
+        1 => Vec3::new(p.z, p.y, -p.x),
+        2 => Vec3::new(-p.x, p.y, -p.z),
+        _ => Vec3::new(-p.z, p.y, p.x),
+    };
+    let fwd = rot(Vec3::Z);
+    for n in &mut car.nodes {
+        n.pos = rot(n.pos) + Vec3::new(x, 0.0, z);
+        n.vel = fwd * speed;
+    }
+    car
+}
+
+/// The two-body scenes: (name, the bodies). Head-on: two cars nose to nose, each at
+/// `speed`; side: one car at `speed` into the side of a parked one; rear: into the back of
+/// a parked one.
+pub fn pair_scene(template: &ExplicitBeams, name: &str, speed: f32, gap: f32) -> anyhow::Result<Vec<ExplicitBeams>> {
+    let base = place(template, 0.02, 0.0);
+    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+    for n in &base.nodes {
+        lo = lo.min(n.pos);
+        hi = hi.max(n.pos);
+    }
+    let (len, wid) = (hi.z - lo.z, hi.x - lo.x);
+    let mut cars = match name {
+        "headon" => vec![
+            place_at(template, 0.02, speed, 0, 0.0, -0.5 * (len + gap)),
+            place_at(template, 0.02, speed, 2, 0.0, 0.5 * (len + gap)),
+        ],
+        "side" => vec![
+            place_at(template, 0.02, speed, 0, 0.0, -0.5 * (len + gap) - 0.5 * wid),
+            place_at(template, 0.02, 0.0, 1, 0.0, 0.0),
+        ],
+        "rear" => vec![
+            place_at(template, 0.02, speed, 0, 0.0, -0.5 * (len + gap)),
+            place_at(template, 0.02, 0.0, 0, 0.0, 0.5 * (len + gap)),
+        ],
+        "apart" => vec![
+            place_at(template, 0.02, 0.0, 0, -5.0, 0.0),
+            place_at(template, 0.02, 0.0, 0, 5.0, 0.0),
+        ],
+        other => anyhow::bail!("unknown pair scene {other} (headon, side, rear, apart)"),
+    };
+    for c in &mut cars {
+        c.drive = None;
+    }
+    Ok(cars)
+}

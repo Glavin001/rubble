@@ -23,30 +23,57 @@ int main(int argc, char** argv)
     fclose(f);
     if (b.size() != 31) { fprintf(stderr, "emu: %zu buffers\n", b.size()); return 5; }
     #define B(i, T) ((T)(void*)b[i].data())
-    std::vector<Lane> lanes;
+    // Every workgroup's lanes (the first parameter word: how many groups).
+    const uint groups = *B(0, const uint*);
+    std::vector<std::vector<Lane>> lanes(groups);
+    for (uint g = 0; g < groups; g++)
     for (uint lid = 0; lid < LANES; lid++)
 #ifdef V2
-        lanes.push_back(floorFrame(*B(0, const Params*), B(1, uint*), B(2, const float4*), B(4, const uint4*), B(5, const float4*),
+        lanes[g].push_back(floorFrame(*B(0, const Params*), B(1, uint*), B(2, const float4*), B(4, const uint4*), B(5, const float4*),
             B(6, const float4*), B(7, const float4*), B(12, const uint*), B(14, const uint*), B(17, const uint4*),
-            B(22, const uint*), B(23, const uint4*), B(24, const uint*), lid, 0u));
+            B(22, const uint*), B(23, const uint4*), B(24, const uint*), lid, g));
 #else
-        lanes.push_back(floorFrame(*B(0, const Params*), B(1, float4*), B(2, const float4*), B(3, const uint4*), B(4, const uint4*),
+        lanes[g].push_back(floorFrame(*B(0, const Params*), B(1, float4*), B(2, const float4*), B(3, const uint4*), B(4, const uint4*),
             B(5, const float4*), B(6, const float4*), B(7, const float4*), B(8, float4*), B(9, const uint4*), B(10, const uint4*),
             B(11, float4*), B(12, float4*), B(13, const uint2*), B(14, const uint*), B(15, uint*), B(16, uint*), B(17, const uint4*),
             B(18, uint*), B(19, atomic_int*), B(20, int*), B(21, uint*), B(22, const uint*), B(23, const uint4*), B(24, const uint*),
-            B(25, float4*), B(26, uint*), B(27, float4*), B(28, atomic_uint*), B(29, float4*), B(30, uint*), lid, 0u));
+            B(25, float4*), B(26, uint*), B(27, float4*), B(28, atomic_uint*), B(29, float4*), B(30, uint*), lid, g));
 #endif
+    // A group runs phase after phase until its lanes stop at a cross-group barrier (or
+    // finish); when every group is there, all go on.
     unsigned long phases = 0;
+    std::vector<int> state(groups, 0); // 0 running, 1 at the cross barrier, 2 done
     for (;;) {
-        uint done = 0;
-        for (uint k = 0; k < LANES; k++) {
-            uint lid = reverse ? LANES - 1 - k : k;
-            if (lanes[lid].h.done()) { done++; continue; }
-            lanes[lid].h.resume();
+        bool progressed = false;
+        for (uint g = 0; g < groups; g++) {
+            while (state[g] == 0) {
+                uint done = 0, atx = 0;
+                for (uint k = 0; k < LANES; k++) {
+                    uint lid = reverse ? LANES - 1 - k : k;
+                    if (lanes[g][lid].h.done()) { done++; continue; }
+                    g_at_x = false;
+                    lanes[g][lid].h.resume();
+                    if (lanes[g][lid].h.done()) done++;
+                    else if (g_at_x) atx++;
+                }
+                phases++;
+                progressed = true;
+                if (done == LANES) state[g] = 2;
+                else if (atx == LANES) state[g] = 1;
+                else if (done != 0 || atx != 0) { fprintf(stderr, "emu: group %u: lanes at different barriers (%u done, %u at the cross barrier)\n", g, done, atx); return 6; }
+            }
         }
-        if (done == LANES) break;
-        if (done != 0) { fprintf(stderr, "emu: lanes left the kernel at different barriers\n"); return 6; }
-        phases++;
+        bool all_done = true, all_wait = true;
+        for (uint g = 0; g < groups; g++) { if (state[g] != 2) all_done = false; if (state[g] == 0) all_wait = false; }
+        if (all_done) break;
+        if (all_wait) {
+            bool any = false;
+            for (uint g = 0; g < groups; g++) if (state[g] == 1) { state[g] = 0; any = true; }
+            if (!any) break;
+            // (A group that finished while others wait at a cross barrier: a mismatch.)
+            for (uint g = 0; g < groups; g++) if (state[g] == 2) { fprintf(stderr, "emu: group %u finished while others wait at a cross barrier\n", g); return 7; }
+        }
+        if (!progressed && !all_wait) break;
     }
     f = fopen(argv[2], "wb");
     for (auto& v : b) { uint64_t n = v.size(); fwrite(&n, 8, 1, f); fwrite(v.data(), 1, n, f); }
