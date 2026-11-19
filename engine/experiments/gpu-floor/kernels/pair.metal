@@ -54,7 +54,17 @@
         #else
         #define XNV(c, w) v3(XNODE(c)[w])
         #endif
-        #define XF(c, i) XNV(c, (i) * 3u + 2u)
+        // (A body's own nodes' forces from its own block: any node's, a plain load. The
+        // partner's only for the nodes it published, the ones that can be hit.)
+        #define XF(c, i) ((c) == ME ? v3(nodeState[(i) * 3u + 2u]) : XNV(c, (i) * 3u + 2u))
+        // Whether a point of body `pt` can pass any triangle's test of body `ow`: inside
+        // `ow`'s box with the contact band and the largest pad any pair of them can have
+        // (the same rounded terms as the reference's test, each bound no smaller). Both
+        // bodies evaluate it from the same published words, so they agree.
+        #define XREACH(ow, pt, p) ( \
+            (p).x >= (unordF(TXI((ow) * 6u)) - CR) - XPADMAX(ow, pt) && (p).y >= (unordF(TXI((ow) * 6u + 1u)) - CR) - XPADMAX(ow, pt) && (p).z >= (unordF(TXI((ow) * 6u + 2u)) - CR) - XPADMAX(ow, pt) && \
+            (p).x <= (unordF(TXI((ow) * 6u + 3u)) + CR) + XPADMAX(ow, pt) && (p).y <= (unordF(TXI((ow) * 6u + 4u)) + CR) + XPADMAX(ow, pt) && (p).z <= (unordF(TXI((ow) * 6u + 5u)) + CR) + XPADMAX(ow, pt))
+        #define XPADMAX(ow, pt) ((as_type<float>(TXI(12u + (ow))) * H + as_type<float>(TXI(12u + (pt))) * H) + CLIP_DEPTH)
         #define PV(i) XNV(PA, (i) * 3u + 1u)
         #define TXI(k) ILOAD(&tgX[k])
         // A triangle's box with the contact band, and its nodes' farthest travel a step.
@@ -114,9 +124,17 @@
                 {
         #if XATOM >= 2
                     device atomic_uint* na = (device atomic_uint*)(nodeState + ni * 3);
+                    // Every node's position (the partner's boxes and side votes read any
+                    // of them); velocity and force only of the nodes a partner's triangle
+                    // can reach (six atomic stores fewer for the others). The force also
+                    // with a plain store, for this body's own lanes.
                     ISTORE(&na[0], as_type<uint>(Pown.x)); ISTORE(&na[1], as_type<uint>(Pown.y)); ISTORE(&na[2], as_type<uint>(Pown.z));
-                    ISTORE(&na[4], as_type<uint>(Vown.x)); ISTORE(&na[5], as_type<uint>(Vown.y)); ISTORE(&na[6], as_type<uint>(Vown.z));
-                    ISTORE(&na[8], as_type<uint>(F0.x)); ISTORE(&na[9], as_type<uint>(F0.y)); ISTORE(&na[10], as_type<uint>(F0.z));
+                    nodeState[ni * 3 + 2] = f4(F0, 0);
+                    if (XREACH(PA, ME, Pown))
+                    {
+                        ISTORE(&na[4], as_type<uint>(Vown.x)); ISTORE(&na[5], as_type<uint>(Vown.y)); ISTORE(&na[6], as_type<uint>(Vown.z));
+                        ISTORE(&na[8], as_type<uint>(F0.x)); ISTORE(&na[9], as_type<uint>(F0.y)); ISTORE(&na[10], as_type<uint>(F0.z));
+                    }
         #else
                     nodeState[ni * 3] = f4(Pown, 0);
                     nodeState[ni * 3 + 1] = f4(Vown, 0);
@@ -128,9 +146,16 @@
                 // body's triangles against the partner's box.
                 for (uint k = lid; k < NN; k += LANES)
                 {
-                    V3 p = XNV(PA, k * 3u), v = XNV(PA, k * 3u + 1u);
+                    V3 p = XNV(PA, k * 3u);
                     tgG[k * 4u] = p.x; tgG[k * 4u + 1u] = p.y; tgG[k * 4u + 2u] = p.z;
-                    tgG[k * 4u + 3u] = len3(v) * H;
+                    // (A point no triangle can reach was not published: a travel that fails
+                    // every box test.)
+                    float sv = -3.0e38f;
+        #if XATOM >= 2
+                    if (XREACH(ME, PA, p))
+        #endif
+                        sv = len3(XNV(PA, k * 3u + 1u)) * H;
+                    tgG[k * 4u + 3u] = sv;
                 }
                 if (lid < NCLP)
                 {
@@ -232,7 +257,12 @@
                     float4 loc = frameLocal(p0, ra, rb, rd, ok, x);
                     const uint key = a << 20 | t;
                     float side = 0.0f;
+        #if XATOM == 3
+                    const uint4 cq = ((device const uint4*)(CB(b) + O_CLIP))[h];
+                    uint c0 = cq.x, c1 = cq.y;
+        #else
                     uint c0 = ILOAD(&XCLIP(b)[h * 4]), c1 = ILOAD(&XCLIP(b)[h * 4 + 1]);
+        #endif
                     if (c0 != CLIP_EMPTY && (c0 >> 1) == key) side = (c0 & 1u) != 0u ? 1.0f : -1.0f;
                     else if (c1 != CLIP_EMPTY && (c1 >> 1) == key) side = (c1 & 1u) != 0u ? 1.0f : -1.0f;
                     bool over = loc.x >= 0.0f && loc.y >= 0.0f && loc.z >= 0.0f;
