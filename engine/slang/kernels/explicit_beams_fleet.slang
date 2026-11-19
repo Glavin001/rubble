@@ -1223,7 +1223,7 @@ void fkCheck(uint lane)
     if (code != 0u) gAcc[fkAccCtl(0u)].max(int(code));
 }
 // … and after a barrier.
-uint fkDecide(uint lane)
+uint fkDecide(uint lane, bool untracked)
 {
     uint nv = gP.vehicles;
     uint epoch = gNext[fkCtl(FK_EPOCH)];
@@ -1232,6 +1232,9 @@ uint fkDecide(uint lane)
     if (lane == 0u)
     {
         uint c = uint(gAcc[fkAccCtl(0u)].load());
+        // (A pass whose nodes were not tracked, fkTrackIdle: its bounds say nothing, so no
+        // list is reused in it; a build or today's front.)
+        if (untracked) c = max(c, 4u);
         gAcc[fkAccCtl(0u)].store(0);
         uint wait = fkWaitLeft();
         if (gNext[flPrefixAt(0u, nv)] != 0u)
@@ -1659,6 +1662,9 @@ void fleetPlan(uint lane, uint word)
         // After the scans: the owners' parts of the fleet-wide run, the prefix of their
         // offered counts; past the run's room no owner is offered anything this step
         // (FL_ERR_RUN: the pass is cut short, loudly).
+        // (Whether the members' rest tracked this pass's nodes: fkTrackIdle reads the last
+        // pass's offered total, which the prefix below replaces.)
+        bool untracked = fkTrackInRest() && fkTrackIdle();
         flPrefix(0u, FL_OFFERED, lane);
         uint total = splitUniform(lane, gNext[flPrefixAt(0u, nv)]);
         if (total > vvRoomCp())
@@ -1681,7 +1687,8 @@ void fleetPlan(uint lane, uint word)
         if (resets) gsUniformOpen = 1u;
         // (The kept candidates' checks of the pass, beside the owners' records: fkDecide
         // reads their result after this barrier.)
-        if (fkOn()) fkCheck(lane);
+        // (Nothing offered: the pass decides nothing, fkDecide.)
+        if (fkOn() && total != 0u) fkCheck(lane);
         sync();
         uint anyReset = gsUniformOpen;
         // The kept candidates' mode of the pass (PERF_FLEET_KEEP). A pass that reuses
@@ -1689,7 +1696,7 @@ void fleetPlan(uint lane, uint word)
         // step word alone) and nothing after; a build sizes the grids and the sorted copy
         // by its own run, and its tests are the listed pairs' dispatch.
         uint mode = FK_OFF;
-        if (fkOn()) mode = fkDecide(lane);
+        if (fkOn()) mode = fkDecide(lane, untracked);
         if (lane == 0u)
         {
             uint offered = gNext[flPrefixAt(0u, nv)];

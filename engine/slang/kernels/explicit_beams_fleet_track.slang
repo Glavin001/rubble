@@ -147,11 +147,65 @@ void fkTrackNode(uint n, uint v)
 bool fkTrackInRest() { return (gP.perfFlags & (PERF_FLEET_KEEP | PERF_KEEP_TRACK_REST)) == (PERF_FLEET_KEEP | PERF_KEEP_TRACK_REST); }
 // Workgroup v of the members' rest, after its rest (every lane; no barrier inside): its
 // vehicle's nodes, a lane each, as fkTrack's threads take them.
+// A pass after one in which no owner was offered a partner (the last pass's offered total,
+// which this pass's first plan replaces after the rest) is not tracked: its plan then reuses
+// no list (fkDecide's `untracked`). Cars in a group but apart track nothing.
+bool fkTrackIdle() { return gNext[flPrefixAt(0u, gP.vehicles)] == 0u; }
 void fkTrackVehicle(uint v, uint lane)
 {
-    if (v >= gP.vehicles || gP.vvTriPairs == 0u || fkWaitLeft() > 1u || !flVehicleOn(v)) return;
+    if (v >= gP.vehicles || gP.vvTriPairs == 0u || fkWaitLeft() > 1u || fkTrackIdle() || !flVehicleOn(v)) return;
     uint4 r0 = gStatic[v * 4u];
-    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES) fkTrackNode(r0.x + i, v);
+    // (fkTrackNode's values, each lane's maxima and sum kept in registers and put once: the
+    // same maxima and the same integer sum, a quarter of the atomics on four words.)
+    float3 shift = fkOriginShift(v);
+    float3 refm = fkReference(v);
+    int4 most = int4(0, 0, 0, 0);
+    int3 sum = int3(0, 0, 0);
+    bool sampled = false;
+    uint hot = (gNext[fkCtl(FK_PASS)] >> 8u) + FK_HOT;
+    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+    {
+        uint n = r0.x + i;
+        float4 ref = gBeams[fkRef(n)];
+        float3 m = (gNodes[n * 3u].xyz - ref.xyz) + shift;
+        float3 d = m - refm;
+        float3 w = gNodes[n * 3u + 1u].xyz;
+        float dev = sqrt(dot(d, d));
+        float trav = sqrt(dot(w, w)) * STEP;
+        int db = int(fkBits(dev));
+        int tb = int(fkBits(trav));
+        if (fkWild(ref))
+        {
+            most.z = max(most.z, db);
+            most.w = max(most.w, tb);
+        }
+        else
+        {
+            most.x = max(most.x, db);
+            most.y = max(most.y, tb);
+        }
+        if ((n & 7u) == 0u)
+        {
+            sum += int3(clamp(m, float3(-1.0, -1.0, -1.0), float3(1.0, 1.0, 1.0)) * 4096.0);
+            sampled = true;
+        }
+        if (fkBits(dev + trav) > asuint(0.5 * FK_CALM))
+        {
+            uint bits = asuint(ref.w);
+            if ((bits >> 1u) != hot) gBeams[fkRef(n)] = float4(ref.xyz, asfloat((hot << 1u) | (bits & 1u)));
+        }
+    }
+    for (uint c = 0u; c < 4u; c++)
+    {
+        int b = c == 0u ? most.x : (c == 1u ? most.y : (c == 2u ? most.z : most.w));
+        if (b > gAcc[fkAcc(v, c)].load()) gAcc[fkAcc(v, c)].max(b);
+    }
+    if (sampled)
+    {
+        gAcc[fkAcc(v, FK_SUM)].add(sum.x);
+        gAcc[fkAcc(v, FK_SUM + 1u)].add(sum.y);
+        gAcc[fkAcc(v, FK_SUM + 2u)].add(sum.z);
+    }
 }
 // The kept pairs' places (explicit_beams_fleet.slang fkKeepPair): the fleet's pair regions
 // as one room of vehicles · FK_CAP slots (slot g: region g / FK_CAP's pair g % FK_CAP, never
