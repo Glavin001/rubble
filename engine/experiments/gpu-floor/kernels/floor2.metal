@@ -45,6 +45,18 @@ struct Params
 #ifndef PAIR
 #define PAIR 0
 #endif
+// XATOM: what crosses between a pair's workgroups (each on its own core) read with
+// atomic loads (1), and written with atomic stores too (2). 0: plain loads and stores.
+#ifndef XATOM
+#define XATOM 0
+#endif
+#if XATOM >= 1
+#define SHL(i) atomic_load_explicit((device atomic_int*)&shift[i], memory_order_relaxed)
+#define SHZ(i) atomic_store_explicit((device atomic_int*)&shift[i], 0, memory_order_relaxed)
+#else
+#define SHL(i) shift[i]
+#define SHZ(i) shift[i] = 0
+#endif
 #if PAIR && !defined(EMU)
 // A barrier across the workgroups of a contact pair (each on its own core; Metal has
 // none): after this group's own barrier its lane 0 adds one to a device counter and waits,
@@ -664,11 +676,11 @@ kernel void floorFrame(
                     P0 = P0 + V0 * H;
                     if (fShift)
                     {
-                        P0 = P0 + v3(float(shift[ni * 3]), float(shift[ni * 3 + 1]), float(shift[ni * 3 + 2])) * (1.0f / 16777216.0f);
-                        shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0;
+                        P0 = P0 + v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f);
+                        SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2);
                     }
                 }
-                else if (fShift) { shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0; }
+                else if (fShift) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
                 { Pown = (P0); SETP(ni, Pown); }
                 { Vown = (V0); SETV(ni, Vown); }
             }
@@ -767,10 +779,10 @@ kernel void floorFrame(
                 {
                     V0 = V0 + (F0 / massN) * H;
                     P0 = P0 + V0 * H;
-                    if (fShift) P0 = P0 + v3(float(shift[ni * 3]), float(shift[ni * 3 + 1]), float(shift[ni * 3 + 2])) * (1.0f / 16777216.0f);
+                    if (fShift) P0 = P0 + v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f);
                     if (lift != 0.0f) P0.y = P0.y + lift;
                 }
-                if (fShift) { shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0; }
+                if (fShift) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
                 { Pown = (P0); SETP(ni, Pown); }
                 { Vown = (V0); SETV(ni, Vown); }
             }
@@ -1587,19 +1599,25 @@ kernel void floorFrame(
         // pass runs between the two barriers; what it left for this body picked up.
         if (isNode)
         {
+#if XATOM >= 2
+            device atomic_uint* na = (device atomic_uint*)(nodeState + ni * 3);
+            atomic_store_explicit(&na[0], as_type<uint>(Pown.x), memory_order_relaxed); atomic_store_explicit(&na[1], as_type<uint>(Pown.y), memory_order_relaxed); atomic_store_explicit(&na[2], as_type<uint>(Pown.z), memory_order_relaxed);
+            atomic_store_explicit(&na[4], as_type<uint>(Vown.x), memory_order_relaxed); atomic_store_explicit(&na[5], as_type<uint>(Vown.y), memory_order_relaxed); atomic_store_explicit(&na[6], as_type<uint>(Vown.z), memory_order_relaxed);
+            atomic_store_explicit(&na[8], as_type<uint>(F0.x), memory_order_relaxed); atomic_store_explicit(&na[9], as_type<uint>(F0.y), memory_order_relaxed); atomic_store_explicit(&na[10], as_type<uint>(F0.z), memory_order_relaxed);
+#else
             nodeState[ni * 3] = f4(Pown, 0);
             nodeState[ni * 3 + 1] = f4(Vown, 0);
             nodeState[ni * 3 + 2] = f4(F0, 0);
+#endif
         }
         XBAR;
         XBAR;
         if (lid == 0)
         {
-            const uint xf = misc[12];
+            const uint xf = atomic_exchange_explicit((device atomic_uint*)&misc[12], 0u, memory_order_relaxed);
             if ((xf & 1u) != 0u) tgFlags[F_HITS] = 1u;
             if ((xf & 2u) != 0u) tgFlags[F_SHIFT] = 1u;
             if ((xf & 4u) != 0u) tgFlags[F_REC] = 1u;
-            misc[12] = 0u;
             if (xlate != 0u) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 8u;
         }
         BAR;

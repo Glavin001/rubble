@@ -38,8 +38,73 @@ kernel void xs(constant P& p [[buffer(0)]], device atomic_uint* cnt [[buffer(1)]
 }
 "#;
 
+/// Is memory one workgroup wrote seen by a workgroup on another core after the
+/// cross-group barrier? Each round every group stamps its own 1,024 words (plain stores,
+/// or atomic ones with `p.work` bit 0), all groups meet, then each reads its neighbour's
+/// words (a plain load and an atomic load of each: the same addresses every round, so a
+/// core that kept a private copy would read last round's) and adds to the neighbour's
+/// sums (atomic); all groups meet again; next round each group reads its own sums back
+/// (plain load) and clears them (plain store). Counts every wrong read by kind.
+const DATA: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+struct P { uint rounds; uint groups; uint cap; uint work; };
+#define BARR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
+#define XB { BARR; if (lid == 0u) { xr++; atomic_fetch_add_explicit(&cnt[0], 1u, memory_order_relaxed); uint i = 0u; for (; i < p.cap; i++) if (atomic_load_explicit(&cnt[0], memory_order_relaxed) >= p.groups * xr) break; if (i >= p.cap) atomic_fetch_add_explicit(&cnt[2], 1u, memory_order_relaxed); } BARR; }
+kernel void xd(constant P& p [[buffer(0)]], device atomic_uint* cnt [[buffer(1)]], device uint* data [[buffer(2)]], device uint* sums [[buffer(3)]],
+               uint lid [[thread_position_in_threadgroup]], uint grp [[threadgroup_position_in_grid]])
+{
+    uint xr = 0u;
+    const uint nb = (grp + 1u) % p.groups;
+    for (uint r = 0; r < p.rounds; r++)
+    {
+        uint got = sums[grp * 1024u + lid];
+        uint want = r == 0u ? 0u : (r - 1u) * 7u + lid + 1u;
+        if (got != want) atomic_fetch_add_explicit(&cnt[6], 1u, memory_order_relaxed);
+        sums[grp * 1024u + lid] = 0u;
+        const uint stamp = r << 16 | (grp * 1024u + lid);
+        if ((p.work & 1u) != 0u) atomic_store_explicit((device atomic_uint*)(data + grp * 1024u + lid), stamp, memory_order_relaxed);
+        else data[grp * 1024u + lid] = stamp;
+        XB;
+        const uint exp = r << 16 | (nb * 1024u + lid);
+        if (data[nb * 1024u + lid] != exp) atomic_fetch_add_explicit(&cnt[4], 1u, memory_order_relaxed);
+        if (atomic_load_explicit((device atomic_uint*)(data + nb * 1024u + lid), memory_order_relaxed) != exp) atomic_fetch_add_explicit(&cnt[5], 1u, memory_order_relaxed);
+        atomic_fetch_add_explicit((device atomic_uint*)(sums + nb * 1024u + lid), r * 7u + lid + 1u, memory_order_relaxed);
+        XB;
+    }
+}
+"#;
+
+fn data_test(gpu: &Gpu) -> anyhow::Result<()> {
+    let pso = gpu.pipeline(DATA, "xd", false)?;
+    if std::env::args().any(|a| a == "--compile-only") {
+        println!("compiled");
+        return Ok(());
+    }
+    let cnt = gpu.zeros(64);
+    let data = gpu.zeros(64 * 1024 * 4);
+    let sums = gpu.zeros(64 * 1024 * 4);
+    println!("memory across cores after the cross-group barrier (2,000 rounds, 1,024 words a group a round)");
+    println!("groups | the writer's stores | wrong plain loads | wrong atomic loads | wrong sums read back by their owner | barriers missed");
+    for groups in [2u32, 3, 8, 39, 40] {
+        for atomic_store in [0u32, 1] {
+            write(&cnt, &[0u32; 16]);
+            write(&data, &vec![0u32; 64 * 1024]);
+            write(&sums, &vec![0u32; 64 * 1024]);
+            let p = gpu.buffer(&[2000u32, groups, 1 << 20, atomic_store]);
+            gpu.run(&pso, &[&p, &cnt, &data, &sums], groups as u64, 1024);
+            let c: Vec<u32> = read(&cnt, 8);
+            println!("{groups:6} | {:6} | {:8} | {:8} | {:8} | {}", if atomic_store == 1 { "atomic" } else { "plain" }, c[4], c[5], c[6], c[2]);
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let gpu = Gpu::new()?;
+    if std::env::args().any(|a| a == "--data") {
+        return data_test(&gpu);
+    }
     let pso = gpu.pipeline(SRC, "xs", true)?;
     let cnt = gpu.zeros(64);
     let out = gpu.zeros(64 * 1024 * 4);

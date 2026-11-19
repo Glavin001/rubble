@@ -31,8 +31,16 @@
         #define XIMM(i) ((as_type<uint>(nodeStatic[i].z) & NODE_IMMOVABLE) != 0u)
         #define XACCEL(f, i) (XIMM(i) ? v3(0, 0, 0) : (f) / XM(i))
         #define XIM(i, kf) (XIMM(i) ? 0.0f : (kf) / XM(i))
-        #define XF(c, i) v3(XNODE(c)[(i) * 3 + 2])
         #define ILOAD(p) atomic_load_explicit(p, memory_order_relaxed)
+        #define XNA(c) ((device atomic_uint*)(CB(c) + O_NODE))
+        #define XLD3(c, w) v3(as_type<float>(ILOAD(&XNA(c)[(w) * 4u])), as_type<float>(ILOAD(&XNA(c)[(w) * 4u + 1u])), as_type<float>(ILOAD(&XNA(c)[(w) * 4u + 2u])))
+        #if XATOM >= 1
+        #define XF(c, i) XLD3(c, (i) * 3u + 2u)
+        #define XISDEAD(c, t) (ILOAD((device atomic_uint*)&XDEAD(c)[t]) != 0u)
+        #else
+        #define XF(c, i) v3(XNODE(c)[(i) * 3 + 2])
+        #define XISDEAD(c, t) (XDEAD(c)[t] != 0u)
+        #endif
         for (uint frame = 0; frame < P.frames; frame++)
         for (uint step = 0; step < Z_STEPS; step++)
         {
@@ -44,7 +52,11 @@
             for (uint k = lid; k < 2u * NN; k += LANES)
             {
                 const uint c = k < NN ? 0u : 1u, i = k - c * NN;
+        #if XATOM >= 1
+                float4 p4 = f4(XLD3(c, i * 3u), 0), v4 = f4(XLD3(c, i * 3u + 1u), 0);
+        #else
                 float4 p4 = XNODE(c)[i * 3], v4 = XNODE(c)[i * 3 + 1];
+        #endif
                 if (c == 0u) { SETP(i, v3(p4)); SETV(i, v3(v4)); }
                 else
                 {
@@ -99,7 +111,7 @@
                 for (uint k = lid; k < 2u * NT; k += LANES)
                 {
                     const uint a = k < NT ? 0u : 1u, t = k - a * NT, b = 1u - a;
-                    if (XDEAD(a)[t] != 0u) continue;
+                    if (XISDEAD(a, t)) continue;
                     uint4 tn = tris[t];
                     V3 p0 = XP(a, tn.x), p1 = XP(a, tn.y), p2 = XP(a, tn.z);
                     float travel = rmax(rmax(rmax(0.0f, len3(XV(a, tn.x))), len3(XV(a, tn.y))), len3(XV(a, tn.z))) * H;

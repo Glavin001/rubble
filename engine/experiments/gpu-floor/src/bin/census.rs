@@ -56,6 +56,45 @@ fn main() -> anyhow::Result<()> {
     println!("first aero record {:?}, last non-aero {:?}; couplers {:?}..{:?}, torsion {:?}..{:?}", first(&|b| b.kind == ExplicitKind::JbeamAeroTri), last(&|b| !matches!(b.kind, ExplicitKind::JbeamAeroTri | ExplicitKind::JbeamAeroTri2)), first(&|b| b.kind == ExplicitKind::JbeamCoupler), last(&|b| b.kind == ExplicitKind::JbeamCoupler), first(&|b| b.kind == ExplicitKind::JbeamTorsion), last(&|b| b.kind == ExplicitKind::JbeamTorsion));
     let sup: Vec<f32> = s.beams.iter().filter(|b| b.kind == ExplicitKind::JbeamSupport).map(|b| b.long_bound / b.rest0).collect();
     println!("support long/rest0 min {:?} max {:?}; gate/k*rest0 ...", sup.iter().cloned().fold(f32::MAX, f32::min), sup.iter().cloned().fold(f32::MIN, f32::max));
+    // Ownership: how many two-node beams a node's lane could own (at most `cap`) if the
+    // owned ones must be the first or the last entries of the node's ordered add list.
+    {
+        let scalar = |k: ExplicitKind| matches!(k, ExplicitKind::JbeamPlain | ExplicitKind::JbeamSupport | ExplicitKind::JbeamBounded | ExplicitKind::JbeamAniso | ExplicitKind::Plain);
+        let nn = s.nodes.len();
+        let mut lists: Vec<Vec<usize>> = vec![Vec::new(); nn];
+        let mut all_scalar = 0;
+        for (j, b) in s.beams.iter().enumerate() {
+            if matches!(b.kind, ExplicitKind::JbeamTorsionPair | ExplicitKind::JbeamAeroTri2) { continue; }
+            if scalar(b.kind) { all_scalar += 1; }
+            for n in [b.a, b.b] { lists[n as usize].push(j); }
+            if b.kind == ExplicitKind::JbeamAeroTri { /* third node: not a two-node entry */ }
+        }
+        for cap in [4usize, 5, 6, 8] {
+            for both_ends in [false, true] {
+                let mut owner = vec![usize::MAX; s.beams.len()];
+                let mut pre = vec![0usize; nn];
+                let mut suf = vec![0usize; nn];
+                let mut open_pre = vec![true; nn];
+                let mut open_suf = vec![both_ends; nn];
+                loop {
+                    let mut changed = false;
+                    for i in 0..nn {
+                        if open_pre[i] && pre[i] + suf[i] < cap && pre[i] + suf[i] < lists[i].len() {
+                            let j = lists[i][pre[i]];
+                            if scalar(s.beams[j].kind) && owner[j] == usize::MAX { owner[j] = i; pre[i] += 1; changed = true; } else { open_pre[i] = false; }
+                        }
+                        if open_suf[i] && pre[i] + suf[i] < cap && pre[i] + suf[i] < lists[i].len() {
+                            let j = lists[i][lists[i].len() - 1 - suf[i]];
+                            if scalar(s.beams[j].kind) && owner[j] == usize::MAX { owner[j] = i; suf[i] += 1; changed = true; } else { open_suf[i] = false; }
+                        }
+                    }
+                    if !changed { break; }
+                }
+                let owned = owner.iter().filter(|&&o| o != usize::MAX).count();
+                println!("ownership: cap {cap}, {}: {owned} of {all_scalar} two-node beams owned in order", if both_ends { "first or last entries" } else { "first entries only" });
+            }
+        }
+    }
     let tot: f32 = s.nodes.iter().map(|n| n.mass).sum();
     println!("mass {tot}");
     if let Some(d) = &s.drive { println!("drive: {:?}", d.config.wheels.len()); }

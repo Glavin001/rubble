@@ -513,6 +513,8 @@ pub struct Floor {
     /// The second layout: the beams' two deferred words written to their records each
     /// dispatch (to read the beams; off for timing).
     pub flush: bool,
+    /// With a kernel of one substep a dispatch (`PER_STEP`): a run is one dispatch.
+    pub single: bool,
     pair: usize,
     pub l: Layout,
     pub cars: usize,
@@ -566,6 +568,7 @@ impl Floor {
             node: if st.v2_tab.is_empty() { z(l.nn * 3 * 16) } else { z(st.v2_off.words * 4) },
             off: st.v2_off.clone(),
             flush: true,
+            single: false,
             pair: st.pair,
             rec: z(l.nr * 3 * 16),
             add: z(l.nadd * 16),
@@ -694,7 +697,7 @@ impl Floor {
         let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
         bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
         bufs.extend([&self.stat[11], &self.stat[12], &self.stat[13], &self.tri_geo, &self.pairs, &self.pbuild, &self.clip, &self.hits, &self.stage]);
-        let n = if self.per_frame > 1 { self.per_frame * frames as usize } else { 1 };
+        let n = if self.single { 1 } else if self.per_frame > 1 { self.per_frame * frames as usize } else { 1 };
         self.gpu.run_n(&self.pso, &bufs, self.cars as u64, LANES as u64, n)
     }
 }

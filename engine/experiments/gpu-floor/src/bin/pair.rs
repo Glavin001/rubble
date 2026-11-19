@@ -27,7 +27,8 @@ fn main() -> anyhow::Result<()> {
         st.pair = 2;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/gpu-floor/emu-pair");
         let by_step = std::env::args().any(|a| a == "--by-step");
-        let mut e = Emu::new(l, &st, if by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" }, &dir)?;
+        let xa = arg("--xatom").map_or(String::new(), |m| format!("#define XATOM {m}\n"));
+        let mut e = Emu::new(l, &st, &format!("{}{xa}", if by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" }), &dir)?;
         e.reverse = std::env::args().any(|a| a == "--reverse");
         for c in 0..2 {
             let s = state_of(&w.vehicles[c], &e.l, &st);
@@ -82,7 +83,15 @@ fn main() -> anyhow::Result<()> {
         if let Some(m) = arg("--regmode") {
             extra += &format!("#define REGMODE {m}\n");
         }
+        if let Some(m) = arg("--xatom") {
+            extra += &format!("#define XATOM {m}\n");
+        }
+        let by_step = flag("--by-step");
+        if by_step {
+            extra += "#define PER_STEP 1\n";
+        }
         let mut f = Floor::new(Gpu::new()?, l, &st, 3 * pairs, fast, &extra)?;
+        f.single = by_step;
         let (mt, _, tg) = f.threads_ok();
         println!("pipeline: max threads {mt}, threadgroup memory {tg} B; {pairs} pair(s), {} workgroups", 3 * pairs);
         if flag("--compile-only") {
@@ -93,6 +102,31 @@ fn main() -> anyhow::Result<()> {
             for c in 0..2 {
                 f.upload(3 * p + c, &state_of(&w.vehicles[c], &f.l, &st));
             }
+        }
+        if by_step {
+            // One substep a dispatch, compared after each: the first differing step, its
+            // words, and how the kernel's contact pass counted against the reference's.
+            for step in 1..=frames * STEPS {
+                f.run(1);
+                w.step();
+                let g: Vec<State> = (0..2).map(|c| f.download(c)).collect();
+                let x = f.download(2);
+                let bad: Vec<usize> = (0..2).map(|c| compare(&w.vehicles[c], &g[c]).0).collect();
+                if bad[0] + bad[1] != 0 || step % 34 == 0 {
+                    println!("check step {step}: differing words {bad:?}; reference hits {} candidates {}; kernel passes so far {} most hits {} status {:#x}", w.last.hits, w.last.candidates, x.misc[5], x.misc[6], x.misc[1] | g[0].misc[1] | g[1].misc[1]);
+                }
+                if bad[0] + bad[1] != 0 {
+                    for c in 0..2 {
+                        for n in compare(&w.vehicles[c], &g[c]).1.iter().take(8) {
+                            println!("check   body {c}: {n}");
+                        }
+                    }
+                    println!("check: first differing word at step {step}");
+                    return Ok(());
+                }
+            }
+            println!("check: both bodies bit for bit every step ({} steps)", frames * STEPS);
+            return Ok(());
         }
         let first: Vec<Vec<Vec<u8>>> = (0..3 * pairs).map(|g| f.snapshot(g)).collect();
         // The reference's own sensitivity: the same run from a start moved by a micron.
@@ -141,7 +175,7 @@ fn main() -> anyhow::Result<()> {
                 first_bad = Some(fr);
                 for c in 0..2 {
                     for n in compare(&w.vehicles[c], &g[c]).1.iter().take(4) {
-                        println!("  body {c}: {n}");
+                        println!("check   body {c}: {n}");
                     }
                 }
             }
