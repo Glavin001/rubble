@@ -189,6 +189,12 @@ back instead. Measured 2026-11-19 (T4, strict floats): every row bit for bit, 10
 faster (pile32 1 %); the gaps went from 0.5 to 5.7 ms a frame to none, the host's share is
 under 0.2 ms (pile32 0.5 ms), and what remains is the kernels' own time.
 
+Tried and not kept (2026-11-19, same matrix): replaying each frame as a CUDA graph. Bit for
+bit, but within noise: -2.6 to +1.3 % against the same launches queued one by one. A graph
+cannot hold the banks' pointer rewrites as host writes, and the device copies that replace
+them cost more than the small host copies the driver puts in the stream. With no gaps left
+between launches, a graph has nothing to remove.
+
 ## Cold kernel compiles (WebGPU route; read this first)
 
 wgpu creates each compute pipeline from SPIR-V, and NVIDIA's driver compiles it on the
