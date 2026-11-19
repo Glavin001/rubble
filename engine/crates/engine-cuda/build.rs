@@ -38,6 +38,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_SASS");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_LOAD_CACHE");
+    println!("cargo:rerun-if-env-changed=ENGINE_CUDA_FMAD");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_REQUIRE_PTX");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_EXPLICIT_MODULES");
 

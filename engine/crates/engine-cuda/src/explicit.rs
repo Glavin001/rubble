@@ -149,6 +149,9 @@ pub struct CudaExplicitBeams {
     vv_grid: bool,
     /// Host reads of the indirect arguments (each one waits for the stream).
     pub args_syncs: u64,
+    /// Frames that ran a split path ([`schedule::FrameKind::split`]): tests see the
+    /// switches took effect.
+    pub split_frames: u64,
     /// A frame queued since the last wait copied the status.
     status_due: bool,
     /// Events around timed frames ([`Self::enable_frame_timing`]).
@@ -298,6 +301,7 @@ impl CudaExplicitBeams {
             wide_fused: false,
             vv_grid: true,
             args_syncs: 0,
+            split_frames: 0,
             status_due: false,
             timing_left: 0,
             events: Vec::new(),
@@ -379,6 +383,7 @@ impl CudaExplicitBeams {
             ready: &ready,
         };
         let frame = schedule::frame(&mut self.planner, &sw, steps);
+        self.split_frames += u64::from(frame.kind.split());
         // Pageable sources are staged before the call returns; stream order keeps
         // the last frame's kernels reading the old parameters.
         unsafe { result::memcpy_htod_async(self.bufs[BIND_PARAMS as usize], &frame.params, self.stream) }

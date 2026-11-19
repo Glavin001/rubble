@@ -797,6 +797,12 @@ pub mod cuda_layout {
         // L1 caching (the CUDA default) for measurements.
         let cache = std::env::var("ENGINE_CUDA_LOAD_CACHE").unwrap_or_else(|_| "cg".into());
         cmd.args(["-Xptxas", &format!("-dlcm={cache}")]);
+        // Test setting (strict floats): ENGINE_CUDA_FMAD=0 keeps every a * b + c a
+        // multiply and an add (-fmad=false), so two modules that do the same arithmetic
+        // round alike whatever each one's code around it. Off by default (nvcc fuses).
+        if std::env::var("ENGINE_CUDA_FMAD").as_deref() == Ok("0") {
+            cmd.arg("-fmad=false");
+        }
         for sm in sass {
             cmd.arg(format!("-gencode=arch=compute_{sm},code=sm_{sm}"));
         }

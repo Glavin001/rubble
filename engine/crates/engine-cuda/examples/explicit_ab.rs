@@ -402,6 +402,7 @@ fn main() -> anyhow::Result<()> {
             "  timing: {frame_ms:.3} ms GPU a frame (events), {wall:.3} ms wall a frame; rerun from snapshot bit for bit: {}",
             repeat.as_deref().unwrap_or("yes")
         );
+        println!("  frames on a split path: {}; argument reads (waits): {}", g.split_frames, g.args_syncs);
         println!(
             "  per kernel (ms over {frames} frames, launches): {}",
             phases.iter().map(|(k, ms, n)| format!("{k} {ms:.2}×{n}")).collect::<Vec<_>>().join(", ")
