@@ -3455,7 +3455,7 @@ the work left is in the drawing itself, lossless first:
   asset side: §8.30's follow-up).
 
 
-### 8.39 The cars of one model skinned in one pass, and a retired check read once (2026-11-19)
+### 8.41 The cars of one model skinned in one pass, and a retired check read once (2026-11-19)
 
 §8.38 left the skin as the drawing's largest lossless part: eight generated cars 6.1 ms a
 picture, each car reading the shared 157 MB of binds. Headless Chrome on the M3 Max,
