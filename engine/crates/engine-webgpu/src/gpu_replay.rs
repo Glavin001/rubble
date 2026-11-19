@@ -84,6 +84,8 @@ pub struct KernelReplayReport {
     pub dispatch_split_span_ms: Vec<f64>,
     /// An empty pass (one-workgroup no-op), per rep.
     pub empty_pass_ms: Vec<f64>,
+    /// Timed passes that wrote no begin or end timestamp (left out of every time).
+    pub unwritten_passes: u32,
     pub dispatches: Vec<ReplayedDispatch>,
 }
 
@@ -126,6 +128,7 @@ impl KernelReplayReport {
             "dispatch_split_sum_ms": stat(&self.dispatch_split_sum_ms),
             "dispatch_split_span_ms": stat(&self.dispatch_split_span_ms),
             "empty_pass_ms": stat(&self.empty_pass_ms),
+            "unwritten_passes": self.unwritten_passes,
             "isolated_sum_ms": isolated_sum,
             "in_sequence_sum_ms": in_sequence_sum,
             "kernels": by.iter().map(|((p, k), (n, wg, seq, iso))| json!({
@@ -161,6 +164,7 @@ impl KernelReplayReport {
         let seq: f64 = self.dispatches.iter().map(|d| median(&d.in_sequence_ms)).sum();
         let empty = median(&self.empty_pass_ms);
         let _ = writeln!(out, "kernel replay at step {} ({} reps, {} dispatches, snapshot {:.1} MB)", self.step, self.reps, self.dispatches.len(), self.snapshot_bytes as f64 / 1e6);
+        let _ = writeln!(out, "  timed passes that wrote no timestamp: {}", self.unwritten_passes);
         let _ = writeln!(out, "  whole step (one pass)        {whole:8.3} ms  p90 {:.3}", quantile(&self.whole_step_ms, 0.9));
         let _ = writeln!(out, "  pass per phase: sum / span   {:8.3} / {:.3} ms", median(&self.phases_sum_ms), median(&self.phases_span_ms));
         let gaps: f64 = self.phase_gaps_ms.iter().sum();
@@ -242,8 +246,12 @@ pub fn env_hook(sim: &mut WgpuSim) -> bool {
             true
         }
         Err(e) => {
-            // (Pending host commands at this step: try again at the next call.)
-            eprintln!("kernel replay at step {}: {e:#}", sim.steps_done);
+            // (Pending host commands, or every body asleep: try again at the next call;
+            // said once.)
+            static SAID: AtomicBool = AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                eprintln!("kernel replay at step {}: {e:#} (retrying each step)", sim.steps_done);
+            }
             false
         }
     }
@@ -292,7 +300,14 @@ fn pairs(set: &[Option<wgpu::Buffer>]) -> (Vec<usize>, Vec<&wgpu::Buffer>) {
 /// WebGPU's cap on a query set's size.
 const MAX_QUERIES: u32 = 4096;
 
+/// Timestamps for the replay's chunks. A slot is never written twice: a pass that writes
+/// no timestamp (Metal, for some passes) would otherwise leave an older chunk's tick in
+/// its slot and stretch every span computed over it. Unwritten slots read 0 and are
+/// skipped; a full query set is replaced by a fresh one.
 struct Timer {
+    base: std::cell::Cell<u32>,
+    /// Timed passes whose begin or end timestamp was never written (read 0).
+    unwritten: std::rc::Rc<std::cell::Cell<u32>>,
     set: wgpu::QuerySet,
     resolve: wgpu::Buffer,
     read: wgpu::Buffer,
@@ -303,6 +318,8 @@ impl Timer {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let bytes = 8 * u64::from(MAX_QUERIES);
         Self {
+            base: std::cell::Cell::new(0),
+            unwritten: Default::default(),
             set: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("kernel replay timestamps"),
                 ty: wgpu::QueryType::Timestamp,
@@ -324,11 +341,22 @@ impl Timer {
         }
     }
 
+    /// Room for a chunk of `slots` pairs (a fresh query set when this one is full).
+    fn room(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slots: u32) {
+        assert!(2 * slots <= MAX_QUERIES, "a chunk of {slots} timestamp pairs");
+        if 2 * (self.base.get() + slots) > MAX_QUERIES {
+            let unwritten = self.unwritten.clone();
+            *self = Timer::new(device, queue);
+            self.unwritten = unwritten;
+        }
+    }
+
     fn writes(&self, slot: u32) -> wgpu::ComputePassTimestampWrites<'_> {
+        let k = self.base.get() + slot;
         wgpu::ComputePassTimestampWrites {
             query_set: &self.set,
-            beginning_of_pass_write_index: Some(2 * slot),
-            end_of_pass_write_index: Some(2 * slot + 1),
+            beginning_of_pass_write_index: Some(2 * k),
+            end_of_pass_write_index: Some(2 * k + 1),
         }
     }
 
@@ -339,15 +367,24 @@ impl Timer {
         queue.submit([enc.finish()]);
         let mut r = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay resolve") });
         let n = 2 * slots;
-        r.resolve_query_set(&self.set, 0..n, &self.resolve, 0);
+        let first = 2 * self.base.get();
+        r.resolve_query_set(&self.set, first..first + n, &self.resolve, 0);
         r.copy_buffer_to_buffer(&self.resolve, 0, &self.read, 0, 8 * u64::from(n));
         queue.submit([r.finish()]);
+        self.base.set(self.base.get() + slots);
         let t = read_mapped(device, &self.read, 8 * u64::from(n));
         let t: &[u64] = bytemuck::cast_slice(&t);
-        (0..slots as usize).map(|i| (t[2 * i], t[2 * i + 1])).collect()
+        let out: Vec<(u64, u64)> = (0..slots as usize).map(|i| (t[2 * i], t[2 * i + 1])).collect();
+        let missing = out.iter().filter(|p| p.0 == 0 || p.1 == 0).count() as u32;
+        self.unwritten.set(self.unwritten.get() + missing);
+        out
     }
 
+    /// ms from tick `a` to tick `b`; 0 when either was never written.
     fn ms(&self, (a, b): (u64, u64)) -> f64 {
+        if a == 0 || b == 0 {
+            return 0.0;
+        }
         b.saturating_sub(a) as f64 * self.period_ms
     }
 }
@@ -412,7 +449,7 @@ impl WgpuSim {
         );
         let device = self.device.clone();
         let queue = self.queue.clone();
-        let timer = Timer::new(&device, &queue);
+        let mut timer = Timer::new(&device, &queue);
         let reps = opts.reps;
 
         // The state before anything of the replay, restored at the end (taken before the
@@ -506,6 +543,7 @@ impl WgpuSim {
                 compilation_options: Default::default(),
                 cache: None,
             });
+            timer.room(&device, &queue, reps + 1);
             for r in 0..=reps {
                 wait_idle(&device, &queue);
                 let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
@@ -545,6 +583,7 @@ impl WgpuSim {
                 restore_all(&mut enc, self, &input);
                 queue.submit([enc.finish()]);
                 wait_idle(&device, &queue);
+                timer.room(&device, &queue, n_items);
                 let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay step") });
                 let slots = match shape {
                     0 => {
@@ -583,7 +622,8 @@ impl WgpuSim {
                     continue; // warm-up
                 }
                 let sum: f64 = t.iter().map(|&x| timer.ms(x)).sum();
-                let span = timer.ms((t.iter().map(|x| x.0).filter(|&x| x > 0).min().unwrap_or(0), t.iter().map(|x| x.1).max().unwrap_or(0)));
+                // Written slots only (a pass may write none).
+                let span = timer.ms((t.iter().map(|x| x.0).filter(|&x| x > 0).min().unwrap_or(0), t.iter().map(|x| x.1).filter(|&x| x > 0).max().unwrap_or(0)));
                 match shape {
                     0 => report.whole_step_ms.push(sum),
                     1 => {
@@ -591,7 +631,7 @@ impl WgpuSim {
                         report.phases_span_ms.push(span);
                         for (i, &x) in t.iter().enumerate() {
                             phase_samples[i].push(timer.ms(x));
-                            gap_samples[i].push(if i == 0 { 0.0 } else { timer.ms((t[i - 1].1, x.0)) });
+                            gap_samples[i].push(if i == 0 || t[i - 1].1 > x.0 { 0.0 } else { timer.ms((t[i - 1].1, x.0)) });
                         }
                     }
                     _ => {
@@ -599,9 +639,14 @@ impl WgpuSim {
                         report.dispatch_split_span_ms.push(span);
                         // Completion to completion: each pass's end after the previous one's
                         // (the first from its own begin). These sum to the span.
+                        // (From the last pass that wrote its end: an unwritten pass is 0.)
+                        let mut last = 0u64;
                         for (i, &x) in t.iter().enumerate() {
-                            let from = if i == 0 { x.0 } else { t[i - 1].1 };
+                            let from = if last == 0 { x.0 } else { last };
                             in_seq[i].push(timer.ms((from, x.1)));
+                            if x.1 > 0 {
+                                last = x.1;
+                            }
                         }
                     }
                 }
@@ -638,6 +683,7 @@ impl WgpuSim {
                 enc.copy_buffer_to_buffer(input[23].as_ref().expect("args"), u64::from(slot) * 12, &args, 16 * k as u64, 12);
             }
             let runs = if opts.whole_step_only { 0 } else { reps + 1 };
+            timer.room(&device, &queue, runs.max(1));
             for r in 0..runs {
                 // Restore, finish, then the timed pass alone in its submission (see above).
                 for &i in &bound {
@@ -699,6 +745,7 @@ impl WgpuSim {
             })
             .collect();
 
+        report.unwritten_passes = timer.unwritten.get();
         // Everything back as it was before the replay.
         {
             let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay restore") });
