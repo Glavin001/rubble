@@ -25,17 +25,17 @@ int main(int argc, char** argv)
     #define B(i, T) ((T)(void*)b[i].data())
     std::vector<Lane> lanes;
     for (uint lid = 0; lid < LANES; lid++)
+#ifdef V2
+        lanes.push_back(floorFrame(*B(0, const Params*), B(1, uint*), B(2, const float4*), B(4, const uint4*), B(5, const float4*),
+            B(6, const float4*), B(7, const float4*), B(12, const uint*), B(14, const uint*), B(17, const uint4*),
+            B(22, const uint*), B(23, const uint4*), B(24, const uint*), lid, 0u));
+#else
         lanes.push_back(floorFrame(*B(0, const Params*), B(1, float4*), B(2, const float4*), B(3, const uint4*), B(4, const uint4*),
             B(5, const float4*), B(6, const float4*), B(7, const float4*), B(8, float4*), B(9, const uint4*), B(10, const uint4*),
-            B(11, float4*),
-#ifdef V2
-            B(12, const uint*),
-#else
-            B(12, float4*),
-#endif
-            B(13, const uint2*), B(14, const uint*), B(15, uint*), B(16, uint*), B(17, const uint4*),
+            B(11, float4*), B(12, float4*), B(13, const uint2*), B(14, const uint*), B(15, uint*), B(16, uint*), B(17, const uint4*),
             B(18, uint*), B(19, atomic_int*), B(20, int*), B(21, uint*), B(22, const uint*), B(23, const uint4*), B(24, const uint*),
             B(25, float4*), B(26, uint*), B(27, float4*), B(28, atomic_uint*), B(29, float4*), B(30, uint*), lid, 0u));
+#endif
     unsigned long phases = 0;
     for (;;) {
         uint done = 0;

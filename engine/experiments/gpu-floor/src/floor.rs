@@ -57,6 +57,62 @@ pub struct Statics {
     /// empty: the first layout.
     pub v2_tab: Vec<u32>,
     pub v2_defs: String,
+    pub v2_off: V2Off,
+}
+
+/// The second layout's one buffer a car: each part's offset in 4-byte words.
+#[derive(Clone, Default, Debug)]
+pub struct V2Off {
+    pub node: usize,
+    pub rec: usize,
+    pub groups: usize,
+    pub deform: usize,
+    pub tridead: usize,
+    pub acc: usize,
+    pub shift: usize,
+    pub misc: usize,
+    pub pairs: usize,
+    pub pbuild: usize,
+    pub clip: usize,
+    pub hits: usize,
+    pub scratch: usize,
+    pub hot: usize,
+    pub words: usize,
+}
+
+fn put_at(big: &mut [u8], word: usize, data: &[u8]) {
+    big[word * 4..word * 4 + data.len()].copy_from_slice(data);
+}
+fn get_at<T: bytemuck::Pod>(big: &[u8], word: usize, n: usize) -> Vec<T> {
+    let sz = std::mem::size_of::<T>();
+    big[word * 4..word * 4 + n * sz].chunks_exact(sz).map(bytemuck::pod_read_unaligned).collect()
+}
+/// A car's state into its block (every scratch word, the pair rows and the hot image zero).
+pub fn v2_put(big: &mut [u8], o: &V2Off, s: &State) {
+    big.fill(0);
+    put_at(big, o.node, bytemuck::cast_slice(&s.node));
+    put_at(big, o.rec, bytemuck::cast_slice(&s.rec));
+    put_at(big, o.groups, bytemuck::cast_slice(&s.groups_last));
+    put_at(big, o.deform, bytemuck::cast_slice(&s.deform));
+    put_at(big, o.tridead, bytemuck::cast_slice(&s.tri_dead));
+    put_at(big, o.acc, bytemuck::cast_slice(&s.acc));
+    put_at(big, o.shift, bytemuck::cast_slice(&s.shift));
+    put_at(big, o.misc, bytemuck::cast_slice(&s.misc));
+    put_at(big, o.clip, bytemuck::cast_slice(&s.clip));
+}
+pub fn v2_get(big: &[u8], o: &V2Off, l: &Layout) -> State {
+    State {
+        node: get_at(big, o.node, l.nn * 3),
+        rec: get_at(big, o.rec, l.nr * 3),
+        add: Vec::new(),
+        groups_last: get_at(big, o.groups, l.ng),
+        deform: get_at(big, o.deform, l.nd),
+        tri_dead: get_at(big, o.tridead, l.nt),
+        acc: get_at(big, o.acc, l.nn * 3),
+        shift: get_at(big, o.shift, l.nn * 3),
+        misc: get_at(big, o.misc, 16),
+        clip: get_at(big, o.clip, l.nn * 4),
+    }
 }
 
 /// One car's state in the kernel's layout.
@@ -236,7 +292,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new() },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default() },
     ))
 }
 
@@ -355,6 +411,10 @@ pub struct Floor {
     /// Dispatches a frame (1: all substeps in one; STEPS: one a substep).
     pub per_frame: usize,
     v2: bool,
+    off: V2Off,
+    /// The second layout: the beams' two deferred words written to their records each
+    /// dispatch (to read the beams; off for timing).
+    pub flush: bool,
     pub l: Layout,
     pub cars: usize,
     pso: ComputePipelineState,
@@ -404,7 +464,9 @@ impl Floor {
         let params = gpu.zeros(64);
         let z = |bytes: usize| gpu.zeros(bytes * cars);
         Ok(Self {
-            node: z(l.nn * 3 * 16),
+            node: if st.v2_tab.is_empty() { z(l.nn * 3 * 16) } else { z(st.v2_off.words * 4) },
+            off: st.v2_off.clone(),
+            flush: true,
             rec: z(l.nr * 3 * 16),
             add: z(l.nadd * 16),
             cen: if st.v2_tab.is_empty() { z(l.ncen * 16) } else { gpu.buffer(&st.v2_tab) },
@@ -437,6 +499,12 @@ impl Floor {
 
     pub fn upload(&self, car: usize, s: &State) {
         let l = &self.l;
+        if self.v2 {
+            let n = self.off.words * 4;
+            let big = unsafe { std::slice::from_raw_parts_mut((self.node.contents() as *mut u8).add(car * n), n) };
+            v2_put(big, &self.off, s);
+            return;
+        }
         let put = |b: &Buffer, off: usize, data: &[u8]| unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), (b.contents() as *mut u8).add(off), data.len())
         };
@@ -458,6 +526,11 @@ impl Floor {
 
     pub fn download(&self, car: usize) -> State {
         let l = &self.l;
+        if self.v2 {
+            let n = self.off.words * 4;
+            let big = unsafe { std::slice::from_raw_parts((self.node.contents() as *const u8).add(car * n), n) };
+            return v2_get(big, &self.off, l);
+        }
         fn get<T: bytemuck::Pod + Default + Clone>(b: &Buffer, off: usize, n: usize) -> Vec<T> {
             let all: Vec<T> = read(b, off + n);
             all[off..].to_vec()
@@ -479,6 +552,9 @@ impl Floor {
     /// Every per-car buffer with its size a car.
     fn per_car(&self) -> Vec<(&Buffer, usize)> {
         let l = &self.l;
+        if self.v2 {
+            return vec![(&self.node, self.off.words * 4)];
+        }
         vec![
             (&self.node, l.nn * 48), (&self.rec, l.nr * 48), (&self.add, l.nadd * 16), (&self.cen, if self.v2 { 0 } else { l.ncen * 16 }), (&self.groups, l.ng * 4),
             (&self.deform, l.nd * 4), (&self.tri_dead, l.nt * 4), (&self.acc, l.nn * 12), (&self.shift, l.nn * 12), (&self.misc, 64),
@@ -507,7 +583,7 @@ impl Floor {
     pub fn run_skip(&self, frames: u32, skip: u32) -> f64 {
         let l = &self.l;
         let steps = STEPS / self.per_frame;
-        write(&self.params, &[self.cars as u32, if self.per_frame > 1 { 1 } else { frames }, 0.0f32.to_bits(), skip, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, steps as u32, l.ng as u32, l.rs as u32, 0]);
+        write(&self.params, &[self.cars as u32, if self.per_frame > 1 { 1 } else { frames }, 0.0f32.to_bits(), skip, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, steps as u32, l.ng as u32, l.rs as u32, self.flush as u32]);
         let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
         bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
         bufs.extend([&self.stat[11], &self.stat[12], &self.stat[13], &self.tri_geo, &self.pairs, &self.pbuild, &self.clip, &self.hits, &self.stage]);
@@ -635,6 +711,7 @@ pub struct Emu {
     pub bufs: Vec<Vec<u8>>,
     pub reverse: bool,
     v2: bool,
+    off: V2Off,
     /// Substeps a run (RUNTIME_SIZES kernels only; else STEPS).
     pub steps: usize,
 }
@@ -682,11 +759,19 @@ impl Emu {
         bufs[27] = z(l.nn * 16);
         bufs[29] = z(HIT_CAP * HITW * 16);
         bufs[30] = z(l.nn * 48);
-        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), steps: STEPS })
+        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), off: st.v2_off.clone(), steps: STEPS })
     }
 
     pub fn upload(&mut self, s: &State) {
         let b = |v: &[u8]| v.to_vec();
+        if self.v2 {
+            self.bufs[1] = vec![0u8; self.off.words * 4];
+            v2_put(&mut self.bufs[1], &self.off, s);
+            for i in [8, 11, 15, 16, 18, 19, 20, 21, 28] {
+                self.bufs[i] = vec![0u8; 16];
+            }
+            return;
+        }
         self.bufs[1] = b(bytemuck::cast_slice(&s.node));
         self.bufs[8] = b(bytemuck::cast_slice(&s.rec));
         self.bufs[11] = b(bytemuck::cast_slice(&s.add));
@@ -704,6 +789,9 @@ impl Emu {
     }
 
     pub fn download(&self) -> State {
+        if self.v2 {
+            return v2_get(&self.bufs[1], &self.off, &self.l);
+        }
         fn g<T: bytemuck::Pod>(v: &[u8]) -> Vec<T> {
             v.chunks_exact(std::mem::size_of::<T>()).map(bytemuck::pod_read_unaligned).collect()
         }
@@ -723,7 +811,7 @@ impl Emu {
 
     pub fn run(&mut self, frames: u32) -> anyhow::Result<()> {
         let l = &self.l;
-        let p: [u32; 12] = [1, frames, 0.0f32.to_bits(), 0, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, self.steps as u32, l.ng as u32, l.rs as u32, 0];
+        let p: [u32; 12] = [1, frames, 0.0f32.to_bits(), 0, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, self.steps as u32, l.ng as u32, l.rs as u32, 1];
         self.bufs[0] = bytemuck::cast_slice(&p).to_vec();
         self.bufs[0].resize(64, 0);
         let (fin, fout) = (self.dir.join("in.blob"), self.dir.join("out.blob"));
@@ -815,7 +903,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
                 _ => {
                     anyhow::ensure!(scalar(b.kind) && gidx[j] != NONE, "record {j}: no slot");
                     let other = if q == 0 { b.b } else { b.a };
-                    other | gidx[j] << 10
+                    other * 3 | gidx[j] << 11
                 }
             };
             ents[n as usize].push(e);
@@ -862,13 +950,42 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         }
         tab[t_lane + lane * 4] = node;
         tab[t_lane + lane * 4 + 1] = start;
-        tab[t_lane + lane * 4 + 2] = cnt;
+        // (The leading entries with no vector among them, then all of them.)
+        let lead = if lane < nn { ents[order[lane]].iter().take_while(|&&e| e >> 31 == 0).count() as u32 } else { 0 };
+        anyhow::ensure!(cnt < 256 && nn * 3 < 2048);
+        tab[t_lane + lane * 4 + 2] = lead | cnt << 8;
         tab[t_lane + lane * 4 + 3] = if lane < nt { tri_order[lane] as u32 } else { NONE };
     }
     tab.extend_from_slice(&[0; 8]);
+    let mut o = V2Off::default();
+    let mut at = 0usize;
+    let mut take = |words: usize| {
+        let x = at;
+        at = (at + words + 3) & !3;
+        x
+    };
+    o.node = take(nn * 12);
+    o.rec = take(nr * 12);
+    o.groups = take(l.ng);
+    o.deform = take(l.nd);
+    o.tridead = take(nt);
+    o.acc = take(nn * 3);
+    o.shift = take(nn * 3);
+    o.misc = take(16);
+    o.pairs = take(nt * prow);
+    o.pbuild = take(nn * 4);
+    o.clip = take(nn * 4);
+    o.hits = take(HIT_CAP * HITW * 4);
+    o.scratch = take(nn * 12);
+    o.hot = take(LANES * 24);
+    o.words = at;
     st.perm = perm;
     st.v2_tab = tab;
+    st.v2_off = o.clone();
     st.v2_defs = format!(
+        "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define CAR_WORDS {}\n",
+        o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.words
+    ) + &format!(
         "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n",
         nv.max(1)
     );

@@ -252,6 +252,9 @@ fn main() -> anyhow::Result<()> {
     // Timing: `cars` cars, all from the free run's last state.
     let last = f.snapshot(0);
     f.cars = cars;
+    // (Timed as a frame the host does not read the beams of: nodes written, the beams' two
+    // deferred words left in the hot image. --flush: with them written every frame.)
+    f.flush = flag("--flush");
     let reset = |f: &Floor| {
         for c in 0..cars {
             f.restore(c, &last);

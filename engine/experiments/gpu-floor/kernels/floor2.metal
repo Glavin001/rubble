@@ -107,36 +107,18 @@ inline Slow slowScalar(uint r, device const uint4* recA, device const float4* re
 
 kernel void floorFrame(
     constant Params& P [[buffer(0)]],
-    device float4* nodeState [[buffer(1)]],
+    device uint* big [[buffer(1)]],                  // every per-car word (CAR_WORDS a car), one base
     device const float4* nodeStatic [[buffer(2)]],
-    device const uint4* unused3 [[buffer(3)]],
     device const uint4* recA [[buffer(4)]],
     device const float4* recK [[buffer(5)]],
     device const float4* recB [[buffer(6)]],
     device const float4* recE [[buffer(7)]],
-    device float4* recState [[buffer(8)]],
-    device const uint4* unused9 [[buffer(9)]],
-    device const uint4* unused10 [[buffer(10)]],
-    device float4* unused11 [[buffer(11)]],
     device const uint* tab [[buffer(12)]],           // lane table, node entry lists, vector indices
-    device const uint2* unused13 [[buffer(13)]],
     device const uint* perm [[buffer(14)]],          // RS*LANES: the record of slot s of lane l
-    device uint* groupsLast [[buffer(15)]],
-    device uint* deform [[buffer(16)]],
     device const uint4* triBreaks [[buffer(17)]],
-    device uint* triDead [[buffer(18)]],
-    device atomic_int* acc [[buffer(19)]],
-    device int* shift [[buffer(20)]],
-    device uint* misc [[buffer(21)]],
     device const uint* cands [[buffer(22)]],
     device const uint4* tris [[buffer(23)]],
     device const uint* allowed [[buffer(24)]],
-    device float4* unused25 [[buffer(25)]],
-    device uint* pairs [[buffer(26)]],               // NT rows of PROW: count, then nodes
-    device float4* pBuild [[buffer(27)]],
-    device atomic_uint* clip [[buffer(28)]],
-    device float4* hitBuf [[buffer(29)]],
-    device uint* scratch [[buffer(30)]],             // NN*12 a car: stage, published forces, split counts, masters, couplers
     uint lid [[thread_position_in_threadgroup]],
     uint car [[threadgroup_position_in_grid]])
 {
@@ -149,30 +131,34 @@ kernel void floorFrame(
     threadgroup uint tgFlags[TG_FLAGS];
     threadgroup float tgPB[4];
 
-    nodeState += car * NN * 3;
-    recState += car * NR * 3;
-    groupsLast += car * NG;
-    deform += car * ND;
-    triDead += car * NT;
-    acc += car * NN * 3;
-    shift += car * NN * 3;
-    misc += car * 16;
-    pairs += car * (NT * PROW);
-    pBuild += car * NN;
-    clip += car * NN * 4;
-    hitBuf += car * HIT_CAP * HITW;
-    scratch += car * NN * 12;
-    device atomic_int* stage = (device atomic_int*)scratch;
-    device float* fPub = (device float*)(scratch + NN * 6);
-    device atomic_uint* split = (device atomic_uint*)(scratch + NN * 9);
-    device atomic_uint* masters = (device atomic_uint*)(scratch + NN * 10);
-    device float* cplV = (device float*)(scratch + NN * 11);
-    device const uint4* ent4 = (device const uint4*)(tab + T_ENT);
+    // One derived pointer a lane (a pointer a buffer was twenty live registers, past the
+    // spill cliff: every operation then cost three times its price).
+    device uint* const cb = big + car * CAR_WORDS;
+    #define nodeState ((device float4*)(cb + O_NODE))
+    #define recState ((device float4*)(cb + O_REC))
+    #define groupsLast (cb + O_GROUPS)
+    #define deform (cb + O_DEFORM)
+    #define triDead (cb + O_TRIDEAD)
+    #define acc ((device atomic_int*)(cb + O_ACC))
+    #define shift ((device int*)(cb + O_SHIFT))
+    #define misc (cb + O_MISC)
+    #define pairs (cb + O_PAIRS)
+    #define pBuild ((device float4*)(cb + O_PBUILD))
+    #define clip ((device atomic_uint*)(cb + O_CLIP))
+    #define hitBuf ((device float4*)(cb + O_HITS))
+    #define stage ((device atomic_int*)(cb + O_SCRATCH))
+    #define fPub ((device float*)(cb + O_SCRATCH + NN * 6))
+    #define split ((device atomic_uint*)(cb + O_SCRATCH + NN * 9))
+    #define masters ((device atomic_uint*)(cb + O_SCRATCH + NN * 10))
+    #define cplV ((device float*)(cb + O_SCRATCH + NN * 11))
+    #define hot ((device float4*)(cb + O_HOT))
+    #define ent4 ((device const uint4*)(tab + T_ENT))
 
     // This lane's roles.
     const uint nd = tab[T_LANE + lid * 4];
     const uint entStart = tab[T_LANE + lid * 4 + 1];
-    const uint entCount = tab[T_LANE + lid * 4 + 2];
+    const uint entCounts = tab[T_LANE + lid * 4 + 2]; // leading scalar entries | all entries << 8
+    const uint entScalar = entCounts & 255u, entCount = entCounts >> 8;
     const uint tri = tab[T_LANE + lid * 4 + 3];
     const bool isNode = nd != NONE;
     const bool isTri = tri != NONE;
@@ -185,11 +171,24 @@ kernel void floorFrame(
         tgVel[ni * 3] = v.x; tgVel[ni * 3 + 1] = v.y; tgVel[ni * 3 + 2] = v.z;
         tgHeld[ni] = (atomic_load_explicit(&clip[ni * 4], memory_order_relaxed) != CLIP_EMPTY) ? 1 : 0;
     }
-    // The slots' hot words.
+    // The slots' hot words: from the image the last dispatch left (six streamed loads), or
+    // built from the records (the first dispatch after an upload).
     uint w0[RS];
     float kk[RS], cc[RS], rest[RS], up[RS];
     float G = 3.0e38f, L = 3.0e38f;
-    for (uint s = 0; s < RS; s++)
+    const bool hotOk = misc[11] == 1u;
+    if (hotOk)
+    {
+        uint4 hw = as_type<uint4>(hot[lid * 6]);
+        float4 hk = hot[lid * 6 + 1], hc = hot[lid * 6 + 2], hr = hot[lid * 6 + 3], hu = hot[lid * 6 + 4], hg = hot[lid * 6 + 5];
+        w0[0] = hw.x; w0[1] = hw.y; w0[2] = hw.z; w0[3] = hw.w;
+        kk[0] = hk.x; kk[1] = hk.y; kk[2] = hk.z; kk[3] = hk.w;
+        cc[0] = hc.x; cc[1] = hc.y; cc[2] = hc.z; cc[3] = hc.w;
+        rest[0] = hr.x; rest[1] = hr.y; rest[2] = hr.z; rest[3] = hr.w;
+        up[0] = hu.x; up[1] = hu.y; up[2] = hu.z; up[3] = hu.w;
+        G = hg.x; L = hg.y;
+    }
+    for (uint s = 0; s < RS && !hotOk; s++)
     {
         uint r = perm[s * LANES + lid];
         w0[s] = NONE; kk[s] = 0.0f; cc[s] = 0.0f; rest[s] = 0.0f; up[s] = 0.0f;
@@ -429,12 +428,21 @@ kernel void floorFrame(
             uint4 cur = uint4(0u);
             for (uint k = 0; k < MAXENT; k++)
             {
-                if (k >= entCount) break;
+                // The leading scalar entries: (x_self − x_other)·g.
+                if (k >= entScalar) break;
                 if ((k & 3u) == 0u) cur = ent4[(entStart >> 2) + (k >> 2)];
                 uint e = cur[k & 3u];
+                uint o3 = e & 2047u;
+                c = c + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
+            }
+            for (uint k = entScalar; k < MAXENT; k++)
+            {
+                if (k >= entCount) break;
+                uint e = ent4[(entStart >> 2) + (k >> 2)][k & 3u];
                 if ((e >> 31) == 0u)
                 {
-                    c = c + (Ps - TGP(e & 1023u)) * tgG[(e >> 10) & 4095u];
+                    uint o3 = e & 2047u;
+                    c = c + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
                 }
                 else if ((e & (1u << 29)) == 0u)
                 {
@@ -480,7 +488,7 @@ kernel void floorFrame(
             {
                 if ((w & W_ALIVE) == 0u)
                 {
-                    tgG[s * LANES + lid] = as_type<float>(SENT);
+                    tgG[s * LANES + lid] = 0.0f;
                     w0[s] = w & ~W_SLOPE;
                     continue;
                 }
@@ -529,7 +537,7 @@ kernel void floorFrame(
                 float4 s0 = recState[r * 3], s1 = recState[r * 3 + 1];
                 if (s1.w != 0.0f)
                 {
-                    for (uint q = 0; q < 4; q++) PUTV(vi + q, v3(as_type<float>(SENT), 0.0f, 0.0f));
+                    for (uint q = 0; q < 4; q++) PUTV(vi + q, v3(0, 0, 0));
                     if (s1.z != 0.0f) { s1.z = 0.0f; recState[r * 3 + 1] = s1; }
                     continue;
                 }
@@ -578,7 +586,7 @@ kernel void floorFrame(
                 cplV[ci * 6 + 3] = vb.x; cplV[ci * 6 + 4] = vb.y; cplV[ci * 6 + 5] = vb.z;
                 if (s1.w != 0.0f)
                 {
-                    PUTV(vi, v3(as_type<float>(SENT), 0.0f, 0.0f));
+                    PUTV(vi, v3(0, 0, 0));
                     if (s1.z != 0.0f) { s1.z = 0.0f; recState[r * 3 + 1] = s1; }
                     continue;
                 }
@@ -598,7 +606,7 @@ kernel void floorFrame(
                 float4 s1 = recState[r * 3 + 1];
                 if (s1.w != 0.0f)
                 {
-                    tgG[s * LANES + lid] = as_type<float>(SENT);
+                    tgG[s * LANES + lid] = 0.0f;
                     if (s1.z != 0.0f) { s1.z = 0.0f; recState[r * 3 + 1] = s1; }
                     continue;
                 }
@@ -645,9 +653,9 @@ kernel void floorFrame(
                 {
                     s1.z = 0.0f;
                     w = w & ~(W_SLOPE | W_DEFORM);
-                    if (kind == K_JTORSION) { uint vi = tab[T_VIDX + r]; for (uint q = 0; q < 4; q++) PUTV(vi + q, v3(as_type<float>(SENT), 0.0f, 0.0f)); }
-                    else if (kind == K_JCOUPLER) { PUTV(tab[T_VIDX + r], v3(as_type<float>(SENT), 0.0f, 0.0f)); }
-                    else tgG[s * LANES + lid] = as_type<float>(SENT);
+                    if (kind == K_JTORSION) { uint vi = tab[T_VIDX + r]; for (uint q = 0; q < 4; q++) PUTV(vi + q, v3(0, 0, 0)); }
+                    else if (kind == K_JCOUPLER) { PUTV(tab[T_VIDX + r], v3(0, 0, 0)); }
+                    else tgG[s * LANES + lid] = 0.0f;
                 }
                 s1.w = 1.0f;
                 recState[r * 3 + 1] = s1;
@@ -699,22 +707,31 @@ kernel void floorFrame(
             float4 ns = nodeStatic[ni];
             V3 Ps = TGP(ni);
             V3 f = v3(0.0f, ns.x * GRAVITY, 0.0f);
+            // (A broken beam's scalar is zero: adding ±0 changes no bit of a sum that began at
+            // +0 or at the weight, so it is the reference's skipped add.)
             uint4 cur = uint4(0u);
             for (uint k = 0; k < MAXENT; k++)
             {
-                if (k >= entCount) break;
+                if (k >= entScalar) break;
                 if ((k & 3u) == 0u) cur = ent4[(entStart >> 2) + (k >> 2)];
                 uint e = cur[k & 3u];
+                uint o3 = e & 2047u;
+                f = f + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
+            }
+            for (uint k = entScalar; k < MAXENT; k++)
+            {
+                if (k >= entCount) break;
+                uint e = ent4[(entStart >> 2) + (k >> 2)][k & 3u];
                 if ((e >> 31) == 0u)
                 {
-                    float g = tgG[(e >> 10) & 4095u];
-                    if (as_type<uint>(g) != SENT) f = f + (Ps - TGP(e & 1023u)) * g;
+                    uint o3 = e & 2047u;
+                    f = f + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
                 }
                 else
                 {
                     uint vi = e & 0xFFFu;
                     V3 vv = v3(tgVec[vi * 3], tgVec[vi * 3 + 1], tgVec[vi * 3 + 2]);
-                    if (as_type<uint>(vv.x) != SENT) f = f + ((e & (1u << 30)) != 0u ? -vv : vv);
+                    f = f + ((e & (1u << 30)) != 0u ? -vv : vv);
                 }
             }
             F0 = f;
@@ -997,7 +1014,15 @@ kernel void floorFrame(
         nodeState[ni * 3 + 1] = f4(TGV(ni), 0);
         nodeState[ni * 3 + 2] = f4(F0, 0);
     }
-    for (uint s = 0; s < RS; s++)
+    hot[lid * 6] = as_type<float4>(uint4(w0[0], w0[1], w0[2], w0[3]));
+    hot[lid * 6 + 1] = float4(kk[0], kk[1], kk[2], kk[3]);
+    hot[lid * 6 + 2] = float4(cc[0], cc[1], cc[2], cc[3]);
+    hot[lid * 6 + 3] = float4(rest[0], rest[1], rest[2], rest[3]);
+    hot[lid * 6 + 4] = float4(up[0], up[1], up[2], up[3]);
+    hot[lid * 6 + 5] = float4(G, L, 0.0f, 0.0f);
+    // The records' copies of the two words the hot path keeps (the last extension rate and
+    // the damping slope), when the host asks to read the beams (P.pad2 bit 0).
+    for (uint s = 0; s < RS && (P.pad2 & 1u) != 0u; s++)
     {
         uint w = w0[s];
         if (w == NONE || (w >> 30) >= C_AERO) continue;
@@ -1019,6 +1044,7 @@ kernel void floorFrame(
         misc[4] = tgFlags[F_HITS]; misc[5] = tgFlags[F_BUILDS]; misc[6] = tgFlags[F_MOST];
         misc[7] = tgFlags[F_REC]; misc[8] = tgFlags[F_HELD]; misc[9] = tgFlags[F_FIRED] != 0u ? 2u : (tgFlags[F_GDIRTY] == 2u ? 2u : 0u); misc[10] = tgFlags[F_BROKE];
         misc[15] = 2u;
+        misc[11] = 1u;
         uint np = 0u;
         misc[2] = np;
     }
