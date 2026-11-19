@@ -55,7 +55,11 @@
      only if every row is bit for bit and no row is slower than its off half by more than
      the calibrated noise threshold** (5 % and 0.05 ms; a row past it runs twice more and
      the median of the three decides; `docs/measurements/scenario-matrix.md`).
-     A change that speeds up one row and slows another does not pass. Rung 1 stays the
+     A change that speeds up one row and slows another does not pass. A change to the
+     World around the frame (the rigid step, the coupling's passes, the host's encoding)
+     also runs `run.sh --world`: what the World adds a step on each scenario row, by wall
+     clock (fails past 2.5 ms; GPU timestamps misattribute on Metal, do not judge by
+     them). Rung 1 stays the
      per-edit loop (one fixture, seconds); run the matrix before keeping a change and
      before rung 2. `run.sh --baseline` prints each row's ms a frame against its target
      (one soft body 1 ms, eight in contact 3 ms); `run.sh --make` saves the states (once,
