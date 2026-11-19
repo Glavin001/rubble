@@ -39,6 +39,59 @@ fn main() -> anyhow::Result<()> {
     }
     let (l, st) = layout_and_statics(&cpu)?;
     println!("layout: nodes {} records {} lanes {} slots {} add entries {} (max {}) centred entries {} (max {}) groups {}", l.nn, l.nr, LANES, l.rs, l.nadd, l.max_add, l.ncen, l.max_cen, l.ng);
+    if flag("--emu") {
+        // The kernel's source on the CPU, against the reference (no GPU).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/gpu-floor/emu");
+        let mut extra = String::new();
+        if flag("--sums") {
+            extra += "#define FAST_SUMS 1\n";
+        }
+        // --by-step: one substep a run, compared after each (finds the first differing step).
+        let by_step = flag("--by-step");
+        extra += if flag("--runtime-sizes") || by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
+        let mut e = Emu::new(l, &st, &extra, &dir)?;
+        e.reverse = flag("--reverse");
+        e.upload(&state_of(&cpu, &e.l, &st));
+        if by_step {
+            e.steps = 1;
+            for step in 1..=frames * STEPS {
+                e.run(1)?;
+                cpu.step();
+                let g = e.download();
+                let (bad, notes) = compare(&cpu, &g);
+                if bad != 0 {
+                    println!("emu step {step}: differing words {bad}; contacts {} pairs {} builds {}", cpu.last_contacts, g.misc[2], g.misc[5]);
+                    for n in notes {
+                        println!("  {n}");
+                    }
+                    anyhow::bail!("emu: first difference at step {step}");
+                }
+            }
+            println!("emu: bit for bit over {} steps", frames * STEPS);
+            return Ok(());
+        }
+        e.upload(&state_of(&cpu, &e.l, &st));
+        for fr in 1..=frames {
+            e.run(1)?;
+            for _ in 0..STEPS {
+                cpu.step();
+            }
+            let g = e.download();
+            let (bad, notes) = compare(&cpu, &g);
+            let broken = cpu.beams.iter().filter(|b| b.broken).count();
+            if bad != 0 || fr % every == 0 || fr == frames {
+                println!("emu frame {fr}: differing words {bad}; broken {broken}, pairs {} builds {} most hits {} contacts {}", g.misc[2], g.misc[5], g.misc[6], cpu.last_contacts);
+            }
+            if bad != 0 {
+                for n in notes {
+                    println!("  {n}");
+                }
+                anyhow::bail!("emu: first difference at frame {fr}");
+            }
+        }
+        println!("emu: bit for bit over {frames} frames");
+        return Ok(());
+    }
     let gpu = Gpu::new()?;
     // --fast: Metal's fast math; --sums: unordered (atomic) beam and centred sums.
     let sums = flag("--sums");

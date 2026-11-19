@@ -571,3 +571,120 @@ pub fn compare(cpu: &ExplicitBeams, g: &State) -> (usize, Vec<String>) {
     }
     (bad, first)
 }
+
+/// The kernel on the CPU (emu/): the same source, each lane a coroutine. One car.
+pub struct Emu {
+    pub l: Layout,
+    exe: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    /// The 31 buffers in binding order.
+    pub bufs: Vec<Vec<u8>>,
+    pub reverse: bool,
+    /// Substeps a run (RUNTIME_SIZES kernels only; else STEPS).
+    pub steps: usize,
+}
+
+impl Emu {
+    pub fn new(l: Layout, st: &Statics, extra: &str, dir: &std::path::Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let src = msl(&l, st, extra, 1).replace("kernel void floorFrame(", "Lane floorFrame(");
+        std::fs::write(dir.join("kernel.inc"), src)?;
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("emu");
+        let exe = dir.join("emu");
+        let out = std::process::Command::new("xcrun")
+            .args(["clang++", "-std=c++20", "-O1", "-ffp-contract=off", "-w", "-I"])
+            .arg(&here)
+            .arg("-I")
+            .arg(here.join("metal_stdlib_dir"))
+            .arg("-I")
+            .arg(dir)
+            .arg(here.join("main.cpp"))
+            .arg("-o")
+            .arg(&exe)
+            .output()?;
+        anyhow::ensure!(out.status.success(), "emu compile:\n{}", String::from_utf8_lossy(&out.stderr));
+        let b = |v: &[u8]| v.to_vec();
+        let z = |n: usize| vec![0u8; n.max(16)];
+        let mut bufs: Vec<Vec<u8>> = vec![Vec::new(); 31];
+        bufs[0] = z(64);
+        bufs[2] = b(bytemuck::cast_slice(&st.node_static));
+        bufs[3] = b(bytemuck::cast_slice(&st.node_range));
+        bufs[4] = b(bytemuck::cast_slice(&st.rec_a));
+        bufs[5] = b(bytemuck::cast_slice(&st.rec_k));
+        bufs[6] = b(bytemuck::cast_slice(&st.rec_b));
+        bufs[7] = b(bytemuck::cast_slice(&st.rec_e));
+        bufs[9] = b(bytemuck::cast_slice(&st.rec_ent));
+        bufs[10] = b(bytemuck::cast_slice(&st.rec_cen));
+        bufs[13] = b(bytemuck::cast_slice(&st.add_info));
+        bufs[14] = b(bytemuck::cast_slice(&st.perm));
+        bufs[17] = b(bytemuck::cast_slice(&st.tri_breaks));
+        bufs[22] = if st.cands.is_empty() { z(16) } else { b(bytemuck::cast_slice(&st.cands)) };
+        bufs[23] = b(bytemuck::cast_slice(&st.tris));
+        bufs[24] = b(bytemuck::cast_slice(&st.allowed));
+        bufs[12] = z(l.ncen * 16);
+        bufs[25] = z(l.nt * GEO * 16);
+        bufs[26] = z(PAIR_CAP * 4);
+        bufs[27] = z(l.nn * 16);
+        bufs[29] = z(HIT_CAP * HITW * 16);
+        bufs[30] = z(l.nn * 48);
+        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, steps: STEPS })
+    }
+
+    pub fn upload(&mut self, s: &State) {
+        let b = |v: &[u8]| v.to_vec();
+        self.bufs[1] = b(bytemuck::cast_slice(&s.node));
+        self.bufs[8] = b(bytemuck::cast_slice(&s.rec));
+        self.bufs[11] = b(bytemuck::cast_slice(&s.add));
+        self.bufs[12].fill(0);
+        self.bufs[15] = b(bytemuck::cast_slice(&s.groups_last));
+        self.bufs[16] = b(bytemuck::cast_slice(&s.deform));
+        self.bufs[18] = b(bytemuck::cast_slice(&s.tri_dead));
+        self.bufs[19] = b(bytemuck::cast_slice(&s.acc));
+        self.bufs[20] = b(bytemuck::cast_slice(&s.shift));
+        self.bufs[21] = b(bytemuck::cast_slice(&s.misc));
+        self.bufs[28] = b(bytemuck::cast_slice(&s.clip));
+        self.bufs[30].fill(0);
+    }
+
+    pub fn download(&self) -> State {
+        fn g<T: bytemuck::Pod>(v: &[u8]) -> Vec<T> {
+            v.chunks_exact(std::mem::size_of::<T>()).map(bytemuck::pod_read_unaligned).collect()
+        }
+        State {
+            node: g(&self.bufs[1]),
+            rec: g(&self.bufs[8]),
+            add: g(&self.bufs[11]),
+            groups_last: g(&self.bufs[15]),
+            deform: g(&self.bufs[16]),
+            tri_dead: g(&self.bufs[18]),
+            acc: g(&self.bufs[19]),
+            shift: g(&self.bufs[20]),
+            misc: g(&self.bufs[21]),
+            clip: g(&self.bufs[28]),
+        }
+    }
+
+    pub fn run(&mut self, frames: u32) -> anyhow::Result<()> {
+        let l = &self.l;
+        let p: [u32; 12] = [1, frames, 0.0f32.to_bits(), 0, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, self.steps as u32, l.ng as u32, l.rs as u32, 0];
+        self.bufs[0] = bytemuck::cast_slice(&p).to_vec();
+        self.bufs[0].resize(64, 0);
+        let (fin, fout) = (self.dir.join("in.blob"), self.dir.join("out.blob"));
+        let mut blob = Vec::new();
+        for b in &self.bufs {
+            blob.extend_from_slice(&(b.len() as u64).to_le_bytes());
+            blob.extend_from_slice(b);
+        }
+        std::fs::write(&fin, blob)?;
+        let out = std::process::Command::new(&self.exe).arg(&fin).arg(&fout).arg(if self.reverse { "1" } else { "0" }).output()?;
+        anyhow::ensure!(out.status.success(), "emu run: {:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+        let blob = std::fs::read(&fout)?;
+        let mut at = 0;
+        for b in &mut self.bufs {
+            let n = u64::from_le_bytes(blob[at..at + 8].try_into().unwrap()) as usize;
+            *b = blob[at + 8..at + 8 + n].to_vec();
+            at += 8 + n;
+        }
+        Ok(())
+    }
+}

@@ -8,6 +8,11 @@ pub struct Gpu {
 
 impl Gpu {
     pub fn new() -> anyhow::Result<Self> {
+        // GPU work only under the machine's GPU lock (scripts/with-gpu-lock.py sets this).
+        anyhow::ensure!(
+            std::env::var("RUBBLE_GPU_LOCK").as_deref() == Ok("0") || std::env::args().any(|a| a == "--compile-only"),
+            "run under engine/scripts/with-gpu-lock.py (-- env RUBBLE_GPU_LOCK=0 ...), or --compile-only / --emu"
+        );
         let device = Device::system_default().ok_or_else(|| anyhow::anyhow!("no Metal device"))?;
         let queue = device.new_command_queue();
         Ok(Self { device, queue })

@@ -644,8 +644,7 @@ kernel void floorFrame(
         tgFlags[6] = misc[1]; // status
     }
 #if COLLIDE
-    for (uint q = lid; q < 4; q += Z_LANES) atomic_store_explicit(&tgCount[q], 0u, memory_order_relaxed);
-    if (lid == 0) atomic_store_explicit(&tgCount[1], misc[2], memory_order_relaxed);
+    if (lid < 4) atomic_store_explicit(&tgCount[lid], lid == 1 ? misc[2] : 0u, memory_order_relaxed);
     if (lid == 0) tgFlags[2] = misc[3]; // the list must be built
 #endif
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
@@ -1188,7 +1187,7 @@ kernel void floorFrame(
             if (side != 0.0f)
             {
                 haveW = over;
-                w = loc.xyz;
+                w = float3(loc.x, loc.y, loc.z);
             }
             else
             {
@@ -1221,7 +1220,7 @@ kernel void floorFrame(
                     {
                         side = loc.w < 0.0f ? -1.0f : 1.0f;
                         haveW = true;
-                        w = loc.xyz;
+                        w = float3(loc.x, loc.y, loc.z);
                     }
                     else continue;
                 }
@@ -1345,7 +1344,7 @@ kernel void floorFrame(
                     }
                 }
                 float4 h3 = hitBuf[k * HITW + 3];
-                hitBuf[k * HITW + 3] = float4(h3.xyz, r);
+                hitBuf[k * HITW + 3] = float4(h3.x, h3.y, h3.z, r);
                 if (r > 0.0f)
                 {
                     V3 f = n * r;
