@@ -742,6 +742,24 @@ since §8.12 (the fleet's room, shared by the owners' counts). A list per
 car (an excluded car's pairs on today's front, the others reused) was built and measured
 slower on both terrains, and reverted (§8.28).
 
+A second list per car (2026-11-18, §8.28) did what the first one was missing: the excluded
+cars' pairs listed after each owner's kept list in its pair region (no inline tests; the
+walk's only change is the place `vvPairAdd` returns), a build's tests read from its own
+new list in its pass, an owner past its room excluded alone, a car too fast for a build
+excluded instead of the fleet's falling back. Bit for bit on 22 fixtures, both terrains,
+and 20 to 30 % slower than the fleet-wide list (ledges t 16 19.4 against 15.5 ms a frame,
+rolling t 25 36.7 against 28.6), in three attempts. The limit is not where the pairs are
+listed but which pairs a pile has: the car that outlives the lists is in contact with every
+other car, so while it is excluded every owner gathers its points and walks every listed
+triangle, and a mixed pass is today's walk with the kept tests on top; on the rolling gully
+the lists are kept, but wild nodes force a build every ten passes. Reverted. A list per car
+would pay only where an excluded car touches few others.
+
+The fleet-wide list on today's main also gives up two default switches: the throttle
+updates across the fleet (`PERF_FLEET_POST`, `flPostOn`, above) and the fused scans
+(`fuseScansOn`); on the rolling gully that is about 1.4 ms a frame (levels +0.9, scans
++0.4) with no walk saved. A kept list that keeps both is the next step (§8.28).
+
 With the fused front (§8.9, `PERF_FLEET_FUSE`) the two share the grids' dispatch: a
 build's owner sorts its own run there after its offsets (`fuseSortCands`, the build's
 `fkSortCandOf`), a pass that reuses the list tests it there as before. The pairs' scans
@@ -754,7 +772,7 @@ first part.
 ### 8.12 The kept candidates with today's defaults: the throttles, the fused scans, the fleet's room (2026-11-18)
 
 Perf flag 32768 as §8.10; measurements and the default in `vehicle-perf-first-principles.md`
-§8.38. On main before this, turning the flag on cost two of the defaults:
+§8.39. On main before this, turning the flag on cost two of the defaults:
 
 - **The throttles across the fleet (`PERF_FLEET_POST`) were dropped.** Its dispatch is a
   thread a listed triangle, sized by the walk's arguments and indexed by the walk's
@@ -806,14 +824,14 @@ What changed (each lossless: the same tests on the same pairs, only where work r
 4. **A list kept down to 3 passes** (`FK_SHORT` 8 → 3). On the rolling gully the lists
    now built last 6 to 8 passes (wild nodes: tumbling cars), and 8 sent every list to the
    68-pass wait on today's front. A build and a few reused passes cost less there than
-   today's front each pass (§8.38). A choice of path only.
+   today's front each pass (§8.39). A choice of path only.
 
 What was looked at for the rebuilds and not built: a build that touches only the cars
 whose nodes passed their allowance, the list fleet-wide. The pairs of a rebuilt owner
 hold the points of its partners, whose records (the build's positions) the bound measures
 from; a partial build would need either every partner's records again (in a pile, every
 car: a whole build) or boxes padded by twice the allowance for the partners not rebuilt
-(larger lists, the tests' cost up). Neither pays on the measured split (§8.38: on the
+(larger lists, the tests' cost up). Neither pays on the measured split (§8.39: on the
 gully the builds' walk is 2.2 to 2.8 ms a frame and the kept pairs' tests 1.4 to 1.8 ms,
 against 6.1 to 6.9 ms of today's walk; a partial build would save part of the first and add
 to the second).
