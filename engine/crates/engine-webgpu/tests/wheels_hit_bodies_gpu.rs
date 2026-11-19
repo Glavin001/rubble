@@ -25,17 +25,22 @@ const CAP: CouplingCapacity = CouplingCapacity {
     planes: 64,
 };
 const CRATE: f32 = 2000.0;
+/// The drive suites' settings (explicit_drive_gpu.rs): the GPU's bit-for-bit configuration.
+const SETTINGS: ExplicitBeamsSettings = ExplicitBeamsSettings {
+    fast_inv_sqrt: true,
+    drag: false,
+    turbulence: false,
+    triangle_throttle: true,
+    centred_damping: false,
+    centred_objective: false,
+};
 
 fn car(see: bool) -> ExplicitBeams {
     let text = car_truck(&CarParams {
         minimass: 10.0,
         ..CarParams::sedan()
     });
-    let settings = ExplicitBeamsSettings {
-        drag: false,
-        turbulence: false,
-        ..Default::default()
-    };
+    let settings = SETTINGS;
     let (mut s, _) = ExplicitBeams::from_truck_raycast(&text, None, Vec3::ZERO, 0.0, Vec3::ZERO, settings).unwrap();
     let lo = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     for n in &mut s.nodes {
@@ -139,6 +144,113 @@ fn wheels_on_a_crate_match_the_cpu_and_close_momentum() {
     assert!(rel(car_g, car_c) < 0.01, "car GPU {car_g} CPU {car_c}");
     assert!(rel(box_g, box_c) < 0.01, "crate GPU {box_g} CPU {box_c}");
     assert!(ph.length() < 0.005 * car_g * m, "GPU momentum {ph}");
+}
+
+/// The soft flatbed of `engine-softbody/tests/wheels_hit_bodies.rs` (6 × 6 m, 0.8 m deep,
+/// its top face collision triangles) on its own ground at y = 0 centred at (`cx`, `cz`).
+fn flatbed(cx: f32, cz: f32) -> ExplicitBeams {
+    let n = 13;
+    let id = |i: usize, j: usize, k: usize| (j * n + k) * n + i;
+    let mut text = String::from("flatbed\n\nglobals\n2000, 0, tracks/semi\n\nminimass\n4\n\nset_beam_defaults 200000, 400, 400000, 4000000\n\nnodes\n");
+    for j in 0..2 {
+        for k in 0..n {
+            for i in 0..n {
+                text += &format!("{}, {}, {}, {}, n\n", id(i, j, k), cx - 3.0 + 0.5 * i as f32, 0.8 * j as f32, cz - 3.0 + 0.5 * k as f32);
+            }
+        }
+    }
+    text += "\nbeams\n";
+    for j in 0..2usize {
+        for k in 0..n {
+            for i in 0..n {
+                for (di, dj, dk) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 0, -1), (1, 1, 0), (0, 1, 1), (1, -1, 0), (0, -1, 1)] {
+                    let (i2, j2, k2) = (i as i32 + di, j as i32 + dj, k as i32 + dk);
+                    if (0..n as i32).contains(&i2) && (0..2).contains(&j2) && (0..n as i32).contains(&k2) {
+                        text += &format!("{}, {}\n", id(i, j, k), id(i2 as usize, j2 as usize, k2 as usize));
+                    }
+                }
+            }
+        }
+    }
+    text += "\nsubmesh\ncab\n";
+    for k in 0..n - 1 {
+        for i in 0..n - 1 {
+            let (a, b, c, d) = (id(i, 1, k), id(i + 1, 1, k), id(i + 1, 1, k + 1), id(i, 1, k + 1));
+            text += &format!("{a}, {c}, {b}, c\n{a}, {d}, {c}, c\n");
+        }
+    }
+    text += "\nend\n";
+    let settings = SETTINGS;
+    let mut s = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).expect("flatbed");
+    s.ground = 0.0;
+    s.fixed_contact = true;
+    s.finish();
+    s
+}
+
+/// The raycast sedan (wheels seeing bodies) dropped onto the flatbed, then driven off it:
+/// the GPU's contact group (one workgroup, or `split` across workgroups) against the CPU
+/// reference's world, every node's position and velocity and every wheel's state bit for
+/// bit, frame by frame. Returns the wheel-frames on the flatbed.
+fn car_on_vehicle(split: bool) -> Option<u32> {
+    let (_, device, queue) = default_device().ok()?;
+    let mut a = car(std::env::var("WHB_SEE").as_deref() != Ok("0"));
+    let lo = a.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    for n in &mut a.nodes {
+        n.pos.y += 0.95 - lo;
+    }
+    a.ground = 0.0;
+    let m: f32 = a.nodes.iter().map(|n| n.mass).sum();
+    let x = a.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / m;
+    let far = if std::env::var("WHB_FAR").is_ok() { 30.0 } else { 0.0 };
+    let fleet = vec![a, flatbed(x.x + far, x.z)];
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    gpu.set_vehicle_contact(true);
+    gpu.set_group_split(split);
+    let mut cpu = engine_softbody::explicit_contact::ExplicitBeamsWorld::new(fleet);
+    let mut on = 0;
+    for f in 0..120u32 {
+        let input = DriveInput {
+            forward: if f >= 40 { 1.0 } else { 0.0 },
+            ..Default::default()
+        };
+        cpu.vehicles[0].set_drive_input(input);
+        gpu.set_drive_input(0, input);
+        let steps = cpu.frame_60();
+        gpu.frame(steps);
+        gpu.kernel_status().unwrap();
+        let (gp, gv) = (gpu.positions(), gpu.velocities());
+        for (v, s) in cpu.vehicles.iter().enumerate() {
+            for (i, n) in s.nodes.iter().enumerate() {
+                let p = s.origin + n.pos;
+                assert!(
+                    p.to_array().map(f32::to_bits) == gp[v][i].to_array().map(f32::to_bits)
+                        && n.vel.to_array().map(f32::to_bits) == gv[v][i].to_array().map(f32::to_bits),
+                    "split {split}: frame {f} vehicle {v} node {i}: CPU {p:?} {:?} GPU {:?} {:?}",
+                    n.vel,
+                    gp[v][i],
+                    gv[v][i]
+                );
+            }
+        }
+        let gd = gpu.drive_states(&[cpu.vehicles[0].drive.as_deref().cloned(), None]);
+        let c = cpu.vehicles[0].drive.as_ref().unwrap();
+        assert_eq!(c.wheels, gd[0].as_ref().unwrap().wheels, "split {split}: frame {f} wheels");
+        on += c.wheels.iter().filter(|w| w.contact).count() as u32;
+    }
+    println!("car on a vehicle, group split {split}: 120 frames bit for bit, {on} wheel-frames in contact");
+    Some(on)
+}
+
+#[test]
+fn wheels_on_another_vehicle_are_the_cpu_reference_bit_for_bit() {
+    for split in [false, true] {
+        let Some(on) = car_on_vehicle(split) else {
+            eprintln!("skip: no GPU");
+            return;
+        };
+        assert!(on > 200, "the wheels stood on the flatbed ({on} wheel-frames)");
+    }
 }
 
 #[test]

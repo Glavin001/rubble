@@ -571,6 +571,8 @@ const SPLIT_LEVELS: u32 = 0x4000_0000;
 /// The split group path's entry points (`explicit_beams_split.slang`).
 pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
 pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+/// The members' raycast wheels on each other (`explicit_beams_drive.slang` wheelsPartners).
+pub const SPLIT_WHEELS_ENTRY: &str = "explicit_beams_split_wheels";
 pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
 
 /// Whether the split path runs the small groups' triangle tests across workgroups
@@ -680,6 +682,8 @@ struct GroupSplit {
     /// the buffer it runs from; a spare at the other binding); the groups' module zeroes
     /// both (`bind_args`).
     fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 4]>,
+    /// The members' wheels on each other, created at first use.
+    wheels: std::sync::OnceLock<wgpu::ComputePipeline>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -790,6 +794,7 @@ impl GroupSplit {
             tests,
             bind,
             fleet: std::sync::OnceLock::new(),
+            wheels: std::sync::OnceLock::new(),
             args_layout,
             bind_args,
             bind_first,
@@ -808,6 +813,11 @@ impl GroupSplit {
                 split_pipe(&self.device, &self.pipeline_layout, self.kind, "fleetlevels", FLEET_LEVELS_ENTRY),
             ]
         })
+    }
+
+    fn wheels(&self) -> &wgpu::ComputePipeline {
+        self.wheels
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, "wheels", SPLIT_WHEELS_ENTRY))
     }
 
     fn member(&self) -> &wgpu::ComputePipeline {
@@ -2753,6 +2763,9 @@ impl ExplicitBeamsGpu {
             return;
         };
         self.wheels_bodies = on;
+        // The header's .x bit 2: the groups' wheels on each other (wheelsPartners).
+        let x: u32 = if on { 3 } else { 1 };
+        self.queue.write_buffer(&self.misc, u64::from(d.header) * 16, bytemuck::bytes_of(&x));
         for (v, f) in self.drive_flags.iter().enumerate() {
             let Some(f) = *f else { continue };
             let w = if on { f | plan::drive::FLAG_SEE_BODIES } else { f };
@@ -4667,7 +4680,13 @@ impl ExplicitBeamsGpu {
         // over the solo vehicles (explicit_beams_selfsplit.slang), then the groups.
         let vv = self.self_split_vv.get();
         let slots = self.level_slots.get();
+        // Raycast wheels on each other (wheels_see_bodies): before each step's members, the
+        // last step's reactions and this step's rays; after the last step the reactions.
+        let wheels = self.wheels_bodies;
         for s in 0..steps + u32::from(vv) {
+            if wheels && s < steps {
+                out.push(GroupOp::Wheels { copy: s });
+            }
             if vv {
                 out.push(GroupOp::SelfMember(s));
                 if s == steps {
@@ -4742,6 +4761,9 @@ impl ExplicitBeamsGpu {
                 out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS, part: 5 });
             }
         }
+        if wheels {
+            out.push(GroupOp::Wheels { copy: steps + 1 });
+        }
         out
     }
 
@@ -4755,6 +4777,11 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(if tests { &g.tests } else { &g.group });
                 pass.set_bind_group(0, if tests { &g.bind } else { &g.bind_args }, &at(copy));
                 pass.dispatch_workgroups_indirect(args, off);
+            }
+            GroupOp::Wheels { copy } => {
+                pass.set_pipeline(g.wheels());
+                pass.set_bind_group(0, &g.bind, &at(copy));
+                pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the
@@ -5235,6 +5262,9 @@ enum GroupOp {
     Member(u32),
     /// Self-collision split: every vehicle's step s.
     SelfMember(u32),
+    /// The members' raycast wheels on each other before step `copy` (copy steps + 1: the
+    /// frame's end, the last step's reactions only), a workgroup a group.
+    Wheels { copy: u32 },
     /// Self-collision split: step `copy`'s walk and pairs over the solo vehicles.
     SelfWalk { copy: u32, offset: u64 },
     SelfPairs { copy: u32, offset: u64 },
@@ -5274,6 +5304,7 @@ impl GroupOp {
             GroupOp::SelfWalk { .. } => "explicit self walk",
             GroupOp::SelfPairs { .. } => "explicit self pairs",
             GroupOp::SelfRest { .. } => "explicit self members' hits",
+            GroupOp::Wheels { .. } => "explicit split wheels on cars",
         }
     }
 }

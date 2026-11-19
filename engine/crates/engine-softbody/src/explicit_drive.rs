@@ -38,8 +38,21 @@
 //! linear fade), sized from the vehicle's engine (first-gear torque at the
 //! wheels, top-gear top speed), in place of the engine, clutch, gearbox and
 //! differentials; the wheel force acts at the hub, not at the contact patch
-//! (less roll moment, as a roll influence below 1); rays meet static geometry,
-//! not the World's moving rigid bodies.
+//! (less roll moment, as a roll influence below 1).
+//!
+//! Wheels on bodies ([`DriveConfig::see_bodies`]; the World's `wheels_hit_bodies`, on by
+//! default there): the rays also meet the vehicle's rigid proxies
+//! ([`crate::explicit_rigid`], at their poses this step) and, in a world of vehicles with
+//! vehicle contact, the other vehicles' live collision triangles as they stand at the
+//! step's start; the nearest surface of all wins (ties: ground, boxes and static shapes,
+//! then proxies, then other vehicles, each in order). On a body the hub takes the
+//! two-body form of the tyre (its velocity relative to the surface's at the contact
+//! point; the reduced mass m_red = 1/(1/m + w_b) and the share 1/m·m_red of the hub's
+//! force, w_b the body's inverse mass at the point along the normal, or the triangle
+//! point's Σ w_k² / m_k, split among this vehicle's wheels on the same body or vehicle),
+//! and the wheel force's reaction goes onto the surface: onto the proxy shape's step sums
+//! at the contact point (force and moment, as node contact's), or onto the triangle's
+//! nodes by their weights before the next step (vehicle contact's timing).
 
 use crate::explicit_beams::{to_fixed, ExplicitBeams, StaticShape, CONTACT_FIXED, STEP};
 use crate::explicit_rigid::{ProxyGeom, ProxyShape, RigidProxy};

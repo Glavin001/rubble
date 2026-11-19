@@ -2322,15 +2322,20 @@ impl ExplicitUpload {
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
         let drive_wheels = vehicles.iter().filter_map(|v| v.drive.as_ref()).map(|d| d.config.wheels.len()).max();
         let drive = drive_wheels.map(|w| {
-            let layout = drive::DriveLayout {
+            let mut layout = drive::DriveLayout {
                 header: drive_rec as u32,
+                partner: 0,
                 base: misc.len() as u32,
                 stride: drive::DriveLayout::stride_for(w),
             };
             for v in vehicles {
                 misc.extend(drive::records(v.drive.as_deref(), layout.stride));
             }
-            misc[drive_rec] = layout.header_words();
+            // The wheels' partner records (wheels on other vehicles), zero.
+            layout.partner = misc.len() as u32;
+            misc.extend(std::iter::repeat_n([0u32; 4], (drive::PARTNER_RECS * w as u32) as usize * vehicles.len()));
+            let see = vehicles.iter().any(|v| v.drive.as_ref().is_some_and(|d| d.config.see_bodies));
+            misc[drive_rec] = layout.header_words(see);
             layout
         });
         // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):

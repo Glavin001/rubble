@@ -755,7 +755,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // a contact group's substeps as dispatches, the members' steps (a workgroup per
     // vehicle) and the groups' contact passes, at the frame module's four variants.
     for (tag, lanes) in [("", L256), ("_wide", L512), ("_aero", L256), ("_aero_wide", L512)] {
-        for entry in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+        for entry in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
             // (The members' module without EB_VV_GROUPS: its frame step never reaches
             // contactGroup, so it binds the workgroup variables of the steps alone:
             // Metal allows 31 a kernel.)
@@ -765,7 +765,9 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             }
             match entry {
                 "member" => d.push(("EB_SOLO_STEP", "1")),
-                "group" => d.push(GROUPS),
+                // Raycast wheels on each other (explicit_beams_split_wheels: the groups'
+                // module's defines, a small kernel).
+                "group" | "wheels" => d.push(GROUPS),
                 // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => d.push(("EB_FLEET_FRONT", "1")),
@@ -784,6 +786,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             let e = match entry {
                 "member" => "explicit_beams_split_member",
                 "group" => "explicit_beams_split_group",
+                "wheels" => "explicit_beams_split_wheels",
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
                 "fleetpost" => "explicit_beams_fleet_post",

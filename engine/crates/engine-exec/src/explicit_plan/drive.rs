@@ -43,6 +43,10 @@ use glam::Vec3;
 /// Record 5's flags: the wheels see the rigid proxies (`DriveConfig::see_bodies`).
 pub const FLAG_SEE_BODIES: u32 = 8;
 
+/// Partner records a wheel (the kernel's DRV_PARTNER): its hit on another vehicle's
+/// triangle, the triangle and weights, the step, its staged reaction, the point's velocity.
+pub const PARTNER_RECS: u32 = 5;
+
 /// Records per vehicle before its wheels, and per wheel.
 pub const VEHICLE_RECS: u32 = 20;
 pub const WHEEL_RECS: u32 = 23;
@@ -55,6 +59,9 @@ pub const TYRE_PRE_RECS: u32 = 8;
 pub struct DriveLayout {
     /// gMisc record of the header.
     pub header: u32,
+    /// gMisc record of the wheels' partner records (wheels on other vehicles, the
+    /// kernel's drvPartnerAt: [`PARTNER_RECS`] a wheel, the region's wheels a vehicle).
+    pub partner: u32,
     /// gMisc record of vehicle 0's region and the region's stride.
     pub base: u32,
     pub stride: u32,
@@ -75,8 +82,15 @@ impl DriveLayout {
         u64::from(self.vehicle(v)) * 16
     }
 
-    pub fn header_words(&self) -> [u32; 4] {
-        [1, self.base, self.stride, 0]
+    /// The header: (on: 1, | 2 while wheels see bodies, region base, stride, partner
+    /// records' base).
+    pub fn header_words(&self, see_bodies: bool) -> [u32; 4] {
+        [if see_bodies { 3 } else { 1 }, self.base, self.stride, self.partner]
+    }
+
+    /// Wheels a vehicle's region has room for.
+    pub fn wheels(&self) -> u32 {
+        (self.stride - VEHICLE_RECS) / (WHEEL_RECS + TYRE_PRE_RECS)
     }
 }
 

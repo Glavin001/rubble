@@ -278,6 +278,7 @@ static const uint DRV_SCRATCH = 21u;
 struct DrvCtx
 {
     uint v;
+    uint step; // the step (driveWheelsSplit's; 0 on the ahead schedules)
     uint vr;
     uint nw;
     uint nodeOff;
@@ -437,8 +438,58 @@ bool drvCtx(uint v, out DrvCtx c)
 // goes onto the shape's step sums at the contact point (fixed point, as node contact's).
 // Positions are in the vehicle frame, as the coupling's records. The scratch record's
 // .z holds the shape + 1 (0: a static surface). Its own functions behind early returns.
-bool drvBodiesFlag(DrvCtx c) { return (c.c5y & 8u) != 0u && gMisc[coupleRec()].x != 0u; }
-bool drvSeeBodies(DrvCtx c) { return (c.c5y & 8u) != 0u && gsCpl[0] != 0u; }
+bool drvBodiesFlag(DrvCtx c) { return (c.c5y & 8u) != 0u && (gMisc[coupleRec()].x != 0u || gMisc[driveRec()].w != 0u); }
+uint drvPartnerBase();
+// (The coupling on, or other vehicles' records: wheelsPartners.)
+bool drvSeeBodies(DrvCtx c) { return (c.c5y & 8u) != 0u && (gsCpl[0] != 0u || drvPartnerBase() != 0u); }
+
+// --- Wheels on other vehicles (a contact group's members; explicit_contact.rs
+// ExplicitBeamsWorld::wheels_begin, explicit_drive.rs ray_triangle) ---
+// The drive header's .w: the partner records' base (0: none), DRV_PARTNER a wheel at
+// base + (v · wheels room + k) · DRV_PARTNER (explicit_plan::drive::PARTNER_RECS):
+//   0  the hit (normal, t), or during the rays the ray's start (World) and its reach
+//   1  the triangle's weights (w0, w1, w2) and its global index
+//   2  (the step it is for + 1, the partner vehicle, 0, 0)
+//   3  the wheel's staged reaction on the triangle (force, 1: staged), applied before
+//      the next step (the vehicle-contact pass's timing)
+//   4  the triangle point's velocity and two-body inverse mass (unsplit), or during the
+//      rays the ray's direction
+// A group's members' rays run at each step's start where every member's state is final
+// (wheelsPartners: contactGroup's step start, the split path's own dispatch), so a
+// member's step reads only its own records. The scratch record's .z is DRV_PARTNER_HIT
+// for a wheel on another vehicle.
+static const uint DRV_PARTNER = 5u;
+static const uint DRV_PARTNER_HIT = 0xFFFFFFFFu;
+uint drvPartnerBase() { return gMisc[driveRec()].w; }
+uint drvPartnerAt(uint v, uint k)
+{
+    uint nwMax = (gMisc[driveRec()].z - DRV_VEH) / (DRV_WHEEL + DRV_PRE);
+    return drvPartnerBase() + (v * nwMax + k) * DRV_PARTNER;
+}
+
+// explicit_drive::ray_triangle: (normal facing the ray's start, t), .w < 0 none; the
+// weights in `w`.
+float4 drvTriangle(float3 p, float3 d, float3 x0, float3 x1, float3 x2, out float3 w)
+{
+    w = float3(0.0, 0.0, 0.0);
+    float3 e1 = ssub3(x1, x0);
+    float3 e2 = ssub3(x2, x0);
+    float3 pv = scross(d, e2);
+    float det = sdot(e1, pv);
+    if (abs(det) < DRV_PARALLEL) return drvNone();
+    float3 tv = ssub3(p, x0);
+    float u = sdiv(sdot(tv, pv), det);
+    if (!(u >= 0.0 && u <= 1.0)) return drvNone();
+    float3 qv = scross(tv, e1);
+    float v = sdiv(sdot(d, qv), det);
+    if (!(v >= 0.0 && nf(u + v) <= 1.0)) return drvNone();
+    float t = sdiv(sdot(e2, qv), det);
+    if (!(t >= 0.0)) return drvNone();
+    float3 n = drvNrm(scross(e1, e2));
+    if (sdot(n, d) > 0.0) n = -n;
+    w = float3(nf(nf(1.0 - u) - v), u, v);
+    return float4(n, t);
+}
 
 // The ray p + t·d (vehicle frame) against convex planes from outside (explicit_drive::ray_planes).
 float4 drvHullRay(uint v, uint off, uint count, float4 r, float3 c, float3 p, float3 d)
@@ -534,7 +585,7 @@ void drvRaysBodies(DrvCtx c, uint k)
     float3 d = -c.up;
     float4 ht = drvRay(hp, c.ow, d, tMax, c.ground, c.boxOff, c.boxCount);
     uint shape = 0u;
-    uint4 hdr = cplVeh(c.v);
+    uint4 hdr = gsCpl[0] != 0u ? cplVeh(c.v) : uint4(0u, 0u, 0u, 0u);
     for (uint s = 0u, sStop = EB_END(s, hdr.y, 1u); s < sStop; s++)
     {
         float4 hs = drvProxy(c.v, s, hp, d);
@@ -542,6 +593,18 @@ void drvRaysBodies(DrvCtx c, uint k)
         {
             ht = hs;
             shape = s + 1u;
+        }
+    }
+    // Another vehicle's triangle (its record for this step), after every other surface.
+    uint pa = 0u;
+    if (drvPartnerBase() != 0u)
+    {
+        pa = drvPartnerAt(c.v, k);
+        float4 hq = DF(pa);
+        if (gMisc[pa + 2u].x == c.step + 1u && hq.w >= 0.0 && (ht.w < 0.0 || hq.w < ht.w))
+        {
+            ht = hq;
+            shape = DRV_PARTNER_HIT;
         }
     }
     if (ht.w > tMax)
@@ -560,7 +623,8 @@ void drvRaysBodies(DrvCtx c, uint k)
         {
             float l = nf(ht.w - w1.x);
             float3 vr = vh;
-            if (shape != 0u) vr = ssub3(vh, drvBodyVel(c.v, shape - 1u, ssub3(hp, sscale(c.up, ht.w))));
+            if (shape == DRV_PARTNER_HIT) vr = ssub3(vh, DF(pa + 4u).xyz);
+            else if (shape != 0u) vr = ssub3(vh, drvBodyVel(c.v, shape - 1u, ssub3(hp, sscale(c.up, ht.w))));
             float rate = sdiv(sdot(vr, ht.xyz), cosT);
             float fs = nf(smul(w2.w, nf(l - w2.y)) + smul(w3.x, rate));
             float f = fs < 0.0 ? -fs : 0.0;
@@ -577,6 +641,24 @@ void drvRaysBodies(DrvCtx c, uint k)
     }
     gMisc[wr + DRV_SCRATCH] = uint4(asuint(len), asuint(load), on, 0u);
     DSet(wr + DRV_SCRATCH + 1u, hit);
+}
+
+// Wheel k's surface on another vehicle's triangle (explicit_drive::partner_surface):
+// (effective mass, share), the point's velocity in vb.
+float2 drvPartnerSurface(DrvCtx c, uint k, float m, out float3 vb)
+{
+    uint pa = drvPartnerAt(c.v, k);
+    float4 p4 = DF(pa + 4u);
+    vb = p4.xyz;
+    uint pv = gMisc[pa + 2u].y;
+    uint same = 0u;
+    for (uint j = 0u, jStop = EB_END(j, c.nw, 1u); j < jStop; j++)
+    {
+        if (gMisc[drvWheel(c, j) + DRV_SCRATCH].z == DRV_PARTNER_HIT && gMisc[drvPartnerAt(c.v, j) + 2u].y == pv) same++;
+    }
+    float wb = smul(float(same), p4.w);
+    float wn = sdiv(1.0, m);
+    return float2(sdiv(1.0, nf(wn + wb)), sdiv(wn, nf(wn + wb)));
 }
 
 // Wheel k's surface on its body (explicit_drive::surface): (effective mass, share) and
@@ -912,7 +994,10 @@ void drvTyreBody(DrvCtx c, uint k, uint step)
         // The two-body form against the body's surface at the contact point.
         float3 cp = ssub3(sadd3(xh, sscale(c.up, w2.z)), sscale(c.up, hitK.w));
         float3 vb;
-        float2 ms = drvSurface(c, k, shape, n, cp, m, vb);
+        float2 ms;
+        bool onPartner = gMisc[wr + DRV_SCRATCH].z == DRV_PARTNER_HIT;
+        if (onPartner) ms = drvPartnerSurface(c, k, m, vb);
+        else ms = drvSurface(c, k, shape, n, cp, m, vb);
         float mHub = m;
         m = ms.x;
         vh = ssub3(vh, vb);
@@ -984,8 +1069,15 @@ void drvTyreBody(DrvCtx c, uint k, uint step)
         force = sadd3(sadd3(sscale(t, sol.y), sscale(sd, fT)), sscale(n, fn_));
         fnOut = fn_;
         m = mHub;
-        // Equal and opposite on the body, at the contact point (its step sums).
+        // Equal and opposite on the body, at the contact point (its step sums); on
+        // another vehicle's triangle staged for its nodes before the next step.
         float3 react = -force;
+        if (onPartner)
+        {
+            DSet(drvPartnerAt(c.v, k) + 3u, float4(react, asfloat(1u)));
+        }
+        else
+        {
         uint sat = cplShape(c.v, shape);
         float3 mo = scross(ssub3(cp, asfloat(gMisc[sat + 6u].xyz)), react);
         uint sacc = cplAcc(c.v) + cplB() + 6u * shape;
@@ -995,6 +1087,7 @@ void drvTyreBody(DrvCtx c, uint k, uint step)
         gAcc[sacc + 3u].add(toFixed(mo.x));
         gAcc[sacc + 4u].add(toFixed(mo.y));
         gAcc[sacc + 5u].add(toFixed(mo.z));
+        }
     }
     else
     {
@@ -1060,6 +1153,7 @@ void driveWheelsSplit(uint v, uint w, bool live, uint step)
 {
     DrvCtx c;
     bool has = live && w < DRV_MAX_WHEELS && drvCtx(v, c);
+    c.step = step;
     bool apart = has && drvWheelsApart(c);
     uint k0 = apart ? w : 0u;
     uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
@@ -1526,6 +1620,136 @@ void drvTyreFinish(DrvPostIn d)
             accAdd(g1, sscale(force, sdiv(d.m1, m)));
             accAdd(g2, sscale(force, sdiv(d.m2, m)));
         }
+    }
+}
+
+// A contact group's wheels on each other (members `off`, k of them in vehicle order) at
+// substep s's start, where every member's state is final (explicit_contact.rs
+// ExplicitBeamsWorld::wheels_begin and wheels_end): the last step's staged reactions onto
+// the partners' nodes' accumulators (read by the coming node phases), then (`rays`) every
+// member's wheels' rays against the other members' live collision triangles, the nearest
+// hit per wheel kept in its partner records for step gMisc[v].w + s. The nearest: the
+// least t over every (wheel, triangle) pair across the lanes (workgroup minima in
+// gsCount's first words, free between a step's phases), the first triangle of equals (its
+// global index, the CPU's order). Every lane; barriers in uniform control flow (k uniform).
+// `rays` false: the reactions only (after a frame's last step).
+void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
+{
+    for (uint i = lane, iStop = EB_END(i, k * DRV_MAX_WHEELS, LANES); i < iStop; i += LANES)
+    {
+        uint v = vvMember(off, i / DRV_MAX_WHEELS);
+        uint w = i % DRV_MAX_WHEELS;
+        if (w >= min(gMisc[driveBase(v) + 2u].x, DRV_MAX_WHEELS)) continue;
+        uint pa = drvPartnerAt(v, w);
+        uint4 r = gMisc[pa + 3u];
+        if (r.w == 0u) continue;
+        float3 f = asfloat(r.xyz);
+        float3 wt = DF(pa + 1u).xyz;
+        uint4 tn = gStatic[gP.triBase + gMisc[pa + 1u].w];
+        if (wt.x > 0.0) accAdd(tn.x, sscale(f, wt.x));
+        if (wt.y > 0.0) accAdd(tn.y, sscale(f, wt.y));
+        if (wt.z > 0.0) accAdd(tn.z, sscale(f, wt.z));
+        gMisc[pa + 3u] = uint4(0u, 0u, 0u, 0u);
+    }
+    sync();
+    if (!rays) return;
+    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
+    {
+        uint va = vvMember(off, m);
+        uint nwa = min(gMisc[driveBase(va) + 2u].x, DRV_MAX_WHEELS);
+        bool see = (gMisc[driveBase(va) + 5u].y & 8u) != 0u;
+        if (!see) nwa = 0u;
+        uint step1 = gMisc[va].w + s + 1u;
+        // The rays (World): start and reach in record 0, direction in record 4.
+        if (lane < DRV_MAX_WHEELS)
+        {
+            gsCount[lane].store(0xFFFFFFFFu);
+            gsCount[DRV_MAX_WHEELS + lane].store(0xFFFFFFFFu);
+            DrvCtx c;
+            if (lane < nwa && drvCtx(va, c))
+            {
+                uint wr = drvWheel(c, lane);
+                float4 w1 = DF(wr + 1u);
+                float4 w2 = DF(wr + 2u);
+                float mh;
+                float3 xh, vh;
+                drvHub(c, lane, mh, xh, vh);
+                float3 hp = sadd3(xh, sscale(c.up, w2.z));
+                uint pa = drvPartnerAt(va, lane);
+                DSet(pa, float4(sadd3(c.ow, hp), nf(w2.y + w1.x)));
+                DSet(pa + 4u, float4(-c.up, 0.0));
+            }
+        }
+        sync();
+        // The least t of each wheel, then the first triangle at it.
+        for (uint pass = 0u; pass < 2u; pass++)
+        {
+            for (uint j = 0u, jStop = EB_END(j, k, 1u); j < jStop; j++)
+            {
+                if (j == m || nwa == 0u) continue;
+                uint vb = vvMember(off, j);
+                uint4 r1 = gStatic[vb * 4u + 1u];
+                uint triCount = r1.y;
+                float3 ob = asfloat(gMisc[vb].xyz);
+                for (uint i = lane, iStop = EB_END(i, nwa * triCount, LANES); i < iStop; i += LANES)
+                {
+                    uint w = i / triCount;
+                    uint gt = r1.x + i % triCount;
+                    uint z = gMisc[gP.vehicles + gt].z;
+                    if ((z & TRI_ANTI_ONLY) != 0u || ((z & TRI_BREAKABLE) != 0u && triangleDead(gt))) continue;
+                    uint pa = drvPartnerAt(va, w);
+                    float4 ray = DF(pa);
+                    float3 d = DF(pa + 4u).xyz;
+                    uint4 tn = gStatic[gP.triBase + gt];
+                    float3 wt;
+                    float4 h = drvTriangle(ray.xyz, d, sadd3(ob, gNodes[tn.x * 3u].xyz), sadd3(ob, gNodes[tn.y * 3u].xyz),
+                                           sadd3(ob, gNodes[tn.z * 3u].xyz), wt);
+                    if (h.w < 0.0 || h.w > ray.w) continue;
+                    uint key = asuint(h.w == 0.0 ? 0.0 : h.w);
+                    if (pass == 0u) gsCount[w].min(key);
+                    else if (key == gsCount[w].load()) gsCount[DRV_MAX_WHEELS + w].min(gt);
+                }
+            }
+            sync();
+        }
+        // The winners' records.
+        if (lane < nwa)
+        {
+            uint pa = drvPartnerAt(va, lane);
+            uint gt = gsCount[DRV_MAX_WHEELS + lane].load();
+            if (gt == 0xFFFFFFFFu)
+            {
+                DSet(pa, drvNone());
+                gMisc[pa + 2u] = uint4(step1, 0xFFFFFFFFu, 0u, 0u);
+            }
+            else
+            {
+                float4 ray = DF(pa);
+                float3 d = DF(pa + 4u).xyz;
+                uint4 tn = gStatic[gP.triBase + gt];
+                float3 ob = asfloat(gMisc[tn.w].xyz);
+                float3 wt;
+                float4 h = drvTriangle(ray.xyz, d, sadd3(ob, gNodes[tn.x * 3u].xyz), sadd3(ob, gNodes[tn.y * 3u].xyz),
+                                       sadd3(ob, gNodes[tn.z * 3u].xyz), wt);
+                // The point's velocity and inverse mass (explicit_contact::two_body_inverse_mass).
+                float3 v0 = gNodes[tn.x * 3u + 1u].xyz;
+                float3 v1 = gNodes[tn.y * 3u + 1u].xyz;
+                float3 v2 = gNodes[tn.z * 3u + 1u].xyz;
+                float3 vel = sadd3(sadd3(sscale(v0, wt.x), sscale(v1, wt.y)), sscale(v2, wt.z));
+                float3 im;
+                im.x = (gStatic[gP.nodeInfoBase + tn.x].x & NODE_IMMOVABLE) != 0u ? 0.0 : sdiv(1.0, gNodes[tn.x * 3u].w);
+                im.y = (gStatic[gP.nodeInfoBase + tn.y].x & NODE_IMMOVABLE) != 0u ? 0.0 : sdiv(1.0, gNodes[tn.y * 3u].w);
+                im.z = (gStatic[gP.nodeInfoBase + tn.z].x & NODE_IMMOVABLE) != 0u ? 0.0 : sdiv(1.0, gNodes[tn.z * 3u].w);
+                float t0 = wt.x > 0.0 ? smul(smul(wt.x, wt.x), im.x) : 0.0;
+                float t1 = wt.y > 0.0 ? smul(smul(wt.y, wt.y), im.y) : 0.0;
+                float t2 = wt.z > 0.0 ? smul(smul(wt.z, wt.z), im.z) : 0.0;
+                DSet(pa, h);
+                gMisc[pa + 1u] = uint4(asuint(wt), gt);
+                gMisc[pa + 2u] = uint4(step1, tn.w, 0u, 0u);
+                DSet(pa + 4u, float4(vel, nf(nf(t0 + t1) + t2)));
+            }
+        }
+        sync();
     }
 }
 
