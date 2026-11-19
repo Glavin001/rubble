@@ -452,8 +452,8 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// [`PERF_AHEAD_APART`], [`PERF_TYRE_AHEAD`] (§8.31), [`PERF_FLEET_HITLAT`] and
 /// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
 /// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off). Not
-/// [`PERF_FLEET_KEEP`]: bit for bit natively, but the lab page in Chrome ends elsewhere
-/// with it (§8.28).
+/// [`PERF_FLEET_KEEP`]: bit for bit natively and in Chrome and faster at the median with
+/// today's defaults, but not at every run's worst step nor at 32 cars (§8.38).
 pub fn perf_flags_default() -> u32 {
     std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).map(|f| f & !PERF_KEEP_TRACK_REST).unwrap_or(
         PERF_HIT_FB

@@ -68,9 +68,10 @@ void flError(int code) { gAcc[vvCtl(VV_OVERFLOW)].max(code); }
 // the heat, the reference motion and the allowance between vehicles are choices that
 // cannot make a list unsound: the build's boxes and the bound use the same ones.
 // What is not kept: a pass with a node too fast for a build's allowances, or a bound not
-// finite, takes today's path; a build past an owner's room (FK_CAP pairs: the listing stops,
-// that pass's tests walk the walk's own boxes over the build's candidates) or the run's is
-// followed by FK_BACKOFF passes on today's path;
+// finite, takes today's path; a build past an owner's share of the fleet's pair room
+// (fkKeepPair: the list void, that pass's tests walk the walk's own boxes over the build's
+// candidates) builds again two passes on with shares from its counts, and one past the
+// fleet's room or the run's is followed by FK_BACKOFF passes on today's path;
 // the list's first two words an owner are a signature, so another path's list in the same
 // region (the flag off for a frame) ends the kept one.
 // Owner v's room in the build's candidate run: its covered partners' contact points.

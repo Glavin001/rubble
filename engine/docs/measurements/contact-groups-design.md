@@ -737,7 +737,8 @@ make that pass about a pass of today's front. The flag is now bit for bit in Chr
 the ledges and on the rolling gully, faster at the median everywhere and at the worst on
 the ledges, but not at the worst on the rolling gully, where the cars pile and the list is
 past its room or outlived in a few passes; so it stays off (§8.28). The limit that
-remains: one owner past its room sends every owner to the front's own path. A list per
+remained, one owner past its room sending every owner to the front's own path, is gone
+since §8.12 (the fleet's room, shared by the owners' counts). A list per
 car (an excluded car's pairs on today's front, the others reused) was built and measured
 slower on both terrains, and reverted (§8.28).
 
@@ -812,8 +813,10 @@ whose nodes passed their allowance, the list fleet-wide. The pairs of a rebuilt 
 hold the points of its partners, whose records (the build's positions) the bound measures
 from; a partial build would need either every partner's records again (in a pile, every
 car: a whole build) or boxes padded by twice the allowance for the partners not rebuilt
-(larger lists, the tests' cost up). Neither pays on the measured split (§8.38: the builds
-are a third of the gully's contact time, the kept tests another third).
+(larger lists, the tests' cost up). Neither pays on the measured split (§8.38: on the
+gully the builds' walk is 2.2 to 2.8 ms a frame and the kept pairs' tests 1.4 to 1.8 ms,
+against 6.1 to 6.9 ms of today's walk; a partial build would save part of the first and add
+to the second).
 
 ### 8.11 A group's levels with each hit worked out once (2026-11-18)
 
