@@ -113,8 +113,7 @@ fn main() -> anyhow::Result<()> {
             let mut groups = GROUPS.to_vec();
             groups.push(("pair: boxes, publish, partner's nodes, triangle cull", 1 << 12));
             groups.push(("pair: triangles x clusters", 1 << 17));
-            groups.push(("pair: cluster points' box test", 1 << 18));
-            groups.push(("pair: candidates' rule", 1 << 19));
+            groups.push(("pair: cluster points' test and rule", 1 << 18));
             groups.push(("pair: hit counts, owners' turns", 1 << 20));
             profile(&f, 2 * pairs, fr, time.max(9), &groups);
             return Ok(());

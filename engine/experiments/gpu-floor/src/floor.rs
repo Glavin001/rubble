@@ -1351,6 +1351,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     let o_touch = take(128);
     o.hmap = take(nn);
     o.xmap = take(nn * 2);
+    let x_clb = take(nclp * 8);
     o.touch = o_touch;
     let xcnd_cap = 8192usize;
     let x_pub = take(16);
@@ -1367,7 +1368,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define O_HMAP {}\n#define O_XMAP {}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
+        "#define O_HMAP {}\n#define O_XMAP {}\n#define O_XCLB {x_clb}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
         o.hmap, o.xmap, list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out
     ) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
