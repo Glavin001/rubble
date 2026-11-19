@@ -32,20 +32,19 @@
         #define XCND (cb + O_XCND)
         #define XHIT ((device float4*)(cb + O_XHIT))
         #define HX 8
-        // A turn's per-node words in threadgroup memory: a slot a node, 20 words of the beam
+        // A turn's per-node words in threadgroup memory: a slot a node, 14 words of the beam
         // scalars' array (force 3, mass, hits that name it, staged sums 6, contact sums at
-        // the turn's start 3, the turn's total 3, its position step 3); a hit has four, so
-        // this many hits a turn.
-        #define XH2CAP (NGS / 80u)
+        // the turn's start 3); a hit has four, so this many hits a turn.
+        #define XH2CAP (NGS / 56u)
         #define XMAPA ((device atomic_uint*)(cb + O_XMAP))
         #define XMAPB ((device atomic_uint*)(cb + O_XMAP + NN))
-        #define XLF(s_) v3(tgG[(s_) * 20u], tgG[(s_) * 20u + 1u], tgG[(s_) * 20u + 2u])
-        #define XLM(s_) tgG[(s_) * 20u + 3u]
-        #define XLKP(s_) ((TGPTR(atomic_uint))&tgG[(s_) * 20u + 4u])
+        #define XLF(s_) v3(tgG[(s_) * 14u], tgG[(s_) * 14u + 1u], tgG[(s_) * 14u + 2u])
+        #define XLM(s_) tgG[(s_) * 14u + 3u]
+        #define XLKP(s_) ((TGPTR(atomic_uint))&tgG[(s_) * 14u + 4u])
         #define XLK(s_) atomic_load_explicit(XLKP(s_), memory_order_relaxed)
-        #define XLS(s_, q_) ((TGPTR(atomic_int))&tgG[(s_) * 20u + 5u + (q_)])
+        #define XLS(s_, q_) ((TGPTR(atomic_int))&tgG[(s_) * 14u + 5u + (q_)])
         #define XLL(s_, q_) atomic_load_explicit(XLS(s_, q_), memory_order_relaxed)
-        #define XLA(s_, q_) as_type<int>(tgG[(s_) * 20u + 11u + (q_)])
+        #define XLA(s_, q_) as_type<int>(tgG[(s_) * 14u + 11u + (q_)])
         #define XSACC(f_, s_) (XLM(s_) == 0.0f ? v3(0, 0, 0) : (f_) / XLM(s_))
         #define XSIM(s_, k_) (XLM(s_) == 0.0f ? 0.0f : (k_) / XLM(s_))
         // The partner's nodes in this group's memory: position and travel a step (|v|·h,
@@ -143,16 +142,6 @@
                     // of them); velocity and force only of the nodes a partner's triangle
                     // can reach (six atomic stores fewer for the others). The force also
                     // with a plain store, for this body's own lanes.
-                    // (The contact sums this lane holds from the body's own hits, where the
-                    // partner's pass and the turns read them.)
-                    if ((aOx | aOy | aOz) != 0)
-                    {
-                        atomic_fetch_add_explicit(&acc[ni * 3], aOx, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&acc[ni * 3 + 1], aOy, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&acc[ni * 3 + 2], aOz, memory_order_relaxed);
-                        TOUCHK(ni, 1u);
-                        aOx = 0; aOy = 0; aOz = 0;
-                    }
                     ISTORE(&na[0], as_type<uint>(Pown.x)); ISTORE(&na[1], as_type<uint>(Pown.y)); ISTORE(&na[2], as_type<uint>(Pown.z));
                     nodeState[ni * 3 + 2] = f4(F0, 0);
                     if (XREACH(PA, ME, Pown))
@@ -168,7 +157,9 @@
                 }
                 if (lid < NCLP)
                 {
-                    // This body's clusters of contact points' boxes, for its partner's cull.
+                    // This body's clusters of contact points' boxes, for its partner's cull
+                    // (from its own memory: read from the partner's block they were 28
+                    // scattered loads a lane, one after another).
                     V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
                     device const uint4* cl4 = (device const uint4*)(tab + T_PCL + lid * 32u);
                     for (uint jj = 0; jj < 8u; jj++)
@@ -215,7 +206,8 @@
                     if (qhi.x < lo.x - padTop || qhi.y < lo.y - padTop || qhi.z < lo.z - padTop || qlo.x > hi.x + padTop || qlo.y > hi.y + padTop || qlo.z > hi.z + padTop) continue;
                     // The partner's clusters of contact points this triangle's padded box
                     // reaches (their boxes as the partner published them), each a (triangle,
-                    // cluster) item.
+                    // cluster) item. (SKIP(17..20), timing only: the pass cut short from a
+                    // stage on, on both bodies.)
                     if (SKIP(17)) continue;
                     device const float4* pcb = (device const float4*)(CB(PA) + O_XCLB);
                     for (uint q = 0; q < NCLP; q++)
@@ -228,13 +220,12 @@
                 }
                 BAR;
                 // F: a lane a (triangle, cluster): the cluster's points by the reference's
-                // padded box test, and the contact rule (frame, held side, swept crossing,
-                // side vote) for each that passes; a contact's side recorded, its hit kept.
+                // padded box test.
                 const uint ntc = SKIP(18) ? 0u : (uint)TXI(16);
                 for (uint k = lid; k < ntc; k += LANES)
                 {
-                    const uint tq = XTC[k];
-                    const uint t = tq >> 8, q = tq & 255u, a = ME, b = PA;
+                    const uint w = XTC[k];
+                    const uint t = w >> 8, q = w & 255u;
                     uint4 tn = tris[t];
                     TRIBOX(tn)
                     device const uint4* cl4 = (device const uint4*)(tab + T_PCL + q * 32u);
@@ -248,115 +239,127 @@
                             V3 x = PP(h);
                             float pad = (travel + PS(h)) + CLIP_DEPTH;
                             if (!(x.x >= lo.x - pad && x.y >= lo.y - pad && x.z >= lo.z - pad && x.x <= hi.x + pad && x.y <= hi.y + pad && x.z <= hi.z + pad)) continue;
-                            // (The contact rule here, by the lane that found the point: a
-                            // phase of its own for the candidates was a phase more of long
-                            // chains.)
-                            // ContactFrame::new and local.
-                            V3 u = p1 - p0, w = p2 - p0;
-                            V3 c = cross3(u, w);
-                            float len = sqrt(((c.x * c.x) + (c.y * c.y)) + (c.z * c.z));
-                            V3 n = len > 1e-8f ? c * (1.0f / len) : c;
-                            float det = dot3(u, cross3(w, n));
-                            bool ok = fabs(det) > 1e-6f;
-                            V3 ra = v3(0, 0, 0), rb = ra, rd = ra;
-                            if (ok) { float r = 1.0f / det; ra = cross3(w, n) * r; rb = cross3(n, u) * r; rd = cross3(u, w) * r; }
-                            float4 loc = frameLocal(p0, ra, rb, rd, ok, x);
-                            const uint key = a << 20 | t;
-                            float side = 0.0f;
+                            uint ci = (uint)atomic_fetch_add_explicit(&tgX[17], 1, memory_order_relaxed);
+                            if (ci < XCND_CAP) XCND[ci] = t << 16 | h;
+                        }
+                    }
+                }
+                BAR;
+                // G: a lane a candidate: the contact rule (frame, held side, swept crossing,
+                // the side vote); a contact's side recorded, its hit kept.
+                const uint ncx = SKIP(19) ? 0u : min((uint)TXI(17), (uint)XCND_CAP);
+                if (lid == 0 && (uint)TXI(17) > XCND_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 4u;
+                for (uint k = lid; k < ncx; k += LANES)
+                {
+                    const uint cw = XCND[k];
+                    const uint a = ME, b = PA, t = cw >> 16, h = cw & 0xFFFFu;
+                    uint4 tn = tris[t];
+                    V3 p0 = OP(tn.x), p1 = OP(tn.y), p2 = OP(tn.z);
+                    V3 x = PP(h);
+                    // ContactFrame::new and local.
+                    V3 u = p1 - p0, w = p2 - p0;
+                    V3 c = cross3(u, w);
+                    float len = sqrt(((c.x * c.x) + (c.y * c.y)) + (c.z * c.z));
+                    V3 n = len > 1e-8f ? c * (1.0f / len) : c;
+                    float det = dot3(u, cross3(w, n));
+                    bool ok = fabs(det) > 1e-6f;
+                    V3 ra = v3(0, 0, 0), rb = ra, rd = ra;
+                    if (ok) { float r = 1.0f / det; ra = cross3(w, n) * r; rb = cross3(n, u) * r; rd = cross3(u, w) * r; }
+                    float4 loc = frameLocal(p0, ra, rb, rd, ok, x);
+                    const uint key = a << 20 | t;
+                    float side = 0.0f;
         #if XATOM == 3
-                            const uint4 cq = ((device const uint4*)(CB(b) + O_CLIP))[h];
-                            uint c0 = cq.x, c1 = cq.y;
+                    const uint4 cq = ((device const uint4*)(CB(b) + O_CLIP))[h];
+                    uint c0 = cq.x, c1 = cq.y;
         #else
-                            uint c0 = ILOAD(&XCLIP(b)[h * 4]), c1 = ILOAD(&XCLIP(b)[h * 4 + 1]);
+                    uint c0 = ILOAD(&XCLIP(b)[h * 4]), c1 = ILOAD(&XCLIP(b)[h * 4 + 1]);
         #endif
-                            if (c0 != CLIP_EMPTY && (c0 >> 1) == key) side = (c0 & 1u) != 0u ? 1.0f : -1.0f;
-                            else if (c1 != CLIP_EMPTY && (c1 >> 1) == key) side = (c1 & 1u) != 0u ? 1.0f : -1.0f;
-                            bool over = loc.x >= 0.0f && loc.y >= 0.0f && loc.z >= 0.0f;
-                            bool haveW = false;
-                            float3 wgt = float3(0);
-                            if (side != 0.0f)
+                    if (c0 != CLIP_EMPTY && (c0 >> 1) == key) side = (c0 & 1u) != 0u ? 1.0f : -1.0f;
+                    else if (c1 != CLIP_EMPTY && (c1 >> 1) == key) side = (c1 & 1u) != 0u ? 1.0f : -1.0f;
+                    bool over = loc.x >= 0.0f && loc.y >= 0.0f && loc.z >= 0.0f;
+                    bool haveW = false;
+                    float3 wgt = float3(0);
+                    if (side != 0.0f)
+                    {
+                        haveW = over;
+                        wgt = float3(loc.x, loc.y, loc.z);
+                    }
+                    else
+                    {
+                        // The swept crossing: the frame a step ago, the point a step ago.
+                        V3 q0 = p0 - TGV(tn.x) * H, q1 = p1 - TGV(tn.y) * H, q2 = p2 - TGV(tn.z) * H;
+                        V3 ub = q1 - q0, wb = q2 - q0;
+                        V3 cb2 = cross3(ub, wb);
+                        float lenb = sqrt(((cb2.x * cb2.x) + (cb2.y * cb2.y)) + (cb2.z * cb2.z));
+                        V3 nb = lenb > 1e-8f ? cb2 * (1.0f / lenb) : cb2;
+                        float detb = dot3(ub, cross3(wb, nb));
+                        bool okb = fabs(detb) > 1e-6f;
+                        V3 rab = v3(0, 0, 0), rbb = rab, rdb = rab;
+                        if (okb) { float r = 1.0f / detb; rab = cross3(wb, nb) * r; rbb = cross3(nb, ub) * r; rdb = cross3(ub, wb) * r; }
+                        float4 l0 = frameLocal(q0, rab, rbb, rdb, okb, x - PV(h) * H);
+                        float e0 = l0.w, e1 = loc.w;
+                        bool crossed = false;
+                        if ((e0 > 0.0f && e1 < 0.0f) || (e0 < 0.0f && e1 > 0.0f))
+                        {
+                            float sx = e0 / (e0 - e1);
+                            float aa = l0.x + (loc.x - l0.x) * sx;
+                            float bb2 = l0.y + (loc.y - l0.y) * sx;
+                            float3 cwt = float3(aa, bb2, (1.0f - aa) - bb2);
+                            if (cwt.x >= 0.0f && cwt.y >= 0.0f && cwt.z >= 0.0f)
                             {
-                                haveW = over;
-                                wgt = float3(loc.x, loc.y, loc.z);
-                            }
-                            else
-                            {
-                                // The swept crossing: the frame a step ago, the point a step ago.
-                                V3 q0 = p0 - TGV(tn.x) * H, q1 = p1 - TGV(tn.y) * H, q2 = p2 - TGV(tn.z) * H;
-                                V3 ub = q1 - q0, wb = q2 - q0;
-                                V3 cb2 = cross3(ub, wb);
-                                float lenb = sqrt(((cb2.x * cb2.x) + (cb2.y * cb2.y)) + (cb2.z * cb2.z));
-                                V3 nb = lenb > 1e-8f ? cb2 * (1.0f / lenb) : cb2;
-                                float detb = dot3(ub, cross3(wb, nb));
-                                bool okb = fabs(detb) > 1e-6f;
-                                V3 rab = v3(0, 0, 0), rbb = rab, rdb = rab;
-                                if (okb) { float r = 1.0f / detb; rab = cross3(wb, nb) * r; rbb = cross3(nb, ub) * r; rdb = cross3(ub, wb) * r; }
-                                float4 l0 = frameLocal(q0, rab, rbb, rdb, okb, x - PV(h) * H);
-                                float e0 = l0.w, e1 = loc.w;
-                                bool crossed = false;
-                                if ((e0 > 0.0f && e1 < 0.0f) || (e0 < 0.0f && e1 > 0.0f))
-                                {
-                                    float sx = e0 / (e0 - e1);
-                                    float aa = l0.x + (loc.x - l0.x) * sx;
-                                    float bb2 = l0.y + (loc.y - l0.y) * sx;
-                                    float3 cwt = float3(aa, bb2, (1.0f - aa) - bb2);
-                                    if (cwt.x >= 0.0f && cwt.y >= 0.0f && cwt.z >= 0.0f)
-                                    {
-                                        crossed = true;
-                                        side = e0 > 0.0f ? 1.0f : -1.0f;
-                                        haveW = true;
-                                        wgt = cwt;
-                                    }
-                                }
-                                if (!crossed)
-                                {
-                                    if (!(over && fabs(loc.w) <= CR)) continue;
-                                    // The side vote (spec §5.3): the point's neighbours' sides.
-                                    int score = loc.w >= 0.0f ? 3 : -3;
-                                    const uint ns = tab[T_NB + h], ne = tab[T_NB + h + 1u];
-                                    if (ne - ns > 3u)
-                                    {
-                                        for (uint j = ns; j < ne && j < ns + 64u; j++)
-                                        {
-                                            V3 e = PP(tab[T_NBL + j]) - p0;
-                                            score += (((n.x * e.x) + (n.y * e.y)) + (n.z * e.z)) >= 0.0f ? 1 : -1;
-                                        }
-                                    }
-                                    side = score < 0 ? -1.0f : 1.0f;
-                                    haveW = true;
-                                    wgt = float3(loc.x, loc.y, loc.z);
-                                }
-                            }
-                            float dd = side * loc.w;
-                            if (!(haveW && dd <= CR && dd >= -CLIP_DEPTH)) continue;
-                            uint word = a << 21 | t << 1 | (side > 0.0f ? 1u : 0u);
-                            uint old = atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 2], word, memory_order_relaxed);
-                            atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 3], max(old, word), memory_order_relaxed);
-                            atomic_fetch_or_explicit(XFLAG(b), 4u, memory_order_relaxed);
-                            XTOUCHK(b, h, 4u);
-                            float pen = rmin(CR - dd, CR);
-                            uint hi_ = (uint)atomic_fetch_add_explicit(&tgX[18], 1, memory_order_relaxed);
-                            if (hi_ < XH2CAP)
-                            {
-                                device float4* hr = XHIT + hi_ * HX;
-                                hr[0] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
-                                hr[1] = float4(wgt.x, wgt.y, wgt.z, pen);
-                                hr[2] = f4(n * side, 0);
-                                // The forces at the pass's start (the contact sums before any turn).
-                                uint ids[4] = {h, tn.y, tn.z, tn.x};
-                                for (uint e = 0; e < 4u; e++)
-                                {
-                                    const uint xc = e == 0u ? b : a;
-                                    V3 f = XF(xc, ids[e]) + v3(float(ILOAD(&XACC(xc)[ids[e] * 3])), float(ILOAD(&XACC(xc)[ids[e] * 3 + 1])), float(ILOAD(&XACC(xc)[ids[e] * 3 + 2]))) * (1.0f / 32.0f);
-                                    hr[4 + e] = f4(f, 0);
-                                }
-                                // (Each node's slot for the turn: the smallest (hit, corner) that names it.)
-                                atomic_fetch_min_explicit(&XMAPB[h], hi_ * 4u, memory_order_relaxed);
-                                atomic_fetch_min_explicit(&XMAPA[tn.x], hi_ * 4u + 1u, memory_order_relaxed);
-                                atomic_fetch_min_explicit(&XMAPA[tn.y], hi_ * 4u + 2u, memory_order_relaxed);
-                                atomic_fetch_min_explicit(&XMAPA[tn.z], hi_ * 4u + 3u, memory_order_relaxed);
+                                crossed = true;
+                                side = e0 > 0.0f ? 1.0f : -1.0f;
+                                haveW = true;
+                                wgt = cwt;
                             }
                         }
+                        if (!crossed)
+                        {
+                            if (!(over && fabs(loc.w) <= CR)) continue;
+                            // The side vote (spec §5.3): the point's neighbours' sides.
+                            int score = loc.w >= 0.0f ? 3 : -3;
+                            const uint ns = tab[T_NB + h], ne = tab[T_NB + h + 1u];
+                            if (ne - ns > 3u)
+                            {
+                                for (uint j = ns; j < ne && j < ns + 64u; j++)
+                                {
+                                    V3 e = PP(tab[T_NBL + j]) - p0;
+                                    score += (((n.x * e.x) + (n.y * e.y)) + (n.z * e.z)) >= 0.0f ? 1 : -1;
+                                }
+                            }
+                            side = score < 0 ? -1.0f : 1.0f;
+                            haveW = true;
+                            wgt = float3(loc.x, loc.y, loc.z);
+                        }
+                    }
+                    float dd = side * loc.w;
+                    if (!(haveW && dd <= CR && dd >= -CLIP_DEPTH)) continue;
+                    uint word = a << 21 | t << 1 | (side > 0.0f ? 1u : 0u);
+                    uint old = atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 2], word, memory_order_relaxed);
+                    atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 3], max(old, word), memory_order_relaxed);
+                    atomic_fetch_or_explicit(XFLAG(b), 4u, memory_order_relaxed);
+                    XTOUCHK(b, h, 5u); XTOUCHK(a, tn.x, 1u); XTOUCHK(a, tn.y, 1u); XTOUCHK(a, tn.z, 1u);
+                    float pen = rmin(CR - dd, CR);
+                    uint hi_ = (uint)atomic_fetch_add_explicit(&tgX[18], 1, memory_order_relaxed);
+                    if (hi_ < XH2CAP)
+                    {
+                        device float4* hr = XHIT + hi_ * HX;
+                        hr[0] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
+                        hr[1] = float4(wgt.x, wgt.y, wgt.z, pen);
+                        hr[2] = f4(n * side, 0);
+                        // The forces at the pass's start (the contact sums before any turn).
+                        uint ids[4] = {h, tn.y, tn.z, tn.x};
+                        for (uint e = 0; e < 4u; e++)
+                        {
+                            const uint xc = e == 0u ? b : a;
+                            V3 f = XF(xc, ids[e]) + v3(float(ILOAD(&XACC(xc)[ids[e] * 3])), float(ILOAD(&XACC(xc)[ids[e] * 3 + 1])), float(ILOAD(&XACC(xc)[ids[e] * 3 + 2]))) * (1.0f / 32.0f);
+                            hr[4 + e] = f4(f, 0);
+                        }
+                        // (Each node's slot for the turn: the smallest (hit, corner) that names it.)
+                        atomic_fetch_min_explicit(&XMAPB[h], hi_ * 4u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XMAPA[tn.x], hi_ * 4u + 1u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XMAPA[tn.y], hi_ * 4u + 2u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XMAPA[tn.z], hi_ * 4u + 3u, memory_order_relaxed);
                     }
                 }
                 BAR;
@@ -395,7 +398,7 @@
                     float hres = 0.0f;
                     if (mySlot != NONE)
                     {
-                        const uint o = mySlot * 20u;
+                        const uint o = mySlot * 14u;
                         tgG[o] = F0.x; tgG[o + 1u] = F0.y; tgG[o + 2u] = F0.z;
                         tgG[o + 3u] = XIMM(ni) ? 0.0f : massN;
                         tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
@@ -403,8 +406,6 @@
                         tgG[o + 11u] = as_type<float>(ILOAD(&XACC(a)[ni * 3]));
                         tgG[o + 12u] = as_type<float>(ILOAD(&XACC(a)[ni * 3 + 1]));
                         tgG[o + 13u] = as_type<float>(ILOAD(&XACC(a)[ni * 3 + 2]));
-                        tgG[o + 14u] = 0.0f; tgG[o + 15u] = 0.0f; tgG[o + 16u] = 0.0f;
-                        tgG[o + 17u] = 0.0f; tgG[o + 18u] = 0.0f; tgG[o + 19u] = 0.0f;
                     }
                     if (lid < nh)
                     {
@@ -416,7 +417,7 @@
                         hsl = uint4(ILOAD(&XMAPB[hid.x]), ILOAD(&XMAPA[hid.y]), ILOAD(&XMAPA[hid.z]), ILOAD(&XMAPA[hid.w]));
                         if (hsl.x == lid * 4u)
                         {
-                            const uint o = hsl.x * 20u, h = hid.x;
+                            const uint o = hsl.x * 14u, h = hid.x;
                             V3 fb = XF(b, h);
                             tgG[o] = fb.x; tgG[o + 1u] = fb.y; tgG[o + 2u] = fb.z;
                             tgG[o + 3u] = XIMM(h) ? 0.0f : XM(h);
@@ -425,8 +426,6 @@
                             tgG[o + 11u] = as_type<float>(ILOAD(&XACC(b)[h * 3]));
                             tgG[o + 12u] = as_type<float>(ILOAD(&XACC(b)[h * 3 + 1]));
                             tgG[o + 13u] = as_type<float>(ILOAD(&XACC(b)[h * 3 + 2]));
-                            tgG[o + 14u] = 0.0f; tgG[o + 15u] = 0.0f; tgG[o + 16u] = 0.0f;
-                            tgG[o + 17u] = 0.0f; tgG[o + 18u] = 0.0f; tgG[o + 19u] = 0.0f;
                         }
                     }
                     BAR;
@@ -465,13 +464,12 @@
                             {
                                 float q = delta * m;
                                 V3 dh = n * (q * imh);
-                                // (Position steps and, below, the hits' totals go to the nodes'
-                                // slots; after the passes each node's own lane, and for a
-                                // partner's point the hit that names its slot, carries them on.)
-                                atomic_fetch_add_explicit(XLS(sh, 12u), toFixedShift(dh.x), memory_order_relaxed);
-                                atomic_fetch_add_explicit(XLS(sh, 13u), toFixedShift(dh.y), memory_order_relaxed);
-                                atomic_fetch_add_explicit(XLS(sh, 14u), toFixedShift(dh.z), memory_order_relaxed);
-                                uint ti[3] = {s1, s2, s0};
+                                XTOUCHK(b, h, 2u);
+                                atomic_fetch_add_explicit(&XSHIFT(b)[h * 3], toFixedShift(dh.x), memory_order_relaxed);
+                                atomic_fetch_add_explicit(&XSHIFT(b)[h * 3 + 1], toFixedShift(dh.y), memory_order_relaxed);
+                                atomic_fetch_add_explicit(&XSHIFT(b)[h * 3 + 2], toFixedShift(dh.z), memory_order_relaxed);
+                                atomic_fetch_or_explicit(XFLAG(b), 2u, memory_order_relaxed);
+                                uint ti[3] = {i1, i2, i0};
                                 float tw[3] = {alpha, beta, gamma};
                                 float tm[3] = {im1, im2, im0};
                                 for (uint e = 0; e < 3u; e++)
@@ -479,9 +477,11 @@
                                     if (tw[e] > 0.0f)
                                     {
                                         V3 dt = n * -(tw[e] * (q * tm[e]));
-                                        atomic_fetch_add_explicit(XLS(ti[e], 12u), toFixedShift(dt.x), memory_order_relaxed);
-                                        atomic_fetch_add_explicit(XLS(ti[e], 13u), toFixedShift(dt.y), memory_order_relaxed);
-                                        atomic_fetch_add_explicit(XLS(ti[e], 14u), toFixedShift(dt.z), memory_order_relaxed);
+                                        XTOUCHK(a, ti[e], 2u);
+                                        atomic_fetch_add_explicit(&XSHIFT(a)[ti[e] * 3], toFixedShift(dt.x), memory_order_relaxed);
+                                        atomic_fetch_add_explicit(&XSHIFT(a)[ti[e] * 3 + 1], toFixedShift(dt.y), memory_order_relaxed);
+                                        atomic_fetch_add_explicit(&XSHIFT(a)[ti[e] * 3 + 2], toFixedShift(dt.z), memory_order_relaxed);
+                                        atomic_fetch_or_explicit(XFLAG(a), 2u, memory_order_relaxed);
                                     }
                                 }
                             }
@@ -562,47 +562,16 @@
                             }
                         }
                         V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
-                        uint ss[4] = {sh, s1, s2, s0};
+                        uint ns[4] = {h, i1, i2, i0};
                         for (uint e = 0; e < 4u; e++)
                         {
-                            atomic_fetch_add_explicit(XLS(ss[e], 9u), toFixed(fs[e].x), memory_order_relaxed);
-                            atomic_fetch_add_explicit(XLS(ss[e], 10u), toFixed(fs[e].y), memory_order_relaxed);
-                            atomic_fetch_add_explicit(XLS(ss[e], 11u), toFixed(fs[e].z), memory_order_relaxed);
+                            const uint xc = e == 0u ? b : a;
+                            atomic_fetch_add_explicit(&XACC(xc)[ns[e] * 3], toFixed(fs[e].x), memory_order_relaxed);
+                            atomic_fetch_add_explicit(&XACC(xc)[ns[e] * 3 + 1], toFixed(fs[e].y), memory_order_relaxed);
+                            atomic_fetch_add_explicit(&XACC(xc)[ns[e] * 3 + 2], toFixed(fs[e].z), memory_order_relaxed);
                         }
-                    }
-                    BAR;
-                    // The turn's totals carried on. This body's nodes by their own lanes: the
-                    // contact sums to their device words (the partner's turn reads them), the
-                    // position step into the lane's registers. A partner's point by the hit
-                    // that names its slot: both to the partner's words.
-                    if (mySlot != NONE)
-                    {
-                        const int tx = XLL(mySlot, 9u), ty = XLL(mySlot, 10u), tz = XLL(mySlot, 11u);
-                        atomic_fetch_add_explicit(&acc[ni * 3], tx, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&acc[ni * 3 + 1], ty, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&acc[ni * 3 + 2], tz, memory_order_relaxed);
-                        TOUCHK(ni, 1u);
-                        tgFlags[F_HITS] = 1u;
-                        const int ux = XLL(mySlot, 12u), uy = XLL(mySlot, 13u), uz = XLL(mySlot, 14u);
-                        if ((ux | uy | uz) != 0) { sOx += ux; sOy += uy; sOz += uz; tgFlags[F_SHIFT] = 1u; }
-                    }
-                    if (lid < nh && hsl.x == lid * 4u)
-                    {
-                        const uint h = hid.x, sh = hsl.x;
-                        atomic_fetch_add_explicit(&XACC(b)[h * 3], XLL(sh, 9u), memory_order_relaxed);
-                        atomic_fetch_add_explicit(&XACC(b)[h * 3 + 1], XLL(sh, 10u), memory_order_relaxed);
-                        atomic_fetch_add_explicit(&XACC(b)[h * 3 + 2], XLL(sh, 11u), memory_order_relaxed);
-                        const int ux = XLL(sh, 12u), uy = XLL(sh, 13u), uz = XLL(sh, 14u);
-                        uint kinds = 1u;
-                        if ((ux | uy | uz) != 0)
-                        {
-                            atomic_fetch_add_explicit(&XSHIFT(b)[h * 3], ux, memory_order_relaxed);
-                            atomic_fetch_add_explicit(&XSHIFT(b)[h * 3 + 1], uy, memory_order_relaxed);
-                            atomic_fetch_add_explicit(&XSHIFT(b)[h * 3 + 2], uz, memory_order_relaxed);
-                            kinds = 3u;
-                        }
-                        XTOUCHK(b, h, kinds);
-                        atomic_fetch_or_explicit(XFLAG(b), kinds, memory_order_relaxed);
+                        atomic_fetch_or_explicit(XFLAG(a), 1u, memory_order_relaxed);
+                        atomic_fetch_or_explicit(XFLAG(b), 1u, memory_order_relaxed);
                     }
                     }
                     XBAR; // the turn is applied

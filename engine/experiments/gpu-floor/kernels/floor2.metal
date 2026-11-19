@@ -91,9 +91,8 @@ struct Params
 #ifndef HITTG
 #define HITTG 1
 #endif
-// (A slot is 17 words of the beam scalars' array: force 3, mass, hits that name the node,
-// staged sums 6, the passes' total 3, the position step 3. A hit has four.)
-#define H2CAP (NGS / 68u)
+// (A slot is 11 words of the beam scalars' array; a hit has four.)
+#define H2CAP (NGS / 44u)
 // TGPV: a node's position and velocity next to each other (an end of a beam is then six
 // adjacent floats, where adjacent loads are nearly free).
 #ifndef TGPV
@@ -454,10 +453,6 @@ kernel void floorFrame(
     // entries shorter), before the listed entries: another order than the reference's.
     V3 cOwn = v3(0, 0, 0), fOwn = v3(0, 0, 0);
 #endif
-    // The lane's own node's contact sums and position step from this body's own hits, not
-    // yet applied (HITTG): added at its next node pass, or written to device memory where
-    // another group must read them and when the dispatch ends.
-    int aOx = 0, aOy = 0, aOz = 0, sOx = 0, sOy = 0, sOz = 0;
     const bool hotOk = misc[11] == 1u;
     if (hotOk)
     {
@@ -693,17 +688,12 @@ kernel void floorFrame(
                 for (uint q = 0; q < 6; q++) atomic_store_explicit(&stage[ni * 6 + q], 0, memory_order_relaxed);
                 atomic_store_explicit(&split[ni], 0u, memory_order_relaxed);
             }
-            if (fHits)
+            if (fHits && (tw & 1u) != 0u)
             {
-                int ax_ = aOx, ay_ = aOy, az_ = aOz;
-                if ((tw & 1u) != 0u)
-                {
-                    ax_ += atomic_exchange_explicit(&acc[ni * 3], 0, memory_order_relaxed);
-                    ay_ += atomic_exchange_explicit(&acc[ni * 3 + 1], 0, memory_order_relaxed);
-                    az_ += atomic_exchange_explicit(&acc[ni * 3 + 2], 0, memory_order_relaxed);
-                }
+                int ax_ = atomic_exchange_explicit(&acc[ni * 3], 0, memory_order_relaxed);
+                int ay_ = atomic_exchange_explicit(&acc[ni * 3 + 1], 0, memory_order_relaxed);
+                int az_ = atomic_exchange_explicit(&acc[ni * 3 + 2], 0, memory_order_relaxed);
                 F0 = F0 + v3(float(ax_), float(ay_), float(az_)) * (1.0f / 32.0f);
-                aOx = 0; aOy = 0; aOz = 0;
             }
             else F0 = F0 + v3(0, 0, 0);
             // A node in the ground or a static box goes on the step's list: its contact
@@ -749,21 +739,15 @@ kernel void floorFrame(
                     if (fShift)
                     {
                         // (An unwritten node's step is zero: the same add of +0.)
-                        int sx_ = sOx, sy_ = sOy, sz_ = sOz;
                         if ((tw & 2u) != 0u)
                         {
-                            sx_ += SHL(ni * 3); sy_ += SHL(ni * 3 + 1); sz_ += SHL(ni * 3 + 2);
+                            P0 = P0 + v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f);
                             SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2);
                         }
-                        P0 = P0 + v3(float(sx_), float(sy_), float(sz_)) * (1.0f / 16777216.0f);
-                        sOx = 0; sOy = 0; sOz = 0;
+                        else P0 = P0 + v3(0, 0, 0);
                     }
                 }
-                else if (fShift)
-                {
-                    if ((tw & 2u) != 0u) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
-                    sOx = 0; sOy = 0; sOz = 0;
-                }
+                else if (fShift && (tw & 2u) != 0u) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
                 { Pown = (P0); SETP(ni, Pown); }
                 { Vown = (V0); SETV(ni, Vown); }
             }
@@ -865,19 +849,10 @@ kernel void floorFrame(
                 {
                     V0 = V0 + (F0 / massN) * H;
                     P0 = P0 + V0 * H;
-                    if (fShift)
-                    {
-                        int sx_ = sOx, sy_ = sOy, sz_ = sOz;
-                        if ((tw & 2u) != 0u) { sx_ += SHL(ni * 3); sy_ += SHL(ni * 3 + 1); sz_ += SHL(ni * 3 + 2); }
-                        P0 = P0 + v3(float(sx_), float(sy_), float(sz_)) * (1.0f / 16777216.0f);
-                    }
+                    if (fShift) P0 = P0 + ((tw & 2u) != 0u ? v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f) : v3(0, 0, 0));
                     if (lift != 0.0f) P0.y = P0.y + lift;
                 }
-                if (fShift)
-                {
-                    if ((tw & 2u) != 0u) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
-                    sOx = 0; sOy = 0; sOz = 0;
-                }
+                if (fShift && (tw & 2u) != 0u) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
                 { Pown = (P0); SETP(ni, Pown); }
                 { Vown = (V0); SETV(ni, Vown); }
             }
@@ -1546,91 +1521,6 @@ kernel void floorFrame(
             }
         }
 #if COLLIDE
-        // The self-collision rule for one (triangle, point) (explicit_beams.rs collision_pass,
-        // clip_hit): its side recorded, its hit kept. Run by the row's own lane for the first
-        // point of a row that may be a contact (a phase of a few lanes, each a long chain,
-        // costs its longest chain however few they are; inside the row phase it is hidden
-        // under the rows), and a lane a pair for any further ones.
-        #define SELF_RULE(TRI_, H_, T0_, T1_, T2_) do { \
-                const uint rtri = (TRI_), h = (H_), rt0 = (T0_), rt1 = (T1_), rt2 = (T2_); \
-                V3 ph = v3(0, 0, 0) + TGP(h); \
-                V3 vh = TGV(h); \
-                    const uint4 tn = uint4(rt0, rt1, rt2, 0u); \
-                    const V3 pA = v3(0, 0, 0) + TGP(rt0), pB = v3(0, 0, 0) + TGP(rt1), pC = v3(0, 0, 0) + TGP(rt2); \
-                    const V3 vA = TGV(rt0), vB = TGV(rt1), vC = TGV(rt2); \
-                    Frame F = triFrame(pA, pB, pC); \
-                    Frame B = triFrame(pA - vA * H, pB - vB * H, pC - vC * H); \
-                    float tv = rmax(rmax(rmax(0.0f, len3(vA)), len3(vB)), len3(vC)); \
-                    float reach = (CR + (tv + vmax) * H) + CLIP_DEPTH; \
-                    V3 lo = v3(rmin(rmin(pA.x, pB.x), pC.x) - reach, rmin(rmin(pA.y, pB.y), pC.y) - reach, rmin(rmin(pA.z, pB.z), pC.z) - reach); \
-                    V3 hi = v3(rmax(rmax(pA.x, pB.x), pC.x) + reach, rmax(rmax(pA.y, pB.y), pC.y) + reach, rmax(rmax(pA.z, pB.z), pC.z) + reach); \
-                    if (ph.x < lo.x || ph.y < lo.y || ph.z < lo.z || ph.x > hi.x || ph.y > hi.y || ph.z > hi.z) break; \
-                    float4 loc = frameLocal(F.p0, F.ra, F.rb, F.rd, F.ok, ph); \
-                    uint key = CLIP_SELF << 20 | rtri; \
-                    float side = 0.0f; \
-                    uint c0 = atomic_load_explicit(&clip[h * 4], memory_order_relaxed); \
-                    uint c1 = atomic_load_explicit(&clip[h * 4 + 1], memory_order_relaxed); \
-                    if (c0 != CLIP_EMPTY && (c0 >> 1) == key) side = (c0 & 1u) != 0u ? 1.0f : -1.0f; \
-                    else if (c1 != CLIP_EMPTY && (c1 >> 1) == key) side = (c1 & 1u) != 0u ? 1.0f : -1.0f; \
-                    bool over = loc.x >= 0.0f && loc.y >= 0.0f && loc.z >= 0.0f; \
-                    bool haveW = false; \
-                    float3 wgt = float3(0); \
-                    if (side != 0.0f) \
-                    { \
-                        haveW = over; \
-                        wgt = float3(loc.x, loc.y, loc.z); \
-                    } \
-                    else \
-                    { \
-                        float4 l0 = frameLocal(B.p0, B.ra, B.rb, B.rd, B.ok, ph - vh * H); \
-                        float e0 = l0.w, e1 = loc.w; \
-                        bool crossed = false; \
-                        if ((e0 > 0.0f && e1 < 0.0f) || (e0 < 0.0f && e1 > 0.0f)) \
-                        { \
-                            float sx = e0 / (e0 - e1); \
-                            float aa = l0.x + (loc.x - l0.x) * sx; \
-                            float bb2 = l0.y + (loc.y - l0.y) * sx; \
-                            float3 cw = float3(aa, bb2, (1.0f - aa) - bb2); \
-                            if (cw.x >= 0.0f && cw.y >= 0.0f && cw.z >= 0.0f) \
-                            { \
-                                crossed = true; \
-                                side = e0 > 0.0f ? 1.0f : -1.0f; \
-                                haveW = true; \
-                                wgt = cw; \
-                            } \
-                        } \
-                        if (!crossed) \
-                        { \
-                            if (over && fabs(loc.w) <= CR) \
-                            { \
-                                side = loc.w < 0.0f ? -1.0f : 1.0f; \
-                                haveW = true; \
-                                wgt = float3(loc.x, loc.y, loc.z); \
-                            } \
-                            else break; \
-                        } \
-                    } \
-                    float dd = side * loc.w; \
-                    if (!(haveW && dd <= CR && dd >= -CLIP_DEPTH)) break; \
-                    uint word = CLIP_SELF << 21 | rtri << 1 | (side > 0.0f ? 1u : 0u); \
-                    uint old = atomic_fetch_min_explicit(&clip[h * 4 + 2], word, memory_order_relaxed); \
-                    atomic_fetch_min_explicit(&clip[h * 4 + 3], max(old, word), memory_order_relaxed); \
-                    tgFlags[F_REC] = 1u; \
-                    float pen = rmin(CR - dd, CR); \
-                    V3 nn = F.n * side; \
-                    uint i = atomic_fetch_add_explicit(&tgCount[2], 1u, memory_order_relaxed); \
-                    TOUCHK(h, 4u); \
-                    if (i < H2CAP) \
-                    { \
-                        hitBuf[i * HITW] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z)); \
-                        hitBuf[i * HITW + 1] = float4(wgt.x, wgt.y, wgt.z, pen); \
-                        hitBuf[i * HITW + 2] = f4(nn, 0); \
-                        atomic_fetch_min_explicit(&hmap[h], i * 4u, memory_order_relaxed); \
-                        atomic_fetch_min_explicit(&hmap[tn.x], i * 4u + 1u, memory_order_relaxed); \
-                        atomic_fetch_min_explicit(&hmap[tn.y], i * 4u + 2u, memory_order_relaxed); \
-                        atomic_fetch_min_explicit(&hmap[tn.z], i * 4u + 3u, memory_order_relaxed); \
-                    } \
-            } while (false)
         if (isTri && !SKIP(5))
         {
             // (No node holds a side unless the last step had a contact: the held byte is read
@@ -1696,11 +1586,9 @@ kernel void floorFrame(
                     bool cand = ROW_FIRST; \
                     ROW_MORE \
                     if (!cand) break; \
-                    if (pend == NONE) { pend = h; break; } \
                     uint ci = atomic_fetch_add_explicit(&tgCount[1], 1u, memory_order_relaxed); \
                     if (ci < CAND_CAP) candBuf[ci] = tri << 16 | h; \
                 } while (false)
-                uint pend = NONE;
 #if ROW4
                 // (Four points a load, each by its own name: a vector indexed by a variable
                 // is a store and a load.)
@@ -1723,7 +1611,6 @@ kernel void floorFrame(
                     ROW_ONE(cur[kk1 & 3u]);
                 }
 #endif
-                if (pend != NONE && !SKIP(15)) SELF_RULE(tri, pend, t0, t1, t2);
             }
         }
 #endif
@@ -1738,9 +1625,102 @@ kernel void floorFrame(
             if (lid == 0 && ncand > CAND_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 4u;
             for (uint kc = lid; kc < min(ncand, (uint)CAND_CAP); kc += LANES)
             {
+                // The full rule (explicit_beams.rs collision_pass, clip_hit).
                 const uint cw = candBuf[kc];
-                const uint hdr = pairs[(cw >> 16) * PROW + 1u];
-                SELF_RULE(cw >> 16, cw & 0xFFFFu, hdr & 1023u, (hdr >> 10) & 1023u, (hdr >> 20) & 1023u);
+                const uint tri = cw >> 16, h = cw & 0xFFFFu;
+                const uint hdr = pairs[tri * PROW + 1u];
+                const uint t0 = hdr & 1023u, t1 = (hdr >> 10) & 1023u, t2 = (hdr >> 20) & 1023u;
+                V3 ph = v3(0, 0, 0) + TGP(h);
+                V3 vh = TGV(h);
+                    const uint4 tn = uint4(t0, t1, t2, 0u);
+                    const V3 pA = v3(0, 0, 0) + TGP(t0), pB = v3(0, 0, 0) + TGP(t1), pC = v3(0, 0, 0) + TGP(t2);
+                    const V3 vA = TGV(t0), vB = TGV(t1), vC = TGV(t2);
+                    Frame F = triFrame(pA, pB, pC);
+                    Frame B = triFrame(pA - vA * H, pB - vB * H, pC - vC * H);
+                    float tv = rmax(rmax(rmax(0.0f, len3(vA)), len3(vB)), len3(vC));
+                    float reach = (CR + (tv + vmax) * H) + CLIP_DEPTH;
+                    V3 lo = v3(rmin(rmin(pA.x, pB.x), pC.x) - reach, rmin(rmin(pA.y, pB.y), pC.y) - reach, rmin(rmin(pA.z, pB.z), pC.z) - reach);
+                    V3 hi = v3(rmax(rmax(pA.x, pB.x), pC.x) + reach, rmax(rmax(pA.y, pB.y), pC.y) + reach, rmax(rmax(pA.z, pB.z), pC.z) + reach);
+                    if (ph.x < lo.x || ph.y < lo.y || ph.z < lo.z || ph.x > hi.x || ph.y > hi.y || ph.z > hi.z) continue;
+                    float4 loc = frameLocal(F.p0, F.ra, F.rb, F.rd, F.ok, ph);
+                    uint key = CLIP_SELF << 20 | tri;
+                    float side = 0.0f;
+                    uint c0 = atomic_load_explicit(&clip[h * 4], memory_order_relaxed);
+                    uint c1 = atomic_load_explicit(&clip[h * 4 + 1], memory_order_relaxed);
+                    if (c0 != CLIP_EMPTY && (c0 >> 1) == key) side = (c0 & 1u) != 0u ? 1.0f : -1.0f;
+                    else if (c1 != CLIP_EMPTY && (c1 >> 1) == key) side = (c1 & 1u) != 0u ? 1.0f : -1.0f;
+                    bool over = loc.x >= 0.0f && loc.y >= 0.0f && loc.z >= 0.0f;
+                    bool haveW = false;
+                    float3 wgt = float3(0);
+                    if (side != 0.0f)
+                    {
+                        haveW = over;
+                        wgt = float3(loc.x, loc.y, loc.z);
+                    }
+                    else
+                    {
+                        float4 l0 = frameLocal(B.p0, B.ra, B.rb, B.rd, B.ok, ph - vh * H);
+                        float e0 = l0.w, e1 = loc.w;
+                        bool crossed = false;
+                        if ((e0 > 0.0f && e1 < 0.0f) || (e0 < 0.0f && e1 > 0.0f))
+                        {
+                            float sx = e0 / (e0 - e1);
+                            float aa = l0.x + (loc.x - l0.x) * sx;
+                            float bb2 = l0.y + (loc.y - l0.y) * sx;
+                            float3 cw = float3(aa, bb2, (1.0f - aa) - bb2);
+                            if (cw.x >= 0.0f && cw.y >= 0.0f && cw.z >= 0.0f)
+                            {
+                                crossed = true;
+                                side = e0 > 0.0f ? 1.0f : -1.0f;
+                                haveW = true;
+                                wgt = cw;
+                            }
+                        }
+                        if (!crossed)
+                        {
+                            if (over && fabs(loc.w) <= CR)
+                            {
+                                side = loc.w < 0.0f ? -1.0f : 1.0f;
+                                haveW = true;
+                                wgt = float3(loc.x, loc.y, loc.z);
+                            }
+                            else continue;
+                        }
+                    }
+                    float dd = side * loc.w;
+                    if (!(haveW && dd <= CR && dd >= -CLIP_DEPTH)) continue;
+                    uint word = CLIP_SELF << 21 | tri << 1 | (side > 0.0f ? 1u : 0u);
+                    uint old = atomic_fetch_min_explicit(&clip[h * 4 + 2], word, memory_order_relaxed);
+                    atomic_fetch_min_explicit(&clip[h * 4 + 3], max(old, word), memory_order_relaxed);
+                    tgFlags[F_REC] = 1u;
+                    float pen = rmin(CR - dd, CR);
+                    V3 nn = F.n * side;
+                    uint i = atomic_fetch_add_explicit(&tgCount[2], 1u, memory_order_relaxed);
+#if HITTG
+                    TOUCHK(h, 5u); TOUCHK(tn.x, 1u); TOUCHK(tn.y, 1u); TOUCHK(tn.z, 1u);
+                    if (i < H2CAP)
+                    {
+                        hitBuf[i * HITW] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
+                        hitBuf[i * HITW + 1] = float4(wgt.x, wgt.y, wgt.z, pen);
+                        hitBuf[i * HITW + 2] = f4(nn, 0);
+                        atomic_fetch_min_explicit(&hmap[h], i * 4u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&hmap[tn.x], i * 4u + 1u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&hmap[tn.y], i * 4u + 2u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&hmap[tn.z], i * 4u + 3u, memory_order_relaxed);
+                    }
+#else
+                    TOUCHK(h, 13u); TOUCHK(tn.x, 9u); TOUCHK(tn.y, 9u); TOUCHK(tn.z, 9u);
+                    if (i < HIT_CAP)
+                    {
+                        hitBuf[i * HITW] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
+                        hitBuf[i * HITW + 1] = float4(wgt.x, wgt.y, wgt.z, pen);
+                        hitBuf[i * HITW + 2] = f4(nn, 0);
+                    }
+                    atomic_fetch_add_explicit(&split[h], 1u, memory_order_relaxed);
+                    atomic_fetch_add_explicit(&split[tn.x], 1u, memory_order_relaxed);
+                    atomic_fetch_add_explicit(&split[tn.y], 1u, memory_order_relaxed);
+                    atomic_fetch_add_explicit(&split[tn.z], 1u, memory_order_relaxed);
+#endif
             }
             BAR;
         }
@@ -1768,7 +1748,7 @@ kernel void floorFrame(
             float hres = 0.0f;
             if (mySlot != NONE)
             {
-                const uint o = mySlot * 17u;
+                const uint o = mySlot * 11u;
                 tgG[o] = F0.x; tgG[o + 1u] = F0.y; tgG[o + 2u] = F0.z;
 #if HAS_IMMOVABLE
                 tgG[o + 3u] = (as_type<uint>(nodeStatic[ni].z) & NODE_IMMOVABLE) != 0u ? 0.0f : massN;
@@ -1777,8 +1757,6 @@ kernel void floorFrame(
 #endif
                 tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
                 tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
-                tgG[o + 11u] = 0.0f; tgG[o + 12u] = 0.0f; tgG[o + 13u] = 0.0f;
-                tgG[o + 14u] = 0.0f; tgG[o + 15u] = 0.0f; tgG[o + 16u] = 0.0f;
             }
             if (lid < nh)
             {
@@ -1795,11 +1773,11 @@ kernel void floorFrame(
                 if (nhits > H2CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 2u;
             }
             BAR;
-            #define SLF(s_) v3(tgG[(s_) * 17u], tgG[(s_) * 17u + 1u], tgG[(s_) * 17u + 2u])
-            #define SLM(s_) tgG[(s_) * 17u + 3u]
-            #define SLKP(s_) ((TGPTR(atomic_uint))&tgG[(s_) * 17u + 4u])
+            #define SLF(s_) v3(tgG[(s_) * 11u], tgG[(s_) * 11u + 1u], tgG[(s_) * 11u + 2u])
+            #define SLM(s_) tgG[(s_) * 11u + 3u]
+            #define SLKP(s_) ((TGPTR(atomic_uint))&tgG[(s_) * 11u + 4u])
             #define SLK(s_) atomic_load_explicit(SLKP(s_), memory_order_relaxed)
-            #define SLS(s_, q_) ((TGPTR(atomic_int))&tgG[(s_) * 17u + 5u + (q_)])
+            #define SLS(s_, q_) ((TGPTR(atomic_int))&tgG[(s_) * 11u + 5u + (q_)])
             #define SLL(s_, q_) atomic_load_explicit(SLS(s_, q_), memory_order_relaxed)
             #define SACC(f_, s_) (SLM(s_) == 0.0f ? v3(0, 0, 0) : (f_) / SLM(s_))
             #define SIM(s_, k_) (SLM(s_) == 0.0f ? 0.0f : float(k_) / SLM(s_))
@@ -1838,11 +1816,9 @@ kernel void floorFrame(
                     {
                         float q = delta * m;
                         V3 dh = n * (q * SIM(sh, 1u));
-                        // (The position steps and, below, the hits' totals go to the nodes' slots:
-                        // each node's own lane takes them into registers after the passes.)
-                        atomic_fetch_add_explicit(SLS(sh, 9u), toFixedShift(dh.x), memory_order_relaxed);
-                        atomic_fetch_add_explicit(SLS(sh, 10u), toFixedShift(dh.y), memory_order_relaxed);
-                        atomic_fetch_add_explicit(SLS(sh, 11u), toFixedShift(dh.z), memory_order_relaxed);
+                        TOUCHK(hn, 2u);
+                        for (uint a = 0; a < 3; a++) atomic_fetch_add_explicit((device atomic_int*)&shift[hn * 3 + a], toFixedShift(a == 0 ? dh.x : (a == 1 ? dh.y : dh.z)), memory_order_relaxed);
+                        uint ti[3] = {i1, i2, i0};
                         uint tsl[3] = {s1, s2, s0};
                         float tw[3] = {alpha, beta, gamma};
                         for (uint e = 0; e < 3; e++)
@@ -1850,9 +1826,8 @@ kernel void floorFrame(
                             if (tw[e] > 0.0f)
                             {
                                 V3 dt = n * -(tw[e] * (q * SIM(tsl[e], 1u)));
-                                atomic_fetch_add_explicit(SLS(tsl[e], 9u), toFixedShift(dt.x), memory_order_relaxed);
-                                atomic_fetch_add_explicit(SLS(tsl[e], 10u), toFixedShift(dt.y), memory_order_relaxed);
-                                atomic_fetch_add_explicit(SLS(tsl[e], 11u), toFixedShift(dt.z), memory_order_relaxed);
+                                TOUCHK(ti[e], 2u);
+                                for (uint a = 0; a < 3; a++) atomic_fetch_add_explicit((device atomic_int*)&shift[ti[e] * 3 + a], toFixedShift(a == 0 ? dt.x : (a == 1 ? dt.y : dt.z)), memory_order_relaxed);
                             }
                         }
                         tgFlags[F_SHIFT] = 1u;
@@ -1936,22 +1911,164 @@ kernel void floorFrame(
                     }
                 }
                 V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
-                uint ss[4] = {sh, s1, s2, s0};
+                uint ns[4] = {hn, i1, i2, i0};
                 for (uint e = 0; e < 4; e++)
                 {
-                    atomic_fetch_add_explicit(SLS(ss[e], 6u), toFixed(fs[e].x), memory_order_relaxed);
-                    atomic_fetch_add_explicit(SLS(ss[e], 7u), toFixed(fs[e].y), memory_order_relaxed);
-                    atomic_fetch_add_explicit(SLS(ss[e], 8u), toFixed(fs[e].z), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3], toFixed(fs[e].x), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3 + 1], toFixed(fs[e].y), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3 + 2], toFixed(fs[e].z), memory_order_relaxed);
                 }
             }
             BAR;
-            // Each hit node's own lane takes its totals: into registers, for its next node
-            // pass (no device word is written for a body's own hits).
-            if (mySlot != NONE)
+        }
+#else
+        if (nhits != 0u && !SKIP(8))
+        {
+            // ---- the step's hits: the forces published, then the two-body rule's passes ----
+            if (isNode) { fPub[ni * 3] = F0.x; fPub[ni * 3 + 1] = F0.y; fPub[ni * 3 + 2] = F0.z; }
+            if (lid == 0)
             {
-                aOx += SLL(mySlot, 6u); aOy += SLL(mySlot, 7u); aOz += SLL(mySlot, 8u);
-                sOx += SLL(mySlot, 9u); sOy += SLL(mySlot, 10u); sOz += SLL(mySlot, 11u);
+                tgFlags[F_HITS] = 1u;
+                tgFlags[F_MOST] = max(tgFlags[F_MOST], nhits);
+                if (nhits > HIT_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 2u;
             }
+            BAR;
+            const uint nh = min(nhits, (uint)HIT_CAP);
+            #define NP(i) TGP(i)
+            #define NV(i) TGV(i)
+            #define NF(i) (v3(fPub[(i) * 3], fPub[(i) * 3 + 1], fPub[(i) * 3 + 2]) + v3(0, 0, 0))
+            #define NM(i) nodeStatic[i].x
+            #define NIMM(i) ((as_type<uint>(nodeStatic[i].z) & NODE_IMMOVABLE) != 0u)
+            #define ACC(f, i) (NIMM(i) ? v3(0, 0, 0) : (f) / NM(i))
+            #define IM(i, kk_) (NIMM(i) ? 0.0f : float(kk_) / NM(i))
+            #define SPL(i) atomic_load_explicit(&split[i], memory_order_relaxed)
+            for (uint k = lid; k < nh; k += LANES)
+            {
+                uint4 id = as_type<uint4>(hitBuf[k * HITW]);
+                float4 wp = hitBuf[k * HITW + 1];
+                V3 n = v3(hitBuf[k * HITW + 2]);
+                uint hn = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
+                float alpha = wp.x, beta = wp.y, gamma = wp.z, depth = wp.w;
+                V3 v = NV(hn) - ((NV(i1) * alpha + NV(i2) * beta) + NV(i0) * gamma);
+                float imh = IM(hn, SPL(hn));
+                float imt = tbInvMass(IM(i1, SPL(i1)), IM(i2, SPL(i2)), IM(i0, SPL(i0)), alpha, beta, gamma);
+                float inv = imh + imt;
+                float m = inv > 0.0f ? 1.0f / inv : 0.0f;
+                V3 at = (ACC(NF(i1), i1) * alpha + ACC(NF(i2), i2) * beta) + ACC(NF(i0), i0) * gamma;
+                V3 fh = (ACC(NF(hn), hn) - at) * m;
+                float budget;
+                V3 f = contactResponse(fh, v, m, n, BOXS, depth, nodeStatic[hn].y, budget);
+                if (!isZero3(f))
+                {
+                    float delta = shiftDepth(depth, budget, dot3(fh, n));
+                    if (delta > 0.0f)
+                    {
+                        float q = delta * m;
+                        V3 dh = n * (q * IM(hn, 1u));
+                        TOUCHK(hn, 2u);
+                        for (uint a = 0; a < 3; a++) atomic_fetch_add_explicit((device atomic_int*)&shift[hn * 3 + a], toFixedShift(a == 0 ? dh.x : (a == 1 ? dh.y : dh.z)), memory_order_relaxed);
+                        uint ti[3] = {i1, i2, i0};
+                        float tw[3] = {alpha, beta, gamma};
+                        for (uint e = 0; e < 3; e++)
+                        {
+                            if (tw[e] > 0.0f)
+                            {
+                                V3 dt = n * -(tw[e] * (q * IM(ti[e], 1u)));
+                                TOUCHK(ti[e], 2u);
+                                for (uint a = 0; a < 3; a++) atomic_fetch_add_explicit((device atomic_int*)&shift[ti[e] * 3 + a], toFixedShift(a == 0 ? dt.x : (a == 1 ? dt.y : dt.z)), memory_order_relaxed);
+                            }
+                        }
+                        tgFlags[F_SHIFT] = 1u;
+                    }
+                }
+                hitBuf[k * HITW + 3] = f4(f, 0);
+                V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
+                uint ns[4] = {hn, i1, i2, i0};
+                for (uint e = 0; e < 4; e++)
+                {
+                    atomic_fetch_add_explicit(&stage[ns[e] * 6], toFixed(fs[e].x), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&stage[ns[e] * 6 + 1], toFixed(fs[e].y), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&stage[ns[e] * 6 + 2], toFixed(fs[e].z), memory_order_relaxed);
+                }
+            }
+            BAR;
+            #define NOW1(i) (v3(fPub[(i) * 3], fPub[(i) * 3 + 1], fPub[(i) * 3 + 2]) + v3(float(atomic_load_explicit(&stage[(i) * 6], memory_order_relaxed)), float(atomic_load_explicit(&stage[(i) * 6 + 1], memory_order_relaxed)), float(atomic_load_explicit(&stage[(i) * 6 + 2], memory_order_relaxed))) * (1.0f / 32.0f))
+            for (uint k = lid; k < nh; k += LANES)
+            {
+                uint4 id = as_type<uint4>(hitBuf[k * HITW]);
+                float4 wp = hitBuf[k * HITW + 1];
+                V3 n = v3(hitBuf[k * HITW + 2]);
+                uint hn = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
+                float alpha = wp.x, beta = wp.y, gamma = wp.z;
+                V3 v = NV(hn) - ((NV(i1) * alpha + NV(i2) * beta) + NV(i0) * gamma);
+                V3 at = (ACC(NOW1(i1), i1) * alpha + ACC(NOW1(i2), i2) * beta) + ACC(NOW1(i0), i0) * gamma;
+                float a = dot3(ACC(NOW1(hn), hn) - at, n);
+                float vn = dot3(v, n);
+                float x = vn + rmax(vn, 0.0f);
+                float r = 0.0f;
+                if (vn < 0.0f && a * H + x < 0.0f)
+                {
+                    float inv = IM(hn, SPL(hn)) + tbInvMass(IM(i1, SPL(i1)), IM(i2, SPL(i2)), IM(i0, SPL(i0)), alpha, beta, gamma);
+                    if (inv > 0.0f)
+                    {
+                        float m = 1.0f / inv;
+                        float rr = -(a * m) - (x * m) / H;
+                        if (rr > 0.0f) r = rr;
+                    }
+                }
+                float4 h3 = hitBuf[k * HITW + 3];
+                hitBuf[k * HITW + 3] = float4(h3.x, h3.y, h3.z, r);
+                if (r > 0.0f)
+                {
+                    V3 f = n * r;
+                    V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
+                    uint ns[4] = {hn, i1, i2, i0};
+                    for (uint e = 0; e < 4; e++)
+                    {
+                        atomic_fetch_add_explicit(&stage[ns[e] * 6 + 3], toFixed(fs[e].x), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&stage[ns[e] * 6 + 4], toFixed(fs[e].y), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&stage[ns[e] * 6 + 5], toFixed(fs[e].z), memory_order_relaxed);
+                    }
+                }
+            }
+            BAR;
+            #define SUM2(i, a) (atomic_load_explicit(&stage[(i) * 6 + (a)], memory_order_relaxed) + atomic_load_explicit(&stage[(i) * 6 + 3 + (a)], memory_order_relaxed))
+            #define NOW2(i) (v3(fPub[(i) * 3], fPub[(i) * 3 + 1], fPub[(i) * 3 + 2]) + v3(float(SUM2(i, 0)), float(SUM2(i, 1)), float(SUM2(i, 2))) * (1.0f / 32.0f))
+            for (uint k = lid; k < nh; k += LANES)
+            {
+                uint4 id = as_type<uint4>(hitBuf[k * HITW]);
+                float4 wp = hitBuf[k * HITW + 1];
+                V3 n = v3(hitBuf[k * HITW + 2]);
+                float4 h3 = hitBuf[k * HITW + 3];
+                uint hn = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
+                float alpha = wp.x, beta = wp.y, gamma = wp.z;
+                V3 t = v3(h3);
+                if (h3.w > 0.0f) t = t + n * h3.w;
+                V3 f = t;
+                if (!isZero3(t))
+                {
+                    V3 v = NV(hn) - ((NV(i1) * alpha + NV(i2) * beta) + NV(i0) * gamma);
+                    V3 a = ACC(NOW2(hn), hn) - ((ACC(NOW2(i1), i1) * alpha + ACC(NOW2(i2), i2) * beta) + ACC(NOW2(i0), i0) * gamma);
+                    float inv = IM(hn, 1u) + tbInvMass(IM(i1, 1u), IM(i2, 1u), IM(i0, 1u), alpha, beta, gamma);
+                    V3 aRest = a - t * inv;
+                    float aa = dot3(t, (v + v) + aRest * H);
+                    float bb = (H * dot3(t, t)) * inv;
+                    if (aa + bb > 0.0f && bb > 0.0f)
+                    {
+                        float sc = aa < 0.0f ? rmin(-aa / bb, 1.0f) : 0.0f;
+                        f = t + t * -(1.0f - sc);
+                    }
+                }
+                V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
+                uint ns[4] = {hn, i1, i2, i0};
+                for (uint e = 0; e < 4; e++)
+                {
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3], toFixed(fs[e].x), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3 + 1], toFixed(fs[e].y), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3 + 2], toFixed(fs[e].z), memory_order_relaxed);
+                }
+            }
+            BAR;
         }
 #endif
 #endif
@@ -2005,21 +2122,6 @@ kernel void floorFrame(
     // ---- write back ----
     if (isNode)
     {
-        // (What this lane still holds for its node goes to the words the next dispatch reads.)
-        if ((aOx | aOy | aOz) != 0)
-        {
-            atomic_fetch_add_explicit(&acc[ni * 3], aOx, memory_order_relaxed);
-            atomic_fetch_add_explicit(&acc[ni * 3 + 1], aOy, memory_order_relaxed);
-            atomic_fetch_add_explicit(&acc[ni * 3 + 2], aOz, memory_order_relaxed);
-            TOUCHK(ni, 1u);
-        }
-        if ((sOx | sOy | sOz) != 0)
-        {
-            atomic_fetch_add_explicit((device atomic_int*)&shift[ni * 3], sOx, memory_order_relaxed);
-            atomic_fetch_add_explicit((device atomic_int*)&shift[ni * 3 + 1], sOy, memory_order_relaxed);
-            atomic_fetch_add_explicit((device atomic_int*)&shift[ni * 3 + 2], sOz, memory_order_relaxed);
-            TOUCHK(ni, 2u);
-        }
         nodeState[ni * 3] = f4(Pown, 0);
         nodeState[ni * 3 + 1] = f4(Vown, 0);
         nodeState[ni * 3 + 2] = f4(F0, 0);

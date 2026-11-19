@@ -100,8 +100,75 @@ fn data_test(gpu: &Gpu) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Does a workgroup waiting at the cross-group barrier (its lane 0 loading the counter in
+/// a loop) slow the workgroup that is still working? Group 0's first warp does 40
+/// scattered device atomic adds a lane a round (a hit pass's shape); group 1 has nothing to
+/// do and waits. Against group 0 alone, and against a waiter that does some arithmetic
+/// between its loads (`p.work` bit 1: 64 multiply-adds a poll).
+const SPIN: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+struct P { uint rounds; uint groups; uint cap; uint work; };
+#define BARR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
+kernel void xs(constant P& p [[buffer(0)]], device atomic_uint* cnt [[buffer(1)]], device atomic_uint* dat [[buffer(2)]], device float* out [[buffer(3)]],
+               uint lid [[thread_position_in_threadgroup]], uint grp [[threadgroup_position_in_grid]])
+{
+    uint xr = 0u;
+    float idle = float(lid) + 1.0f;
+    for (uint r = 0; r < p.rounds; r++)
+    {
+        if (grp == 0u && lid < 32u && (p.work & 1u) != 0u)
+            for (uint k = 0; k < 40u; k++) atomic_fetch_add_explicit(&dat[(lid * 977u + k * 131u + r * 7u) & 4095u], 1u, memory_order_relaxed);
+        BARR;
+        if (lid == 0u && p.groups > 1u)
+        {
+            xr++;
+            atomic_fetch_add_explicit(&cnt[0], 1u, memory_order_relaxed);
+            uint i = 0u;
+            for (; i < p.cap; i++)
+            {
+                if (atomic_load_explicit(&cnt[0], memory_order_relaxed) >= p.groups * xr) break;
+                if ((p.work & 2u) != 0u) for (uint d = 0; d < 64u; d++) idle = idle * 1.000001f + 0.25f;
+            }
+            if (i >= p.cap) atomic_fetch_add_explicit(&cnt[2], 1u, memory_order_relaxed);
+        }
+        BARR;
+    }
+    out[grp * 1024u + lid] = idle;
+}
+"#;
+
+fn spin_test(gpu: &Gpu) -> anyhow::Result<()> {
+    let pso = gpu.pipeline(SPIN, "xs", true)?;
+    if std::env::args().any(|a| a == "--compile-only") {
+        println!("compiled");
+        return Ok(());
+    }
+    let cnt = gpu.zeros(64);
+    let dat = gpu.zeros(4096 * 4);
+    let out = gpu.zeros(64 * 1024 * 4);
+    println!("a working workgroup beside a waiting one (µs a round, medians of 5; 2,000 rounds)");
+    println!("groups | group 0's work | the waiter | µs a round | barriers missed");
+    for (groups, work, name, waiter) in [(1u32, 0u32, "none", "-"), (1, 1, "40 scattered atomic adds a lane, one warp", "-"), (2, 0, "none", "loads the counter"), (2, 1, "40 scattered atomic adds a lane, one warp", "loads the counter"), (2, 3, "40 scattered atomic adds a lane, one warp", "64 multiply-adds a load"), (2, 2, "none", "64 multiply-adds a load")] {
+        let mut us = Vec::new();
+        let mut missed = 0;
+        for _ in 0..5 {
+            write(&cnt, &[0u32; 16]);
+            let p = gpu.buffer(&[2000u32, groups, 1 << 20, work]);
+            us.push(gpu.run(&pso, &[&p, &cnt, &dat, &out], groups as u64, 1024) * 1000.0 / 2000.0);
+            missed += read::<u32>(&cnt, 4)[2];
+        }
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("{groups:6} | {name:42} | {waiter:24} | {:8.3} | {missed}", us[2]);
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let gpu = Gpu::new()?;
+    if std::env::args().any(|a| a == "--spin") {
+        return spin_test(&gpu);
+    }
     if std::env::args().any(|a| a == "--data") {
         return data_test(&gpu);
     }
