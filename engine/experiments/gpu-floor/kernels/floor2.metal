@@ -377,14 +377,17 @@ kernel void floorFrame(
     const bool isTri = tri != NONE;
     const uint ni = isNode ? nd : 0u;
     V3 F0 = v3(nodeState[ni * 3 + 2]);
+    // (The lane's own node's position and velocity stay in registers too: its own reads
+    // of them were four threadgroup loads a substep.)
+    V3 Pown = v3(0, 0, 0), Vown = v3(0, 0, 0);
     // (The node's mass in a register: three device loads a step otherwise. Friction and the
     // flags are read where a contact or an immovable node needs them.)
     const float massN = nodeStatic[ni].x;
     if (isNode)
     {
         float4 p = nodeState[ni * 3], v = nodeState[ni * 3 + 1];
-        SETP(ni, v3(p));
-        SETV(ni, v3(v));
+        { Pown = (v3(p)); SETP(ni, Pown); }
+        { Vown = (v3(v)); SETV(ni, Vown); }
         tgHeld[ni] = (atomic_load_explicit(&clip[ni * 4], memory_order_relaxed) != CLIP_EMPTY) ? 1 : 0;
     }
     // The slots' hot words: from the image the last dispatch left (six streamed loads), or
@@ -505,7 +508,7 @@ kernel void floorFrame(
         // ---- R0: the proxies placed (explicit_rigid.rs begin_step) ----
         if (isNode)
         {
-            V3 x = v3(0, 0, 0) + TGP(ni);
+            V3 x = v3(0, 0, 0) + Pown;
             atomic_fetch_min_explicit(&tgX[0], ordF(x.x), memory_order_relaxed);
             atomic_fetch_min_explicit(&tgX[1], ordF(x.y), memory_order_relaxed);
             atomic_fetch_min_explicit(&tgX[2], ordF(x.z), memory_order_relaxed);
@@ -598,7 +601,7 @@ kernel void floorFrame(
 #else
             const uint nflags = 0u;
 #endif
-            V3 P0 = TGP(ni), V0 = TGV(ni);
+            V3 P0 = Pown, V0 = Vown;
             if (fRoll)
             {
                 uint m2 = atomic_load_explicit(&clip[ni * 4 + 2], memory_order_relaxed);
@@ -666,8 +669,8 @@ kernel void floorFrame(
                     }
                 }
                 else if (fShift) { shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0; }
-                SETP(ni, P0);
-                SETV(ni, V0);
+                { Pown = (P0); SETP(ni, Pown); }
+                { Vown = (V0); SETV(ni, Vown); }
             }
         }
         BAR;
@@ -752,7 +755,7 @@ kernel void floorFrame(
             BAR;
             if (isNode && inC)
             {
-                V3 P0 = TGP(ni), V0 = TGV(ni);
+                V3 P0 = Pown, V0 = Vown;
                 F0 = v3(fPub[ni * 3], fPub[ni * 3 + 1], fPub[ni * 3 + 2]);
                 const float lift = liftBuf[ni];
 #if HAS_IMMOVABLE
@@ -768,8 +771,8 @@ kernel void floorFrame(
                     if (lift != 0.0f) P0.y = P0.y + lift;
                 }
                 if (fShift) { shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0; }
-                SETP(ni, P0);
-                SETV(ni, V0);
+                { Pown = (P0); SETP(ni, Pown); }
+                { Vown = (V0); SETV(ni, Vown); }
             }
             if (lid == 3) atomic_store_explicit(&tgCount[3], 0u, memory_order_relaxed);
         }
@@ -863,7 +866,7 @@ kernel void floorFrame(
         V3 Pn = v3(0, 0, 0), Vn = v3(0, 0, 0);
         if (isNode && !SKIP(2))
         {
-            V3 Ps = TGP(ni);
+            V3 Ps = Pown;
             V3 c = v3(0, 0, 0);
             for (uint k = 0; k < MAXENT; k += 4u)
             {
@@ -895,7 +898,7 @@ kernel void floorFrame(
                     c = c + ((e & (1u << 30)) != 0u ? -vv : vv);
                 }
             }
-            Pn = Ps; Vn = TGV(ni);
+            Pn = Ps; Vn = Vown;
 #if HAS_IMMOVABLE
             if ((as_type<uint>(nodeStatic[ni].z) & NODE_IMMOVABLE) == 0u)
 #endif
@@ -910,8 +913,8 @@ kernel void floorFrame(
         // ---- C2: published ----
         if (isNode && !SKIP(2))
         {
-            SETP(ni, Pn);
-            SETV(ni, Vn);
+            { Pown = (Pn); SETP(ni, Pown); }
+            { Vown = (Vn); SETV(ni, Vown); }
         }
         BAR;
 
@@ -1087,7 +1090,7 @@ kernel void floorFrame(
         if (isNode && !SKIP(6))
         {
             float4 pb = pBuild[ni];
-            V3 rel = (TGP(ni) - v3(pb)) - (TGP(REFNODE) - v3(tgPB[0], tgPB[1], tgPB[2]));
+            V3 rel = (Pown - v3(pb)) - (TGP(REFNODE) - v3(tgPB[0], tgPB[1], tgPB[2]));
             float D = fmax(fmax(fabs(rel.x), fabs(rel.y)), fabs(rel.z));
             float need = ((CR + 2.0f * vmax * H) + CLIP_DEPTH) + 2.0f * D + LIST_EPS;
             if (!(need <= LIST_REACH)) tgFlags[F_REBUILD] = 1u;
@@ -1157,7 +1160,7 @@ kernel void floorFrame(
                 cluBox[lid * 2u] = f4(lo, 0);
                 cluBox[lid * 2u + 1u] = f4(hi, 0);
             }
-            if (isNode) pBuild[ni] = f4(TGP(ni), 0);
+            if (isNode) pBuild[ni] = f4(Pown, 0);
             if (lid == 0) { V3 pr = TGP(REFNODE); tgPB[0] = pr.x; tgPB[1] = pr.y; tgPB[2] = pr.z; }
             BAR;
             if (isTri)
@@ -1203,7 +1206,7 @@ kernel void floorFrame(
         // ---- S4: the beam pass gathered per node; the triangles' listed pairs ----
         if (isNode && !SKIP(4))
         {
-            V3 Ps = TGP(ni);
+            V3 Ps = Pown;
             V3 f = v3(0.0f, massN * GRAVITY, 0.0f);
             // (A broken beam's scalar is zero: adding ±0 changes no bit of a sum that began at
             // +0 or at the weight, so it is the reference's skipped add.)
@@ -1253,6 +1256,9 @@ kernel void floorFrame(
 #if COLLIDE
         if (isTri && !SKIP(5))
         {
+            // (No node holds a side unless the last step had a contact: the held byte is read
+            // only then.)
+            const bool anyHeld = tgFlags[F_HELD] != 0u;
             // (The row's first load: its count, its triangle's nodes, its first two pairs.)
             device const uint4* row4 = (device const uint4*)(pairs + tri * PROW);
             uint4 cur = row4[0];
@@ -1281,7 +1287,7 @@ kernel void floorFrame(
                     V3 vh = TGV(h);
                     float d1 = fok ? dot3(frd, ph - f0) : 0.0f;
                     float d0 = bok ? dot3(brd, (ph - vh * H) - b0) : 0.0f;
-                    bool cand = tgHeld[h] != 0 || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
+                    bool cand = (anyHeld && tgHeld[h] != 0) || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
                     if (!cand) continue;
                     // A pair that may be a contact goes on the step's list: the full rule runs
                     // a lane a pair after the barrier (a warp pays for its slowest lane, and
@@ -1581,8 +1587,8 @@ kernel void floorFrame(
         // pass runs between the two barriers; what it left for this body picked up.
         if (isNode)
         {
-            nodeState[ni * 3] = f4(TGP(ni), 0);
-            nodeState[ni * 3 + 1] = f4(TGV(ni), 0);
+            nodeState[ni * 3] = f4(Pown, 0);
+            nodeState[ni * 3 + 1] = f4(Vown, 0);
             nodeState[ni * 3 + 2] = f4(F0, 0);
         }
         XBAR;
@@ -1603,8 +1609,8 @@ kernel void floorFrame(
     // ---- write back ----
     if (isNode)
     {
-        nodeState[ni * 3] = f4(TGP(ni), 0);
-        nodeState[ni * 3 + 1] = f4(TGV(ni), 0);
+        nodeState[ni * 3] = f4(Pown, 0);
+        nodeState[ni * 3 + 1] = f4(Vown, 0);
         nodeState[ni * 3 + 2] = f4(F0, 0);
     }
     hot[lid * 6 + 4] = as_type<float4>(uint4(w0[0], w0[1], w0[2], w0[3]));
