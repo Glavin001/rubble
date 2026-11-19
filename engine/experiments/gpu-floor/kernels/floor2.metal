@@ -400,8 +400,10 @@ kernel void floorFrame(
         for (uint s = 0; s < RS && !SKIP(1); s++)
         {
             uint w = w0[s];
-            if (w == NONE) continue;
-            uint cls = w >> 30;
+            // (The leading slots hold plain beams on every lane: no class to test there.)
+            const bool sp = s < FULL_PLAIN_SLOTS;
+            if (!sp && w == NONE) continue;
+            const uint cls = sp ? C_PLAIN : (w >> 30);
             if (cls == C_AERO) continue;
             if (cls != C_GENERIC)
             {
@@ -527,8 +529,10 @@ kernel void floorFrame(
         for (uint s = 0; s < RS && !SKIP(3); s++)
         {
             uint w = w0[s];
-            if (w == NONE) continue;
-            uint cls = w >> 30;
+            // (The leading slots hold plain beams on every lane: no class to test there.)
+            const bool sp = s < FULL_PLAIN_SLOTS;
+            if (!sp && w == NONE) continue;
+            const uint cls = sp ? C_PLAIN : (w >> 30);
             if (cls == C_AERO)
             {
                 uint a = w & 1023u, b = (w >> 10) & 1023u, c = (w >> 20) & 1023u;
