@@ -1233,6 +1233,21 @@ pub fn fq_msl() -> String {
         out += comment;
         out.push('\n');
     }
+    // One candidate of a walk alone (the surface pass's staged box tests take the kept
+    // candidates one at a time): `ilo..ihi` bounds the candidate loops of an edge's walk
+    // (fqSegTri's six, fqEdgeBeam's three) and of the run inside (fqEdgesInside's edge and
+    // end as one index, fqBeamInside's end). The default is every candidate.
+    let mut patch = |within: &str, from: &str, to: &str| {
+        let at = out.find(within).unwrap_or_else(|| panic!("feature_query.slang: no {within}"));
+        let i = at + out[at..].find(from).unwrap_or_else(|| panic!("feature_query.slang: no {from} in {within}"));
+        out.replace_range(i..i + from.len(), to);
+    };
+    patch("struct FqAcc", "    float lim;", "    float lim; uint ilo; uint ihi;");
+    patch("FqAcc fqAccNew()", "    a.lim = 3.0e38f;", "    a.lim = 3.0e38f; a.ilo = 0u; a.ihi = 6u;");
+    patch("void fqSegTri(", "for (uint i = 0u; i < 6u; i++)", "for (uint i = a.ilo; i < a.ihi; i++)");
+    patch("void fqEdgeBeam(", "for (uint i = 0u; i < 3u; i++)", "for (uint i = a.ilo; i < min(a.ihi, 3u); i++)");
+    patch("void fqEdgesInside(", "        for (uint e = 0u; e < 2u; e++)\n        {", "        for (uint e = 0u; e < 2u; e++)\n        {\n            if (k * 2u + e < a.ilo || k * 2u + e >= a.ihi) continue;");
+    patch("void fqBeamInside(", "    for (uint e = 0u; e < 2u; e++)\n    {", "    for (uint e = 0u; e < 2u; e++)\n    {\n        if (e < a.ilo || e >= a.ihi) continue;");
     out += "inline float3 fqHullVertex(FqShape s, uint i) { return float3(0.0f, 0.0f, 0.0f); }\ninline uint2 fqHullEdge(FqShape s, uint e) { return uint2(0u, 0u); }\ninline float4 fqHullPlane(FqShape s, uint f) { return float4(0.0f, 0.0f, 0.0f, 0.0f); }\ninline bool fqCullsOn() { return true; }\n";
     out
 }
@@ -1507,7 +1522,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     let nss = if st.surface { s.boxes.len() + nsh } else { 0 };
     anyhow::ensure!(nss <= 64 && nt + segs.len() + nn < 65536, "surface contact holds 64 slots");
     anyhow::ensure!(!st.surface || (nss != 0 && st.pair == 0), "surface contact: a world shape, and one body a group");
-    o.surf = take(if st.surface { nss * 32 + 4096 + 512 * 16 + 64 } else { 0 });
+    // (Then the staged box tests: 256 pairs of 200 words, two task lists of 1664 of two.)
+    o.surf = take(if st.surface { nss * 32 + 4096 + 512 * 16 + 64 + 256 * 200 + 2 * 1664 * 2 } else { 0 });
     for b in &s.boxes {
         if !st.surface {
             break;

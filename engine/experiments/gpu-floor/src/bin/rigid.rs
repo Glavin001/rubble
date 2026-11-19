@@ -75,6 +75,10 @@ fn main() -> anyhow::Result<()> {
         if flag("--native") {
             extra += "#define NATIVE 1\n";
         }
+        // --direct: surface contact's box tests a lane a pair (the whole query), not staged.
+        if flag("--direct") {
+            extra += "#define SURF_STAGED 0\n";
+        }
         let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
         if prof.is_some() {
             extra += "#define PER_STEP 1\n";
@@ -94,6 +98,9 @@ fn main() -> anyhow::Result<()> {
             f.cars = 1;
             let mut groups = vec![("S0 node pass, no shapes", 1u32 << 0), ("rigid shapes and proxies", 1 << 13)];
             groups.extend_from_slice(&GROUPS[1..]);
+            if c.surface_contact {
+                groups.extend_from_slice(&[("surface: box, near slots, search", 1 << 21), ("surface: narrow tests", 1 << 22), ("surface: slots, hits applied", 1 << 23)]);
+            }
             profile(&f, 1, fr, time.max(9), &groups);
             return Ok(());
         }

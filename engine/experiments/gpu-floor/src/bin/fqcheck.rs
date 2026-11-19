@@ -10,12 +10,22 @@ use glam::{Quat, Vec3};
 
 const KERNEL: &str = r#"
 static void put3(device uint* o, float3 v) { o[0] = as_type<uint>(v.x); o[1] = as_type<uint>(v.y); o[2] = as_type<uint>(v.z); }
+static void fqCase(device const float* c, device uint* res);
 kernel void fqk(device const float* in [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= n) return;
-    device const float* c = in + gid * 28u;
-    device uint* res = out + gid * 24u;
+    fqCase(in + gid * 28u, out + gid * 24u);
+}
+// One query's latency: every lane of one warp runs the same n cases in turn, REPS times.
+kernel void fqlat(device const float* in [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]],
+    uint lid [[thread_position_in_threadgroup]])
+{
+    for (uint rep = 0u; rep < 16u; rep++)
+        for (uint i = 0u; i < n; i++) fqCase(in + i * 28u, out + (lid * n + i) * 24u);
+}
+static void fqCase(device const float* c, device uint* res)
+{
     FqShape s;
     s.kind = (uint)c[1]; s.hull = 0u; s.nv = 0u; s.nf = 0u; s.ne = 0u; s.moved = 0u; s.off = float3(0.0f); s.b = float3(0.0f);
     const float r = c[2];
@@ -125,6 +135,8 @@ fn main() -> anyhow::Result<()> {
     };
     // Per case 24 words: near, separated, hit, two, w(3), n(3), gap, q(3), w2(3), q2(3), pad.
     let (mut bad, mut hits, mut seps, mut nears) = (0, 0, 0, 0);
+    // (For --latency: the cases by element, shape and outcome.)
+    let mut cats: std::collections::BTreeMap<(u32, bool, &str), Vec<usize>> = Default::default();
     for (i, (kind, shape, x)) in cases.iter().enumerate() {
         let g = &got[i * 24..i * 24 + 24];
         let mut want = [0u32; 24];
@@ -168,6 +180,16 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        let outcome = if want[2] != 0 {
+            if f32::from_bits(want[10]) > engine_softbody::explicit_surface::PIERCE { "hit, apart" } else { "hit, touching or crossing" }
+        } else if want[0] == 0 {
+            "not near"
+        } else if want[1] != 0 {
+            "separated (the cull)"
+        } else {
+            "near, no contact"
+        };
+        cats.entry((*kind, matches!(shape, SurfaceShape::Sphere { .. }), outcome)).or_default().push(i);
         nears += want[0];
         seps += want[1];
         hits += want[2];
@@ -181,5 +203,30 @@ fn main() -> anyhow::Result<()> {
     }
     println!("{n} cases ({nears} near, {seps} separated by the cull, {hits} hits): {bad} differ");
     anyhow::ensure!(bad == 0);
+    if args.iter().any(|a| a == "--latency") {
+        // One query's latency on the GPU by element, shape and outcome: one warp, every
+        // lane the same 32 cases in turn 16 times (the surface pass's narrow stage is a lane
+        // a pair, so a phase costs its slowest query, not their sum).
+        let g = gpu_floor::gpu::Gpu::new()?;
+        let src = format!("#pragma clang fp contract(off)\n#include <metal_stdlib>\nusing namespace metal;\n{}\n{}", gpu_floor::floor::fq_msl(), KERNEL);
+        for (fast, name) in [(false, "strict"), (true, "fast math")] {
+            let src = if fast { src.replace("#pragma clang fp contract(off)\n", "") } else { src.clone() };
+            let pso = g.pipeline(&src, "fqlat", fast)?;
+            println!("latency, {name} (microseconds a query; one warp, 32 cases x 16):");
+            for ((kind, sphere, outcome), ids) in &cats {
+                if ids.len() < 32 {
+                    continue;
+                }
+                let mut inp: Vec<f32> = Vec::new();
+                for &i in &ids[..32] {
+                    inp.extend_from_slice(&input[i * 28..i * 28 + 28]);
+                }
+                let (inb, outb, nb) = (g.buffer(&inp), g.zeros(32 * 32 * 24 * 4), g.buffer(&[32u32]));
+                let mut ms: Vec<f64> = (0..7).map(|_| g.run(&pso, &[&inb, &outb, &nb], 1, 32)).collect();
+                ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!("  {:8} vs {:6} {:28} {:7.2}", ["triangle", "beam", "point"][*kind as usize], if *sphere { "sphere" } else { "box" }, outcome, ms[3] * 1e3 / (32.0 * 16.0));
+            }
+        }
+    }
     Ok(())
 }

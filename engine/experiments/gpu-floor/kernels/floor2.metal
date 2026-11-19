@@ -394,6 +394,35 @@ inline V3 noPositiveWorkBody(V3 c, V3 f, V3 v, float m, V3 n, BodyK bk)
 #define SURF_STATIC 0xFFFFu
 #define SPAIR_CAP 4096u
 #define SHIT_CAP 512u
+// The staged box tests: the pairs (triangles' in the first half, beams' in the second),
+// each its pair word, the least gap (ordered bits), the kept candidates' count and 16
+// kept candidates of three rows (weights and walk order, point, shape point); the tasks
+// (pair, box edge; 12: the element's run inside), two words each.
+#ifndef SURF_STAGED
+#define SURF_STAGED 1
+#endif
+#define HHALF 128u
+#define HPW 200u
+#define KCAP 16u
+#define STASK_CAP 1664u
+// One task's candidates in the walk's order (x_candidates, seg_candidates: a box's edge e,
+// then the run inside).
+inline void surfEdgeWalk(bool tri, FqShape fs, float3 x0, float3 x1, float3 x2, uint e, thread FqAcc& a)
+{
+    if (e < 12u)
+    {
+        float3 e0, e1;
+        fqWalkEdge(fs, e, e0, e1);
+        if (tri) fqSegTri(fs, e0, e1, x0, x1, x2, a);
+        else
+        {
+            float3 d = ssub3(x1, x0);
+            fqEdgeBeam(fs, e0, e1, x0, x1, d, sdot(d, d), a);
+        }
+    }
+    else if (tri) fqEdgesInside(fs, x0, x1, x2, a);
+    else fqBeamInside(fs, x0, x1, a);
+}
 inline FqShape surfShape(device const float4* row)
 {
     FqShape s;
@@ -483,12 +512,17 @@ kernel void floorFrame(
 
 #if SURF
     // ([0..5] the body's box now, [6..7] the slots near it, [8] pairs, [9] hits, [10] hit
-    // nodes, [11] status bits.)
-    TGDECL(atomic_int, tgS, 12);
+    // nodes, [11] status bits, [12..13] staged pairs (triangles', beams'), [14..15] tasks.)
+    TGDECL(atomic_int, tgS, 16);
     #define surfRow ((device float4*)(cb + O_SURF))
     #define surfPair (cb + O_SURF + NSS * SRW * 4u)
     #define surfHit ((device float4*)(cb + O_SURF + NSS * SRW * 4u + SPAIR_CAP))
     #define surfBH ((device atomic_uint*)(cb + O_SURF + NSS * SRW * 4u + SPAIR_CAP + SHIT_CAP * 16u))
+    #define surfHP (cb + O_SURF + NSS * SRW * 4u + SPAIR_CAP + SHIT_CAP * 16u + 64u)
+    #define HPGX(h_) ((device atomic_int*)(surfHP + (h_) * HPW + 1u))
+    #define HPKC(h_) ((device atomic_uint*)(surfHP + (h_) * HPW + 2u))
+    #define HPREC(h_) ((device float4*)(surfHP + (h_) * HPW + 4u))
+    #define surfTask (surfHP + 2u * HHALF * HPW)
     #define SSLOT0 (NSS * 7u)
     #define SSLOT_CAP ((NGS - SSLOT0) / 6u)
 #endif
@@ -508,7 +542,7 @@ kernel void floorFrame(
     // counter.)
     device atomic_uint* const xcnt = (device atomic_uint*)(big + (car & ~1u) * CAR_WORDS + O_MISC + 14);
 #elif RIGID
-    TGDECL(atomic_int, tgX, 16);
+    TGDECL(atomic_int, tgX, 6);
 #endif
     // This lane's roles.
     const uint nd = tab[T_LANE + lid * 4];
@@ -658,7 +692,7 @@ kernel void floorFrame(
     if (lid < 24u) atomic_store_explicit(&tgX[lid], lid >= 12u ? 0 : ((lid % 6u) < 3u ? 0x7FFFFFFF : int(0x80000000)), memory_order_relaxed);
 #endif
 #if SURF
-    if (lid < 12u) atomic_store_explicit(&tgS[lid], lid < 3u ? 0x7FFFFFFF : (lid < 6u ? int(0x80000000) : 0), memory_order_relaxed);
+    if (lid < 16u) atomic_store_explicit(&tgS[lid], lid < 3u ? 0x7FFFFFFF : (lid < 6u ? int(0x80000000) : 0), memory_order_relaxed);
 #endif
     BAR;
 
@@ -999,7 +1033,7 @@ kernel void floorFrame(
         if (lid == 2) atomic_store_explicit(&tgCount[2], 0u, memory_order_relaxed);
         if (lid == 1) atomic_store_explicit(&tgCount[1], 0u, memory_order_relaxed);
 #if SURF
-        if (lid < 11u) atomic_store_explicit(&tgS[lid], lid < 3u ? 0x7FFFFFFF : (lid < 6u ? int(0x80000000) : 0), memory_order_relaxed);
+        if (lid < 16u && lid != 11u) atomic_store_explicit(&tgS[lid], lid < 3u ? 0x7FFFFFFF : (lid < 6u ? int(0x80000000) : 0), memory_order_relaxed);
 #endif
         BAR;
         // (The node pass has read the written nodes' bits: cleared before this step's writers.)
@@ -2304,72 +2338,340 @@ kernel void floorFrame(
                 if (npair != 0u && !SKIP(22))
                 {
                     if (lid == 0 && npair > SPAIR_CAP) atomic_fetch_or_explicit(&tgS[11], 16, memory_order_relaxed);
-                    // The narrow tests, a lane a pair: the separation cull, then the contact.
+                    // The narrow tests. A point, and any element against a sphere, is tested
+                    // here, a lane a pair (cheap). A triangle or a beam against a box is the
+                    // heavy query (12 box edges, each several closest-point candidates, walked
+                    // up to four times: 20 to 80 us in one lane), so it is staged: a lane a
+                    // (pair, box edge) finds the least gap; the lanes owning the candidates at
+                    // it record them; a lane a pair finishes the contact from those.
+                    #define SURF_EMIT(n0_, n1_, n2_, slot_, w_, g_, nn_, q_, two_, w2_, q2_) { \
+                        const uint bi_ = as_type<uint>(surfRow[(slot_) * SRW + 4u].w); \
+                        for (uint h2_ = 0u; h2_ < ((two_) ? 2u : 1u); h2_++) { \
+                            float3 wh_ = h2_ == 0u ? (w_) : (w2_), qh_ = h2_ == 0u ? (q_) : (q2_); \
+                            const uint i_ = uint(atomic_fetch_add_explicit(&tgS[9], 1, memory_order_relaxed)); \
+                            if (i_ < SHIT_CAP) { \
+                                surfHit[i_ * 4u] = as_type<float4>(uint4(n0_, n1_, n2_, slot_)); \
+                                surfHit[i_ * 4u + 1u] = f4(wh_, g_); \
+                                surfHit[i_ * 4u + 2u] = f4(nn_, 0.0f); \
+                                surfHit[i_ * 4u + 3u] = f4(qh_, 0.0f); } \
+                            if (wh_.x > 0.0f) atomic_fetch_add_explicit(&split[n0_], 1u, memory_order_relaxed); \
+                            if (wh_.y > 0.0f) atomic_fetch_add_explicit(&split[n1_], 1u, memory_order_relaxed); \
+                            if (wh_.z > 0.0f) atomic_fetch_add_explicit(&split[n2_], 1u, memory_order_relaxed); \
+                            SURF_BODY_HIT(bi_) } \
+                        atomic_store_explicit(&hmap[n0_], 0u, memory_order_relaxed); TOUCHK(n0_, 3u); \
+                        if (n1_ != n0_) { atomic_store_explicit(&hmap[n1_], 0u, memory_order_relaxed); TOUCHK(n1_, 3u); } \
+                        if (n2_ != n0_) { atomic_store_explicit(&hmap[n2_], 0u, memory_order_relaxed); TOUCHK(n2_, 3u); } }
+#if RIGID
+                    #define SURF_BODY_HIT(bi_) if (bi_ != SURF_STATIC) atomic_fetch_add_explicit(&surfBH[bi_], 1u, memory_order_relaxed);
+#else
+                    #define SURF_BODY_HIT(bi_)
+#endif
                     for (uint kp = lid; kp < min(npair, SPAIR_CAP); kp += LANES)
                     {
                         const uint pw = surfPair[kp];
                         const uint e = pw & 0xFFFFu, slot = pw >> 16;
-                        device const float4* row = surfRow + slot * SRW;
-                        FqShape fs = surfShape(row);
+                        FqShape fs = surfShape(surfRow + slot * SRW);
                         uint n0, n1, n2;
+                        float3 x0, x1, x2;
                         float3 w = float3(1.0f, 0.0f, 0.0f), nn, q, w2 = float3(0.0f, 0.0f, 0.0f), q2 = float3(0.0f, 0.0f, 0.0f);
                         float g = 0.0f;
                         bool two = false;
-                        if (e < NT)
+                        const bool isT = e < NT, isS = !isT && e < NT + NSEG;
+                        if (isT)
                         {
                             if (triDead[e] != 0u) continue;
                             uint4 tn = tris[e];
                             n0 = tn.x; n1 = tn.y; n2 = tn.z;
-                            float3 x0 = fv(v3(0, 0, 0) + TGP(n0)), x1 = fv(v3(0, 0, 0) + TGP(n1)), x2 = fv(v3(0, 0, 0) + TGP(n2));
-                            if (fqSeparated(fs, x0, x1, x2, CR)) continue;
-                            if (!fqContact(fs, x0, x1, x2, CR, w, nn, g, q)) continue;
+                            x0 = fv(v3(0, 0, 0) + TGP(n0)); x1 = fv(v3(0, 0, 0) + TGP(n1)); x2 = fv(v3(0, 0, 0) + TGP(n2));
                         }
-                        else if (e < NT + NSEG)
+                        else if (isS)
                         {
                             const uint k = e - NT;
                             const uint ab = tab[T_SEG + k * 2u];
                             if (recState[tab[T_SEG + k * 2u + 1u] * 3u + 1u].w != 0.0f) continue;
                             n0 = ab & 0xFFFFu; n1 = ab >> 16; n2 = n0;
-                            float3 x0 = fv(v3(0, 0, 0) + TGP(n0)), x1 = fv(v3(0, 0, 0) + TGP(n1));
-                            if (fqSeparated(fs, x0, x1, x1, CR)) continue;
-                            if (!fqSegContact(fs, x0, x1, CR, w, nn, g, q, two, w2, q2)) continue;
+                            x0 = fv(v3(0, 0, 0) + TGP(n0)); x1 = fv(v3(0, 0, 0) + TGP(n1)); x2 = x1;
                         }
                         else
                         {
                             n0 = e - (NT + NSEG); n1 = n0; n2 = n0;
-                            float3 x0 = fv(v3(0, 0, 0) + TGP(n0));
+                            x0 = fv(v3(0, 0, 0) + TGP(n0)); x1 = x0; x2 = x0;
+                        }
+                        if (!isT && !isS)
+                        {
                             if (!fqPointContact(fs, x0, CR, nn, g)) continue;
                             q = x0;
                         }
-                        if (SKIP(23)) continue;
-                        const uint bi = as_type<uint>(row[4].w);
-                        for (uint h2 = 0u; h2 < (two ? 2u : 1u); h2++)
+                        else
                         {
-                            float3 wh = h2 == 0u ? w : w2, qh = h2 == 0u ? q : q2;
-                            const uint i = uint(atomic_fetch_add_explicit(&tgS[9], 1, memory_order_relaxed));
-                            if (i < SHIT_CAP)
+                            if (fqSeparated(fs, x0, x1, x2, CR)) continue;
+                            bool direct = fs.kind != FQ_BOX || SURF_STAGED == 0;
+                            if (!direct)
                             {
-                                surfHit[i * 4u] = as_type<float4>(uint4(n0, n1, n2, slot));
-                                surfHit[i * 4u + 1u] = f4(wh, g);
-                                surfHit[i * 4u + 2u] = f4(nn, 0.0f);
-                                surfHit[i * 4u + 3u] = f4(qh, 0.0f);
+                                // (A degenerate element has no contact: the queries' first test.)
+                                if (isT) { if (!(fqLen(scross(ssub3(x1, x0), ssub3(x2, x0))) > 1e-8f)) continue; }
+                                else { float3 d = ssub3(x1, x0); if (!(sdot(d, d) > 1e-12f)) continue; }
+                                const uint h = uint(atomic_fetch_add_explicit(&tgS[isT ? 12 : 13], 1, memory_order_relaxed));
+                                if (h < HHALF)
+                                {
+                                    const uint hh = isT ? h : HHALF + h;
+                                    surfHP[hh * HPW] = pw;
+                                    atomic_store_explicit(HPGX(hh), 0x7FFFFFFF, memory_order_relaxed);
+                                    atomic_store_explicit(HPKC(hh), 0u, memory_order_relaxed);
+                                    // Its tasks: the box edges within the band of the element's box
+                                    // (fqFar: a farther edge has no candidate within the band, so
+                                    // none that counts), and the element's run inside the box (12).
+                                    float3 tlo = min(min(x0, x1), x2), thi = max(max(x0, x1), x2);
+                                    for (uint ed = 0u; ed < 13u; ed++)
+                                    {
+                                        if (ed < 12u)
+                                        {
+                                            float3 e0, e1;
+                                            fqWalkEdge(fs, ed, e0, e1);
+                                            if (fqFar(e0, e1, tlo, thi, CR)) continue;
+                                        }
+                                        const uint t = uint(atomic_fetch_add_explicit(&tgS[isT ? 14 : 15], 1, memory_order_relaxed));
+                                        surfTask[(isT ? 0u : STASK_CAP * 2u) + t * 2u] = hh | ed << 16;
+                                    }
+                                    continue;
+                                }
+                                // (No room for another staged pair: the whole query here, the
+                                // same result.)
                             }
-                            // How many hits name each node with a weight (the mass split), and
-                            // each body.
-                            if (wh.x > 0.0f) atomic_fetch_add_explicit(&split[n0], 1u, memory_order_relaxed);
-                            if (wh.y > 0.0f) atomic_fetch_add_explicit(&split[n1], 1u, memory_order_relaxed);
-                            if (wh.z > 0.0f) atomic_fetch_add_explicit(&split[n2], 1u, memory_order_relaxed);
-#if RIGID
-                            if (bi != SURF_STATIC) atomic_fetch_add_explicit(&surfBH[bi], 1u, memory_order_relaxed);
-#endif
+                            if (isT) { if (!fqContact(fs, x0, x1, x2, CR, w, nn, g, q)) continue; }
+                            else if (!fqSegContact(fs, x0, x1, CR, w, nn, g, q, two, w2, q2)) continue;
                         }
-                        // Its nodes take a slot each (their own lanes fill them), and the
-                        // next node pass reads their sums.
-                        atomic_store_explicit(&hmap[n0], 0u, memory_order_relaxed); TOUCHK(n0, 3u);
-                        if (n1 != n0) { atomic_store_explicit(&hmap[n1], 0u, memory_order_relaxed); TOUCHK(n1, 3u); }
-                        if (n2 != n0) { atomic_store_explicit(&hmap[n2], 0u, memory_order_relaxed); TOUCHK(n2, 3u); }
+                        if (SKIP(23)) continue;
+                        SURF_EMIT(n0, n1, n2, slot, w, g, nn, q, two, w2, q2)
                     }
                     BAR;
+                    const uint nTriH = min(uint(atomic_load_explicit(&tgS[12], memory_order_relaxed)), HHALF), nSegH = min(uint(atomic_load_explicit(&tgS[13], memory_order_relaxed)), HHALF);
+                    const uint nTriT = uint(atomic_load_explicit(&tgS[14], memory_order_relaxed)), nSegT = uint(atomic_load_explicit(&tgS[15], memory_order_relaxed));
+#ifdef EMU_TRACE
+                    if (lid == 0u) fprintf(stderr, "T car %u step %u: staged pairs %u + %u, tasks %u + %u\n", car, step, nTriH, nSegH, nTriT, nSegT);
+#endif
+                    if ((nTriH | nSegH) != 0u)
+                    {
+                        // A staged pair's element and shape, from its pair word.
+                        #define SURF_LOAD(isT_, hh_) \
+                            const uint pw_ = surfHP[(hh_) * HPW]; \
+                            const uint el_ = pw_ & 0xFFFFu, slot_ = pw_ >> 16; \
+                            FqShape fs = surfShape(surfRow + slot_ * SRW); \
+                            uint n0, n1, n2; \
+                            if (isT_) { uint4 tn_ = tris[el_]; n0 = tn_.x; n1 = tn_.y; n2 = tn_.z; } \
+                            else { const uint ab_ = tab[T_SEG + (el_ - NT) * 2u]; n0 = ab_ & 0xFFFFu; n1 = ab_ >> 16; n2 = n0; } \
+                            float3 x0 = fv(v3(0, 0, 0) + TGP(n0)), x1 = fv(v3(0, 0, 0) + TGP(n1)), x2 = (isT_) ? fv(v3(0, 0, 0) + TGP(n2)) : x1;
+                        // Stage A, a lane a task (triangles' from lane 0 up, beams' from the last
+                        // lane down, so a warp runs one kind): the task's least gap, and the
+                        // pair's (an atomic min: the walk's first pass).
+                        #define SURF_TASK_A(isT_, t_, base_) { \
+                            const uint tw_ = surfTask[(base_) + (t_) * 2u]; \
+                            const uint hh_ = tw_ & 0xFFFFu, ed_ = tw_ >> 16; \
+                            SURF_LOAD(isT_, hh_) \
+                            FqAcc a = fqAccNew(); \
+                            surfEdgeWalk(isT_, fs, x0, x1, x2, ed_, a); \
+                            surfTask[(base_) + (t_) * 2u + 1u] = as_type<uint>(a.gx); \
+                            atomic_fetch_min_explicit(HPGX(hh_), ordF(a.gx), memory_order_relaxed); }
+                        for (uint t = lid; t < nTriT; t += LANES) SURF_TASK_A(true, t, 0u)
+                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_A(false, t, STASK_CAP * 2u)
+                        BAR;
+                        // Stage B: a task that owns a candidate within the tie of the pair's
+                        // least gap walks again (the pair's second pass, alone); one kept
+                        // candidate is the pass's sum itself, several are taken one at a time.
+                        #define SURF_TASK_B(isT_, t_, base_) { \
+                            const uint tw_ = surfTask[(base_) + (t_) * 2u]; \
+                            const uint hh_ = tw_ & 0xFFFFu, ed_ = tw_ >> 16; \
+                            const float GX_ = unordF(atomic_load_explicit(HPGX(hh_), memory_order_relaxed)); \
+                            if (GX_ <= CR && as_type<float>(surfTask[(base_) + (t_) * 2u + 1u]) <= nf(GX_ + FQ_TIE)) { \
+                                SURF_LOAD(isT_, hh_) \
+                                for (uint att_ = 0u; att_ < 7u; att_++) { \
+                                    FqAcc a = fqAccNew(); \
+                                    a.gx = GX_; a.pass = 1u; \
+                                    if (att_ != 0u) { a.ilo = att_ - 1u; a.ihi = att_; } \
+                                    surfEdgeWalk(isT_, fs, x0, x1, x2, ed_, a); \
+                                    if (att_ == 0u && a.k == 0u) break; \
+                                    if (a.k != 1u) continue; \
+                                    const uint idx_ = atomic_fetch_add_explicit(HPKC(hh_), 1u, memory_order_relaxed); \
+                                    if (idx_ < KCAP) { \
+                                        device float4* rec_ = HPREC(hh_) + idx_ * 3u; \
+                                        rec_[0] = f4(a.w, as_type<float>(ed_ * 8u + (att_ == 0u ? 0u : att_ - 1u))); \
+                                        rec_[1] = f4(a.q, 0.0f); rec_[2] = f4(a.cs, 0.0f); } \
+                                    if (att_ == 0u) break; } } }
+                        for (uint t = lid; t < nTriT; t += LANES) SURF_TASK_B(true, t, 0u)
+                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_B(false, t, STASK_CAP * 2u)
+                        BAR;
+                        // Stage R, a lane a pair: the query's steps between its walks
+                        // (triangle_contact, segment_contact), its later passes over the kept
+                        // candidates in the walk's order.
+                        #define SURF_ORDER(hh_, kc_) \
+                            uint keys_[KCAP]; \
+                            for (uint j_ = 0u; j_ < kc_; j_++) keys_[j_] = as_type<uint>(HPREC(hh_)[j_ * 3u].w); \
+                            uint ordA_ = 0u, ordB_ = 0u; \
+                            for (uint j_ = 0u; j_ < kc_; j_++) { \
+                                uint rank_ = 0u; \
+                                for (uint i_ = 0u; i_ < kc_; i_++) rank_ += keys_[i_] < keys_[j_] ? 1u : 0u; \
+                                if (rank_ < 8u) ordA_ |= j_ << (rank_ * 4u); else ordB_ |= j_ << ((rank_ - 8u) * 4u); }
+                        #define SURF_REC(hh_, r_) (HPREC(hh_) + (((r_) < 8u ? ordA_ >> ((r_) * 4u) : ordB_ >> (((r_) - 8u) * 4u)) & 15u) * 3u)
+                        if (lid < nTriH)
+                        {
+                            const uint hh = lid;
+                            const float GX = unordF(atomic_load_explicit(HPGX(hh), memory_order_relaxed));
+                            if (GX <= CR)
+                            {
+                                SURF_LOAD(true, hh)
+                                bool ok = true, hit = false, two = false;
+                                for (uint k = 0u; k < 3u; k++)
+                                {
+                                    float2 pd = fqPointDist(fs, fqX(x0, x1, x2, k));
+                                    if (pd.y != 0.0f && pd.x <= nf(GX + FQ_TIE)) ok = false;
+                                }
+                                const uint kc = atomic_load_explicit(HPKC(hh), memory_order_relaxed);
+                                float3 w = float3(0.0f, 0.0f, 0.0f), nn = w, q = w, w2 = w, q2 = w;
+                                float g = GX;
+                                if (ok && (kc == 0u || kc > KCAP))
+                                {
+                                    // (More candidates at the least gap than a pair keeps: the
+                                    // whole query, the same result.)
+                                    hit = fqContact(fs, x0, x1, x2, CR, w, nn, g, q);
+                                }
+                                else if (ok)
+                                {
+                                    SURF_ORDER(hh, kc)
+                                    float3 aw = float3(0.0f, 0.0f, 0.0f), aq = aw, acs = aw;
+                                    for (uint r = 0u; r < kc; r++)
+                                    {
+                                        device const float4* rec = SURF_REC(hh, r);
+                                        aw = float3(nf(aw.x + rec[0].x), nf(aw.y + rec[0].y), nf(aw.z + rec[0].z));
+                                        aq = sadd3(aq, fv(rec[1])); acs = sadd3(acs, fv(rec[2]));
+                                    }
+                                    float kf = float(kc);
+                                    w = float3(sdiv(aw.x, kf), sdiv(aw.y, kf), sdiv(aw.z, kf));
+                                    q = sdiv3(aq, kf);
+                                    float3 cs = sdiv3(acs, kf);
+                                    const uint nz = (w.x > 0.0f ? 1u : 0u) + (w.y > 0.0f ? 1u : 0u) + (w.z > 0.0f ? 1u : 0u);
+                                    if (nz > 1u)
+                                    {
+                                        float3 dv = ssub3(cs, q);
+                                        float dl = fqLen(dv);
+                                        hit = true;
+                                        if (GX > FQ_PIERCE && dl > FQ_PIERCE) nn = sdiv3(dv, dl);
+                                        else
+                                        {
+                                            // Touching or crossing: the overlap axis, the deepest
+                                            // shared candidates along it, their mean.
+                                            float3 nc = scross(ssub3(x1, x0), ssub3(x2, x0));
+                                            nn = fqOverlapAxis(fs, x0, x1, x2, sdiv3(nc, fqLen(nc)));
+                                            bool any = false;
+                                            float top = 0.0f;
+                                            for (uint r = 0u; r < kc; r++)
+                                            {
+                                                device const float4* rec = SURF_REC(hh, r);
+                                                if (!fqShared(fv(rec[0]))) continue;
+                                                float d = sdot(nn, fv(rec[1]));
+                                                top = any ? max(top, d) : d;
+                                                any = true;
+                                            }
+                                            if (any)
+                                            {
+                                                aw = float3(0.0f, 0.0f, 0.0f); aq = aw;
+                                                uint k3 = 0u;
+                                                for (uint r = 0u; r < kc; r++)
+                                                {
+                                                    device const float4* rec = SURF_REC(hh, r);
+                                                    if (!(fqShared(fv(rec[0])) && sdot(nn, fv(rec[1])) >= nf(top - FQ_TIE))) continue;
+                                                    aw = float3(nf(aw.x + rec[0].x), nf(aw.y + rec[0].y), nf(aw.z + rec[0].z));
+                                                    aq = sadd3(aq, fv(rec[1]));
+                                                    k3++;
+                                                }
+                                                float kf3 = float(k3);
+                                                w = float3(sdiv(aw.x, kf3), sdiv(aw.y, kf3), sdiv(aw.z, kf3));
+                                                q = sdiv3(aq, kf3);
+                                            }
+                                        }
+                                    }
+                                }
+                                if (hit && !SKIP(23)) SURF_EMIT(n0, n1, n2, slot_, w, g, nn, q, two, w2, q2)
+                            }
+                        }
+                        if (lid >= LANES - nSegH)
+                        {
+                            const uint hh = HHALF + ((LANES - 1u) - lid);
+                            const float GX = unordF(atomic_load_explicit(HPGX(hh), memory_order_relaxed));
+                            if (GX <= CR)
+                            {
+                                SURF_LOAD(false, hh)
+                                bool ok = true, hit = false, two = false;
+                                for (uint k = 0u; k < 2u; k++)
+                                {
+                                    float2 pd = fqPointDist(fs, k == 0u ? x0 : x1);
+                                    if (pd.y != 0.0f && pd.x <= nf(GX + FQ_TIE)) ok = false;
+                                }
+                                const uint kc = atomic_load_explicit(HPKC(hh), memory_order_relaxed);
+                                float3 w = float3(0.0f, 0.0f, 0.0f), nn = w, q = w, w2 = w, q2 = w;
+                                float g = GX;
+                                if (ok && (kc == 0u || kc > KCAP))
+                                {
+                                    hit = fqSegContact(fs, x0, x1, CR, w, nn, g, q, two, w2, q2);
+                                }
+                                else if (ok)
+                                {
+                                    SURF_ORDER(hh, kc)
+                                    float3 aw = float3(0.0f, 0.0f, 0.0f), aq = aw, acs = aw;
+                                    for (uint r = 0u; r < kc; r++)
+                                    {
+                                        device const float4* rec = SURF_REC(hh, r);
+                                        aw = float3(nf(aw.x + rec[0].x), nf(aw.y + rec[0].y), nf(aw.z + rec[0].z));
+                                        aq = sadd3(aq, fv(rec[1])); acs = sadd3(acs, fv(rec[2]));
+                                    }
+                                    float kf = float(kc);
+                                    w = float3(sdiv(aw.x, kf), sdiv(aw.y, kf), 0.0f);
+                                    q = sdiv3(aq, kf);
+                                    float3 cs = sdiv3(acs, kf);
+                                    if (w.x > 0.0f && w.y > 0.0f)
+                                    {
+                                        float3 dv = ssub3(cs, q);
+                                        float dl = fqLen(dv);
+                                        hit = true;
+                                        if (GX > FQ_PIERCE && dl > FQ_PIERCE) nn = sdiv3(dv, dl);
+                                        else
+                                        {
+                                            // Touching or crossing: of the deepest shared candidates
+                                            // along the overlap axis, the beam's two extremes.
+                                            nn = fqSegOverlapAxis(fs, x0, x1);
+                                            bool any = false;
+                                            float top = 0.0f;
+                                            for (uint r = 0u; r < kc; r++)
+                                            {
+                                                device const float4* rec = SURF_REC(hh, r);
+                                                if (!fqShared(fv(rec[0]))) continue;
+                                                float d = sdot(nn, fv(rec[1]));
+                                                top = any ? max(top, d) : d;
+                                                any = true;
+                                            }
+                                            if (any)
+                                            {
+                                                float3 lw = float3(0.0f, 0.0f, 0.0f), lq = lw, hw = lw, hq = lw;
+                                                uint k4 = 0u;
+                                                for (uint r = 0u; r < kc; r++)
+                                                {
+                                                    device const float4* rec = SURF_REC(hh, r);
+                                                    float3 pw3 = fv(rec[0]), pq3 = fv(rec[1]);
+                                                    if (!(fqShared(pw3) && sdot(nn, pq3) >= nf(top - FQ_TIE))) continue;
+                                                    if (k4 == 0u || pw3.y < lw.y) { lw = pw3; lq = pq3; }
+                                                    if (k4 == 0u || pw3.y > hw.y) { hw = pw3; hq = pq3; }
+                                                    k4 = 1u;
+                                                }
+                                                w = lw; q = lq;
+                                                if (hw.y > lw.y) { two = true; w2 = hw; q2 = hq; }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (hit && !SKIP(23)) SURF_EMIT(n0, n1, n2, slot_, w, g, nn, q, two, w2, q2)
+                            }
+                        }
+                        BAR;
+                    }
                     const uint nsHits = uint(atomic_load_explicit(&tgS[9], memory_order_relaxed));
 #ifdef EMU_TRACE
                     if (lid == 0u) fprintf(stderr, "T car %u step %u: surface hits %u\n", car, step, nsHits);

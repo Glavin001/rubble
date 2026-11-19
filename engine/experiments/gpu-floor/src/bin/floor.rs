@@ -33,6 +33,15 @@ fn main() -> anyhow::Result<()> {
         let front = cpu.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
         cpu.boxes.push(engine_softbody::explicit_beams::StaticBox { lo: glam::Vec3::new(-5.0, -1.0, front + gap), hi: glam::Vec3::new(5.0, 3.0, front + gap + 2.0) });
     }
+    if let Some(gap) = arg("--pole").map(|x| x.parse::<f32>().unwrap()) {
+        // A fixed 12 cm square pole `gap` m ahead, a little off the centre line: thin enough
+        // to pass between the nose's nodes (what surface contact is for).
+        let front = cpu.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+        cpu.boxes.push(engine_softbody::explicit_beams::StaticBox { lo: glam::Vec3::new(0.07, -1.0, front + gap), hi: glam::Vec3::new(0.19, 3.0, front + gap + 0.12) });
+    }
+    // --surface: the reference's surface contact on (triangles, beams and band nodes against
+    // the static boxes, not only the nodes inside them).
+    cpu.surface_contact = flag("--surface");
     let handoff: usize = arg("--handoff").map_or(0, |x| x.parse().unwrap());
     for _ in 0..handoff * STEPS {
         cpu.step();
