@@ -81,6 +81,8 @@ GPU_PRICE = {"T4": 0.000164, "L4": 0.000222, "L40S": 0.000542}
 CPUS, MEM_GIB = 4, 8
 CPU_PRICE, MEM_PRICE = 0.0000131, 0.00000222
 MAX_TIMEOUT = 1800
+# Fan-out: reruns of a cold shard hoping for a warm host before it compiles itself.
+COLD_RETRIES = 2
 
 COLD_GUARD = (
     "STOPPED: this kernel version has not been compiled on {driver} yet. Its warm-up "
@@ -591,14 +593,22 @@ def _fanout(fn, key: str, s: dict, shards: list[dict], run_dir: Path, rate: floa
     calls = [(sh, spawn(i, sh)) for i, sh in enumerate(shards)]
     done: list[tuple[dict, dict | None]] = [(sh, collect(sh, c)) for sh, c in calls]
     # A shard on a host whose driver the warm-up did not reach (Modal mixes driver
-    # versions) found its kernels cold: rerun those, compiling only what each uses.
+    # versions; the cache is per driver) found its kernels cold. Compiling there costs
+    # the same minutes again, so first try to land on a warm host: up to COLD_RETRIES
+    # cheap reruns (the guard stops a cold one in ~5 s), then compile only what that
+    # shard uses.
     if s.get("cold_retry"):
-        again = [i for i, (sh, o) in enumerate(done) if o and o["code"] == 3]
-        if again:
-            print(f"[gpu_run] {len(again)} shard(s) landed on another driver, cold: rerunning them "
-                  "compiling only their own pipelines", flush=True)
+        for attempt in range(COLD_RETRIES + 1):
+            again = [i for i, (sh, o) in enumerate(done) if o and o["code"] == 3]
+            if not again:
+                break
+            last = attempt == COLD_RETRIES
+            print(f"[gpu_run] {len(again)} shard(s) on a cold driver: "
+                  + ("compiling their own pipelines" if last else f"retry {attempt + 1} for a warm host"),
+                  flush=True)
             billed_extra += sum(done[i][1]["secs"] for i in again)  # type: ignore[index]
-            reruns = [(i, spawn(i, done[i][0], allow_cold=True, warm=False)) for i in again]
+            extra = {"allow_cold": True, "warm": False} if last else {}
+            reruns = [(i, spawn(i, done[i][0], **extra)) for i in again]
             for i, c in reruns:
                 done[i] = (done[i][0], collect(done[i][0], c))
     wall = time.time() - t0

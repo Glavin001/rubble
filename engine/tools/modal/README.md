@@ -89,6 +89,9 @@ engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_v
 | `--no-shader-cache` | Neither read nor write the shared shader cache |
 | `--data PATH` | An extra repo-relative file or directory to ship (32 MB cap, not counting the generated WGSL) |
 | `--sedan DIR` | The generated sedan's JBeam export (default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`). Shipped only when an argument, `--env` or `--variant` says `@sedan`, which becomes `/scenarios/sedan_new`; only `files.json`, `*.jbeam` and `*.pc` (under 1 MB), never the `.glb`/`.rskin` |
+| `--fanout` | One container per executable of the selection (each test binary), all at once (see Fan-out) |
+| `--fanout-tests` | One container per test, all at once |
+| `--matrix` | The scenario matrix, one container per row (`tools/scenario-matrix/run.sh` calls it) |
 | `--build-only` | Build and pack, no Modal call |
 | `--keep` | Keep `engine/target/gpu-run/<id>/` |
 
@@ -103,6 +106,53 @@ binary, the runner names the test that was running and reprints its last 60 line
 the summary marks it KILLED and any binary after it NOT RUN (exit 124). The container sets
 `RUBBLE_GPU_LOCK=0` (one job per container), `WGPU_BACKEND=vulkan` and
 `SEDAN=/scenarios/sedan_new`.
+
+## Fan-out: many GPU containers from one build
+
+What the Mac does and what Modal does: the Mac builds (free, local Docker) and runs
+CPU-only tests natively; Modal runs only GPU work, every job in a T4 container of its
+own (the smallest GPU Modal has), so no two runs share a GPU and nothing queues.
+
+```bash
+# Each test binary in its own container, all at once
+engine/tools/modal/gpu_run.sh --fanout -- -p engine-webgpu \
+  --test explicit_pair_reuse_gpu --test vv_grid_gpu --test debris_retire_gpu
+# Each test in its own container (names listed at build time; the run args' filter applies)
+engine/tools/modal/gpu_run.sh --fanout-tests -- -p engine-world --test explicit_vehicles
+# The scenario matrix: each row in its own container (the default for run.sh)
+engine/tools/scenario-matrix/run.sh perf=8388608
+```
+
+1. One build and pack, as for a single run.
+2. The archive uploads once to the Volume `rubble-gpu-run-archives`, named by its
+   SHA-256: a rerun of the same build uploads nothing; archives older than 2 days are
+   pruned.
+3. Every shard is spawned at once (Modal starts as many containers as the workspace's
+   GPU limit allows and queues the rest). Each streams its output prefixed with
+   `[label]`.
+4. One summary (status and container seconds a shard, its GPU and driver), the summed
+   billed estimate, and the first failure's exit code.
+
+Cold kernels: a shard whose kernel version is not compiled on its host's driver stops
+at once (the guard, ~5 s billed, `COLD` in the summary). With `--allow-cold-compile`
+a fan-out first runs **one** warm-up container that compiles every pipeline and saves
+the cache; then the shards, which start warm. Modal mixes driver versions (610.57.04
+and 620.70.06 seen; the cache is per driver), so a shard that lands on the other
+driver reruns up to twice hoping for a warm host (~5 s each), and only then compiles
+its own pipelines. Never let every shard compile: 12 cold matrix rows would each pay
+the ~18-minute warm-up.
+
+The scenario matrix's own pieces: `--matrix` builds `-p engine-world --example
+vehicle_lab`, ships `tools/scenario-matrix` (matrix.py, scenes) and the generated
+sedan (`CAR`, default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`),
+forwards `FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT`, and gives
+each row `engine/out/scenario-matrix/ROW.fx`, uploaded once by hash to the Volume
+`rubble-scenario-states`. Each container runs matrix.py for its row (both halves, the
+retries and the median in that one container, so the speed comparison is between
+runs on one GPU), and the local side prints one table and one verdict. `run.sh --make`
+saves new states on Modal and writes them back to `engine/out/scenario-matrix/`.
+Options for gpu_run go in `MODAL_OPTS`, e.g. `MODAL_OPTS="--allow-cold-compile
+--timeout 1500"` for a kernel version new on Modal.
 
 ## Cold kernel compiles (WebGPU route; read this first)
 

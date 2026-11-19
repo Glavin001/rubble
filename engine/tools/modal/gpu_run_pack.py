@@ -139,11 +139,16 @@ def main() -> None:
         # `--fanout-tests`: each test harness's test names (libtest lists them without
         # running anything or opening a device), with the run args' filter applied.
         filt = [a for a in run_args if not a.startswith("-")][:1]
+        # A cross build (the arm64 image) runs the x86_64 test binary through Rosetta
+        # with the cross toolchain's libraries.
+        list_env = dict(os.environ)
+        if os.environ.get("RUBBLE_X86_LIBS"):
+            list_env["LD_LIBRARY_PATH"] = os.environ["RUBBLE_X86_LIBS"]
         for e in runs:
             if e["kind"] != "test":
                 continue
             p = subprocess.run([str(e["path"]), "--list", "--format", "terse", *filt],
-                               cwd=e["cwd"], capture_output=True, text=True)
+                               cwd=e["cwd"], capture_output=True, text=True, env=list_env)
             names = [l[: -len(": test")] for l in p.stdout.splitlines() if l.endswith(": test")]
             if p.returncode == 0 and names:
                 e["tests"] = names
@@ -206,20 +211,26 @@ def main() -> None:
         h.update(f"{name} {digest}\n".encode())
     manifest = {"run_args": run_args, "cargo": cargo_args, "exes": [], "data_bytes": total,
                 "kernel_hash": "" if cuda else h.hexdigest()[:16], "route": "cuda" if cuda else "vulkan"}
+    # Byte-reproducible (no timestamps or owners): an unchanged build has the same SHA-256,
+    # so gpu_run.py uploads nothing for it.
+    def norm(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+        return info
+
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=6) as gz:
         with tarfile.open(fileobj=gz, mode="w") as tar:
             for e in exes:
                 stripped = out / f"{e['name']}.{e['kind']}"
                 # Debug info off, symbols kept (panics' backtraces name functions).
-                subprocess.run(["strip", "--strip-debug", "-o", str(stripped), str(e["path"])], check=True)
+                subprocess.run([os.environ.get("STRIP", "strip"), "--strip-debug", "-o", str(stripped), str(e["path"])], check=True)
                 arc = f"bin/{stripped.name}"
-                tar.add(stripped, arcname=arc)
+                tar.add(stripped, arcname=arc, filter=norm)
                 stripped.unlink()
                 manifest["exes"].append({k: e[k] for k in ("name", "kind", "cwd", "role")}
                                         | {"file": arc} | ({"tests": e["tests"]} if "tests" in e else {}))
             for key, f in sorted([*files.items(), *staged.items()]):
-                tar.add(f, arcname="data" + key)
+                tar.add(f, arcname="data" + key, filter=norm)
             blob = json.dumps(manifest, indent=1).encode()
             info = tarfile.TarInfo("manifest.json")
             info.size = len(blob)

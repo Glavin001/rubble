@@ -143,14 +143,30 @@ fi
 # Build: x86_64 Ubuntu 22.04 (the CUDA build image: Rust + slangc), cargo's target in a
 # volume of this worktree's own (two worktrees share /repo as their path inside the
 # container, so a shared target dir could take one's stale outputs for the other's).
-image=rubble-cuda-build:slang-2026.19-cuda-12.8
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-  echo "gpu_run: building $image (once; a few minutes)" >&2
-  docker build --platform linux/amd64 -q -t "$image" "$repo/engine/tools/cuda" >/dev/null
-fi
+#
+# On Apple silicon (except the CUDA route: nvcc is x86_64-only) the build runs natively:
+# an arm64 Linux image cross-compiling to x86_64 (engine/tools/modal/build), about 3x
+# faster than the x86_64 image under Rosetta (vehicle_lab from empty: 112 s vs 328 s).
 wt_key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
+cuda_route=0
+case " $* " in *" engine-cuda "*|*" -p engine-cuda"*) cuda_route=1 ;; esac
+if [ "$(uname -m)" = arm64 ] && [ "$cuda_route" = 0 ]; then
+  platform=linux/arm64
+  image="rubble-gpurun-build:arm64-$(shasum -a 256 "$here/build/Dockerfile" | cut -c1-12)"
+  image_dir="$here/build"
+  target_vol="rubble-gpurun-arm-target-$wt_key"
+else
+  platform=linux/amd64
+  image=rubble-cuda-build:slang-2026.19-cuda-12.8
+  image_dir="$repo/engine/tools/cuda"
+  target_vol="rubble-gpurun-target-$wt_key"
+fi
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  echo "gpu_run: building $image (once; a minute or a few)" >&2
+  docker build --platform "$platform" -q -t "$image" "$image_dir" >/dev/null
+fi
 t0=$(date +%s)
-echo "gpu_run: building in Docker (target volume rubble-gpurun-target-$wt_key)" >&2
+echo "gpu_run: building in Docker ($platform, target volume $target_vol)" >&2
 # ENGINE_* variables reach the build (engine-cuda: ENGINE_CUDA_EXPLICIT_MODULES,
 # ENGINE_CUDA_SASS, ...). The CUDA route embeds SASS for the GPU it runs on only.
 case " $* " in *" engine-cuda "*|*" -p engine-cuda"*)
@@ -162,13 +178,17 @@ build_env=()
 while IFS='=' read -r k _; do
   case "$k" in ENGINE_*) build_env+=(-e "$k") ;; esac
 done < <(env)
-docker run --rm --platform linux/amd64 ${build_env[@]+"${build_env[@]}"} \
+# Native builds use every core (the OS shares them with whatever else runs); the
+# emulated one keeps its old default.
+if [ "$platform" = linux/arm64 ]; then jobs_default=$(sysctl -n hw.ncpu 2>/dev/null || echo 8); rjobs_default=8
+else jobs_default=6; rjobs_default=4; fi
+docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} \
   -v "$repo:/repo" \
   -v "$run:/out" \
   -v rubble-cuda-cargo:/cache/cargo \
-  -v "rubble-gpurun-target-$wt_key:/cache/target" \
+  -v "$target_vol:/cache/target" \
   -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
-  -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-4}" \
+  -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$jobs_default}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-$rjobs_default}" \
   "$image" python3 /repo/engine/tools/modal/gpu_run_pack.py /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
 t1=$(date +%s)
 echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
