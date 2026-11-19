@@ -212,6 +212,7 @@ fn main() -> anyhow::Result<()> {
     let mut first_bad = None;
     let mut worst = Defect::default();
     let mut worst_ref = Defect::default();
+    let mut defects: Vec<Defect> = Vec::new();
     let (mut defect_ok, mut defect_first) = (true, String::new());
     let mut verdict_ok = true;
     let mut verdict_first = String::new();
@@ -224,6 +225,7 @@ fn main() -> anyhow::Result<()> {
         let d1 = Defect::of(&refs[fr], &g1);
         worst = worst.max(d1);
         worst_ref = worst_ref.max(one[fr - 1]);
+        defects.push(d1);
         // (Inside ten times the reference's own one-frame spread, with a floor of 1 µm, 1 mm/s.)
         if !(d1.pos <= 10.0 * one[fr - 1].pos + 1e-6 && d1.vel <= 10.0 * one[fr - 1].vel + 1e-3) && defect_ok {
             defect_ok = false;
@@ -261,6 +263,23 @@ fn main() -> anyhow::Result<()> {
         match first_bad { None => "none: bit for bit every frame".to_string(), Some(f) => format!("first differing word at frame {f}") },
         worst.pos * 1e3, worst.vel * 1e3, worst_ref.pos * 1e3, worst_ref.vel * 1e3, if defect_ok { "INSIDE" } else { "OUTSIDE" }, defect_first
     );
+    {
+        // The two distributions over the run (a contact or a yield that falls in another
+        // frame makes one frame differ by millimetres in either: frame by frame is the
+        // strict test, these are the fair one).
+        let q = |v: &[Defect], f: fn(&Defect) -> f64, p: f64| {
+            let mut x: Vec<f64> = v.iter().map(f).collect();
+            x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            x[((x.len() - 1) as f64 * p) as usize]
+        };
+        println!(
+            "check: one-frame defect over the run, median / p90 / worst: pos {:.5} / {:.5} / {:.5} mm, vel {:.3} / {:.3} / {:.3} mm/s; the reference's own from a micron: pos {:.5} / {:.5} / {:.5} mm, vel {:.3} / {:.3} / {:.3} mm/s",
+            q(&defects, |d| d.pos, 0.5) * 1e3, q(&defects, |d| d.pos, 0.9) * 1e3, q(&defects, |d| d.pos, 1.0) * 1e3,
+            q(&defects, |d| d.vel, 0.5) * 1e3, q(&defects, |d| d.vel, 0.9) * 1e3, q(&defects, |d| d.vel, 1.0) * 1e3,
+            q(&one, |d| d.pos, 0.5) * 1e3, q(&one, |d| d.pos, 0.9) * 1e3, q(&one, |d| d.pos, 1.0) * 1e3,
+            q(&one, |d| d.vel, 0.5) * 1e3, q(&one, |d| d.vel, 0.9) * 1e3, q(&one, |d| d.vel, 1.0) * 1e3
+        );
+    }
     println!("check: free run {} three times the reference's own micron spread{}; reference {cpu_ms:.2} ms a frame on the CPU", if verdict_ok { "INSIDE" } else { "OUTSIDE" }, verdict_first);
     // Timing: `cars` cars, all from the free run's last state.
     let last = f.snapshot(0);
