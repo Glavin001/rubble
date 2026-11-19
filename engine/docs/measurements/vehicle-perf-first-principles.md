@@ -3492,13 +3492,21 @@ slower at the median and 1 to 2 % at p95: there the builds are past the fleet's 
 lists short, and what is left is the flag's own cost (the plan's checks, the per-triangle
 listing marks; the tracking is skipped while the passes wait).
 
+**The Demolition Derby** (Chrome, `mode=derby&derbyPlayer=0`, spectator, the derby probe,
+`run.sh --probe --secs 40`, one run each way; the AI's paths differ run to run, so a pair is
+not one run): 8 cars off 13.77 / 15.25 / 17.04 (median / p95 / worst, 1,373 steps), on
+14.60 / 16.01 / 19.00 (1,311 steps): **6 % slower**. 4 cars on 11.74 / 13.16 / 14.12 (1,626
+steps) against 9.35 / 12.23 / 13.17 off (1,512 steps, a run before a machine restart). On a
+flat arena the cars ram at speed, as in the mountain's first collisions: lists past the
+fleet's room or outlived in a few passes, and the flag's own cost on top.
+
 **Default: still off.** Bit for bit everywhere it was checked (fixtures on both terrains, the
 suites, the matrix, whole runs' final states, Chrome's frame-locked A/B on both terrains),
 and faster at the median on both terrains natively (−15 %) and in Chrome (−6 to −12 %). The
 rule was faster everywhere, and three places are not: the worst step of the native ledges run
 (+2 % in both rounds: the crash's levels and a build in one step), 32 cars (a tie, +0.5 % and
-−1.2 %: the list never holds there), and the rolling gully's first 20 s in Chrome (+0.4 to
-1.6 %, the flag's own cost before the cars pile). The lab page's box stays unchecked. The
+−1.2 %: the list never holds there), the rolling gully's first 20 s in Chrome (+0.4 to
+1.6 %, the flag's own cost before the cars pile), and the derby (+6 % at 8 cars). The lab page's box stays unchecked. The
 stop rule ended the work: after the composition (−12 to −19 % on the 8-car fixtures) and the
 fleet's room (−12 to −16 % on the rolling gully), three attempts in a row each under 5 %
 (the per-lane tracking, no tracking after idle passes, 16 partners covered).
