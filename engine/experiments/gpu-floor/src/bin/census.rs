@@ -95,6 +95,39 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // Ownership in any order (the fast variant): each node's lane owns up to `cap` of its
+    // plain beams, a beam one owner (augmenting paths).
+    for cap in [3usize, 4] {
+        let nn = s.nodes.len();
+        let plain: Vec<usize> = (0..s.beams.len()).filter(|&j| s.beams[j].kind == ExplicitKind::JbeamPlain).collect();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); nn];
+        for (k, &j) in plain.iter().enumerate() {
+            adj[s.beams[j].a as usize].push(k);
+            adj[s.beams[j].b as usize].push(k);
+        }
+        let mut owner = vec![usize::MAX; plain.len()];
+        let mut owned = vec![0usize; nn];
+        fn aug(i: usize, adj: &[Vec<usize>], owner: &mut [usize], seen: &mut [bool]) -> bool {
+            for &k in &adj[i] {
+                if seen[k] { continue; }
+                seen[k] = true;
+                if owner[k] == usize::MAX || aug(owner[k], adj, owner, seen) {
+                    owner[k] = i;
+                    return true;
+                }
+            }
+            false
+        }
+        for _ in 0..cap {
+            for i in 0..nn {
+                let mut seen = vec![false; plain.len()];
+                if aug(i, &adj, &mut owner, &mut seen) { owned[i] += 1; }
+            }
+        }
+        let mut hist = vec![0usize; cap + 1];
+        for i in 0..nn { hist[owner.iter().filter(|&&o| o == i).count()] += 1; }
+        println!("ownership, any order, cap {cap}: {} of {} plain beams owned; nodes by beams owned {:?}; nodes with fewer plain beams than the cap {}", owner.iter().filter(|&&o| o != usize::MAX).count(), plain.len(), hist, (0..nn).filter(|&i| adj[i].len() < cap).count());
+    }
     let tot: f32 = s.nodes.iter().map(|n| n.mass).sum();
     println!("mass {tot}");
     if let Some(d) = &s.drive { println!("drive: {:?}", d.config.wheels.len()); }

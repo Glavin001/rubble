@@ -44,6 +44,8 @@ fn main() -> anyhow::Result<()> {
     }
     // --v2: the second layout (kernels/floor2.metal).
     if flag("--v2") {
+        // --own: the owning layout (each node's lane owns three of its beams; fast variant).
+        st.own = flag("--own");
         make_v2(&cpu, &mut l, &mut st)?;
     }
     println!("layout: nodes {} records {} lanes {} slots {} add entries {} (max {}) centred entries {} (max {}) groups {}", l.nn, l.nr, LANES, l.rs, l.nadd, l.max_add, l.ncen, l.max_cen, l.ng);
@@ -55,7 +57,10 @@ fn main() -> anyhow::Result<()> {
             extra += "#define FAST_SUMS 1\n";
         }
         // --by-step: one substep a run, compared after each (finds the first differing step).
-        let by_step = flag("--by-step");
+        // --tol: one substep a run, each from the reference's state, compared by size (for a
+        // layout whose sums run in another order than the reference's).
+        let tol = flag("--tol");
+        let by_step = flag("--by-step") || tol;
         extra += if flag("--runtime-sizes") || by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
         if flag("--no-rowover") {
             extra += "#define ROWOVER 0\n";
@@ -75,6 +80,24 @@ fn main() -> anyhow::Result<()> {
         let mut e = Emu::new(l, &st, &extra, &dir)?;
         e.reverse = flag("--reverse");
         e.upload(&state_of(&cpu, &e.l, &st));
+        if tol {
+            e.steps = 1;
+            let (mut mp, mut mv, mut mf) = (0.0f64, 0.0f64, 0.0f64);
+            for step in 1..=frames * STEPS {
+                e.upload(&state_of(&cpu, &e.l, &st));
+                e.run(1)?;
+                cpu.step();
+                let (dp, dv, df, dd) = compare_tol(&cpu, &e.download());
+                mp = mp.max(dp);
+                mv = mv.max(dv);
+                mf = mf.max(df);
+                if dd != 0 || dp > 1.0e-6 || dv > 1.0e-3 {
+                    anyhow::bail!("emu: step {step}: farthest node {dp:e} m, velocity {dv:e} m/s, force {df:e} of the largest, broken states differing {dd}");
+                }
+            }
+            println!("emu: each of {} steps from the reference's state: farthest node {mp:.2e} m, velocity {mv:.2e} m/s, force {mf:.2e} of the largest; every beam's broken state equal", frames * STEPS);
+            return Ok(());
+        }
         if by_step {
             e.steps = 1;
             for step in 1..=frames * STEPS {

@@ -112,6 +112,8 @@ inline V3 v3p(packed_float3 a) { return v3(a.x, a.y, a.z); }
 #define W_ALIVE (1u << 22)
 #define W_SLOPE (1u << 23)
 #define W_DEFORM (1u << 24)
+// (The owning layout: the lane's own node is the beam's second end.)
+#define W_OWNB (1u << 25)
 #define TG3P(o) TGP(o)
 #define TG3V(o) TGV(o)
 #define ENT_ADD(acc, e) { uint o3_ = (e) & 2047u; acc = acc + (Ps - TG3P(o3_)) * tgG[(e) >> 11]; }
@@ -417,6 +419,13 @@ kernel void floorFrame(
     float kk[RS], rest[RS];
 #endif
     float G = 3.0e38f, L = 3.0e38f;
+#if OWN
+    // The owning layout (the fast variant): a node lane's slots 0 to 2 hold three of its
+    // own node's beams; their part of the node's two sums is added here from registers
+    // (one end is the lane's own node, so half the loads; the node's lists are three
+    // entries shorter), before the listed entries: another order than the reference's.
+    V3 cOwn = v3(0, 0, 0), fOwn = v3(0, 0, 0);
+#endif
     const bool hotOk = misc[11] == 1u;
     if (hotOk)
     {
@@ -456,6 +465,9 @@ kernel void floorFrame(
         if (kind == K_JPLAIN || kind == K_JSUPPORT)
         {
             w0[s] = a.x | a.y << 11 | (st1.w == 0.0f ? W_ALIVE : 0u) | (st1.z != 0.0f ? W_SLOPE : 0u) | (kind == K_JSUPPORT ? C_SUPPORT : C_PLAIN) << 30;
+#if OWN
+            if (isNode && s < 3u && a.y == nd) w0[s] |= W_OWNB;
+#endif
             float4 kc = recK[r];
             hs = float4(kc.x, kc.y, st0.x, ax.x);
             if (st1.w == 0.0f)
@@ -806,6 +818,9 @@ kernel void floorFrame(
         }
 
         // ---- S1: the centred damping's scalars (last beam pass's slopes) ----
+#if OWN
+        cOwn = v3(0, 0, 0);
+#endif
         for (uint s = 0; s < RS && !SKIP(1); s++)
         {
             uint w = w0[s];
@@ -820,13 +835,33 @@ kernel void floorFrame(
                 if ((w & W_SLOPE) != 0u)
                 {
                     uint a = w & 2047u, b = (w >> 11) & 2047u;
+#if OWN
+                    V3 d, dvel, own = v3(0, 0, 0);
+                    const bool owned = isNode && s < 3u;
+                    if (owned)
+                    {
+                        const bool ob = (w & W_OWNB) != 0u;
+                        const uint o = ob ? a : b;
+                        V3 po = TG3P(o), vo = TG3V(o);
+                        own = Pown - po;
+                        d = ob ? po - Pown : own;
+                        dvel = ob ? vo - Vown : Vown - vo;
+                    }
+                    else { d = TG3P(a) - TG3P(b); dvel = TG3V(a) - TG3V(b); }
+                    float inv = exactLength(dot3(d, d)).y;
+                    float du = dot3(dvel, d) * inv - up[s];
+#else
                     V3 d = TG3P(a) - TG3P(b);
                     float inv = exactLength(dot3(d, d)).y;
                     float du = dot3(TG3V(a) - TG3V(b), d) * inv - up[s];
+#endif
 #if REGMODE < 2
                     gc = ((-0.5f * cc[s]) * du) * inv;
 #else
                     gc = ((-0.5f * HOTS(s).y) * du) * inv;
+#endif
+#if OWN
+                    if (owned) cOwn = cOwn + own * gc;
 #endif
                 }
                 tgG[s * LANES + lid] = gc;
@@ -886,7 +921,11 @@ kernel void floorFrame(
         if (isNode && !SKIP(2))
         {
             V3 Ps = Pown;
+#if OWN
+            V3 c = cOwn;
+#else
             V3 c = v3(0, 0, 0);
+#endif
             for (uint k = 0; k < MAXENT; k += 4u)
             {
                 // The leading scalar entries, four a load: (x_self − x_other)·g.
@@ -939,6 +978,9 @@ kernel void floorFrame(
 
         // ---- S3: the beam pass ----
         const float vmax = as_type<float>(atomic_load_explicit(&tgCount[0], memory_order_relaxed));
+#if OWN
+        fOwn = v3(0, 0, 0);
+#endif
         for (uint s = 0; s < RS && !SKIP(3); s++)
         {
             uint w = w0[s];
@@ -963,7 +1005,22 @@ kernel void floorFrame(
                     continue;
                 }
                 uint a = w & 2047u, b = (w >> 11) & 2047u;
+#if OWN
+                V3 pa, pb, va, vb, own = v3(0, 0, 0);
+                const bool owned = isNode && s < 3u;
+                if (owned)
+                {
+                    const bool ob = (w & W_OWNB) != 0u;
+                    const uint o = ob ? a : b;
+                    V3 po = TG3P(o), vo = TG3V(o);
+                    own = Pown - po;
+                    pa = ob ? po : Pown; pb = ob ? Pown : po;
+                    va = ob ? vo : Vown; vb = ob ? Vown : vo;
+                }
+                else { pa = TG3P(a); pb = TG3P(b); va = TG3V(a); vb = TG3V(b); }
+#else
                 V3 pa = TG3P(a), pb = TG3P(b), va = TG3V(a), vb = TG3V(b);
+#endif
                 V3 d = pa - pb;
                 float2 li = exactLength(dot3(d, d));
 #if REGMODE >= 1
@@ -1004,11 +1061,17 @@ kernel void floorFrame(
                     if ((o.bits & 8u) != 0u) tgFlags[F_FIRED] = 1u;
                     if ((o.bits & 16u) != 0u) tgFlags[F_BROKE] = 1u;
                     tgG[s * LANES + lid] = o.g;
+#if OWN
+                    if (owned) fOwn = fOwn + own * o.g;
+#endif
                     continue;
                 }
                 up[s] = u;
                 w0[s] = slopeOn ? (w | W_SLOPE) : (w & ~W_SLOPE);
                 tgG[s * LANES + lid] = f * li.y;
+#if OWN
+                if (owned) fOwn = fOwn + own * (f * li.y);
+#endif
                 continue;
             }
             // The car's few special elements, from their records every step.
@@ -1151,6 +1214,15 @@ kernel void floorFrame(
                 if (ext && (as_type<uint>(recB[r].w) & EXT_DEFORM) != 0u) w |= W_DEFORM;
                 w0[s] = w;
             }
+#if OWN
+            // (A beam a group just broke adds nothing: the lane's own part again, from the
+            // scalars as they now stand.)
+            if (isNode)
+            {
+                #define OWNPART(q) ((Pown - TG3P((w0[q] & W_OWNB) != 0u ? (w0[q] & 2047u) : ((w0[q] >> 11) & 2047u))) * tgG[(q) * LANES + lid])
+                fOwn = (OWNPART(0) + OWNPART(1)) + OWNPART(2);
+            }
+#endif
             if (lid == 0) tgFlags[F_BROKE] = 1u;
             BAR;
         }
@@ -1227,6 +1299,9 @@ kernel void floorFrame(
         {
             V3 Ps = Pown;
             V3 f = v3(0.0f, massN * GRAVITY, 0.0f);
+#if OWN
+            f = f + fOwn;
+#endif
             // (A broken beam's scalar is zero: adding ±0 changes no bit of a sum that began at
             // +0 or at the weight, so it is the reference's skipped add.)
             for (uint k = 0; k < MAXENT; k += 4u)

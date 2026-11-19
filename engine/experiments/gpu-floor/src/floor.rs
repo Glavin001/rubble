@@ -61,6 +61,10 @@ pub struct Statics {
     /// Bodies stepped in lockstep, their contact pass on their own workgroups (0: none;
     /// 2: pairs of workgroups).
     pub pair: usize,
+    /// The fast variant's layout: each node's lane owns three of its plain beams (slots 0
+    /// to 2), whose force on that node it adds from registers; the node's sums then start
+    /// from its own beams (another order than the reference's).
+    pub own: bool,
 }
 
 /// The second layout's one buffer a car: each part's offset in 4-byte words.
@@ -218,6 +222,28 @@ pub fn compare_rigid(r: &engine_softbody::explicit_rigid::ProxySet, w: &[u32]) -
         chk(format!("shape {k} peak"), w[at + 3], s.peak);
     }
     (bad, notes)
+}
+
+/// The GPU's car against the reference's by size, for a build whose sums run in another
+/// order: (farthest node m, largest velocity difference m/s, largest force difference
+/// over the largest force, beams and triangles whose broken state differs).
+pub fn compare_tol(cpu: &ExplicitBeams, g: &State) -> (f64, f64, f64, usize) {
+    let (mut dp, mut dv, mut df, mut fmax) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let nan = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
+    for (i, n) in cpu.nodes.iter().enumerate() {
+        let v = |k: usize| Vec3::new(g.node[i * 3 + k][0], g.node[i * 3 + k][1], g.node[i * 3 + k][2]);
+        dp = dp.max(nan((v(0) - n.pos).length() as f64));
+        dv = dv.max(nan((v(1) - n.vel).length() as f64));
+        df = df.max(nan((v(2) - n.force).length() as f64));
+        fmax = fmax.max(n.force.length() as f64);
+    }
+    let mut discrete = 0;
+    for (j, b) in cpu.beams.iter().enumerate() {
+        if (g.rec[j * 3 + 1][3] != 0.0) != b.broken {
+            discrete += 1;
+        }
+    }
+    (dp, dv, df / fmax.max(1.0), discrete)
 }
 
 fn fb(x: u32) -> f32 {
@@ -382,7 +408,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0 },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0, own: false },
     ))
 }
 
@@ -989,7 +1015,60 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     // Scalar owners: plain by yield gate (a lane's slots near each other), supports, the rest.
     let mut plain: Vec<usize> = (0..nr).filter(|&j| s.beams[j].kind == K::JbeamPlain).collect();
     plain.sort_by(|&x, &y| s.beams[y].gate.min(s.beams[y].strength).total_cmp(&s.beams[x].gate.min(s.beams[x].strength)).then(x.cmp(&y)));
-    let mut owners = plain;
+    // Nodes on lanes by entry count (a warp's lanes loop alike).
+    let mut nadds = vec![0usize; nn];
+    for j in 0..nr {
+        for &n in &adds_of(s, j) {
+            nadds[n as usize] += 1;
+        }
+    }
+    let mut order: Vec<usize> = (0..nn).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(nadds[i]), i));
+    // The owning layout: every node the owner of three of its plain beams, a beam one
+    // owner (augmenting paths); they take slots 0 to 2 of the node's lane.
+    let mut owner_of = vec![usize::MAX; nr];
+    let mut plain_front: Vec<usize> = Vec::new();
+    if st.own {
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); nn];
+        for &j in &plain {
+            adj[s.beams[j].a as usize].push(j);
+            adj[s.beams[j].b as usize].push(j);
+        }
+        fn aug(i: usize, adj: &[Vec<usize>], owner: &mut [usize], seen: &mut [bool]) -> bool {
+            for &k in &adj[i] {
+                if seen[k] {
+                    continue;
+                }
+                seen[k] = true;
+                if owner[k] == usize::MAX || aug(owner[k], adj, owner, seen) {
+                    owner[k] = i;
+                    return true;
+                }
+            }
+            false
+        }
+        for _ in 0..3 {
+            for i in 0..nn {
+                let mut seen = vec![false; nr];
+                anyhow::ensure!(aug(i, &adj, &mut owner_of, &mut seen), "node {i} cannot own three plain beams");
+            }
+        }
+        let mut owned: Vec<Vec<usize>> = vec![Vec::new(); nn];
+        for &j in &plain {
+            if owner_of[j] != usize::MAX {
+                owned[owner_of[j]].push(j);
+            }
+        }
+        for lane in 0..nn {
+            let mut o = owned[order[lane]].clone();
+            o.sort();
+            anyhow::ensure!(o.len() == 3);
+            plain_front.extend(o);
+        }
+        plain.retain(|&j| owner_of[j] == usize::MAX);
+    }
+    let mut owners = plain_front;
+    owners.extend(plain);
     owners.extend((0..nr).filter(|&j| s.beams[j].kind == K::JbeamSupport));
     owners.extend((0..nr).filter(|&j| scalar(s.beams[j].kind) && !matches!(s.beams[j].kind, K::JbeamPlain | K::JbeamSupport)));
     let full = 3 * LANES;
@@ -1034,6 +1113,10 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     for j in 0..nr {
         let b = &s.beams[j];
         for (q, &n) in adds_of(s, j).iter().enumerate() {
+            // (The owner adds its own beam's force from registers: no entry.)
+            if owner_of[j] == n as usize {
+                continue;
+            }
             let e = match b.kind {
                 K::JbeamAeroTri => 1 << 31 | 1 << 29 | vidx[j],
                 K::JbeamCoupler => 1 << 31 | (q as u32) << 30 | vidx[j],
@@ -1047,10 +1130,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
             ents[n as usize].push(e);
         }
     }
-    // Nodes on lanes by entry count (a warp's lanes loop alike); triangles by their pair
-    // count in this pose.
-    let mut order: Vec<usize> = (0..nn).collect();
-    order.sort_by_key(|&i| (std::cmp::Reverse(ents[i].len()), i));
+    // Triangles on lanes by their pair count in this pose.
     let reach = st.list_reach;
     let count = |t: usize| -> usize {
         let p = s.triangles[t].nodes.map(|i| s.nodes[i as usize].pos + s.origin);
@@ -1188,7 +1268,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.allowed = allowed_c;
     st.v2_tab = tab;
     st.v2_off = o.clone();
-    st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig) + &format!(
+    st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
         "#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n"
     ) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
