@@ -3569,5 +3569,5 @@ most phases wait on loads and integer index arithmetic.
 **Proofs that bit-exact is unchanged.** No Slang source changed; with bit-exact on the
 host passes the build's WGSL as before (`host_wgsl(src, true)` is the uniform-load
 rewrite alone, as on main). Suites with `RUBBLE_BIT_EXACT=1` (`perf-verify.sh default`):
-explicit_loop_cap 5, explicit_beams_bitwise 12, explicit_contact_gpu 13, explicit_pair_reuse_gpu 2, explicit_beam_order_gpu 3, debris_retire_gpu 1, showcase_car_gpu 6 (1 ignored, as before), vv_grid_gpu 2, fleet_contact_gpu 1, self_split_gpu 8, engine-world explicit_vehicles 11: PASS; vehicle_lab_reset, vehicle_lab_piece_windows and explicit_drive_world were queued when the machine restarted (not yet confirmed). engine-metal `vehicle_parity` was not run: no file it compiles or
+explicit_loop_cap 5, explicit_beams_bitwise 12, explicit_contact_gpu 13, explicit_pair_reuse_gpu 2, explicit_beam_order_gpu 3, debris_retire_gpu 1, showcase_car_gpu 6 (1 ignored, as before), vv_grid_gpu 2, fleet_contact_gpu 1, self_split_gpu 8, engine-world explicit_vehicles 11, vehicle_lab_reset 3, vehicle_lab_piece_windows 1, explicit_drive_world 1: all PASS. engine-metal `vehicle_parity` was not run: no file it compiles or
 runs changed.
