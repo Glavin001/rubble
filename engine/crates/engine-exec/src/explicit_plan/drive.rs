@@ -11,7 +11,8 @@
 //! 2  (wheels, ref centre, ref back, ref left) u32         (0 wheels: no drive)
 //! 3  (max torque, top speed, steer rate, Ackermann)
 //! 4  (wheelbase, track, throttle rate, brake rate)
-//! 5  (handbrake rate, flags u32: 1 reverse brake, 2 traction control, 4 hub axles, max slope cos, surface)
+//! 5  (handbrake rate, flags u32: 1 reverse brake, 2 traction control, 4 hub axles, 8 wheels see
+//!    bodies, max slope cos, surface)
 //! 6  (traction-control α, cut, speed, anti-roll bars u32)  cut, speed: state
 //! 7  (speed-curve points u32, 0, 0, 0)
 //! 8..11   speed curve, two points per record
@@ -27,6 +28,7 @@
 //!    7..10   longitudinal curve; 11..14 lateral curve
 //!    15 state (spin, spin angle, steer angle, length)
 //!    16 state (load, slip ratio, slip angle °, contact 0/1)
+//!    21, 22 scratch within a step: (length, load, proxy shape + 1 or 0, 0), hit
 //!    17..19 outputs: centre, axle, up (xyz, 0)
 //!    20 the axle's spawn direction in the vehicle frame (forward, up, left, 0)
 //! 20 + 23·W + 8·w  (W the region's wheels, [`TYRE_PRE_RECS`]) wheel w's tyre values
@@ -37,6 +39,9 @@
 
 use engine_softbody::explicit_drive::{Drive, DriveInput, CURVE_POINTS, MAX_ANTI_ROLL};
 use glam::Vec3;
+
+/// Record 5's flags: the wheels see the rigid proxies (`DriveConfig::see_bodies`).
+pub const FLAG_SEE_BODIES: u32 = 8;
 
 /// Records per vehicle before its wheels, and per wheel.
 pub const VEHICLE_RECS: u32 = 20;
@@ -108,8 +113,10 @@ pub fn records(d: Option<&Drive>, stride: u32) -> Vec<[u32; 4]> {
     r[2] = [c.wheels.len() as u32, c.refs[0], c.refs[1], c.refs[2]];
     r[3] = f4(c.max_torque, c.top_speed, c.steer_rate, c.ackermann);
     r[4] = f4(c.wheelbase, c.track, c.throttle_rate, c.brake_rate);
-    let flags =
-        c.reverse_brake as u32 | (c.traction_control as u32) << 1 | (c.hub_axles as u32) << 2;
+    let flags = c.reverse_brake as u32
+        | (c.traction_control as u32) << 1
+        | (c.hub_axles as u32) << 2
+        | if c.see_bodies { FLAG_SEE_BODIES } else { 0 };
     r[5] = [
         c.handbrake_rate.to_bits(),
         flags,

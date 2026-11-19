@@ -162,6 +162,22 @@ pub struct ExplicitBeamsGpu {
     sleep_inputs: Vec<Option<engine_softbody::explicit_drive::DriveInput>>,
     sleep_grab: Option<usize>,
     sleep_wake: std::sync::Mutex<Vec<usize>>,
+    /// Raycast wheels that see the rigid proxies ([`Self::set_wheels_see_bodies`]): per
+    /// vehicle its drive flags word without that bit (None: no wheels), and whether it is on.
+    drive_flags: Vec<Option<u32>>,
+    wheels_bodies: bool,
+}
+
+/// A vehicle's drive flags word (`explicit_plan::drive` record 5 .y) without the
+/// see-bodies bit, and whether that bit is set.
+fn drive_flags_of(v: &ExplicitBeams) -> (Option<u32>, bool) {
+    match v.drive.as_deref() {
+        Some(d) if !d.config.wheels.is_empty() => {
+            let r = plan::drive::records(Some(d), plan::drive::DriveLayout::stride_for(d.config.wheels.len()));
+            (Some(r[5][1] & !plan::drive::FLAG_SEE_BODIES), d.config.see_bodies)
+        }
+        _ => (None, false),
+    }
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -1703,7 +1719,7 @@ impl ExplicitBeamsGpu {
         // rule; `RUBBLE_WIDE_SLEEP=0`: a workgroup or a step's dispatches, as before).
         planner.set_wide_sleep(std::env::var("RUBBLE_WIDE_SLEEP").as_deref() != Ok("0"));
         let one = vehicles.len() <= 1;
-        let gpu = Self {
+        let mut gpu = Self {
             device: device.clone(),
             queue: queue.clone(),
             frame: std::sync::OnceLock::new(),
@@ -1768,7 +1784,12 @@ impl ExplicitBeamsGpu {
             sleep_inputs: vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect(),
             sleep_grab: None,
             sleep_wake: Default::default(),
+            drive_flags: vehicles.iter().map(|v| drive_flags_of(v).0).collect(),
+            wheels_bodies: vehicles.iter().any(|v| drive_flags_of(v).1),
         };
+        // Wheels that see bodies leave out the schedules that run rays ahead.
+        let f = gpu.planner.perf_flags();
+        gpu.set_perf_flags(f);
         // One vehicle runs the plain frame (or, with surface contact, the split one)
         // from the first frame on.
         if one {
@@ -1845,6 +1866,10 @@ impl ExplicitBeamsGpu {
         self.labelled.iter_mut().for_each(|l| *l = false);
         self.planner.words[plan::W_RETIRE_BASE] = 0;
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
+        self.drive_flags = vehicles.iter().map(|v| drive_flags_of(v).0).collect();
+        self.wheels_bodies = vehicles.iter().any(|v| drive_flags_of(v).1);
+        let f = self.planner.perf_flags();
+        self.set_perf_flags(f);
         self.sleep_grab = None;
         self.sleep_wake.lock().unwrap().clear();
         self.contact_errors.lock().unwrap().clear();
@@ -2706,8 +2731,40 @@ impl ExplicitBeamsGpu {
     /// The kernels' lossless schedule switches ([`plan::W_PERF_FLAGS`], `plan::PERF_*`
     /// bits; `RUBBLE_PERF_FLAGS` sets the start value): each the same results bit for
     /// bit on or off. Applies from the next frame.
+    /// While raycast wheels see bodies ([`Self::set_wheels_see_bodies`]) the schedules that
+    /// run the wheels' rays before the step's proxy integration
+    /// ([`plan::PERF_DRIVE_AHEAD`], [`plan::PERF_SPLIT_WHEELS_AHEAD`]) are left out (the
+    /// kernel fails a frame that takes them with the bit set).
     pub fn set_perf_flags(&mut self, flags: u32) {
+        let flags = if self.wheels_bodies {
+            flags & !(plan::PERF_DRIVE_AHEAD | plan::PERF_SPLIT_WHEELS_AHEAD)
+        } else {
+            flags
+        };
         self.planner.set_perf_flags(flags);
+    }
+
+    /// Raycast wheels that also meet the rigid proxies and push back on them
+    /// (`engine_softbody::explicit_drive::DriveConfig::see_bodies`; the World's
+    /// `wheels_hit_bodies`) for every vehicle with wheels, from the next frame. Off, every
+    /// frame is the frame without it bit for bit.
+    pub fn set_wheels_see_bodies(&mut self, on: bool) {
+        let Some(d) = self.layout.drive else {
+            return;
+        };
+        self.wheels_bodies = on;
+        for (v, f) in self.drive_flags.iter().enumerate() {
+            let Some(f) = *f else { continue };
+            let w = if on { f | plan::drive::FLAG_SEE_BODIES } else { f };
+            let at = u64::from(d.vehicle(v) + 5) * 16 + 4;
+            self.queue.write_buffer(&self.misc, at, bytemuck::bytes_of(&w));
+        }
+        let f = self.planner.perf_flags();
+        self.set_perf_flags(f);
+    }
+
+    pub fn wheels_see_bodies(&self) -> bool {
+        self.wheels_bodies
     }
 
     pub fn perf_flags(&self) -> u32 {
