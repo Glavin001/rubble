@@ -16,6 +16,11 @@ one state, the same build), compares every state word and times each frame apart
         the same state); fails a row where the World adds more than WORLD_MS. The rows with
         a scenario file by default (the mountain rows drive for seconds first: name them).
     matrix.py --rows ARGS...            the row names ARGS pick (for the Modal runner)
+    matrix.py --end-state DIR [ROW ...] each row's state after END_FRAMES (default 20)
+        frames from its moment, into DIR/ROW.fx (one build's; a host refactor's gate)
+    matrix.py --compare-end A B [ROW ...]  two builds' end states, every state word:
+        PASS only if each row is bit for bit (a host change the A/B cannot see, since
+        it changes both halves alike)
 Options (environment): FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
@@ -186,10 +191,69 @@ def world(rows):
     return 0 if not bad else 1
 
 
+def end_state(out_dir, rows):
+    """Each row's state after END_FRAMES (default 20) frames of 34 steps from its saved
+    moment, saved as OUT_DIR/ROW.fx: one build's end states, for --compare-end against
+    another build's (a host change that changes both halves of the A/B alike, which the
+    A/B cannot see)."""
+    n = os.environ.get("END_FRAMES", "20")
+    os.makedirs(out_dir, exist_ok=True)
+    bad = []
+    for row in rows:
+        t0 = time.time()
+        d = os.path.join(out_dir, row[0] + ".d")
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            os.remove(os.path.join(d, f))
+        cmd = lab_args(row) + ["--from-fixture", state_file(row), "--ab-switch", "perf=0",
+                               "--ab-frames", "1", "--save-fixtures", d]
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE, env=dict(os.environ, AB_PRE=n))
+        saved = [f for f in os.listdir(d) if f.endswith(".fx")]
+        if p.returncode != 0 or len(saved) != 1:
+            bad.append(row[0])
+            print(f"FAIL {row[0]}: exit {p.returncode}, {saved}")
+            print("\n".join((p.stdout + p.stderr).splitlines()[-8:]))
+            continue
+        os.replace(os.path.join(d, saved[0]), os.path.join(out_dir, row[0] + ".fx"))
+        os.rmdir(d)
+        print(f"end state {row[0]:<8} after {n} frames ({time.time() - t0:.1f} s)")
+    return 0 if not bad else 1
+
+
+def compare_end(a_dir, b_dir, rows):
+    """Every state word of each row's end state in A_DIR against B_DIR's (the A/B's
+    masking), and the host state (piece labels, retired nodes) as bytes."""
+    bad = []
+    for row in rows:
+        a, b = os.path.join(a_dir, row[0] + ".fx"), os.path.join(b_dir, row[0] + ".fx")
+        if not (os.path.isfile(a) and os.path.isfile(b)):
+            bad.append(row[0])
+            print(f"{row[0]:<8} MISSING ({a if not os.path.isfile(a) else b})")
+            continue
+        cmd = lab_args(row) + ["--from-fixture", a, "--compare-fixture", b]
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE)
+        out = p.stdout + p.stderr
+        host = re.search(r"host state the same: (true|false)", out)
+        same = p.returncode == 0 and "state bit for bit: true" in out and host is not None and host.group(1) == "true"
+        if not same:
+            bad.append(row[0])
+        print(f"{row[0]:<8} {'bit for bit' if same else 'DIFFERS'}")
+        if not same:
+            for l in out.splitlines():
+                if "differ" in l or "Error" in l or "panicked" in l or "host state" in l:
+                    print("    " + l.strip())
+    print(f"verdict: {'PASS' if not bad else 'FAIL (' + ', '.join(bad) + ')'}; {len(rows)} rows")
+    return 0 if not bad else 1
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    if args[0] == "--end-state" and len(args) >= 2:
+        return end_state(args[1], pick(args[2:]))
+    if args[0] == "--compare-end" and len(args) >= 3:
+        return compare_end(args[1], args[2], pick(args[3:]))
     if args[0] == "--rows":
         # The rows the rest of the arguments pick (SWITCH | --baseline | --make, then
         # names): the Modal runner gives each its own container.

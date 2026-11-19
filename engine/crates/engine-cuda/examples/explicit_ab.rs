@@ -31,6 +31,10 @@
 //! - `vv_grid=0|1`: vehicle contact's candidate grid;
 //! - `wide=0|1`: the wide passes (several workgroups a vehicle) where the fleet allows;
 //! - `contact=0|1`: vehicle contact; `contact_margin=M` (metres);
+//! - `group_split=0|1`, `group_split_tests=0|1`, `self_split=0|1`, `wide_list=0|1`,
+//!   `wide_fused=0|1`: the split paths (engine_exec's frame schedule; their modules must
+//!   be in the build: `ENGINE_CUDA_EXPLICIT_MODULES`, `explicit_beams_split_*`,
+//!   `explicit_beams_selfsplit_*`);
 //! - `env.NAME=V`: an environment variable set while that variant's host is built
 //!   (switches the plan reads at upload, e.g. `env.RUBBLE_PAIR_REUSE=0`);
 //! - `param.W=V`: the planner's parameter word W (a switch that is a word, e.g. a
@@ -233,6 +237,12 @@ fn host(fleet: &[ExplicitBeams], switches: &serde_json::Map<String, Value>) -> a
                 g.set_wide(on());
             }
             "contact" => g.set_vehicle_contact(on()),
+            // The split paths (engine_exec's frame schedule): bit for bit against off.
+            "group_split" => g.set_group_split(on()),
+            "group_split_tests" => g.set_group_split_tests(on()),
+            "self_split" => g.set_self_split(on()),
+            "wide_list" => g.set_wide_list(on()),
+            "wide_fused" => g.set_wide_fused(on()),
             "contact_margin" => g.planner_mut().set_contact_margin(v.parse()?),
             "coupling_list" | "coupling_fold" | "piece_windows" => anyhow::bail!(
                 "{k}: the World coupling's switch; these scenarios have no coupling proxies (run it \

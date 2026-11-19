@@ -13,6 +13,12 @@
 //!   and the ordered command list ([`FramePlanner::commands`]): dispatches, indirect
 //!   dispatches and buffer copies, with the vehicle-contact plan's and the wide
 //!   passes' scheduling decided here.
+//! * [`schedule::frame`]: the whole frame a host replays: the planner's commands with
+//!   the split paths around them (self-collision split, the split group path and its
+//!   fleet-wide passes, the wide passes' reused pair list), their parameter copies, and
+//!   for each split launch its module, workgroups and argument buffers
+//!   ([`schedule::split_launch`]). [`MODULES`] and [`split_modules`] are every module
+//!   those launches name.
 //! * [`ExplicitLayout`]'s readback decoders (positions, beams, ...) and the host
 //!   writes' offsets (a node's velocity, the grab, the coupling switch).
 //!
@@ -22,6 +28,7 @@
 
 pub mod coupling;
 pub mod drive;
+pub mod schedule;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
