@@ -56,9 +56,13 @@ A dispatch outside the lock is refused (`Gpu::run_n`). Strict (the default) is f
 off plus `#pragma clang fp contract(off)` and is bit for bit with the reference; `--fast
 --native` is the fast variant, judged by the closeness report the drivers print.
 `--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `pair --gpu` also
-prints the contact pass by stage on whole frames, and `pair --def NAME=V` switches one of
-`pair.metal`'s options (`XT_OVERLAP`, `XB_ATOM`, `XF_MASK`, `XD_MASK`, `XG_SPLIT`,
-`XP_LANE`) for an A/B from one binary. `rigid --direct`
+prints the contact pass by stage on whole frames. `--def NAME=V` on any driver switches a
+kernel option for an A/B from one binary: `pair.metal`'s `XT_OVERLAP`, `XB_ATOM`,
+`XF_MASK`, `XD_MASK`, `XG_SPLIT`, `XP_LANE`; `floor2.metal`'s `LANE_LOCAL`, `SURF_BOX_ATOM`,
+and the measurements `SURF_CUT`, `SURF_SUB`, `LIVE_DUMMY`, `COLD_OPAQUE`. `GPU_FLOOR_DUMP=file`
+writes the assembled Metal source (for `xcrun metal -S -emit-llvm`); `GPU_FLOOR_INLINE=1`
+marks every helper always-inline. `microbench 1 only=dead` (and `only=unchanging`,
+`only=which:`, `only=stack:`, `only=live`) are the rows on code that never runs. `rigid --direct`
 tests a box a lane a pair (the whole query) instead of staged; `fqcheck --gpu --latency`
 is one query's latency by element, shape and outcome. `microbench`,
 `mathprobe` and `xsync [--data]` measure the GPU's primitives, its arithmetic and its

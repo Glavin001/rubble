@@ -3886,7 +3886,8 @@ Slang through wgpu, one dispatch a substep, and some of this it already has in a
 | 11 | Fast math with native functions | 10 to 20 % (rest 1.25 → 1.09, head-on 4.2 → 3.5) | **no**: within the closeness report above | an option, as now |
 | 12 | A lane's item given to it (a list, or `ctz` over a mask of hits) instead of a scan with a skip; appends after the loop, not inside it | 24 proxy bodies' integration 1.0 → 0.09 ms a frame (node contact on the bricks 2.69 → 1.83); surface search 0.57 → 0.17 | yes | per loop: the production kernels' own scans (a body's shapes, candidates appended inside a row or cluster loop) are to be read for it |
 | 13 | In a pass whose owners take turns, the part of every turn that reads only the pass's start (two-body: slots, hit counts, first pass) done by all owners at once, before they meet | head-on 3.40 → 3.32; those stages 0.46 → 0.32 ms | yes | with 3 only; a turn's values cross the meeting in the hit's record, not in registers |
-| 14 | A reduction done by the lanes that hold the values (atomic min and max into workgroup memory) instead of one warp walking them | head-on 3.31 → 3.23; two bodies apart 1.47 → 1.43 | yes | the body's box and its clusters' boxes; surface contact's box is the same shape (not done) |
+| 14 | A reduction done by the lanes that hold the values (atomic min and max into workgroup memory) instead of one warp walking them | head-on 3.31 → 3.23; two bodies apart 1.47 → 1.43; surface contact's box 0.02 | yes | the body's box, its clusters' boxes, surface contact's box |
+| 15 | What a phase's loop reads that does not change (the lane's roles and entry counts, the bases) taken again at the phase's start, not kept from the kernel's | 2 to 7 %: parked with surface contact 1.51 → 1.41, bricks 3.47 → 3.36, at rest 1.09 → 1.06 | yes | grows with the kernel's size, so production's general kernels have the most to gain; needs a load the compiler cannot fold |
 
 Two that are not kernel changes and paid for all of the above: the strict Metal build is
 fast math off plus `#pragma clang fp contract(off)` (no XOR barriers; that is what made
@@ -3993,10 +3994,9 @@ Two things about the model. *Values alive across a barrier and not touched cost 
 with no change in the work done*: across this round's variants the frame without the pass
 (none of the pass's stages run) was 2.17 to 2.25 ms, and the same turns compiled in a
 restructured loop 3.40 or 3.60. It is the same thing as surface contact's 0.14 ms for its
-code's presence, it is as large as most of the changes tried here, and it is not
-explained: what is known is that it is not the kernel's size and not values across
-barriers. A change of a few hundredths of a millisecond cannot be judged on this kernel
-at all until it is.
+code's presence, and it is as large as most of the changes tried here; the paragraph
+after the next finds its cause in part. A change of a few hundredths of a millisecond
+cannot be judged on this kernel while it lasts.
 
 What is left in the pass, by the table: five meetings a substep in contact (about 0.3 ms;
 the reference's order fixes three of them: owner 0's guard after owner 1's candidates
@@ -4004,6 +4004,80 @@ have read the start's sums, owner 1's residual after owner 0's guard); the nodes
 publication (0.12: every node's position goes to the partner, for the side vote's
 neighbours; publishing only what the partner's box can reach, with those neighbours,
 would cut the stores, not done); the turns' 0.4, short chains on one warp of hits.
+
+**What code that does not run costs, and why (2026-11-19).** Two paragraphs here left a
+cost with no cause: a parked car pays 0.14 to 0.2 ms for surface contact's code being in
+its kernel, and the two-body frame moved by 0.05 to 0.2 ms with the code's shape. The
+cause, as far as it was found: **the compiler keeps a value in one place for its whole
+life.** A value read at the kernel's start and used in a phase's loop (a lane's entry
+counts, its node, its triangle) is alive through every phase of every substep. While the
+kernel is small it has a register; as code is added, more such values are kept in memory
+instead, and a loop that uses one then reads it from memory every turn. Nothing is
+slower where the new code is; the old loops are.
+
+How it was found. First what it is not, each measured:
+
+| suspected | measure | result |
+|---|---|---|
+| values alive across a barrier, not touched | `microbench only=live`, 1 to 128 a lane | 0.088 µs a phase throughout |
+| values alive through the whole kernel, never used | `LIVE_DUMMY` 0, 4, 8, 16, 32, parked car | 1.23 throughout (1.44 with surface contact) |
+| the stack frame's size | `microbench only=stack:`, a dead array of 64 to 2,048 floats | none |
+| the kernel's length; a barrier that never runs | 2,000 dead instructions; a dead barrier | none (1.51 µs for 1.51) |
+| the pass's addresses computed before the substeps' loop | `COLD_OPAQUE`: its bases behind a load the compiler cannot see through | 1.512 and 1.515 |
+| helpers not inlined (the compiler's output keeps 77 functions) | `GPU_FLOOR_INLINE=1`: all marked always-inline | node contact 1.26 → 1.22, surface contact 1.52 → 1.54 |
+
+Then what it is. In the microbenchmark a phase that updates 48 values (0.57 µs alone) ran
+anywhere from 0.58 to 1.56 µs beside code that never runs, with no order in it (16
+threadgroup loads in the dead code 1.03, 48 of them 0.69; fast and strict builds
+differently), while a phase of 128 operations on one value did not move. So it is the
+running code with many values that is touched, not anything the dead code does. In the
+kernel, the parked car with the surface pass's stages left out of the build one after
+another (`SURF_CUT`, `SURF_SUB`): 1.26 with node contact alone, 1.33 with the pass's code
+left out, 1.38 with its search and narrow tests, 1.50 with its staged stages, 1.51 with
+all of it; any one staged stage alone adds 0.03 to 0.09 and all three 0.07. No one
+construct, and not additive. By group (`--profile`), with the pass in the kernel and not
+run: the two gathers slower (0.17 → 0.22 and 0.19 → 0.29 ms a frame), the beams faster
+(0.22 → 0.17). The gathers' loops are bounded by the lane's entry counts, read at the
+kernel's start. Reading them again at the gather's start (one load of the lane's table
+row, behind a load the compiler cannot see through, so that the copy is the phase's own)
+made every build faster, the larger the more. That is the split the compiler does not
+make: one value for the long life, another for the loop.
+
+Applied (`LANE_LOCAL`, on by default): the node pass, both gathers, the list check and
+the pair rows take their lane's roles, entry counts and bases at the phase's start; and
+surface contact's box is reduced by the nodes' own lanes, as the two-body pass's (0.02).
+Bit for bit in every scene of every mechanism (the emulator's three suites; strict on the
+GPU). ms a frame, before → after, one batch (`batch-shape13`):
+
+| scene | fast + native | strict |
+|---|---|---|
+| one body at rest | 1.09 → 1.06 | 1.26 → 1.22 |
+| one body, wall, mid-crash | 1.83 → 1.74 | 2.26 → 2.22 |
+| parked beside the post, node contact | 1.26 → 1.23 | 1.46 → 1.41 |
+| parked beside the post, surface contact | 1.51 → **1.41** | 1.68 → 1.58 |
+| the post, surface contact | 3.54 → 3.40 | 4.35 → 4.24 |
+| 24 bricks, surface contact | 3.47 → 3.36 | 4.22 → 4.10 |
+| four rocks, surface contact | 2.52 → 2.40 | 3.04 → 2.93 |
+| 24 bricks / four rocks, node contact | 1.83 → 1.80 / 1.66 → 1.62 | 2.08 → 2.00 / 2.06 → 1.97 |
+| two bodies apart / head-on / side | 1.43 → 1.41 / 3.22 → 3.14 / 3.27 → 3.21 | no change |
+
+Two to seven percent, most where the kernel is largest. What remains: the parked car
+with surface contact is 1.41 against 1.26 with the pass's code left out of the same
+build, of which the pass's first phase runs for some 0.05; about 0.1 is still the code's
+presence. The values it would take are the lane's state (position, force, the beams'
+slots), which cannot be read again from a table; a bit-for-bit copy of the node's
+position made for the gathers alone was erratic (`LANE_LOCAL=3`: 1.437 → 1.429 with
+surface contact, 1.270 → 1.306 with its code left out) and is off. The compiler's own
+output cannot be read here (the intermediate code can, `GPU_FLOOR_DUMP` and `xcrun metal
+-S -emit-llvm`; it is before the inlining and the register assignment that matter), so
+what is left is found one experiment at a time.
+
+What follows for a kernel that holds every mechanism: its always-run loops should read
+their bounds and bases at the phase's start, not from the kernel's; and a body with
+nothing in reach in a frame is cheapest in a kernel that has no contact code at all (1.06
+at rest against 1.23 with node contact compiled in and 1.41 with surface contact). The
+World builds each body's proxy set every frame; an empty set could pick that kernel. Not
+built here.
 
 **Surface contact (the car's skin against the world's shapes), added 2026-11-19.**
 Mechanism 3 above is the engine's default rule against a rigid shape, *node contact*: a
@@ -4167,11 +4241,11 @@ pass's code being in the kernel at all, not run (1.46 with the pass switched off
 1.32 with its code removed). It is not the lane's state being live across that code:
 writing the state to its rows before the pass and reading it back after left the parked
 frame where it was and made the frames in contact 0.36 ms longer. It does not follow the
-kernel's size either (the build without the fallback queries is the same). Unexplained,
-and worth a seventh of an idle frame: the next thing to find out, with the same build
-(`--surf-empty`) cut down a part at a time.
+kernel's size either (the build without the fallback queries is the same). That was
+taken apart later ("What code that does not run costs", above): the parked car with
+surface contact is 1.41 now, node contact alone 1.23.
 
-*What is left, in order.* That 0.14. Then the stages are each a few tenths with no one
+*What is left, in order.* What remains of that 0.14 (about 0.1). Then the stages are each a few tenths with no one
 cause: the kept candidates' rows are read from device memory in stage R (three scattered
 rows a candidate a pass); a hit's 24 fixed-point adds are device atomics; the search runs
 every substep where the body's other searches keep a list over several. And the query
