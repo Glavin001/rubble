@@ -17,7 +17,8 @@ struct float2 { float x, y; float2() : x(0), y(0) {} float2(float a, float b) : 
 struct float3 { float x, y, z; float3() : x(0), y(0), z(0) {} explicit float3(float a) : x(a), y(a), z(a) {} float3(float a, float b, float c) : x(a), y(b), z(c) {} };
 struct packed_float3 { float x, y, z; packed_float3() : x(0), y(0), z(0) {} packed_float3(float a, float b, float c) : x(a), y(b), z(c) {} };
 struct float4 { float x, y, z, w; float4() : x(0), y(0), z(0), w(0) {} explicit float4(float a) : x(a), y(a), z(a), w(a) {} float4(float a, float b, float c, float d) : x(a), y(b), z(c), w(d) {}
-    float4(float3 v, float d) : x(v.x), y(v.y), z(v.z), w(d) {} };
+    float4(float3 v, float d) : x(v.x), y(v.y), z(v.z), w(d) {}
+    float operator[](uint i) const { return (&x)[i]; } };
 struct uint2 { uint x, y; uint2() : x(0), y(0) {} uint2(uint a, uint b) : x(a), y(b) {} };
 struct bool3 { bool x, y, z; };
 struct int3 { int x, y, z; int3(int a, int b, int c) : x(a), y(b), z(c) {} int operator[](uint i) const { return (&x)[i]; } };
