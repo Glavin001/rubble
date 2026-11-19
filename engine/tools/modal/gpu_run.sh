@@ -181,7 +181,10 @@ done < <(env)
 # Native builds use every core (the OS shares them with whatever else runs); the
 # emulated one keeps its old default.
 if [ "$platform" = linux/arm64 ]; then jobs_default=$(sysctl -n hw.ncpu 2>/dev/null || echo 8); rjobs_default=8
-else jobs_default=6; rjobs_default=4; fi
+# (The CUDA route's build script runs nvcc a module a job: a kernel edit of the parity
+# tests' 21 modules took 301 s at 4 jobs, 222 s at 8 and 211 s at 12, peak 6-7 GB, on a
+# 16-core M3 Max with Docker given 16 cores and 25 GB; 2026-11-19.)
+else jobs_default=6; rjobs_default=12; fi
 docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} \
   -v "$repo:/repo" \
   -v "$run:/out" \
