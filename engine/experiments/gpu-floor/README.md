@@ -12,7 +12,8 @@ Three mechanisms, one kernel path each:
 |---|---|---|
 | one body and a fixed world | `kernels/floor2.metal` (`floor.metal` is the first layout) | `floor --v2` |
 | body against body, two workgroups a pair in lockstep | `floor2.metal` + `pair.metal` | `pair --scene headon\|side\|rear\|apart` |
-| body against rigid bodies (the reference's proxy set) | `floor2.metal`, `RIGID` blocks | `rigid --scene bricks\|rocks` |
+| body against rigid bodies (the reference's proxy set) | `floor2.metal`, `RIGID` blocks | `rigid --scene bricks\|rocks\|post` |
+| surface contact (triangles, beams and band nodes against the world's boxes and spheres) | `floor2.metal`, `SURF` blocks; the queries are `slang/physics/feature_query.slang` converted as text (`floor.rs` `fq_msl`) | `rigid --surface`, `floor --v2 --pole 0.3 --surface` |
 
 ## Checking without the GPU
 
@@ -27,6 +28,11 @@ cargo build --profile fast -p gpu-floor
 ./target/fast/pair --scene headon --emu --frames 12 --reverse        # lanes and groups in the other order
 ./target/fast/rigid --scene bricks --emu --frames 12
 EMU_TRACE=1 ./target/fast/floor --v2 --emu --frames 1                # the kernel's own counts
+./target/fast/rigid --scene post --surface --emu --frames 24        # surface contact
+./target/fast/floor --v2 --emu --pole 0.3 --speed 11 --surface --frames 14   # a fixed pole
+./surf-emu.sh                                                        # surface contact's scenes, both lane orders
+./target/fast/fqcheck 300000                                         # the converted queries against the engine's
+./target/fast/surfdemo                                               # what surface contact changes (CPU reference)
 ```
 
 One emulator run at a time: they share `out/gpu-floor/emu*`.
@@ -49,7 +55,9 @@ profiler's sums have favoured changes that made the frame slower.
 A dispatch outside the lock is refused (`Gpu::run_n`). Strict (the default) is fast math
 off plus `#pragma clang fp contract(off)` and is bit for bit with the reference; `--fast
 --native` is the fast variant, judged by the closeness report the drivers print.
-`--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `microbench`,
+`--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `rigid --direct`
+tests a box a lane a pair (the whole query) instead of staged; `fqcheck --gpu --latency`
+is one query's latency by element, shape and outcome. `microbench`,
 `mathprobe` and `xsync [--data]` measure the GPU's primitives, its arithmetic and its
 memory across cores.
 

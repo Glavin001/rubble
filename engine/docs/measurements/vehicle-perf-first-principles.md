@@ -3910,9 +3910,138 @@ three steps for it); a body's rigid shapes on lists (a node still tests every ac
 1.2 ms with 24 boxes). Each is tens of percent of its group, not of the frame: the frame
 is now spread over a dozen groups, none above a quarter.
 
+**Surface contact (the car's skin against the world's shapes), added 2026-11-19.**
+Mechanism 3 above is the engine's default rule against a rigid shape, *node contact*: a
+node takes a force once the node itself is strictly inside the shape. Nothing between the
+nodes is tested, so a shape thinner than the node spacing passes into the car. The
+engine's opt-in *surface contact* (`surface_contact`, spec §38, `explicit_surface.rs`)
+also tests every collision triangle, every beam that is no triangle's edge (2,796 on the
+sedan) and every node within the 2.5 cm band, against every shape. What it changes, on the
+CPU reference (`surfdemo`: the sedan into a fixed 12 cm square pole that passes between
+the nose's nodes; "inside" is how far the pole's near face is past the car's front-most
+node, sampled every four frames):
+
+| speed | node contact only: deepest inside, speed when 0.4 m in | surface contact: deepest inside | steps a node is inside the pole |
+|---|---|---|---|
+| 5 m/s | 0.41 m | 0.12 m | 0 (node only: up to 170 node-steps a frame) |
+| 11 m/s | 0.99 m, still 10.2 m/s at 0.43 m | 0.26 m | 0 |
+| 20 m/s | 1.53 m, still 16.0 m/s at 0.97 m | 0.44 m | 0 |
+
+With node contact the pole is a metre into the car before the car has slowed; with
+surface contact it is stopped at the skin and no node is ever inside it. One thing to
+check on the engine side, not this kernel's: with surface contact the car leaves the pole
+again at 2.6, 4.6 and 5.1 m/s (from 5, 11 and 20 m/s). That is the reference's own
+response (the kernel reproduces it bit for bit) and I have no reference run that says
+what it should be.
+
+*In the kernel (`floor2.metal` `SURF`).* Boxes and spheres, on rigid bodies (two-way) and
+fixed in the world; the reference's casts for fast bodies (§38.4) are not ported and the
+kernel's status says so if a body is fast enough to need them. The geometry is not
+rewritten: `slang/physics/feature_query.slang` (the engine's strict closest-feature
+queries, the twin of `engine_schema::feature_query`) is converted to Metal as text when
+the kernel is assembled (`floor.rs` `fq_msl`: `out` parameters to references, constants to
+macros, literals to single precision), so there is one source. Checks, all 0 differing:
+the converted queries against the Rust module on 300,000 random triangle, beam and point
+cases against boxes and spheres, compiled as C++ and by Metal on the GPU (`fqcheck`,
+`fqcheck --gpu`); the whole pass against the reference in the emulator, every state word
+and the proxies', on a loose 3 t post (24 frames, both lane orders, by step, at 11 and
+25 m/s), the brick wall (14), the falling rocks (16) and a fixed pole (14, both orders);
+and strict on the GPU, bit for bit every frame, on all four.
+
+*What a query costs alone* (`fqcheck --gpu --latency`: one warp, every lane the same 32
+cases; µs a query, fast | strict):
+
+| element against shape | apart, in the band | touching or crossing | near, no contact |
+|---|---|---|---|
+| triangle, box | 20–23 \| 34–37 | 47–52 \| 74–81 | 11 \| 19 |
+| beam, box | 11 \| 20 | 22 \| 34 | 5 \| 8 |
+| triangle, sphere | 1.8 \| 2.7 | 2.8 \| 4.9 | 1.2 \| 1.6 |
+| beam, sphere | 1.4 \| 2.0 | 2.3 \| 2.9 | 1.1 \| 1.3 |
+| point, either | 0.6 \| 0.8 | | 0.6 \| 0.7 |
+
+A box query is 12 box edges of six (triangle) or three (beam) closest-point candidates
+plus the run inside, walked up to four times (the least gap; the candidates at it; then,
+crossing, the support along the overlap axis and the candidates at it). One such query is
+as long as a whole substep of the car at rest (32 µs), and a stage that runs a lane a pair
+pays its slowest lane, so a warp holding a triangle pair and a beam pair pays both. Forty
+values kept live across the queries (as the car's kernel keeps) changed nothing (20.4
+against 19.9 µs).
+
+*The pass.* After the self hits, before the proxies integrate:
+1. the body's box (a warp reduces it in the S1 phase, where the nodes are final), and the
+   slots whose cull boxes meet it within the band: none, and the pass is one barrier;
+2. the search: each lane's triangle, node and beams against the near slots' boxes (in
+   workgroup memory), the pairs that pass on a list;
+3. a lane a pair: the separation cull; a point, or anything against a sphere, tested
+   here; a triangle or a beam against a box becomes a staged pair with a task for each
+   box edge within the band of the element's box, and one for its run inside;
+4. stage A, a lane a task: the task's six candidates' gaps, and the pair's least gap by
+   an atomic min (the walk's first pass);
+5. stage B: a task that holds a candidate within the tie of that gap walks it again alone
+   and records it with its place in the walk;
+6. stage R, a lane a pair: the query's steps between its walks and its later passes, over
+   the few recorded candidates in the walk's order (the overlap axis only when touching
+   or crossing);
+7. a lane a hit: the response from the nodes' forces (published once to workgroup
+   memory), the counts and the body, into the fixed-point sums.
+
+Every candidate that the reference's pass would count is counted (an unculled edge only
+adds candidates past the band), and each is evaluated by the engine's own function, so
+the result is the reference's. Overflow of a staged list is not a failure: the pair takes
+the whole query in its lane.
+
+*Cost* (ms a frame, one sedan, fast | strict; the node-contact column is the same scene
+and frame without surface contact, which is another trajectory by then):
+
+| state | node contact | surface, staged | surface, a lane a pair (`--direct`) |
+|---|---|---|---|
+| parked 0.3 m from a post, nothing near | 1.29 \| 1.43 | 1.45 \| 1.70 | |
+| a loose 3 t post, 11 m/s, frame 5 | 2.19 | 3.65 \| 4.68 | 3.97 \| 5.53 |
+| 24 bricks, frame 12 | 2.76 | 4.72 \| 5.68 | 5.06 \| 6.76 |
+| four falling rocks (spheres), frame 14 | 1.81 | 2.77 \| 3.36 | 2.78 \| 3.34 |
+
+Surface contact in contact with boxes is 1.5 to 2.0 ms a frame on top (1.0 with
+spheres), 0.15 when nothing is near. Staging took 0.3 (fast) and 0.9 to 1.1 (strict) off
+the boxes' frames, not the several-fold the query's latency suggested: the pass is now six
+short stages of 4 to 16 µs a substep each, and none of them is the query any more. Where
+the time is (the profiler, fast, ms a frame):
+
+| group | post | bricks | rocks |
+|---|---|---|---|
+| near slots, search | 0.21 | 0.56 | 0.41 |
+| cull, tasks, direct tests | 0.35 | 0.36 | 0.33 |
+| A, an edge's gaps | 0.48 | 0.34 | 0 |
+| B, kept candidates | 0.15 | 0.18 | 0 |
+| R, a pair's contact | 0.42 | 0.41 | 0 |
+| hits applied | 0.29 | 0.26 | 0.26 |
+
+Two earlier arrangements, both bit for bit, measured the same frame time within 0.2 ms:
+the working data in device memory (each stage then pays the chain pair → shape rows →
+element at 0.2 µs a dependent load: the cull stage 0.39 against 0.35 with the shapes, the
+staged pairs and the forces in the scalars' array, the hits' stage 0.39 against 0.28
+without its slot phase), and every edge of every pair a task with no list (stage A 0.73
+on the bricks, five tasks a lane, against 0.34 with the far edges culled first).
+
+*In copies* (fast, in contact, ms a frame): post 1: 3.65, 40: 4.87, 41: 8.46, 80: 9.99;
+bricks 1: 4.72, 40: 5.87, 41: 10.6, 80: 11.9; rocks 1: 2.77, 40: 3.41, 41: 6.18,
+80: 7.04. The same staircase as without it: a body a core.
+
+*What is left, in order.* The search runs every substep against every near slot (0.2 to
+0.56): the body's other searches keep a list valid over several steps, and so can this
+one. The node contact's own tests against the same shapes are the largest group of the
+bricks' frame (1.2 ms: every node, every active shape, twice) and can take their pairs
+from this pass's near list. The idle 0.15 is the proxies' strict poses and the box
+reduction, both needed only once a slot is near. The overlap axis runs in one lane a
+crossing pair (about 5 µs a substep when one exists). And the query itself: four walks
+of up to 78 candidates is the reference's definition, so a cheaper exact box test is a
+change to both twins on the engine side, not to a kernel.
+
 **Not built, and what the numbers do not cover.** Raycast wheels and the drivetrain (the
 scenes' cars have none, as the scenario matrix's soft rows); piles of three or more bodies
 (the owners' turns generalise, the pairing does not yet); static, hull and capsule
-proxies; Chrome and WGSL (Metal only, by the brief); a body split over several cores.
+proxies, and for surface contact cylinders, triangles (a trimesh's, a heightfield's) and
+the casts; a car's beams against another car's triangles (car against car is node
+against triangle only); Chrome and WGSL (Metal only, by the brief); a body split over
+several cores.
 Production's figures are the matrix's, on its own scenes: the same car and speeds, not the
 same frames.
