@@ -981,8 +981,13 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         tab[t_lane + lane * 4 + 1] = start;
         // (The leading entries with no vector among them, then all of them.)
         let lead = if lane < nn { ents[order[lane]].iter().take_while(|&&e| e >> 31 == 0).count() as u32 } else { 0 };
-        anyhow::ensure!(cnt < 256 && nn * 3 < 2048);
-        tab[t_lane + lane * 4 + 2] = lead | cnt << 8;
+        // (An aero entry is never followed by another kind: aero records are the last.)
+        let pre = if lane < nn { ents[order[lane]].iter().take_while(|&&e| !(e >> 31 == 1 && e >> 29 & 1 == 1)).count() as u32 } else { 0 };
+        if lane < nn {
+            anyhow::ensure!(ents[order[lane]][pre as usize..].iter().all(|&e| e >> 31 == 1 && e >> 29 & 1 == 1), "an entry after an aero triangle's");
+        }
+        anyhow::ensure!(cnt < 256 && nn < 2048);
+        tab[t_lane + lane * 4 + 2] = lead | pre << 8 | cnt << 16;
         tab[t_lane + lane * 4 + 3] = if lane < nt { tri_order[lane] as u32 } else { NONE };
     }
     tab.extend_from_slice(&[0; 8]);

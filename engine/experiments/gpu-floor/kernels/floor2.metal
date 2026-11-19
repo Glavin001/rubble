@@ -196,8 +196,9 @@ kernel void floorFrame(
     // This lane's roles.
     const uint nd = tab[T_LANE + lid * 4];
     const uint entStart = tab[T_LANE + lid * 4 + 1];
-    const uint entCounts = tab[T_LANE + lid * 4 + 2]; // leading scalar entries | all entries << 8
-    const uint entScalar = entCounts & 255u, entCount = entCounts >> 8;
+    // (Leading scalar entries | entries before the first aero one << 8 | all entries << 16.)
+    const uint entCounts = tab[T_LANE + lid * 4 + 2];
+    const uint entScalar = entCounts & 255u, entPreAero = (entCounts >> 8) & 255u, entCount = entCounts >> 16;
     const uint tri = tab[T_LANE + lid * 4 + 3];
     const bool isNode = nd != NONE;
     const bool isTri = tri != NONE;
@@ -575,16 +576,20 @@ kernel void floorFrame(
                 if (k + 2u < entScalar) ENT_ADD(c, cur.z);
                 if (k + 3u < entScalar) ENT_ADD(c, cur.w);
             }
+            // (The entries from the first vector one, less the aero triangles' at the end,
+            // which have no centred part.)
+            uint4 cur = uint4(0u);
             for (uint k = entScalar; k < MAXENT; k++)
             {
-                if (k >= entCount) break;
-                uint e = ent4[(entStart >> 2) + (k >> 2)][k & 3u];
+                if (k >= entPreAero) break;
+                if (k == entScalar || (k & 3u) == 0u) cur = ent4[(entStart >> 2) + (k >> 2)];
+                uint e = cur[k & 3u];
                 if ((e >> 31) == 0u)
                 {
                     uint o3 = e & 2047u;
                     c = c + (Ps - TGP(o3)) * tgG[e >> 11];
                 }
-                else if ((e & (1u << 29)) == 0u)
+                else
                 {
                     uint vi = e & 0xFFFu;
                     V3 vv = GETV(vi);
@@ -912,10 +917,12 @@ kernel void floorFrame(
                 if (k + 2u < entScalar) ENT_ADD(f, cur.z);
                 if (k + 3u < entScalar) ENT_ADD(f, cur.w);
             }
+            uint4 cur = uint4(0u);
             for (uint k = entScalar; k < MAXENT; k++)
             {
                 if (k >= entCount) break;
-                uint e = ent4[(entStart >> 2) + (k >> 2)][k & 3u];
+                if (k == entScalar || (k & 3u) == 0u) cur = ent4[(entStart >> 2) + (k >> 2)];
+                uint e = cur[k & 3u];
                 if ((e >> 31) == 0u)
                 {
                     uint o3 = e & 2047u;
