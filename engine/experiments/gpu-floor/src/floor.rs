@@ -70,6 +70,9 @@ pub struct Statics {
     /// to 2), whose force on that node it adds from registers; the node's sums then start
     /// from its own beams (another order than the reference's).
     pub own: bool,
+    /// Surface contact (the reference's `surface_contact`): the triangles, the beams that
+    /// are no triangle's edge and the nodes in the band against the world's shapes.
+    pub surface: bool,
 }
 
 /// The second layout's one buffer a car: each part's offset in 4-byte words.
@@ -98,6 +101,10 @@ pub struct V2Off {
     pub clu: usize,
     pub rig: usize,
     pub rig_words: usize,
+    /// Surface contact's block (its slots' rows, lists and counts), and the static
+    /// slots' rows as uploaded (the proxies' are the kernel's).
+    pub surf: usize,
+    pub surf_rows: Vec<u32>,
     pub words: usize,
 }
 
@@ -128,6 +135,7 @@ pub fn v2_put(big: &mut [u8], o: &V2Off, s: &State) {
     if o.rig_words != 0 && s.rig.len() == o.rig_words {
         put_at(big, o.rig, bytemuck::cast_slice(&s.rig));
     }
+    put_at(big, o.surf, bytemuck::cast_slice(&o.surf_rows));
 }
 pub fn v2_get(big: &[u8], o: &V2Off, l: &Layout) -> State {
     State {
@@ -287,7 +295,8 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     anyhow::ensure!(s.damp_filters.is_empty() && s.shocks2.is_empty() && s.triggers.is_empty());
     anyhow::ensure!(s.settings.centred_damping && s.settings.centred_objective && !s.settings.fast_inv_sqrt);
     anyhow::ensure!(!s.settings.drag && !s.plastic_strength_drop && s.fixed_contact && s.dissipative_contact && s.exact_friction);
-    anyhow::ensure!(s.damp_scheme == 0 && s.shapes.is_empty() && !s.surface_contact);
+    anyhow::ensure!(s.damp_scheme == 0 && s.shapes.is_empty());
+    anyhow::ensure!(!s.surface_contact || (s.surface_separation && s.nodes.iter().all(|n| n.flags & engine_softbody::explicit_beams::NODE_NO_GROUND == 0)), "surface contact: the separation cull on and no node without ground contact");
     anyhow::ensure!(s.contact_force.is_none() && s.wings.is_empty() && s.fusedrag.is_none() && s.slides.is_empty());
     let ng = s.beams.iter().map(|b| b.group.unsigned_abs() as usize).max().unwrap_or(0).max(
         s.torsion_watch.iter().flatten().copied().max().unwrap_or(0) as usize,
@@ -423,7 +432,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, list_reach_out: list_reach + LIST_SKIN_OUT - LIST_SKIN, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0, own: false },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, list_reach_out: list_reach + LIST_SKIN_OUT - LIST_SKIN, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0, own: false, surface: s.surface_contact },
     ))
 }
 
@@ -530,11 +539,14 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
             "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define LANES {}\n#define STEPS {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define HITW {HITW}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n#ifndef RUNTIME_SIZES\n#define RUNTIME_SIZES 0\n#endif\n{}\n{}\n{}\n{}",
             l.nn, l.nr, l.nt, l.ng, l.nd, LANES, STEPS / per_frame, (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(),
             extra, st.v2_defs, helpers,
-            unroll_slots(&if st.pair != 0 {
-                format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 1048576u\n{}", st.pair, st.pair, include_str!("../kernels/floor2.metal").replace("//@PAIR_PASS", include_str!("../kernels/pair.metal")))
-            } else {
-                include_str!("../kernels/floor2.metal").to_string()
-            })
+            {
+                let k = unroll_slots(&if st.pair != 0 {
+                    format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 1048576u\n{}", st.pair, st.pair, include_str!("../kernels/floor2.metal").replace("//@PAIR_PASS", include_str!("../kernels/pair.metal")))
+                } else {
+                    include_str!("../kernels/floor2.metal").to_string()
+                });
+                if st.surface { k.replace("//@FQ", &fq_msl()) } else { k }
+            }
         );
     }
     format!(
@@ -1089,6 +1101,142 @@ pub fn list_args(st: &mut Statics) {
     }
 }
 
+/// The engine's strict closest-feature queries (`slang/physics/feature_query.slang`, the
+/// twin of `engine_schema::feature_query`) as Metal source: the Slang text converted, so
+/// there is one source. Slang's `out` / `inout` parameters become references, its global
+/// constants macros, its unsuffixed literals single precision; the hull accessors (no
+/// hulls here) and the culls' switch are defined after it.
+pub fn fq_msl() -> String {
+    let src = include_str!("../../../slang/physics/feature_query.slang");
+    let mut out = String::from(include_str!("../kernels/fq_strict.metal"));
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with("#ifndef ENGINE_") || t.starts_with("#define ENGINE_") || t.starts_with("#include") || t == "#endif" {
+            continue;
+        }
+        // (The code part: a trailing comment is kept as it is.)
+        let (code, comment) = match line.find("//") {
+            Some(i) => line.split_at(i),
+            None => (line, ""),
+        };
+        let mut code = code.to_string();
+        if let Some(rest) = code.strip_prefix("static const ") {
+            // static const float NAME = V;  ->  #define NAME (V)
+            let rest = rest.trim_end().trim_end_matches(';');
+            let (decl, val) = rest.split_once('=').expect("a constant's value");
+            let name = decl.split_whitespace().last().expect("a constant's name");
+            code = format!("#define {name} ({}) ", val.trim());
+        }
+        for kw in ["inout ", "out "] {
+            // `out T name` -> `thread T& name` (parameters only: after `(` or `, `).
+            let mut res = String::new();
+            let mut i = 0;
+            let b = code.as_bytes();
+            while i < code.len() {
+                let at_word = code[i..].starts_with(kw) && (i == 0 || !is_ident(b[i - 1] as char));
+                let after_sep = code[..i].trim_end().ends_with('(') || code[..i].trim_end().ends_with(',') || code[..i].trim().is_empty();
+                if at_word && after_sep {
+                    let rest = &code[i + kw.len()..];
+                    let ty: String = rest.chars().take_while(|&c| is_ident(c)).collect();
+                    res += &format!("thread {ty}&");
+                    i += kw.len() + ty.len();
+                } else {
+                    res.push(b[i] as char);
+                    i += 1;
+                }
+            }
+            code = res;
+        }
+        // Unsuffixed floating literals are single precision (a C++ compiler reads them double).
+        let c: Vec<char> = code.chars().collect();
+        let mut res = String::new();
+        let mut i = 0;
+        while i < c.len() {
+            let start_ok = i == 0 || !(is_ident(c[i - 1]) || c[i - 1] == '.');
+            if c[i].is_ascii_digit() && start_ok {
+                let mut j = i;
+                while j < c.len() && c[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let mut float = false;
+                if j < c.len() && c[j] == '.' && j + 1 < c.len() && c[j + 1].is_ascii_digit() {
+                    float = true;
+                    j += 1;
+                    while j < c.len() && c[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                }
+                if j < c.len() && (c[j] == 'e' || c[j] == 'E') && j + 1 < c.len() && (c[j + 1].is_ascii_digit() || ((c[j + 1] == '-' || c[j + 1] == '+') && j + 2 < c.len() && c[j + 2].is_ascii_digit())) {
+                    float = true;
+                    j += 2;
+                    while j < c.len() && c[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                }
+                let end_ok = j >= c.len() || !(is_ident(c[j]) || c[j] == '.');
+                res.extend(&c[i..j]);
+                if float && end_ok {
+                    res.push('f');
+                }
+                i = j;
+            } else {
+                res.push(c[i]);
+                i += 1;
+            }
+        }
+        // `E.xyz` -> FQXYZ(E) (the emulator's vectors have no swizzles); `half` is a type
+        // in Metal, so the shape's field is `hext`.
+        let mut code = res;
+        while let Some(at) = code.find(".xyz") {
+            let b = code.as_bytes();
+            let mut st = at;
+            if st > 0 && b[st - 1] == b')' {
+                let mut depth = 0;
+                while st > 0 {
+                    st -= 1;
+                    match b[st] {
+                        b')' => depth += 1,
+                        b'(' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            while st > 0 && is_ident(b[st - 1] as char) {
+                st -= 1;
+            }
+            code = format!("{}FQXYZ({}){}", &code[..st], &code[st..at], &code[at + 4..]);
+        }
+        let b: Vec<char> = code.chars().collect();
+        let mut res = String::new();
+        let mut i = 0;
+        while i < b.len() {
+            if is_ident(b[i]) && (i == 0 || !is_ident(b[i - 1])) {
+                let mut j = i;
+                while j < b.len() && is_ident(b[j]) {
+                    j += 1;
+                }
+                let word: String = b[i..j].iter().collect();
+                res += if word == "half" { "hext" } else { &word };
+                i = j;
+            } else {
+                res.push(b[i]);
+                i += 1;
+            }
+        }
+        out += &res;
+        out += comment;
+        out.push('\n');
+    }
+    out += "inline float3 fqHullVertex(FqShape s, uint i) { return float3(0.0f, 0.0f, 0.0f); }\ninline uint2 fqHullEdge(FqShape s, uint e) { return uint2(0u, 0u); }\ninline float4 fqHullPlane(FqShape s, uint f) { return float4(0.0f, 0.0f, 0.0f, 0.0f); }\ninline bool fqCullsOn() { return true; }\n";
+    out
+}
+
 /// The second layout (kernels/floor2.metal) for this car: which lane holds which node,
 /// triangle and beam slots, each node's entry list in the reference's add order, and the
 /// vector slots of the elements whose force is not along a beam.
@@ -1317,6 +1465,15 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         tab[t_lane + lane * 4 + 3] = if lane < nt { tri_order[lane] as u32 } else { NONE };
     }
     tab.extend_from_slice(&[0; 8]);
+    // Surface contact's segments (explicit_surface.rs surface_segments): two words each,
+    // the nodes (16 bits each) and the beam (its broken flag).
+    let segs = if st.surface { engine_softbody::explicit_surface::surface_segments(s) } else { Vec::new() };
+    let t_seg = tab.len();
+    for &j in &segs {
+        let b = &s.beams[j as usize];
+        tab.extend_from_slice(&[b.a | b.b << 16, j]);
+    }
+    tab.extend_from_slice(&[0; 4]);
     let mut o = V2Off::default();
     let mut at = 0usize;
     let mut take = |words: usize| {
@@ -1345,6 +1502,30 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     let (nb, nsh) = s.rigid.as_ref().map_or((0, 0), |r| (r.bodies.len(), r.shapes.len()));
     o.rig_words = if nb != 0 { nb * BDW * 4 + 64 + nsh * SHW * 4 + nsh * 6 } else { 0 };
     o.rig = take(o.rig_words);
+    // Surface slots: the static boxes, then the proxies' shapes (8 rows each); the step's
+    // pairs (4096), its hits (512 of 16 words), the bodies' hit counts.
+    let nss = if st.surface { s.boxes.len() + nsh } else { 0 };
+    anyhow::ensure!(nss <= 64 && nt + segs.len() + nn < 65536, "surface contact holds 64 slots");
+    anyhow::ensure!(!st.surface || (nss != 0 && st.pair == 0), "surface contact: a world shape, and one body a group");
+    o.surf = take(if st.surface { nss * 32 + 4096 + 512 * 16 + 64 } else { 0 });
+    for b in &s.boxes {
+        if !st.surface {
+            break;
+        }
+        // (surface_shapes: a static box's centre and half extents, its cull box the box.)
+        let (c, half) = ((b.lo + b.hi) * 0.5, (b.hi - b.lo) * 0.5);
+        let rows: [[f32; 4]; 8] = [
+            [c.x, c.y, c.z, f32::from_bits(0)],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [half.x, half.y, half.z, f32::from_bits(0xFFFF)],
+            [b.lo.x, b.lo.y, b.lo.z, 0.0],
+            [b.hi.x, b.hi.y, b.hi.z, 0.0],
+            [0.0; 4],
+        ];
+        o.surf_rows.extend(rows.iter().flatten().map(|x| x.to_bits()));
+    }
     // A contact pair's pass (pair.metal): what a body publishes for its partner (box, top
     // speed, hit count); the owner's staging sums and hit counts for both bodies' nodes;
     // its lists (triangles, triangle and cluster, candidates) and its hits.
@@ -1368,6 +1549,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
+        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define O_SURF {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf
+    ) + &format!(
         "#define O_HMAP {}\n#define O_XMAP {}\n#define O_XCLB {x_clb}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
         o.hmap, o.xmap, list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out
     ) + &format!(

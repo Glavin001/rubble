@@ -134,7 +134,7 @@ pub fn pair_scene(template: &ExplicitBeams, name: &str, speed: f32, gap: f32) ->
 /// four spheres of 0.5 to 1 t coming down on the parked car at 6 m/s.
 pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::Result<ExplicitBeams> {
     use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
-    let mut car = place(template, 0.02, if name == "bricks" { speed } else { 0.0 });
+    let mut car = place(template, 0.02, if name == "bricks" || name == "post" { speed } else { 0.0 });
     car.drive = None;
     let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
     for n in &car.nodes {
@@ -167,7 +167,15 @@ pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::
                 body(&mut set, Vec3::new(x, hi.y + r + 0.2 + 0.3 * k as f32, z), Vec3::new(0.0, -6.0, 0.0), m, Vec3::splat(0.4 * m * r * r), ProxyGeom::Sphere { radius: r });
             }
         }
-        other => anyhow::bail!("unknown rigid scene {other} (bricks, rocks)"),
+        "post" => {
+            // A 12 cm square post, 2 m tall, 3 t (loose, not anchored), 0.3 m ahead and a
+            // little off the centre line: thin enough to pass between the nose's nodes.
+            let half = Vec3::new(0.06, 1.0, 0.06);
+            let m = 3000.0f32;
+            let i = Vec3::new(half.y * half.y + half.z * half.z, half.x * half.x + half.z * half.z, half.x * half.x + half.y * half.y) * (m / 3.0);
+            body(&mut set, Vec3::new(0.13, 1.0, hi.z + 0.3 + half.z), Vec3::ZERO, m, i, ProxyGeom::Box { half });
+        }
+        other => anyhow::bail!("unknown rigid scene {other} (bricks, rocks, post)"),
     }
     set.begin_window();
     car.rigid = Some(Box::new(set));

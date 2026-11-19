@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 engine-softbody.workspace = true
+engine-schema.workspace = true
 glam.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

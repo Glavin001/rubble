@@ -15,6 +15,12 @@ fn main() -> anyhow::Result<()> {
     let frames: usize = arg("--frames").map_or(30, |x| x.parse().unwrap());
     let t = car::load_template(&car::default_car_dir(), JbeamWheels::Raycast)?;
     let mut c = car::rigid_scene(&t, &scene, speed)?;
+    // --surface: the reference's surface contact on (the car's triangles, beams and nodes in
+    // the band against the shapes, not only the nodes inside them).
+    c.surface_contact = std::env::args().any(|a| a == "--surface");
+    if c.surface_contact {
+        println!("surface contact on: {} segments beside the {} triangles and {} nodes", engine_softbody::explicit_surface::surface_segments(&c).len(), c.triangles.len(), c.nodes.len());
+    }
     if std::env::args().any(|a| a == "--emu") {
         // The kernel's source on the CPU against the reference: the body's every state
         // word, and the proxies' poses, velocities, counts and window impulses.
@@ -166,17 +172,21 @@ fn main() -> anyhow::Result<()> {
     }
     let t0 = std::time::Instant::now();
     for fr in 1..=frames {
-        let mut touching = 0u32;
+        let (mut touching, mut surf, mut quer) = (0u32, 0u32, 0u32);
         for _ in 0..34 {
             c.step();
             touching += c.rigid.as_ref().unwrap().bodies.iter().map(|b| b.count).sum::<u32>();
+            surf += c.surface_last;
+            quer += c.surface_queries;
         }
         c.rigid.as_mut().unwrap().begin_window();
         if fr % 5 == 0 || fr == frames {
             let r = c.rigid.as_ref().unwrap();
             let moved = r.bodies.iter().filter(|b| b.vel.length() > 0.01).count();
             let fastest = r.bodies.iter().map(|b| b.vel.length()).fold(0.0f32, f32::max);
-            println!("frame {fr}: node-in-shape contacts a step {:.1}; bodies moving {moved} of {}, fastest {fastest:.2} m/s; broken beams {}, self contacts {}", touching as f32 / 34.0, r.bodies.len(), c.beams.iter().filter(|b| b.broken).count(), c.last_contacts);
+            let m: f32 = c.nodes.iter().map(|n| n.mass).sum();
+            let vz: f32 = c.nodes.iter().map(|n| n.mass * n.vel.z).sum::<f32>() / m;
+            println!("frame {fr}: node-in-shape contacts a step {:.1}; surface hits a step {:.1}, narrow tests a step {:.0}; bodies moving {moved} of {}, fastest {fastest:.2} m/s (body 0 at z {:.3}, vz {:.2}); car vz {vz:.2}; broken beams {}, self contacts {}", touching as f32 / 34.0, surf as f32 / 34.0, quer as f32 / 34.0, r.bodies.len(), r.bodies[0].pos.z, r.bodies[0].vel.z, c.beams.iter().filter(|b| b.broken).count(), c.last_contacts);
         }
     }
     println!("{frames} frames in {:.1} s ({:.1} ms a frame)", t0.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64() * 1000.0 / frames as f64);
