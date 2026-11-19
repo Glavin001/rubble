@@ -46,6 +46,22 @@
      (3 minutes, once, and again after a change of the buffers' layout). A new switch
      needs its `--ab-switch` value; a new kernel without a switch is checked against
      the committed kernels (`--ab-switch kernel --ab-kernel-dir`).
+  1.5. **Half a minute: the gate for every perf change.** `engine/tools/scenario-matrix/run.sh
+     SWITCH` (from `engine/`) replays a dozen saved use cases, not only the mountain: one
+     soft car driving, tumbling and into a wall; piles of 2, 8 and 32; head-on and side
+     impacts; a car into rigid bricks and under falling rocks; a car into a node-beam
+     barrier; a loaded node-beam truss alone. Each row both ways from one state, every
+     state word compared, each frame timed apart (median). One table, one verdict: **PASS
+     only if every row is bit for bit and no row is slower than its off half by more than
+     the calibrated noise threshold** (5 % and 0.05 ms; a row past it runs twice more and
+     the median of the three decides; `docs/measurements/scenario-matrix.md`).
+     A change that speeds up one row and slows another does not pass. Rung 1 stays the
+     per-edit loop (one fixture, seconds); run the matrix before keeping a change and
+     before rung 2. `run.sh --baseline` prints each row's ms a frame against its target
+     (one soft body 1 ms, eight in contact 3 ms); `run.sh --make` saves the states (once,
+     and after a change of the buffers' layout); `PROFILE_SPLIT=1` adds each row's frame
+     by dispatch kind. 20 to 30 s warm; the first run after a kernel edit also pays the
+     pipelines' compiles (1.5 to 2.5 minutes).
   2. **A minute.** The same with `FRAMES=20`, `EXTRA="--ab-profile"` for the frame by
      dispatch kind, `explicit_loop_cap`, and Chrome's validation of every module
      (`EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket

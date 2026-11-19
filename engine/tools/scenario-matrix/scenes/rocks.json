@@ -1,0 +1,3 @@
+{ "scene": "flat", "events": [
+  { "t": 0, "fire": { "shape": "sphere", "radius": 0.45, "density": 2600, "origin": [0, 5, 0.6], "dir": [0, -1, 0], "speed": 4, "count": 3, "interval": 0.15 } },
+  { "t": 0, "fire": { "shape": "box", "size": [0.8, 0.6, 0.7], "density": 2600, "origin": [0.3, 6, -1.0], "dir": [0, -1, 0], "speed": 2 } } ] }
