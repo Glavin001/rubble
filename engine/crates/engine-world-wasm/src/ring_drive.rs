@@ -145,7 +145,7 @@ impl WebWorld {
                 .map(|k| templates[k % templates.len()].clone())
                 .collect();
             let specs =
-                engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(coupling.capacity));
+                engine_webgpu::ExplicitBeamsGpu::compute_specs_for(&fleet, Some(coupling.capacity), coupling.bit_exact);
             crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
         }
         let s = res(brick_ring_drive(

@@ -134,6 +134,11 @@ fn options(script: &Value) -> LabOptions {
         }
         o.insert("vehicleSleep".into(), d);
     }
+    // `--bit-exact 0|1`: bit-exact results (the lab's `bitExact`; off by default,
+    // `RUBBLE_BIT_EXACT=1` turns it on: the bit-for-bit harnesses).
+    if let Some(s) = arg("--bit-exact") {
+        o.insert("bitExact".into(), json!(s == "1"));
+    }
     // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
     if let Some(s) = arg("--pieces") {
         o.insert("pieceLabels".into(), json!(s == "1"));
@@ -1352,13 +1357,18 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let sleep_ab = arg("--ab-switch").as_deref() == Some("sleep");
     let sleeplist_ab = arg("--ab-switch").as_deref() == Some("sleeplist");
     let sleep_cfg = options(&script).vehicle_sleep_cfg;
+    // `--ab-switch bitexact`: bit-exact results (`set_bit_exact`) on against off (the
+    // strict arithmetic's cost; the states differ in their last bits by design).
+    let bitexact_ab = arg("--ab-switch").as_deref() == Some("bitexact");
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if groupsplit_ab {
+        if bitexact_ab {
+            x.set_bit_exact(on);
+        } else if groupsplit_ab {
             x.set_group_split(on);
             x.set_self_split(on);
         } else if sleep_ab {

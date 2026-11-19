@@ -110,7 +110,7 @@ fn a_vehicle_shoves_a_free_box_and_momentum_closes() {
     .unwrap();
     let masses: Vec<f32> = car.nodes.iter().map(|n| n.mass).collect();
     let m: f32 = masses.iter().sum();
-    w.add_explicit_vehicles(std::slice::from_ref(&car), &ExplicitVehiclesDef::default()).unwrap();
+    w.add_explicit_vehicles(std::slice::from_ref(&car), &ExplicitVehiclesDef { bit_exact: true, ..ExplicitVehiclesDef::default() }).unwrap();
     let box_mass = w.body_mass_data(b).unwrap().unwrap().mass;
     assert!((box_mass - mass).abs() < 1e-2 * mass, "box mass {box_mass}");
     let horizontal = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
@@ -215,6 +215,7 @@ fn a_vehicle_breaks_a_prefractured_house() {
     let car = sedan(20.0, h, Vec3::new(centre.x, h, zmax + 1.5), 2);
     let def = ExplicitVehiclesDef {
         capacity: engine_webgpu::CouplingCapacity { bodies: 64, shapes: 255, planes: 4096 },
+        bit_exact: true,
         ..ExplicitVehiclesDef::default()
     };
     let dt = w.solver().dt;
@@ -306,7 +307,7 @@ fn the_coupling_shape_cull_is_bit_exact() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -369,7 +370,7 @@ fn the_coupling_workgroup_copies_are_bit_exact() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -429,7 +430,7 @@ fn the_coupling_node_ranges_are_bit_exact() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -490,7 +491,7 @@ fn a_vehicle_contact_margin_changes_no_result() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -557,7 +558,7 @@ fn the_coupling_emit_in_parallel_is_the_serial_walk() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -596,7 +597,7 @@ fn the_coupling_plan_in_parallel_is_the_serial_walk() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -684,7 +685,7 @@ fn the_coupling_candidate_list_is_bit_exact() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )
@@ -752,7 +753,7 @@ fn the_coupling_candidate_list_meets_fast_and_thin_bodies() {
         })
         .unwrap();
     w.create_sphere_shape(ball, &ShapeDef { density: 7800.0, ..ShapeDef::default() }, [0.0; 3], 0.08).unwrap();
-    w.add_explicit_vehicles(std::slice::from_ref(&car), &ExplicitVehiclesDef::default()).unwrap();
+    w.add_explicit_vehicles(std::slice::from_ref(&car), &ExplicitVehiclesDef { bit_exact: true, ..ExplicitVehiclesDef::default() }).unwrap();
     let mut used = 0;
     for step in 0..24 {
         w.step().unwrap();
@@ -788,7 +789,7 @@ fn the_group_split_with_the_coupling_is_bit_exact() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 120.0),
         None,
     )

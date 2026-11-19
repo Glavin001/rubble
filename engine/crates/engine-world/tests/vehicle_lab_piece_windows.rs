@@ -52,7 +52,7 @@ fn unordered(u: u32) -> f32 {
 /// 150 World steps; the most proxy shapes in a window, the pieces' boxes the coupling took
 /// at the end (label, lo, hi), and the car's node and beam records and origin as words.
 fn run(windows: bool) -> (u32, Vec<(usize, glam::Vec3, glam::Vec3)>, Vec<u32>) {
-    let opts = LabOptions::from_json(&json!({ "scene": "mountain", "pieceWindows": windows, "debris": { "on": false } }));
+    let opts = LabOptions::from_json(&json!({ "scene": "mountain", "pieceWindows": windows, "debris": { "on": false }, "bitExact": true }));
     let (mut world, mut lab) = Lab::build(GpuContext::Default, &car(), opts, |_| {}).unwrap();
     lab.read_blocking(&world, true).unwrap();
     let mut most = 0u32;
