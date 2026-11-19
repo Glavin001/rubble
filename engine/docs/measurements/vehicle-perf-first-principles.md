@@ -3602,3 +3602,78 @@ settle, both for phase 1: whether Tint's Metal output for a kernel this size kee
 `maxTotalThreadsPerThreadgroup` at 1,024 (Dawn refuses the pipeline otherwise; the floor's
 Metal kernel kept it), and what Chrome's bounds checks on every workgroup access cost
 against the floor's unchecked Metal.
+
+**Step 1, the go/no-go: the core frame alone. Verdict: no-go.** The core frame
+(`slang/kernels/explicit_beams_solo_core.slang`): the node pass, centred damping (objective
+form) and the beam pass, all 34 steps in one dispatch of one 1,024-lane workgroup, the
+layout above. Positions and velocities live in workgroup memory. Each hot record (the beam
+order's hot block, 3,314 of the sedan's records) hands its ends one scalar through the
+pool. Its rate (u0) and slope stay in registers for the next step's correction. The other
+records (aero triangles, torsion bars, couplers, anisotropic extension records, the hub
+plains) take the frame kernel's own functions on device memory. The host's fit check
+(`ExplicitUpload::solo_core_table`, `ExplicitBeamsGpu::set_solo_core`) refuses a car the
+kernel does not cover and names the reason: self-collision, coupling, a drive, sleep,
+surface contact, wings, commands, slides, brakes, the contact-only node paths, more than
+one vehicle, or a car too big for the device's lanes or workgroup memory. Such a car stays
+on today's path. A frame with retired nodes also runs today's frame kernel.
+
+*Checks.* The comparison car is the lab's sedan with contact off: no self-collision
+candidates, no proxies or shapes, no drive, no anti-clip, no two-body or dissipative rule,
+and no pending contact sums or retired nodes. Its states are the lab's own: the spawn, and
+the CPU reference's mountain run at t 2.5, 6 and 20 s (`examples/solo_core_check.rs`).
+- Natively, each path is compared with the CPU reference every frame for 20 frames of 34
+  steps: today's frame kernel, the wide passes, the solo core kernel, and the solo core
+  and frame kernels alternating every frame (`switch`, at t 2.5 and 20). Every node is
+  bit for bit, and so is every state word of each path against the frame kernel's.
+- In Chrome (`tools/solo-car/replay.mjs`, each state's buffers replayed with both
+  kernels), every word of the six state buffers is bit for bit after 60 frames.
+- Chrome accepts the pipeline at 1,024 lanes: the risk noted above did not arise.
+
+*Time*, GPU ms a frame of 34 steps (median; native: M3 Max, wgpu, 60 frames; Chrome: 180
+frames, one frame at a time; Chrome's wide passes were not replayed):
+
+| state | today's frame kernel, native | wide passes, native | solo core, native | frame kernel, Chrome | solo core, Chrome |
+|---|---|---|---|---|---|
+| spawn | 1.33 | 1.37 | 2.37 | 1.58 | 2.04 |
+| mountain t 2.5 | 1.34 | 1.41 | 2.37 | 1.57 | 2.04 |
+| mountain t 6 | 1.32 | 1.34 | 2.37 | 1.58 | 2.04 |
+| mountain t 20 (wreck at rest) | 1.37 | 1.34 | 2.40 | 1.58 | 2.07 |
+
+The solo core is 1.3× today's core in Chrome and 1.75× natively. The bar was well under
+today's, so the build stops here, as decided.
+
+*Where its frame goes* (native, spawn; `RUBBLE_SOLO_SKIP`; time only, each the frame minus
+that phase): hot beam pass 0.59, the two gathers 0.37 and 0.39, the cold records' beams
+0.36 and their corrections 0.16, the hot records' correction scalars 0.19. The rest,
+0.46–0.50 ms, is the node pass's integration, the barriers and the per-step bookkeeping.
+
+*What was tried, each measured on the whole frame* (native, 2.37 ms before):
+
+| change | frame |
+|---|---|
+| the node pass gathers device pushes as today (the beam pass writes them each step), not the pool's scalars | 2.26 |
+| the hot records' state not loaded (time only) | 2.25 |
+| the gather's entry table not loaded (time only) | 2.13 |
+| workgroup barriers only, no storage barriers (time only) | 2.36 |
+| u0 and slope not carried in registers (time only) | 2.33 |
+| the slot loop not unrolled | 2.39 |
+| the gather table interleaved by lane (coalesced) and the group flag read once a step | no change (2.29 → 2.37, noise) |
+| today's frame kernel built at 1,024 lanes, for comparison | 1.356 (1.362 at 512) |
+
+*Reading* (measurements first, then the hypothesis). The floor's two central methods do not
+pay here. Taking memory out barely moves the frame. Handing a scalar through workgroup
+memory, which makes each gather entry rebuild its push, costs more than it saves: the
+device gather is 0.11 ms faster. The lane count is not the cause either: today's kernel at
+1,024 lanes runs as fast as at 512. Hypothesis: the core is arithmetic-bound under the
+bit-exact rule. In WGSL every strict operation carries an XOR with a uniform
+(`slang/physics/strict.slang`), and every array access is bounds-checked, in Chrome
+always. #137's floor got strictness from a compiler pragma, for free, in unchecked Metal.
+A layout that trades memory for arithmetic therefore loses, and the floor's 1.1–1.25 ms
+is not reachable through WGSL's strict path. Fast arithmetic (PR #135's setting, not bit
+for bit) would change the balance. That was not measured here: it is a separate decision.
+
+What stays, all off by default and costing nothing unless switched on:
+- the kernel, its fit check and the host switch (`set_solo_core`), with the test
+  `solo_core_fit_check`;
+- the checks: `solo_core_check`, `replay.mjs`;
+- the measurement variants (`tools/solo-car/variant.sh`, `frame-variant.sh`).

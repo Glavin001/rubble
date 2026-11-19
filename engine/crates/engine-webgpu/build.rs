@@ -663,6 +663,20 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     }) {
         r?;
     }
+    // The solo car's core frame (perf doc §8.43): one 1,024-lane workgroup, the frame's
+    // state in workgroup memory (its array sizes are the host's per car).
+    {
+        let out = wgsl_dir.join("explicit_beams_solo_core.wgsl");
+        compile_with_defines(
+            &slang_root.join("kernels/explicit_beams_solo_core.slang"),
+            "explicit_beams_solo_core",
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            &[("ENGINE_WGSL", "1"), ("EB_LANES", "1024"), ("EB_AERO", "1")],
+        )?;
+        explicit_post(&out)?;
+    }
     // The sixteen frame and contact modules again without surface contact
     // (EB_NO_SURFACE, the `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for):
     // the host runs them when no vehicle of the upload has it, so a browser's first

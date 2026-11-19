@@ -2932,6 +2932,140 @@ impl ExplicitUpload {
     pub fn table_records(&self) -> &[[u32; 4]] {
         &self.table
     }
+
+    /// The solo-car core kernel's table for this upload's one vehicle
+    /// (`slang/kernels/explicit_beams_solo_core.slang`, perf doc §8.43), or why the
+    /// vehicle cannot take that kernel (it then stays on today's path): the fit check.
+    pub fn solo_core_table(&self) -> Result<SoloCoreTable, String> {
+        solo_core_table(self)
+    }
+}
+
+/// The solo core kernel's lanes and its hot records a lane at most.
+pub const SOLO_CORE_LANES: u32 = 1024;
+pub const SOLO_CORE_SLOTS: u32 = 4;
+/// The table's header words (the kernel's SOLO_HDR).
+pub const SOLO_CORE_HDR: usize = 8;
+
+/// [`ExplicitUpload::solo_core_table`]: the kernel's table (binding 0 of group 1) and the
+/// counts its workgroup arrays are sized by.
+#[derive(Clone, Debug)]
+pub struct SoloCoreTable {
+    pub words: Vec<u32>,
+    pub nodes: u32,
+    /// Hot records: the pool's words.
+    pub hot: u32,
+}
+
+impl SoloCoreTable {
+    /// The workgroup bytes of the kernel's own arrays (positions, velocities, pool),
+    /// each rounded to 16 bytes as Dawn counts them.
+    pub fn workgroup_bytes(&self) -> u64 {
+        let r16 = |w: u64| (4 * w).div_ceil(16) * 16;
+        2 * r16(3 * u64::from(self.nodes)) + r16(u64::from(self.hot))
+    }
+}
+
+fn solo_core_table(up: &ExplicitUpload) -> Result<SoloCoreTable, String> {
+    let l = &up.layout;
+    if l.spans.len() != 1 {
+        return Err(format!("{} vehicles (one only)", l.spans.len()));
+    }
+    let s = l.spans[0];
+    let st = |i: usize| up.statics.get(i).copied().unwrap_or([0; 4]);
+    let (r0, r2, r3) = (st(0), st(2), st(3));
+    let nodes = r0[1];
+    if nodes == 0 || nodes > SOLO_CORE_LANES {
+        return Err(format!("{nodes} nodes (1 to {SOLO_CORE_LANES})"));
+    }
+    // The core kernel's phases only (perf doc §8.43): no self-collision, coupling,
+    // drive, sleep, surface contact, wings, commands, slides, brakes, nor the
+    // contact-only node paths.
+    if r2[1] != 0 {
+        return Err("self-collision (not in the core kernel)".into());
+    }
+    if l.coupling.is_some() {
+        return Err("World coupling room (not in the core kernel)".into());
+    }
+    if l.drive.is_some() {
+        return Err("a drive (not in the core kernel)".into());
+    }
+    if l.sleep.is_some() {
+        return Err("vehicle sleep (not in the core kernel)".into());
+    }
+    if l.surface {
+        return Err("surface contact (not in the core kernel)".into());
+    }
+    // FUSEDRAG 8, KEYS 16, SLIDES 32, SHAPES 64, TWO_BODY 128, CFORCE 256, TREAD 512,
+    // ANTI_CLIP 2048, CLIP_MEM 4096, SHIFT_MEM 65536 (explicit_beams.slang).
+    let off = 8 | 16 | 32 | 64 | 128 | 256 | 512 | 2048 | 4096 | 65536;
+    if r3[0] & off != 0 {
+        return Err(format!("vehicle flags {:#x} (not in the core kernel)", r3[0] & off));
+    }
+    // Centred damping: the objective form only (the hot records' u0 in registers).
+    if r3[0] & (1 << 18) != 0 && r3[0] & (1 << 19) == 0 {
+        return Err("centred damping's end-direction form (the core kernel has the objective form)".into());
+    }
+    if l.wing_spans.iter().any(|w| w.1 != 0) || l.brake_spans.iter().any(|b| b.1 != 0) {
+        return Err("wings or brakes (not in the core kernel)".into());
+    }
+    if l.aero {
+        let a0 = st(l.words[24] as usize);
+        if a0[1] != 0 || a0[3] != 0 {
+            return Err("wings or commands (not in the core kernel)".into());
+        }
+    }
+    let info = |i: u32| st(l.words[2] as usize + (s.node_off + i) as usize);
+    if (0..nodes).any(|i| info(i)[0] >> 8 != 0) {
+        return Err("slide nodes (not in the core kernel)".into());
+    }
+    let order = l.words[W_BEAM_ORDER] as usize;
+    if order == 0 {
+        return Err("no beam order (RUBBLE_BEAM_ORDER=0)".into());
+    }
+    let head = st(order);
+    let hot = head[1];
+    if hot == 0 {
+        return Err("no hot records (the beam order's packing does not fit)".into());
+    }
+    if hot > SOLO_CORE_LANES * SOLO_CORE_SLOTS {
+        return Err(format!("{hot} hot records (at most {})", SOLO_CORE_LANES * SOLO_CORE_SLOTS));
+    }
+    let inc_start = head[2];
+    let ninc: u32 = (0..nodes).map(|i| info(i)[2]).sum();
+    if (0..nodes).any(|i| info(i)[1] < inc_start || info(i)[1] + info(i)[2] > inc_start + ninc) {
+        return Err("the incidence lists are not one run".into());
+    }
+    // Entry k of local node i at SOLO_CORE_HDR + k * nodes + i: each incidence position's
+    // node and rank in its list.
+    let most = (0..nodes).map(|i| info(i)[2]).max().unwrap_or(0) as usize;
+    let mut place = vec![usize::MAX; ninc as usize];
+    for i in 0..nodes {
+        let r = info(i);
+        for k in 0..r[2] {
+            place[(r[1] + k - inc_start) as usize] = SOLO_CORE_HDR + k as usize * nodes as usize + i as usize;
+        }
+    }
+    let mut words = vec![0u32; SOLO_CORE_HDR + most * nodes as usize];
+    words[0] = nodes;
+    words[1] = hot;
+    words[2] = ninc;
+    words[3] = inc_start;
+    let at = order + 1 + 2 * s.beam_off as usize;
+    for k in 0..hot {
+        let a = st(at + 2 * k as usize);
+        let (na, nb) = (a[2] & 0xFFFF, a[2] >> 16);
+        let (sa, sb) = ((a[3] & 0xFFFF) as usize, (a[3] >> 16) as usize);
+        if sa >= ninc as usize || sb >= ninc as usize || na >= nodes || nb >= nodes {
+            return Err(format!("hot record {k}: its ends or slots out of range"));
+        }
+        if place[sa] == usize::MAX || place[sb] == usize::MAX {
+            return Err(format!("hot record {k}: a slot in no node's list"));
+        }
+        words[place[sa]] = 0x8000_0000 | k | nb << 12;
+        words[place[sb]] = 0x8000_0000 | k | na << 12;
+    }
+    Ok(SoloCoreTable { words, nodes, hot })
 }
 
 /// Bytes of the parameter buffer ([`PARAM_COPIES`] copies, then [`PARAM_LEVEL_COPIES`]).
@@ -3751,6 +3885,46 @@ fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_car() -> ExplicitBeams {
+        use engine_softbody::explicit_beams::{ExplicitBeamsSettings, JbeamWheels};
+        let d = engine_softbody::jbeam::load_jbeam(&[("t.jbeam", engine_softbody::jbeam_fixture::PART2_CAR)], None).unwrap();
+        let settings = ExplicitBeamsSettings { centred_damping: true, ..Default::default() };
+        ExplicitBeams::from_desc_jbeam_with(&d, JbeamWheels::Raycast, glam::Vec3::ZERO, glam::Vec3::ZERO, settings).unwrap().0
+    }
+
+    /// The solo core kernel's fit check (perf doc §8.43): a car with a feature the core
+    /// kernel lacks, two cars, or a car too big stays on today's path, with the reason;
+    /// a lone car with only the core's phases fits, every hot record's two entries in
+    /// its ends' lists pointing at each other.
+    #[test]
+    fn solo_core_fit_check() {
+        let car = fixture_car();
+        let up = |v: &[ExplicitBeams]| ExplicitUpload::new(v, None).solo_core_table();
+        if !car.candidates.is_empty() {
+            assert!(up(std::slice::from_ref(&car)).unwrap_err().contains("self-collision"));
+        }
+        let mut core = car.clone();
+        core.candidates.clear();
+        core.drive = None;
+        core.anti_clip = false;
+        core.two_body_contact = false;
+        core.dissipative_contact = false;
+        core.surface_contact = false;
+        core.shapes.clear();
+        core.boxes.clear();
+        assert!(up(&[core.clone(), core.clone()]).unwrap_err().contains("2 vehicles"));
+        let t = up(std::slice::from_ref(&core)).expect("the stripped fixture car fits");
+        assert_eq!(t.nodes as usize, core.nodes.len());
+        assert!(t.hot > 0);
+        let hot: Vec<u32> = t.words[SOLO_CORE_HDR..].iter().copied().filter(|&w| w != 0).collect();
+        assert_eq!(hot.len(), 2 * t.hot as usize, "each hot record in both its ends' lists");
+        let mut big = core.clone();
+        let n0 = big.nodes[0].clone();
+        big.nodes.resize(SOLO_CORE_LANES as usize + 1, n0);
+        big.incidence.resize(big.nodes.len(), Vec::new());
+        assert!(up(std::slice::from_ref(&big)).unwrap_err().contains("nodes"));
+    }
 
     /// Each vehicle's box slots (its boxes, then its static shapes) start after every
     /// earlier vehicle's: two vehicles with a box and a cylinder each, the second's

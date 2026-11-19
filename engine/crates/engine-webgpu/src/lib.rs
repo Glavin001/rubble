@@ -27,7 +27,7 @@ mod soft_skin;
 pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
+    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, solo_core_wgsl, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
 #[cfg(feature = "gpu")]
@@ -280,6 +280,11 @@ pub const EXPLICIT_BEAMS_SOLO_AERO_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero.wgsl"));
 pub const EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide.wgsl"));
+/// The solo car's core frame (`slang/kernels/explicit_beams_solo_core.slang`, perf doc
+/// §8.43), its workgroup arrays at sentinel sizes the host replaces per car
+/// (`ExplicitBeamsGpu::set_solo_core`).
+pub const EXPLICIT_BEAMS_SOLO_CORE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_core.wgsl"));
 /// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
 /// entry `state_extent`; `WgpuSim::measure_state`).
 pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));

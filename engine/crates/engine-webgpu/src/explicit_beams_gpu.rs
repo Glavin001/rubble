@@ -60,6 +60,10 @@ pub struct ExplicitBeamsGpu {
     planner: FramePlanner,
     /// The wide passes (one thread per element over every vehicle), when possible.
     wide: Option<Wide>,
+    /// The solo-car core kernel's table for a lone vehicle, or why it cannot take it
+    /// (`None`: more than one vehicle); its pipeline while on ([`Self::set_solo_core`]).
+    solo_table: Option<Result<plan::SoloCoreTable, String>>,
+    solo_core: Option<SoloCorePipe>,
     timing: Option<FrameTiming>,
     /// Diagnostic marks after each of the frame's dispatches (`RUBBLE_GPU_TIMING_DISPATCH`,
     /// a host's [`crate::gpu_marks::GpuMarks`]).
@@ -1083,6 +1087,41 @@ fn status_error(w: &[i32]) -> Result<(), String> {
 /// The parameter buffer as the non-wide passes bind it: its first copy only (the
 /// whole buffer, PARAM_STRIDE × PARAM_COPIES, is past WebGPU's 64 KiB uniform
 /// binding limit; those passes read copy 0, the wide ones a dynamic offset).
+/// The solo core kernel's pipeline ([`ExplicitBeamsGpu::set_solo_core`]).
+struct SoloCorePipe {
+    pipe: wgpu::ComputePipeline,
+    group0: wgpu::BindGroup,
+    group1: wgpu::BindGroup,
+    _table: wgpu::Buffer,
+}
+
+/// The solo core kernel's WGSL for a car: its workgroup arrays at the car's sizes (3 ×
+/// nodes for positions and velocities, the hot records for the pool) in place of the
+/// module's sentinels, so a device counts this car's workgroup memory.
+pub fn solo_core_wgsl(t: &plan::SoloCoreTable) -> String {
+    // Measurement only: `RUBBLE_SOLO_WGSL=file`, another build of the module (variants).
+    let over = std::env::var("RUBBLE_SOLO_WGSL").ok().and_then(|f| std::fs::read_to_string(f).ok());
+    let src = over.as_deref().unwrap_or(crate::EXPLICIT_BEAMS_SOLO_CORE_WGSL);
+    debug_assert!(src.contains("array<f32, i32(3067)>") && src.contains("array<f32, i32(4091)>"));
+    crate::uniformize_workgroup_lanes(
+        &src.replace("array<f32, i32(3067)>", &format!("array<f32, i32({})>", 3 * t.nodes))
+            .replace("array<f32, i32(4091)>", &format!("array<f32, i32({})>", t.hot.max(1))),
+    )
+}
+
+/// The solo core kernel's bind group layouts: group 0 the frame kernel's nine bindings,
+/// group 1 the car's table.
+pub fn solo_core_layout_entries() -> (Vec<wgpu::BindGroupLayoutEntry>, Vec<wgpu::BindGroupLayoutEntry>) {
+    let mut g1 = contact_entries(false);
+    g1.truncate(1);
+    g1[0].ty = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    (contact_entries(false), g1)
+}
+
 fn params_window(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
     wgpu::BindingResource::Buffer(wgpu::BufferBinding {
         buffer: b,
@@ -1737,6 +1776,8 @@ impl ExplicitBeamsGpu {
             labelled: vec![false; vehicles_n],
             piece_windows: std::env::var("RUBBLE_PIECE_WINDOWS").as_deref() != Ok("0"),
             wide,
+            solo_table: (vehicles.len() == 1).then(|| upload.solo_core_table()),
+            solo_core: None,
             contact,
             group_split: group_split_default(),
             group_split_tests: group_split_tests_default(),
@@ -1995,6 +2036,115 @@ impl ExplicitBeamsGpu {
     /// per-vehicle frame module from now on (its entry point and bindings as the
     /// shipped one's). An invalid module is the device's error.
     #[doc(hidden)]
+    /// The solo-car core kernel (perf doc §8.43) for this lone vehicle's frames, or not:
+    /// one dispatch of one 1,024-lane workgroup a frame, its state in workgroup memory,
+    /// bit for bit with the frame kernel. Fails, changing nothing, when the vehicle does
+    /// not fit it (the reason: a feature the core kernel does not have, or the car too
+    /// big for the device's workgroup memory or lanes); the vehicle then stays on today's
+    /// path. While on, a frame with retired nodes runs today's frame kernel (the host's
+    /// pick, frame by frame), and the wide passes are off.
+    pub fn set_solo_core(&mut self, on: bool) -> Result<(), String> {
+        if !on {
+            self.solo_core = None;
+            return Ok(());
+        }
+        let mut t = match &self.solo_table {
+            Some(Ok(t)) => t.clone(),
+            Some(Err(e)) => return Err(e.clone()),
+            None => return Err("more than one vehicle".into()),
+        };
+        let lim = self.device.limits();
+        let lanes = plan::SOLO_CORE_LANES;
+        if lim.max_compute_invocations_per_workgroup < lanes || lim.max_compute_workgroup_size_x < lanes {
+            return Err(format!(
+                "the device grants {} lanes a workgroup ({lanes} needed)",
+                lim.max_compute_invocations_per_workgroup
+            ));
+        }
+        if t.workgroup_bytes() > u64::from(lim.max_compute_workgroup_storage_size) {
+            return Err(format!(
+                "car too big: {} B of workgroup memory ({} nodes, {} hot records), the device grants {}",
+                t.workgroup_bytes(),
+                t.nodes,
+                t.hot,
+                lim.max_compute_workgroup_storage_size
+            ));
+        }
+        // Measurement only: `RUBBLE_SOLO_SKIP=mask` leaves phases out (time, not results;
+        // the kernel's `skip`).
+        if let Some(m) = std::env::var("RUBBLE_SOLO_SKIP").ok().and_then(|x| x.parse::<u32>().ok()) {
+            t.words[4] = m;
+        }
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("explicit_beams_solo_core"),
+            source: wgpu::ShaderSource::Wgsl(solo_core_wgsl(&t).into()),
+        });
+        let (e0, e1) = solo_core_layout_entries();
+        let l0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-solo-core"),
+            entries: &e0,
+        });
+        let l1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-solo-core-table"),
+            entries: &e1,
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-solo-core"),
+            bind_group_layouts: &[Some(&l0), Some(&l1)],
+            immediate_size: 0,
+        });
+        let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("explicit_beams_solo_core"),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some("explicit_beams_solo_core"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("explicit-beams-solo-core-table"),
+            contents: bytemuck::cast_slice(&t.words),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let group0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-solo-core"),
+            layout: &l0,
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+            }),
+        });
+        let group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-solo-core-table"),
+            layout: &l1,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: table.as_entire_binding() }],
+        });
+        self.set_wide(false);
+        self.solo_core = Some(SoloCorePipe { pipe, group0, group1, _table: table });
+        Ok(())
+    }
+
+    /// Whether the solo core kernel is on ([`Self::set_solo_core`]).
+    pub fn solo_core(&self) -> bool {
+        self.solo_core.is_some()
+    }
+
+    /// Why this upload's vehicle cannot take the solo core kernel (`None`: it can).
+    pub fn solo_core_misfit(&self) -> Option<String> {
+        match &self.solo_table {
+            Some(Ok(_)) => None,
+            Some(Err(e)) => Some(e.clone()),
+            None => Some("more than one vehicle".into()),
+        }
+    }
+
+    /// This frame on the solo core kernel: on, and no retired nodes (the core kernel has
+    /// no debris retirement; such a frame runs today's frame kernel).
+    fn solo_core_now(&self) -> bool {
+        self.solo_core.is_some() && self.retired_bits.iter().all(|&w| w == 0)
+    }
+
     pub fn debug_set_frame_wgsl(&mut self, src: &str) {
         let device = &self.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3225,7 +3375,7 @@ impl ExplicitBeamsGpu {
         let mut labels = Vec::new();
         self.check_contact_status();
         self.write_wakes();
-        let wide_allowed = self.alt_pipes().is_none();
+        let wide_allowed = self.alt_pipes().is_none() && self.solo_core.is_none();
         let mut cmds = self.write_params(steps, wide_allowed);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
@@ -3408,6 +3558,12 @@ impl ExplicitBeamsGpu {
             }
         }
         match kernel {
+            Kernel::Frame if alt.is_none() && self.solo_core_now() => {
+                let sc = self.solo_core.as_ref().unwrap();
+                pass.set_pipeline(&sc.pipe);
+                pass.set_bind_group(0, &sc.group0, &[]);
+                pass.set_bind_group(1, &sc.group1, &[]);
+            }
             Kernel::Frame => {
                 let (p, g) = alt.map_or_else(
                     || {
