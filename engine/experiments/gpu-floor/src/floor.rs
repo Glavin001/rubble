@@ -360,7 +360,10 @@ pub struct Floor {
 impl Floor {
     pub fn new(gpu: Gpu, l: Layout, st: &Statics, cars: usize, fast: bool, extra: &str) -> anyhow::Result<Self> {
         let per_frame = if extra.contains("PER_STEP") { STEPS } else { 1 };
-        let pso = gpu.pipeline(&msl(&l, st, extra, per_frame), "floorFrame", fast)?;
+        // Strict: fast math off still lets Metal fuse a·b + c (llvm.fmuladd); the pragma
+        // turns contraction off, which leaves IEEE single operations in source order.
+        let pragma = if fast { "" } else { "#pragma clang fp contract(off)\n" };
+        let pso = gpu.pipeline(&format!("{pragma}{}", msl(&l, st, extra, per_frame)), "floorFrame", fast)?;
         let stat = vec![
             gpu.buffer(&st.node_static),
             gpu.buffer(&st.node_range),
@@ -446,6 +449,28 @@ impl Floor {
             shift: get(&self.shift, car * l.nn * 3, l.nn * 3),
             misc: get(&self.misc, car * 16, 16),
             clip: get(&self.clip, car * l.nn * 4, l.nn * 4),
+        }
+    }
+
+    /// Every per-car buffer with its size a car.
+    fn per_car(&self) -> Vec<(&Buffer, usize)> {
+        let l = &self.l;
+        vec![
+            (&self.node, l.nn * 48), (&self.rec, l.nr * 48), (&self.add, l.nadd * 16), (&self.cen, l.ncen * 16), (&self.groups, l.ng * 4),
+            (&self.deform, l.nd * 4), (&self.tri_dead, l.nt * 4), (&self.acc, l.nn * 12), (&self.shift, l.nn * 12), (&self.misc, 64),
+            (&self.tri_geo, l.nt * GEO * 16), (&self.pairs, PAIR_CAP * 4), (&self.pbuild, l.nn * 16), (&self.clip, l.nn * 16),
+            (&self.hits, HIT_CAP * HITW * 16), (&self.stage, l.nn * 48),
+        ]
+    }
+
+    /// All of car `car`'s buffers (its state with the pair list and every scratch word).
+    pub fn snapshot(&self, car: usize) -> Vec<Vec<u8>> {
+        self.per_car().iter().map(|(b, n)| unsafe { std::slice::from_raw_parts((b.contents() as *const u8).add(car * n), *n).to_vec() }).collect()
+    }
+
+    pub fn restore(&self, car: usize, snap: &[Vec<u8>]) {
+        for ((b, n), s) in self.per_car().iter().zip(snap) {
+            unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), (b.contents() as *mut u8).add(car * n), *n) };
         }
     }
 
