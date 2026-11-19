@@ -2481,7 +2481,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 // Vehicle contact's kept candidates (PERF_FLEET_KEEP), when this run used
                 // them (counted from the snapshot's own counts: a fixture's are zero).
                 let fk = x.take_fleet_keep_stats();
-                if fk[0] + fk[1] > 0 {
+                if fk[0] + fk[1] + fk[3] > 0 {
                     println!(
                         "     kept candidates ({}): {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
                         if on { "on" } else { "off" },
@@ -2803,7 +2803,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     );
                 }
                 let fk = x.take_fleet_keep_stats();
-                if fk[0] + fk[1] > 0 {
+                if fk[0] + fk[1] + fk[3] > 0 {
                     println!(
                         "   vehicle contact's kept candidates: {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
                         fk[0],
