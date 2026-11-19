@@ -52,6 +52,7 @@ pub struct Statics {
     pub allowed: Vec<u32>,
     pub list_reach: f32,
     pub cr: f32,
+    pub boxes: Vec<([f32; 3], [f32; 3])>,
 }
 
 /// One car's state in the kernel's layout.
@@ -95,7 +96,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     anyhow::ensure!(s.damp_filters.is_empty() && s.shocks2.is_empty() && s.triggers.is_empty());
     anyhow::ensure!(s.settings.centred_damping && s.settings.centred_objective && !s.settings.fast_inv_sqrt);
     anyhow::ensure!(!s.settings.drag && !s.plastic_strength_drop && s.fixed_contact && s.dissipative_contact && s.exact_friction);
-    anyhow::ensure!(s.damp_scheme == 0 && s.boxes.is_empty() && s.rigid.is_none() && !s.surface_contact);
+    anyhow::ensure!(s.damp_scheme == 0 && s.shapes.is_empty() && s.rigid.is_none() && !s.surface_contact);
     anyhow::ensure!(s.contact_force.is_none() && s.wings.is_empty() && s.fusedrag.is_none() && s.slides.is_empty());
     let ng = s.beams.iter().map(|b| b.group.unsigned_abs() as usize).max().unwrap_or(0).max(
         s.torsion_watch.iter().flatten().copied().max().unwrap_or(0) as usize,
@@ -231,7 +232,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect() },
     ))
 }
 
@@ -309,6 +310,17 @@ pub fn state_of(s: &ExplicitBeams, l: &Layout, st: &Statics) -> State {
 }
 
 pub fn msl(l: &Layout, st: &Statics, extra: &str) -> String {
+    let f3 = |v: [f32; 3]| format!("float3(as_type<float>({}u), as_type<float>({}u), as_type<float>({}u))", v[0].to_bits(), v[1].to_bits(), v[2].to_bits());
+    let boxes = if st.boxes.is_empty() {
+        "#define NBOX 0\n".to_string()
+    } else {
+        format!(
+            "#define NBOX {}\nconstant float3 BOX_LO[{}] = {{{}}};\nconstant float3 BOX_HI[{}] = {{{}}};\n",
+            st.boxes.len(), st.boxes.len(), st.boxes.iter().map(|b| f3(b.0)).collect::<Vec<_>>().join(", "),
+            st.boxes.len(), st.boxes.iter().map(|b| f3(b.1)).collect::<Vec<_>>().join(", ")
+        )
+    };
+    let extra = format!("{extra}\n{boxes}");
     format!(
         "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define RS {}\n#define LANES {}\n#define STEPS {}\n#define NADD {}\n#define NCEN {}\n#define NODE_MAX_ADD {}\n#define NODE_MAX_CEN {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define GEO {GEO}\n#define HITW {HITW}\n#define PAIR_CAP {PAIR_CAP}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n{}\n{}",
         l.nn, l.nr, l.nt, l.ng, l.nd, l.rs, LANES, STEPS, l.nadd, l.ncen, l.max_add, l.max_cen,
@@ -380,7 +392,7 @@ impl Floor {
             pbuild: z(l.nn * 16),
             clip: z(l.nn * 16),
             hits: z(HIT_CAP * HITW * 16),
-            stage: z(l.nn * 24),
+            stage: z(l.nn * 48),
             gpu,
             l,
             cars,
@@ -410,7 +422,7 @@ impl Floor {
         put(&self.shift, car * l.nn * 12, bytemuck::cast_slice(&s.shift));
         put(&self.misc, car * 64, bytemuck::cast_slice(&s.misc));
         put(&self.clip, car * l.nn * 16, bytemuck::cast_slice(&s.clip));
-        put(&self.stage, car * l.nn * 24, &vec![0u8; l.nn * 24]);
+        put(&self.stage, car * l.nn * 48, &vec![0u8; l.nn * 48]);
     }
 
     pub fn download(&self, car: usize) -> State {
@@ -435,7 +447,12 @@ impl Floor {
 
     /// `frames` frames of every car in one dispatch; the GPU ms.
     pub fn run(&self, frames: u32) -> f64 {
-        write(&self.params, &[self.cars as u32, frames, 0.0f32.to_bits(), 0u32]);
+        self.run_skip(frames, 0)
+    }
+
+    /// Timing only: `skip` leaves phases out (bit k: phase k of the kernel).
+    pub fn run_skip(&self, frames: u32, skip: u32) -> f64 {
+        write(&self.params, &[self.cars as u32, frames, 0.0f32.to_bits(), skip]);
         let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
         bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
         bufs.extend([&self.stat[11], &self.stat[12], &self.stat[13], &self.tri_geo, &self.pairs, &self.pbuild, &self.clip, &self.hits, &self.stage]);

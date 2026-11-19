@@ -504,10 +504,25 @@ struct Params
     uint cars;
     uint frames;
     float ground;
-    uint pad;
+    uint skip; // timing only: phases left out (bit k: phase k)
 };
 
 #define TG_FLAGS 8
+#define SKIP(k) ((P.skip & (1u << (k))) != 0u)
+#ifndef FAST_SUMS
+#define FAST_SUMS 0
+#endif
+#if FAST_SUMS
+// Unordered sums: device atomic float adds into per-node accumulators.
+#define PUT_ADD(e, node, val) { V3 _v = (val); atomic_fetch_add_explicit(&fAcc[(node) * 3], _v.x, memory_order_relaxed); atomic_fetch_add_explicit(&fAcc[(node) * 3 + 1], _v.y, memory_order_relaxed); atomic_fetch_add_explicit(&fAcc[(node) * 3 + 2], _v.z, memory_order_relaxed); }
+#define PUT_CEN(e, node, val) { V3 _v = (val); atomic_fetch_add_explicit(&cAcc[(node) * 3], _v.x, memory_order_relaxed); atomic_fetch_add_explicit(&cAcc[(node) * 3 + 1], _v.y, memory_order_relaxed); atomic_fetch_add_explicit(&cAcc[(node) * 3 + 2], _v.z, memory_order_relaxed); }
+#define PUT_SENT(e)
+#else
+// Ordered sums: each add in its own entry, summed per node in the CPU's order.
+#define PUT_ADD(e, node, val) addEnt[e] = f4((val), 0)
+#define PUT_CEN(e, node, val) cenEnt[e] = f4((val), 0)
+#define PUT_SENT(e) addEnt[e] = as_type<float4>(uint4(SENT))
+#endif
 
 kernel void floorFrame(
     constant Params& P [[buffer(0)]],
@@ -540,7 +555,8 @@ kernel void floorFrame(
     device float4* pBuild [[buffer(27)]],            // NN a car: positions at the list's build
     device atomic_uint* clip [[buffer(28)]],         // NN*4 a car: anti-clip side memory
     device float4* hitBuf [[buffer(29)]],            // HIT_CAP*HITW a car
-    device atomic_int* stage [[buffer(30)]],         // NN*6 a car: the first pass's sums, the residual's
+    device uint* scratch [[buffer(30)]],             // NN*12 a car: stage (the first pass's sums, the residual's),
+                                                     // then (FAST_SUMS) the beam pass's and the centred sums
     uint lid [[thread_position_in_threadgroup]],
     uint car [[threadgroup_position_in_grid]])
 {
@@ -566,13 +582,16 @@ kernel void floorFrame(
     acc += car * NN * 3;
     shift += car * NN * 3;
     misc += car * 16;
+    scratch += car * NN * 12;
+    device atomic_int* stage = (device atomic_int*)scratch;
+    device atomic_float* fAcc = (device atomic_float*)(scratch + NN * 6);
+    device atomic_float* cAcc = (device atomic_float*)(scratch + NN * 9);
 #if COLLIDE
     triGeo += car * NT * GEO;
     pairs += car * PAIR_CAP;
     pBuild += car * NN;
     clip += car * NN * 4;
     hitBuf += car * HIT_CAP * HITW;
-    stage += car * NN * 6;
 #endif
 
     const bool isNode = lid < NN;
@@ -617,7 +636,7 @@ kernel void floorFrame(
     {
         // ---- S0: the node pass ----
         bool shiftsPending = tgFlags[0] != 0u;
-        if (frame != 0u || step != 0u)
+        if ((frame != 0u || step != 0u) && !SKIP(11))
         {
             // The groups the last beam pass set off (torsion watches read them).
             for (uint g = lid; g < NG; g += LANES)
@@ -626,7 +645,7 @@ kernel void floorFrame(
                 atomic_store_explicit(&tgMaster[g], NONE, memory_order_relaxed);
             }
         }
-        if (isNode)
+        if (isNode && !SKIP(0))
         {
             // Fixed-point contact sums (taken and cleared) become part of the force.
             int ax_ = atomic_exchange_explicit(&acc[ni * 3], 0, memory_order_relaxed);
@@ -663,6 +682,25 @@ kernel void floorFrame(
                 if (!isZero3(c)) lift = shiftDepth(depth, budget, F0.y);
                 F0 = F0 + c;
             }
+#if NBOX > 0
+            // Static boxes (box_face, contact_force: the box surface, no depth term).
+            for (uint b = 0; b < NBOX; b++)
+            {
+                float3 lo = BOX_LO[b], hi = BOX_HI[b];
+                if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
+                {
+                    V3 normal = v3(0.0f, 0.0f, -1.0f);
+                    float dist = x.z - lo.z;
+                    float dd[5] = {hi.z - x.z, x.x - lo.x, hi.x - x.x, x.y - lo.y, hi.y - x.y};
+                    V3 nn[5] = {v3(0.0f, 0.0f, 1.0f), v3(-1.0f, 0.0f, 0.0f), v3(1.0f, 0.0f, 0.0f), v3(0.0f, -1.0f, 0.0f), v3(0.0f, 1.0f, 0.0f)};
+                    for (uint q = 0; q < 5; q++)
+                        if (dd[q] < dist) { dist = dd[q]; normal = nn[q]; }
+                    float budget;
+                    V3 c = contactResponse(F0, V0, mass, normal, BOXS, 0.0f, friction, budget);
+                    F0 = F0 + c;
+                }
+            }
+#endif
             V3 vBefore = V0;
             if ((nflags & NODE_IMMOVABLE) == 0u)
             {
@@ -678,7 +716,7 @@ kernel void floorFrame(
             tgDv[ni * 3] = dv.x; tgDv[ni * 3 + 1] = dv.y; tgDv[ni * 3 + 2] = dv.z;
         }
         // Triangle breaks (spec §18): from the broken flags as the beam pass starts.
-        for (uint t = lid; t < NT; t += LANES)
+        for (uint t = lid; t < NT && !SKIP(9); t += LANES)
         {
             if (triDead[t] == 0u)
             {
@@ -700,7 +738,7 @@ kernel void floorFrame(
         if (lid == 0) { tgFlags[0] = 0u; tgFlags[1] = 0u; tgFlags[3] = 0u; }
 
         // ---- S1: the centred damping's slots (last beam pass's slopes) ----
-        for (uint s = 0; s < RS; s++)
+        for (uint s = 0; s < RS && !SKIP(1); s++)
         {
             uint r = rec[s];
             if (r == NONE) continue;
@@ -728,8 +766,8 @@ kernel void floorFrame(
                     float t = (-0.5f * slope) * dr;
                     for (uint q = 0; q < 4; q++) o[q] = J.g[q] * t;
                 }
-                cenEnt[ce.x] = f4(o[0], 0); cenEnt[ce.y] = f4(o[1], 0);
-                cenEnt[ce.z] = f4(o[2], 0); cenEnt[ce.w] = f4(o[3], 0);
+                PUT_CEN(ce.x, ids[0], o[0]); PUT_CEN(ce.y, ids[1], o[1]);
+                PUT_CEN(ce.z, ids[2], o[2]); PUT_CEN(ce.w, ids[3], o[3]);
                 continue;
             }
             V3 push = v3(0, 0, 0);
@@ -753,17 +791,22 @@ kernel void floorFrame(
                     push = d * (((-0.5f * slope) * du) * inv);
                 }
             }
-            cenEnt[ce.x] = f4(push, 0);
-            cenEnt[ce.y] = f4(-push, 0);
+            PUT_CEN(ce.x, a.x, push);
+            PUT_CEN(ce.y, a.y, -push);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
 
         // ---- S2: the centred correction per node ----
-        if (isNode)
+        if (isNode && !SKIP(2))
         {
             V3 c = v3(0, 0, 0);
             uint n = min(nr.w, (uint)NODE_MAX_CEN);
+#if FAST_SUMS
+            (void)n;
+            c = v3(atomic_exchange_explicit(&cAcc[ni * 3], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&cAcc[ni * 3 + 1], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&cAcc[ni * 3 + 2], 0.0f, memory_order_relaxed));
+#else
             for (uint k = 0; k < n; k++) c = c + v3(cenEnt[nr.z + k]);
+#endif
             if ((nflags & NODE_IMMOVABLE) == 0u)
             {
                 V3 dv = (c / mass) * H;
@@ -787,9 +830,13 @@ kernel void floorFrame(
 
         // ---- S3: the beam pass ----
         bool deformReq[RS];
-        for (uint s = 0; s < RS; s++)
+#if FAST_SUMS
+        V3 lastPush[RS];
+        for (uint s = 0; s < RS; s++) lastPush[s] = v3(0, 0, 0);
+#endif
+        for (uint s = 0; s < RS; s++) deformReq[s] = false;
+        for (uint s = 0; s < RS && !SKIP(3); s++)
         {
-            deformReq[s] = false;
             uint r = rec[s];
             if (r == NONE) continue;
             uint4 a = recA[r];
@@ -801,10 +848,10 @@ kernel void floorFrame(
             if (s1[s].w != 0.0f)
             {
                 // Broken: its entries are skipped from now on.
-                addEnt[ent.x] = as_type<float4>(uint4(SENT));
-                addEnt[ent.y] = as_type<float4>(uint4(SENT));
-                if (ent.z != NONE) addEnt[ent.z] = as_type<float4>(uint4(SENT));
-                if (ent.w != NONE) addEnt[ent.w] = as_type<float4>(uint4(SENT));
+                PUT_SENT(ent.x);
+                PUT_SENT(ent.y);
+                if (ent.z != NONE) PUT_SENT(ent.z);
+                if (ent.w != NONE) PUT_SENT(ent.w);
                 s1[s].z = 0.0f;
                 continue;
             }
@@ -821,9 +868,9 @@ kernel void floorFrame(
                 V3 p2 = v3(tgPos[n2 * 3], tgPos[n2 * 3 + 1], tgPos[n2 * 3 + 2]);
                 V3 v2 = v3(tgVel[n2 * 3], tgVel[n2 * 3 + 1], tgVel[n2 * 3 + 2]);
                 V3 f = aeroTri(pa, pb, p2, va, vb, v2, e1.y, e1.z, e1.w);
-                addEnt[ent.x] = f4(f, 0);
-                addEnt[ent.y] = f4(f, 0);
-                addEnt[ent.z] = f4(f, 0);
+                PUT_ADD(ent.x, a.x, f);
+                PUT_ADD(ent.y, a.y, f);
+                PUT_ADD(ent.z, n2, f);
                 s1[s].z = 0.0f;
                 continue;
             }
@@ -868,8 +915,8 @@ kernel void floorFrame(
                 ax[s] = float4(gv[0], gv[1], gv[2], gv[3]);
                 if (broke) s1[s].w = 1.0f;
                 s1[s].z = broke ? 0.0f : kc.y;
-                addEnt[ent.x] = f4(o[0], 0); addEnt[ent.y] = f4(o[1], 0);
-                addEnt[ent.z] = f4(o[2], 0); addEnt[ent.w] = f4(o[3], 0);
+                PUT_ADD(ent.x, a.x, o[0]); PUT_ADD(ent.y, a.y, o[1]);
+                PUT_ADD(ent.z, a2.x, o[2]); PUT_ADD(ent.w, a2.y, o[3]);
                 if (broke && group > 0) { atomic_fetch_min_explicit(&tgMaster[group], r, memory_order_relaxed); tgFlags[1] = 1u; }
                 continue;
             }
@@ -882,8 +929,11 @@ kernel void floorFrame(
                 V3 push = broke ? v3(0, 0, 0) : f;
                 if (broke) s1[s].w = 1.0f;
                 s1[s].z = broke ? 0.0f : kc.y;
-                addEnt[ent.x] = f4(push, 0);
-                addEnt[ent.y] = f4(-push, 0);
+                PUT_ADD(ent.x, a.x, push);
+                PUT_ADD(ent.y, a.y, -push);
+#if FAST_SUMS
+                lastPush[s] = push;
+#endif
                 if (broke && group > 0) { atomic_fetch_min_explicit(&tgMaster[group], r, memory_order_relaxed); tgFlags[1] = 1u; }
                 continue;
             }
@@ -919,17 +969,45 @@ kernel void floorFrame(
             }
             if (brokeNow && group > 0) { atomic_fetch_min_explicit(&tgMaster[group], r, memory_order_relaxed); tgFlags[1] = 1u; }
             V3 push = o.d * (f * o.inv);
-            addEnt[ent.x] = f4(push, 0);
-            addEnt[ent.y] = f4(-push, 0);
+            PUT_ADD(ent.x, a.x, push);
+            PUT_ADD(ent.y, a.y, -push);
+#if FAST_SUMS
+            lastPush[s] = push;
+#endif
         }
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
 
         // ---- S4: node sums of the beam pass; break groups set off ----
         const bool anyFired = tgFlags[1] != 0u;
-        if (isNode)
+#if FAST_SUMS
+        if (anyFired)
+        {
+            // Beams after a group's first break in this pass were skipped: take theirs back.
+            for (uint s = 0; s < RS; s++)
+            {
+                uint r = rec[s];
+                if (r == NONE) continue;
+                uint4 a = recA[r];
+                int group = as_type<int>(a.w);
+                if (group == 0) continue;
+                uint m = atomic_load_explicit(&tgMaster[abs(group)], memory_order_relaxed);
+                if (m != NONE && r > m && (a.z & 0xFFu) != K_JTORSION)
+                {
+                    PUT_ADD(0, a.x, -lastPush[s]);
+                    PUT_ADD(0, a.y, lastPush[s]);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+        }
+#endif
+        if (isNode && !SKIP(4))
         {
             uint n = min(nr.y, (uint)NODE_MAX_ADD);
             V3 f = F0;
+#if FAST_SUMS
+            n = 0;
+            f = f + v3(atomic_exchange_explicit(&fAcc[ni * 3], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&fAcc[ni * 3 + 1], 0.0f, memory_order_relaxed), atomic_exchange_explicit(&fAcc[ni * 3 + 2], 0.0f, memory_order_relaxed));
+#endif
             for (uint k = 0; k < n; k++)
             {
                 float4 e = addEnt[nr.x + k];
@@ -951,7 +1029,7 @@ kernel void floorFrame(
             tgF[ni * 3] = F0.x; tgF[ni * 3 + 1] = F0.y; tgF[ni * 3 + 2] = F0.z;
 #endif
         }
-        for (uint s = 0; s < RS; s++)
+        for (uint s = 0; s < RS && !SKIP(10); s++)
         {
             uint r = rec[s];
             if (r == NONE) continue;
@@ -989,7 +1067,7 @@ kernel void floorFrame(
         // ---- S5: self-collision ----
         // S5a: each triangle's frames and boxes; whether the pair list still holds.
         const float vmax = as_type<float>(atomic_load_explicit(&tgCount[0], memory_order_relaxed));
-        for (uint t = lid; t < NT; t += LANES)
+        for (uint t = lid; t < NT && !SKIP(5); t += LANES)
         {
             uint4 tn = tris[t];
             V3 p[3], v[3];
@@ -1066,7 +1144,7 @@ kernel void floorFrame(
         }
         // S5c: the listed pairs: the box test, then anti-clip's hit test.
         const uint npairs = min(atomic_load_explicit(&tgCount[1], memory_order_relaxed), (uint)PAIR_CAP);
-        for (uint k = lid; k < npairs; k += LANES)
+        for (uint k = lid; k < npairs && !SKIP(7); k += LANES)
         {
             uint pr = pairs[k];
             uint t = pr >> 16, h = pr & 0xFFFFu;
@@ -1152,7 +1230,7 @@ kernel void floorFrame(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
         const uint nhits = atomic_load_explicit(&tgCount[2], memory_order_relaxed);
-        if (nhits != 0u)
+        if (nhits != 0u && !SKIP(8))
         {
             if (lid == 0)
             {

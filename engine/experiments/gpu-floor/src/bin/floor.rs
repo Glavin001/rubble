@@ -28,10 +28,21 @@ fn main() -> anyhow::Result<()> {
     if flag("--core") {
         cpu.candidates.clear();
     }
+    if let Some(gap) = arg("--wall").map(|x| x.parse::<f32>().unwrap()) {
+        // A rigid wall `gap` m ahead of the car's front (+z), 10 m wide, 3 m high, 2 m thick.
+        let front = cpu.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+        cpu.boxes.push(engine_softbody::explicit_beams::StaticBox { lo: glam::Vec3::new(-5.0, -1.0, front + gap), hi: glam::Vec3::new(5.0, 3.0, front + gap + 2.0) });
+    }
+    let handoff: usize = arg("--handoff").map_or(0, |x| x.parse().unwrap());
+    for _ in 0..handoff * STEPS {
+        cpu.step();
+    }
     let (l, st) = layout_and_statics(&cpu)?;
     println!("layout: nodes {} records {} lanes {} slots {} add entries {} (max {}) centred entries {} (max {}) groups {}", l.nn, l.nr, LANES, l.rs, l.nadd, l.max_add, l.ncen, l.max_cen, l.ng);
     let gpu = Gpu::new()?;
-    let extra = if fast { "#define FAST 1" } else { "" };
+    // --fast: Metal's fast math; --sums: unordered (atomic) beam and centred sums.
+    let sums = flag("--sums");
+    let extra = if sums { "#define FAST_SUMS 1" } else { "" };
     let f = Floor::new(gpu, l, &st, cars, fast, extra)?;
     let (mt, w, tg) = f.threads_ok();
     println!("pipeline: max threads {mt}, simd {w}, threadgroup memory {tg} B");
@@ -65,7 +76,7 @@ fn main() -> anyhow::Result<()> {
             for n in notes {
                 println!("  {n}");
             }
-            if !fast {
+            if !fast && !sums {
                 break;
             }
         }
@@ -76,6 +87,25 @@ fn main() -> anyhow::Result<()> {
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let p = |q: f64| ms[((ms.len() - 1) as f64 * q) as usize];
         println!("timing ({} cars, one frame a dispatch, {time} dispatches): median {:.4} p95 {:.4} worst {:.4} best {:.4} ms", cars, p(0.5), p(0.95), ms[ms.len() - 1], ms[0]);
+    }
+    if flag("--phases") {
+        // Each phase's cost: a frame with it left out against the whole frame, from the
+        // same state each time (saved after the check), medians of `--time` dispatches.
+        let save = f.download(0);
+        let names = [(0u32, "S0 node pass"), (9, "S0 triangle breaks"), (11, "S0 groups bookkeeping"), (1, "S1 centred slots"), (2, "S2 centred per node"), (3, "S3 beams"), (4, "S4 node beam sums"), (10, "S4 records' groups"), (5, "S5a triangle frames"), (7, "S5c pair tests"), (8, "S6-S8 hits")];
+        let k = time.max(20);
+        let mut med = |skip: u32| {
+            let mut ms: Vec<f64> = (0..k).map(|_| { for c in 0..cars { f.upload(c, &save); } f.run_skip(1, skip) }).collect();
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ms[ms.len() / 2]
+        };
+        let all = med(0);
+        let none = med(u32::MAX);
+        println!("phases ({cars} cars; ms a frame, medians of {k}): whole {all:.4}, every phase left out {none:.4}");
+        for (bit, name) in names {
+            let t = med(1 << bit);
+            println!("  {name:24} {:.4} ms (frame without it {t:.4})", all - t);
+        }
     }
     Ok(())
 }
