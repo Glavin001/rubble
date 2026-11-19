@@ -1506,6 +1506,22 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         tab.extend(lists.iter().flatten());
     }
     tab.extend_from_slice(&[0; 4]);
+    // For a contact pair: each node's lane (what a body publishes for its partner is by
+    // lane: its stores go one after another), and each lane's node's cluster of contact
+    // points (the clusters' boxes are reduced by the nodes' own lanes).
+    let t_nlane = tab.len();
+    let mut nlane = vec![0u32; nn];
+    for (lane, &i) in order.iter().enumerate() {
+        nlane[i] = lane as u32;
+    }
+    tab.extend_from_slice(&nlane);
+    let t_ncl = tab.len();
+    let mut ncl = vec![NONE; LANES];
+    for (i, &h) in cps.iter().enumerate() {
+        ncl[nlane[h as usize] as usize] = (i / 28) as u32;
+    }
+    tab.extend_from_slice(&ncl);
+    tab.extend_from_slice(&[0; 4]);
     let mut o = V2Off::default();
     let mut at = 0usize;
     let mut take = |words: usize| {
@@ -1583,7 +1599,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define T_BSH {t_bsh}u\n#define O_SURF {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf
+        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define T_BSH {t_bsh}u\n#define T_NLANE {t_nlane}u\n#define T_NCL {t_ncl}u\n#define O_SURF {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf
     ) + &format!(
         "#define O_HMAP {}\n#define O_XMAP {}\n#define O_XCLB {x_clb}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
         o.hmap, o.xmap, list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out

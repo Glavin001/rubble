@@ -42,6 +42,12 @@
         #ifndef XT_HITRELOAD
         #define XT_HITRELOAD 0
         #endif
+        #ifndef XP_LANE
+        #define XP_LANE 0
+        #endif
+        #ifndef XB_ATOM
+        #define XB_ATOM 1
+        #endif
         #ifndef XF_MASK
         #define XF_MASK 1
         #endif
@@ -87,7 +93,22 @@
         #endif
         // (A body's own nodes' forces from its own block: any node's, a plain load. The
         // partner's only for the nodes it published, the ones that can be hit.)
+        // (XP_LANE, measured and not kept: what a body publishes for its partner by lane,
+        // twelve words a lane, so that a node's lane's stores go one after another in
+        // memory. The stores cost the same as by node and the readers' table loads more:
+        // head-on 3.31 -> 3.37. The pair is two of one car here, so the partner's lane
+        // holds the same node as this body's; two models would read the partner's table.)
+        #define XPL(c) (CB(c) + O_XSTG)
+        #if XATOM == 3
+        #define XPV(c, ln, k) v3(((device float4*)XPL(c))[(ln) * 3u + (k)])
+        #else
+        #define XPV(c, ln, k) v3(as_type<float>(ILOAD(&((device atomic_uint*)XPL(c))[(ln) * 12u + (k) * 4u])), as_type<float>(ILOAD(&((device atomic_uint*)XPL(c))[(ln) * 12u + (k) * 4u + 1u])), as_type<float>(ILOAD(&((device atomic_uint*)XPL(c))[(ln) * 12u + (k) * 4u + 2u])))
+        #endif
+        #if XP_LANE
+        #define XF(c, i) ((c) == ME ? v3(nodeState[(i) * 3u + 2u]) : XPV(c, tab[T_NLANE + (i)], 2u))
+        #else
         #define XF(c, i) ((c) == ME ? v3(nodeState[(i) * 3u + 2u]) : XNV(c, (i) * 3u + 2u))
+        #endif
         // Whether a point of body `pt` can pass any triangle's test of body `ow`: inside
         // `ow`'s box with the contact band and the largest pad any pair of them can have
         // (the same rounded terms as the reference's test, each bound no smaller). Both
@@ -96,7 +117,11 @@
             (p).x >= (unordF(TXI((ow) * 6u)) - CR) - XPADMAX(ow, pt) && (p).y >= (unordF(TXI((ow) * 6u + 1u)) - CR) - XPADMAX(ow, pt) && (p).z >= (unordF(TXI((ow) * 6u + 2u)) - CR) - XPADMAX(ow, pt) && \
             (p).x <= (unordF(TXI((ow) * 6u + 3u)) + CR) + XPADMAX(ow, pt) && (p).y <= (unordF(TXI((ow) * 6u + 4u)) + CR) + XPADMAX(ow, pt) && (p).z <= (unordF(TXI((ow) * 6u + 5u)) + CR) + XPADMAX(ow, pt))
         #define XPADMAX(ow, pt) ((as_type<float>(TXI(12u + (ow))) * H + as_type<float>(TXI(12u + (pt))) * H) + CLIP_DEPTH)
+        #if XP_LANE
+        #define PV(i) XPV(PA, tab[T_NLANE + (i)], 1u)
+        #else
         #define PV(i) XNV(PA, (i) * 3u + 1u)
+        #endif
         #define TXI(k) ILOAD(&tgX[k])
         // A triangle's box with the contact band, and its nodes' farthest travel a step.
         #define TRIBOX(tn) \
@@ -105,7 +130,20 @@
             V3 lo = v3(rmin(rmin(p0.x, p1.x), p2.x) - CR, rmin(rmin(p0.y, p1.y), p2.y) - CR, rmin(rmin(p0.z, p1.z), p2.z) - CR); \
             V3 hi = v3(rmax(rmax(p0.x, p1.x), p2.x) + CR, rmax(rmax(p0.y, p1.y), p2.y) + CR, rmax(rmax(p0.z, p1.z), p2.z) + CR);
         {
-            // A: this body's box and top speed (a warp reduces them).
+            // A: this body's box and top speed. (XB_ATOM: each node's lane from its own
+            // registers; one warp walking the nodes was a chain of 17 loads a lane.)
+        #if XB_ATOM
+            if (isNode)
+            {
+                atomic_fetch_min_explicit(&tgX[ME * 6u], ordF(Pown.x), memory_order_relaxed);
+                atomic_fetch_min_explicit(&tgX[ME * 6u + 1u], ordF(Pown.y), memory_order_relaxed);
+                atomic_fetch_min_explicit(&tgX[ME * 6u + 2u], ordF(Pown.z), memory_order_relaxed);
+                atomic_fetch_max_explicit(&tgX[ME * 6u + 3u], ordF(Pown.x), memory_order_relaxed);
+                atomic_fetch_max_explicit(&tgX[ME * 6u + 4u], ordF(Pown.y), memory_order_relaxed);
+                atomic_fetch_max_explicit(&tgX[ME * 6u + 5u], ordF(Pown.z), memory_order_relaxed);
+                atomic_fetch_max_explicit(&tgX[12u + ME], as_type<int>(len3(Vown)), memory_order_relaxed);
+            }
+        #else
             if (lid < 32u)
             {
                 V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
@@ -125,6 +163,7 @@
                 atomic_fetch_max_explicit(&tgX[ME * 6u + 5u], ordF(hi.z), memory_order_relaxed);
                 atomic_fetch_max_explicit(&tgX[12u + ME], as_type<int>(vt), memory_order_relaxed);
             }
+        #endif
             BAR;
             if (lid == 0u)
             {
@@ -155,7 +194,7 @@
                 if (isNode && !SKIP(16))
                 {
         #if XATOM >= 2
-                    device atomic_uint* na = (device atomic_uint*)(nodeState + ni * 3);
+                    device atomic_uint* na = XP_LANE ? (device atomic_uint*)(XPL(ME) + lid * 12u) : (device atomic_uint*)(nodeState + ni * 3);
                     // Every node's position (the partner's boxes and side votes read any
                     // of them); velocity and force only of the nodes a partner's triangle
                     // can reach (six atomic stores fewer for the others). The force also
@@ -173,11 +212,39 @@
                     nodeState[ni * 3 + 2] = f4(F0, 0);
         #endif
                 }
+                // This body's clusters of contact points' boxes, for its partner's cull
+                // (from its own memory: read from the partner's block they were 28
+                // scattered loads a lane, one after another). (XB_ATOM: reduced by the
+                // points' own lanes into the scalars' array past the partner's nodes' place,
+                // then published a lane a cluster; a cluster's lane walking its 28 points
+                // was the phase's chain.)
+        #if XB_ATOM
+                #define XCBX(q) ((TGPTR(atomic_int))&tgG[PCB(q)])
+                if (lid < NCLP * 6u) ISTORE(&XCBX(0)[lid], (lid % 6u) < 3u ? 0x7FFFFFFF : int(0x80000000));
+                BAR;
+                if (isNode && !SKIP(31))
+                {
+                    const uint cl = tab[T_NCL + lid];
+                    if (cl != NONE)
+                    {
+                        atomic_fetch_min_explicit(&XCBX(cl)[0], ordF(Pown.x), memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XCBX(cl)[1], ordF(Pown.y), memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XCBX(cl)[2], ordF(Pown.z), memory_order_relaxed);
+                        atomic_fetch_max_explicit(&XCBX(cl)[3], ordF(Pown.x), memory_order_relaxed);
+                        atomic_fetch_max_explicit(&XCBX(cl)[4], ordF(Pown.y), memory_order_relaxed);
+                        atomic_fetch_max_explicit(&XCBX(cl)[5], ordF(Pown.z), memory_order_relaxed);
+                    }
+                }
+                BAR;
                 if (lid < NCLP && !SKIP(31))
                 {
-                    // This body's clusters of contact points' boxes, for its partner's cull
-                    // (from its own memory: read from the partner's block they were 28
-                    // scattered loads a lane, one after another).
+                    device atomic_uint* cbx = (device atomic_uint*)(cb + O_XCLB + lid * 8u);
+                    ISTORE(&cbx[0], as_type<uint>(unordF(ILOAD(&XCBX(lid)[0])))); ISTORE(&cbx[1], as_type<uint>(unordF(ILOAD(&XCBX(lid)[1])))); ISTORE(&cbx[2], as_type<uint>(unordF(ILOAD(&XCBX(lid)[2]))));
+                    ISTORE(&cbx[4], as_type<uint>(unordF(ILOAD(&XCBX(lid)[3])))); ISTORE(&cbx[5], as_type<uint>(unordF(ILOAD(&XCBX(lid)[4])))); ISTORE(&cbx[6], as_type<uint>(unordF(ILOAD(&XCBX(lid)[5]))));
+                }
+        #else
+                if (lid < NCLP && !SKIP(31))
+                {
                     V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
                     device const uint4* cl4 = (device const uint4*)(tab + T_PCL + lid * 32u);
                     for (uint jj = 0; jj < 8u; jj++)
@@ -196,10 +263,22 @@
                     ISTORE(&cbx[0], as_type<uint>(lo.x)); ISTORE(&cbx[1], as_type<uint>(lo.y)); ISTORE(&cbx[2], as_type<uint>(lo.z));
                     ISTORE(&cbx[4], as_type<uint>(hi.x)); ISTORE(&cbx[5], as_type<uint>(hi.y)); ISTORE(&cbx[6], as_type<uint>(hi.z));
                 }
+        #endif
                 XBAR;
                 // D: the partner's nodes into this group's memory; this body's triangles
                 // against the partner's box and then its clusters' boxes.
                 // (SKIP(29), SKIP(30): timing only, as SKIP(17..20) below.)
+        #if XP_LANE
+                if (!SKIP(29) && isNode)
+                {
+                    const uint k = ni;
+                    V3 p = XPV(PA, lid, 0u);
+                    tgG[k * 4u] = p.x; tgG[k * 4u + 1u] = p.y; tgG[k * 4u + 2u] = p.z;
+                    float sv = -3.0e38f;
+                    if (XREACH(ME, PA, p)) sv = len3(XPV(PA, lid, 1u)) * H;
+                    tgG[k * 4u + 3u] = sv;
+                }
+        #else
                 if (!SKIP(29))
                 for (uint k = lid; k < NN; k += LANES)
                 {
@@ -214,6 +293,7 @@
                         sv = len3(XNV(PA, k * 3u + 1u)) * H;
                     tgG[k * 4u + 3u] = sv;
                 }
+        #endif
                 if (!SKIP(30))
                 for (uint t = lid; t < NT; t += LANES)
                 {
