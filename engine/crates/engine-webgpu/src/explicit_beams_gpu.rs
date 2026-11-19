@@ -553,9 +553,9 @@ const SELF_AWAKE_ARGS: u64 = 160;
 const SPLIT_TESTS: u32 = 0x2000_0000;
 const SPLIT_LEVELS: u32 = 0x4000_0000;
 /// The split group path's entry points (`explicit_beams_split.slang`).
-pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
-pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
-pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
+pub const SPLIT_MEMBER_ENTRY: &str = plan::SPLIT_MEMBER_ENTRY;
+pub const SPLIT_GROUP_ENTRY: &str = plan::SPLIT_GROUP_ENTRY;
+pub const SPLIT_TESTS_ENTRY: &str = plan::SPLIT_TESTS_ENTRY;
 
 /// Whether the split path runs the small groups' triangle tests across workgroups
 /// ([`ExplicitBeamsGpu::set_group_split_tests`]): `RUBBLE_GROUP_SPLIT_TESTS=1|0` (default on).
@@ -571,33 +571,12 @@ const SPLIT_BEGIN: u32 = u32::MAX;
 /// variant: without vehicle contact the step, walk and pairs; with it the vehicles' step,
 /// the walk and pairs that skip members, and the split group path's group and tests.
 fn self_split_modules(aero: bool, lanes: u32, vv: bool) -> Vec<(String, &'static str, bool)> {
-    let tag = match (aero, lanes) {
-        (false, 512) => "_wide",
-        (false, _) => "",
-        (true, 512) => "_aero_wide",
-        (true, _) => "_aero",
-    };
-    // (name, entry, binds the arguments buffer at binding 10)
-    if vv {
-        vec![
-            (format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, true),
-            (format!("explicit_beams_selfsplit_walk_vv{tag}"), "explicit_beams_self_walk", false),
-            (format!("explicit_beams_selfsplit_pairs_vv{tag}"), "explicit_beams_self_pairs", false),
-            (split_module("group", aero, lanes).to_string(), SPLIT_GROUP_ENTRY, false),
-            (split_module("tests", aero, lanes).to_string(), SPLIT_TESTS_ENTRY, false),
-        ]
-    } else {
-        vec![
-            (format!("explicit_beams_selfsplit_step{tag}"), "explicit_beams_self_step", true),
-            (format!("explicit_beams_selfsplit_walk{tag}"), "explicit_beams_self_walk", false),
-            (format!("explicit_beams_selfsplit_pairs{tag}"), "explicit_beams_self_pairs", false),
-        ]
-    }
+    plan::self_split_module_names(aero, lanes, vv)
 }
 
 /// The wide passes' list module for a fleet at `lanes` (wide fleets have no aero).
 fn wide_list_module(lanes: u32) -> &'static str {
-    if lanes == 512 { "explicit_beams_selfsplit_list_wide" } else { "explicit_beams_selfsplit_list" }
+    plan::wide_list_module_name(lanes)
 }
 
 /// The self split's step layout: the split group path's entries and the indirect
@@ -628,13 +607,7 @@ fn fleet_args_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 }
 
 fn split_module(which: &str, aero: bool, lanes: u32) -> &'static str {
-    let tag = match (aero, lanes) {
-        (false, 512) => "_wide",
-        (false, _) => "",
-        (true, 512) => "_aero_wide",
-        (true, _) => "_aero",
-    };
-    let name = format!("explicit_beams_split_{which}{tag}");
+    let name = plan::split_module_name(which, aero, lanes);
     crate::EXPLICIT_BEAMS_SPLIT_GROUPS
         .iter()
         .find(|(n, _)| *n == name)
