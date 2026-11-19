@@ -364,6 +364,11 @@ pub struct OpTiming {
     /// 128-byte lines whose content the op changed, ×128: a lower bound of its DRAM
     /// writes (a line written with the value it held does not count).
     pub changed_bytes: u64,
+    /// An indirect dispatch whose workgroup count was zero in the replayed state. Alone
+    /// its command buffer may still cost GPU time (seen: 0.18 ms for
+    /// `solve_primal_color_compact`) that it does not cost inside the step, so reports
+    /// keep these out of the additive sums.
+    pub empty: bool,
 }
 
 /// What [`replay`] measured.
@@ -376,6 +381,16 @@ pub struct ReplayReport {
     pub whole_step_ms: Vec<f64>,
     /// An empty kernel's command buffer: the floor every op's time includes.
     pub launch_floor_ms: Vec<f64>,
+}
+
+/// FNV-1a of bytes (state hashes for bit-for-bit checks between runs).
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// Percentile of unsorted samples (nearest rank).
@@ -693,6 +708,7 @@ pub fn replay(
             writable_bytes: bytes(&written),
             readonly_bytes: bytes(&readonly),
             changed_bytes,
+            empty: kind == "indirect" && groups.iter().product::<u64>() == 0,
         });
     }
     ReplayReport {

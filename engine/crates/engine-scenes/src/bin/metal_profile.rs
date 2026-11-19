@@ -226,6 +226,10 @@ fn rigid(name: &str, a: &Args) -> anyhow::Result<Report> {
     }
     sim.set_gpu_log(false);
     let after = sim.drain()?;
+    let state_hash = format!(
+        "{:016x}",
+        profile::fnv1a(bytemuck_bodies(&sim.download_bodies()))
+    );
     // Phase-split steps.
     let mut phases: Vec<(String, Vec<f64>)> = Vec::new();
     for _ in 0..a.split {
@@ -279,6 +283,7 @@ fn rigid(name: &str, a: &Args) -> anyhow::Result<Report> {
         "awake_after_timing": after.awake_count,
         "contacts_after_timing": after.contact_count,
         "steps_done": sim.steps_done(),
+        "state_hash_after_timing": state_hash,
     });
     Ok(Report {
         name: name.to_string(),
@@ -346,6 +351,20 @@ fn cars(spec: &str, a: &Args) -> anyhow::Result<Report> {
         )
     };
     g.set_gpu_log(false);
+    let pos: Vec<f32> = g
+        .positions()
+        .iter()
+        .flatten()
+        .flat_map(|p| p.to_array())
+        .collect();
+    let state_hash = format!(
+        "{:016x}",
+        profile::fnv1a(
+            &pos.iter()
+                .flat_map(|f| f.to_bits().to_le_bytes())
+                .collect::<Vec<u8>>()
+        )
+    );
     let steps = clock.next();
     let replay = if a.replay {
         let ops = g.replay_ops(steps);
@@ -365,6 +384,7 @@ fn cars(spec: &str, a: &Args) -> anyhow::Result<Report> {
         "wide": wide_on,
         "contact_active": g.contact_active(),
         "steps_per_frame_replayed": steps,
+        "state_hash_after_timing": state_hash,
         "unit": "frame (60 fps: 33 or 34 solver steps at 2 kHz)",
     });
     Ok(Report {
@@ -377,13 +397,18 @@ fn cars(spec: &str, a: &Args) -> anyhow::Result<Report> {
     })
 }
 
-/// Sum of medians by key.
+fn bytemuck_bodies(b: &[engine_schema::BodyState]) -> &[u8] {
+    // SAFETY: BodyState is plain old data (repr(C), Pod in engine-schema).
+    unsafe { std::slice::from_raw_parts(b.as_ptr() as *const u8, std::mem::size_of_val(b)) }
+}
+
+/// Sum of medians by key (empty indirect dispatches left out).
 fn group_by(
     ops: &[OpTiming],
     key: impl Fn(&OpTiming) -> String,
 ) -> Vec<(String, f64, usize, u64, u64)> {
     let mut out: Vec<(String, f64, usize, u64, u64)> = Vec::new();
-    for o in ops {
+    for o in ops.iter().filter(|o| !o.empty) {
         let k = key(o);
         match out.iter_mut().find(|e| e.0 == k) {
             Some(e) => {
@@ -430,15 +455,31 @@ fn text(r: &Report) -> String {
     if let Some(rp) = &r.replay {
         let step = m(&rp.whole_step_ms);
         let floor = m(&rp.launch_floor_ms);
-        let sum: f64 = rp.ops.iter().map(|o| o.median_ms).sum();
-        let n = rp.ops.len();
+        let live: Vec<&OpTiming> = rp.ops.iter().filter(|o| !o.empty).collect();
+        let empty: Vec<&OpTiming> = rp.ops.iter().filter(|o| o.empty).collect();
+        let sum: f64 = live.iter().map(|o| o.median_ms).sum();
+        let n = live.len();
         let _ = writeln!(
             s,
-            "\nkernel replay (x{} each): whole step in one command buffer {step:.3} ms | {n} ops alone sum {sum:.3} ms | launch floor {floor:.4} ms/op ({:.3} ms over {n}) | sum - floors {:.3} ms",
+            "\nkernel replay (x{} each): whole step in one command buffer {step:.3} ms (p90 {:.3}) | {n} ops alone sum {sum:.3} ms | launch floor {floor:.4} ms/op ({:.3} ms over {n}) | sum - floors {:.3} ms | step - (sum - floors) {:.3} ms",
             rp.reps,
+            percentile(&rp.whole_step_ms, 0.9),
             floor * n as f64,
-            sum - floor * n as f64
+            sum - floor * n as f64,
+            step - (sum - floor * n as f64)
         );
+        if !empty.is_empty() {
+            let alone: f64 = empty.iter().map(|o| o.median_ms).sum();
+            let mut names: Vec<&str> = empty.iter().map(|o| o.kernel.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            let _ = writeln!(
+                s,
+                "  + {} empty indirect dispatches (0 workgroups; {alone:.3} ms alone, not additive, left out): {}",
+                empty.len(),
+                names.join(", ")
+            );
+        }
         let _ = writeln!(s, "\nby kernel (sum of medians over its dispatches):");
         let _ = writeln!(
             s,
@@ -458,7 +499,7 @@ fn text(r: &Report) -> String {
         for (k, ms, cnt, _, _) in group_by(&rp.ops, |o| o.phase.clone()) {
             let _ = writeln!(s, "{k:<38} {cnt:>5} {ms:>9.3} {:>6.1}%", 100.0 * ms / sum);
         }
-        let mut top: Vec<&OpTiming> = rp.ops.iter().collect();
+        let mut top: Vec<&OpTiming> = live.clone();
         top.sort_by(|a, b| b.median_ms.partial_cmp(&a.median_ms).unwrap());
         let _ = writeln!(s, "\ntop dispatches:");
         let _ = writeln!(
