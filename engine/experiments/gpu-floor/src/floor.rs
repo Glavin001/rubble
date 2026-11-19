@@ -119,7 +119,7 @@ pub fn v2_put(big: &mut [u8], o: &V2Off, s: &State) {
     put_at(big, o.misc, bytemuck::cast_slice(&s.misc));
     put_at(big, o.clip, bytemuck::cast_slice(&s.clip));
     // (An uploaded state's pending sums are any node's: every node's bit set.)
-    put_at(big, o.touch, &[0xFFu8; 128]);
+    put_at(big, o.touch, &[0xFFu8; 512]);
     if o.rig_words != 0 && s.rig.len() == o.rig_words {
         put_at(big, o.rig, bytemuck::cast_slice(&s.rig));
     }
@@ -1284,7 +1284,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     // A contact pair's pass (pair.metal): what a body publishes for its partner (box, top
     // speed, hit count); the owner's staging sums and hit counts for both bodies' nodes;
     // its lists (triangles, triangle and cluster, candidates) and its hits.
-    let o_touch = take(32);
+    let o_touch = take(128);
     o.touch = o_touch;
     let xcnd_cap = 8192usize;
     let x_pub = take(16);

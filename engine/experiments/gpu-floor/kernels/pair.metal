@@ -24,7 +24,7 @@
         #define XSHIFT(c) ((device atomic_int*)(CB(c) + O_SHIFT))
         #define XCLIP(c) ((device atomic_uint*)(CB(c) + O_CLIP))
         #define XFLAG(c) ((device atomic_uint*)(CB(c) + O_MISC + 12))
-        #define XTOUCH(c, n) atomic_fetch_or_explicit(&((device atomic_uint*)(CB(c) + O_TOUCH))[(n) >> 5], 1u << ((n) & 31u), memory_order_relaxed)
+        #define XTOUCHK(c, n, k) atomic_fetch_or_explicit(&((device atomic_uint*)(CB(c) + O_TOUCH))[(n) >> 3], (uint)(k) << (((n) & 7u) * 4u), memory_order_relaxed)
         #define XSTAGE(c) ((device atomic_int*)(cb + O_XSTG + (c) * NN * 6))
         #define XSPLIT(c) ((device atomic_uint*)(cb + O_XSPL + (c) * NN))
         #define XTRI (cb + O_XTRI)
@@ -327,7 +327,7 @@
                     uint old = atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 2], word, memory_order_relaxed);
                     atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 3], max(old, word), memory_order_relaxed);
                     atomic_fetch_or_explicit(XFLAG(b), 4u, memory_order_relaxed);
-                    XTOUCH(b, h); XTOUCH(a, tn.x); XTOUCH(a, tn.y); XTOUCH(a, tn.z);
+                    XTOUCHK(b, h, 5u); XTOUCHK(a, tn.x, 1u); XTOUCHK(a, tn.y, 1u); XTOUCHK(a, tn.z, 1u);
                     float pen = rmin(CR - dd, CR);
                     uint hi_ = (uint)atomic_fetch_add_explicit(&tgX[18], 1, memory_order_relaxed);
                     if (hi_ < HCAP)
@@ -400,6 +400,7 @@
                             {
                                 float q = delta * m;
                                 V3 dh = n * (q * imh);
+                                XTOUCHK(b, h, 2u);
                                 atomic_fetch_add_explicit(&XSHIFT(b)[h * 3], toFixedShift(dh.x), memory_order_relaxed);
                                 atomic_fetch_add_explicit(&XSHIFT(b)[h * 3 + 1], toFixedShift(dh.y), memory_order_relaxed);
                                 atomic_fetch_add_explicit(&XSHIFT(b)[h * 3 + 2], toFixedShift(dh.z), memory_order_relaxed);
@@ -412,6 +413,7 @@
                                     if (tw[e] > 0.0f)
                                     {
                                         V3 dt = n * -(tw[e] * (q * tm[e]));
+                                        XTOUCHK(a, ti[e], 2u);
                                         atomic_fetch_add_explicit(&XSHIFT(a)[ti[e] * 3], toFixedShift(dt.x), memory_order_relaxed);
                                         atomic_fetch_add_explicit(&XSHIFT(a)[ti[e] * 3 + 1], toFixedShift(dt.y), memory_order_relaxed);
                                         atomic_fetch_add_explicit(&XSHIFT(a)[ti[e] * 3 + 2], toFixedShift(dt.z), memory_order_relaxed);
