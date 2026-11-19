@@ -832,22 +832,16 @@ kernel void floorFrame(
             const uint n = min(cur.x, (uint)(PROW - 2u));
             if (n != 0u)
             {
-                uint4 tn = uint4(cur.y & 1023u, (cur.y >> 10) & 1023u, (cur.y >> 20) & 1023u, 0u);
-                V3 p[3], v[3], b[3];
-                for (uint q = 0; q < 3; q++)
-                {
-                    uint i = tn[q];
-                    p[q] = v3(0, 0, 0) + TGP(i);
-                    v[q] = TGV(i);
-                    b[q] = p[q] - v[q] * H;
-                }
+                const uint t0 = cur.y & 1023u, t1 = (cur.y >> 10) & 1023u, t2 = (cur.y >> 20) & 1023u;
                 // (Only what the filter reads stays live over the row: two points and two
-                // plane normals; a pair that passes rebuilds the rest, the same values.)
+                // plane normals; a pair that passes rebuilds the rest, the same values. No
+                // arrays: an array indexed in a loop is stack memory.)
                 V3 f0, frd, b0, brd;
                 bool fok, bok;
                 {
-                    Frame F = triFrame(p[0], p[1], p[2]);
-                    Frame B = triFrame(b[0], b[1], b[2]);
+                    V3 q0 = v3(0, 0, 0) + TGP(t0), q1 = v3(0, 0, 0) + TGP(t1), q2 = v3(0, 0, 0) + TGP(t2);
+                    Frame F = triFrame(q0, q1, q2);
+                    Frame B = triFrame(q0 - TGV(t0) * H, q1 - TGV(t1) * H, q2 - TGV(t2) * H);
                     f0 = F.p0; frd = F.rd; fok = F.ok; b0 = B.p0; brd = B.rd; bok = B.ok;
                 }
                 for (uint k = 0; k < PROW - 2u; k++)
@@ -863,20 +857,15 @@ kernel void floorFrame(
                     bool cand = tgHeld[h] != 0 || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
                     if (!cand) continue;
                     // The full rule (explicit_beams.rs collision_pass, clip_hit).
-                    V3 p[3], v[3], b[3];
-                    for (uint q = 0; q < 3; q++)
-                    {
-                        uint i = tn[q];
-                        p[q] = v3(0, 0, 0) + TGP(i);
-                        v[q] = TGV(i);
-                        b[q] = p[q] - v[q] * H;
-                    }
-                    Frame F = triFrame(p[0], p[1], p[2]);
-                    Frame B = triFrame(b[0], b[1], b[2]);
-                    float tv = rmax(rmax(rmax(0.0f, len3(v[0])), len3(v[1])), len3(v[2]));
+                    const uint4 tn = uint4(t0, t1, t2, 0u);
+                    const V3 pA = v3(0, 0, 0) + TGP(t0), pB = v3(0, 0, 0) + TGP(t1), pC = v3(0, 0, 0) + TGP(t2);
+                    const V3 vA = TGV(t0), vB = TGV(t1), vC = TGV(t2);
+                    Frame F = triFrame(pA, pB, pC);
+                    Frame B = triFrame(pA - vA * H, pB - vB * H, pC - vC * H);
+                    float tv = rmax(rmax(rmax(0.0f, len3(vA)), len3(vB)), len3(vC));
                     float reach = (CR + (tv + vmax) * H) + CLIP_DEPTH;
-                    V3 lo = v3(rmin(rmin(p[0].x, p[1].x), p[2].x) - reach, rmin(rmin(p[0].y, p[1].y), p[2].y) - reach, rmin(rmin(p[0].z, p[1].z), p[2].z) - reach);
-                    V3 hi = v3(rmax(rmax(p[0].x, p[1].x), p[2].x) + reach, rmax(rmax(p[0].y, p[1].y), p[2].y) + reach, rmax(rmax(p[0].z, p[1].z), p[2].z) + reach);
+                    V3 lo = v3(rmin(rmin(pA.x, pB.x), pC.x) - reach, rmin(rmin(pA.y, pB.y), pC.y) - reach, rmin(rmin(pA.z, pB.z), pC.z) - reach);
+                    V3 hi = v3(rmax(rmax(pA.x, pB.x), pC.x) + reach, rmax(rmax(pA.y, pB.y), pC.y) + reach, rmax(rmax(pA.z, pB.z), pC.z) + reach);
                     if (ph.x < lo.x || ph.y < lo.y || ph.z < lo.z || ph.x > hi.x || ph.y > hi.y || ph.z > hi.z) continue;
                     float4 loc = frameLocal(F.p0, F.ra, F.rb, F.rd, F.ok, ph);
                     uint key = CLIP_SELF << 20 | tri;

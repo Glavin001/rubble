@@ -394,7 +394,7 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
         return format!(
             "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define LANES {}\n#define STEPS {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define HITW {HITW}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n#ifndef RUNTIME_SIZES\n#define RUNTIME_SIZES 0\n#endif\n{}\n{}\n{}\n{}",
             l.nn, l.nr, l.nt, l.ng, l.nd, LANES, STEPS / per_frame, (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(),
-            extra, st.v2_defs, helpers, include_str!("../kernels/floor2.metal")
+            extra, st.v2_defs, helpers, unroll_slots(include_str!("../kernels/floor2.metal"))
         );
     }
     format!(
@@ -992,4 +992,48 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     );
     l.rs = 4;
     Ok(())
+}
+
+
+/// Every `for (uint s = 0; s < RS ...; s++) { body }` of the kernel written out once a slot
+/// with `s` a constant. Metal's compiler does not unroll these loops (their bodies are
+/// large), and an array indexed by a loop variable stays in stack memory: the slots' hot
+/// words were then loaded and stored through memory in every phase instead of living in
+/// registers. A `continue` in a body leaves its copy (the copies are `do { } while (0)`).
+pub fn unroll_slots(src: &str) -> String {
+    const HEAD: &str = "for (uint s = 0; s < RS";
+    let mut out = String::with_capacity(src.len() * 3);
+    let mut rest = src;
+    while let Some(at) = rest.find(HEAD) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + HEAD.len()..];
+        let close = after.find("; s++)").expect("the slot loop's header");
+        let cond = after[..close].trim().trim_start_matches("&&").trim().to_string();
+        let body_from = close + "; s++)".len();
+        let open = body_from + after[body_from..].find('{').expect("the slot loop's body");
+        assert!(after[body_from..open].trim().is_empty(), "a slot loop without braces");
+        let (mut depth, mut end) = (0i32, 0usize);
+        for (i, ch) in after[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end != 0, "the slot loop's closing brace");
+        let body = &after[open..end];
+        for k in 0..4 {
+            let guard = if cond.is_empty() { String::new() } else { format!("if ({cond}) ") };
+            out.push_str(&format!("{{ const uint s = {k}u; {guard}do {body} while (0); }}\n"));
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
