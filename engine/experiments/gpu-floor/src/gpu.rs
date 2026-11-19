@@ -4,18 +4,17 @@ use metal::*;
 pub struct Gpu {
     pub device: Device,
     pub queue: CommandQueue,
+    /// Launched through the machine's GPU lock (scripts/with-gpu-lock.py sets
+    /// RUBBLE_GPU_LOCK=0 for its child): only then may anything be dispatched. Without it
+    /// the device can still compile pipelines (no GPU work).
+    locked: bool,
 }
 
 impl Gpu {
     pub fn new() -> anyhow::Result<Self> {
-        // GPU work only under the machine's GPU lock (scripts/with-gpu-lock.py sets this).
-        anyhow::ensure!(
-            std::env::var("RUBBLE_GPU_LOCK").as_deref() == Ok("0") || std::env::args().any(|a| a == "--compile-only"),
-            "run under engine/scripts/with-gpu-lock.py (-- env RUBBLE_GPU_LOCK=0 ...), or --compile-only / --emu"
-        );
         let device = Device::system_default().ok_or_else(|| anyhow::anyhow!("no Metal device"))?;
         let queue = device.new_command_queue();
-        Ok(Self { device, queue })
+        Ok(Self { device, queue, locked: std::env::var("RUBBLE_GPU_LOCK").as_deref() == Ok("0") })
     }
 
     /// `fast`: Metal's fast math (contraction, approximate division and square root).
@@ -49,6 +48,7 @@ impl Gpu {
 
     /// `n` dependent dispatches in one serial encoder (in order; each sees the last one's writes).
     pub fn run_n(&self, pso: &ComputePipelineState, bufs: &[&Buffer], groups: u64, threads: u64, n: usize) -> f64 {
+        assert!(self.locked, "GPU work only under engine/scripts/with-gpu-lock.py (-- env RUBBLE_GPU_LOCK=0 ...)");
         let cb = self.queue.new_command_buffer();
         let enc = cb.new_compute_command_encoder();
         enc.set_compute_pipeline_state(pso);
