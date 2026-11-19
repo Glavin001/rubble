@@ -23,6 +23,8 @@ fn main() -> anyhow::Result<()> {
         // The pair kernel's source on the CPU (two bodies' workgroups and their contact
         // group in lockstep) against the reference, every state word of both bodies.
         let (mut l, mut st) = layout_and_statics(&w.vehicles[0])?;
+        list_args(&mut st);
+
         make_v2(&w.vehicles[0], &mut l, &mut st)?;
         st.pair = 2;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/gpu-floor/emu-pair");
@@ -74,6 +76,8 @@ fn main() -> anyhow::Result<()> {
         let time: usize = arg("--time").map_or(30, |x| x.parse().unwrap());
         let fast = flag("--fast");
         let (mut l, mut st) = layout_and_statics(&w.vehicles[0])?;
+        list_args(&mut st);
+
         make_v2(&w.vehicles[0], &mut l, &mut st)?;
         st.pair = 2;
         let mut extra = String::from("#define RUNTIME_SIZES 0\n");

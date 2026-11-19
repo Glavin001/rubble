@@ -19,6 +19,8 @@ fn main() -> anyhow::Result<()> {
         // The kernel's source on the CPU against the reference: the body's every state
         // word, and the proxies' poses, velocities, counts and window impulses.
         let (mut l, mut st) = layout_and_statics(&c)?;
+        list_args(&mut st);
+
         make_v2(&c, &mut l, &mut st)?;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/gpu-floor/emu-rigid");
         let by_step = std::env::args().any(|a| a == "--by-step");
@@ -60,6 +62,8 @@ fn main() -> anyhow::Result<()> {
         let cars: usize = arg("--cars").map_or(1, |x| x.parse().unwrap());
         let time: usize = arg("--time").map_or(30, |x| x.parse().unwrap());
         let (mut l, mut st) = layout_and_statics(&c)?;
+        list_args(&mut st);
+
         make_v2(&c, &mut l, &mut st)?;
         let mut extra = String::from("#define RUNTIME_SIZES 0\n");
         if flag("--native") {

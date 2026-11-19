@@ -33,6 +33,8 @@ pub const PAIR_CAP: usize = 1 << 16;
 pub const HIT_CAP: usize = 4096;
 /// The pair list's box: the contact band, anti-clip's depth and a skin.
 pub const LIST_SKIN: f32 = 0.05;
+/// The wide list's skin.
+pub const LIST_SKIN_OUT: f32 = 0.15;
 
 /// Static data, the same for every car.
 pub struct Statics {
@@ -51,6 +53,9 @@ pub struct Statics {
     pub tris: Vec<[u32; 4]>,
     pub allowed: Vec<u32>,
     pub list_reach: f32,
+    /// The wide list's reach (the working list is filtered from it); the working reach or
+    /// less: one list, built from the clusters every time.
+    pub list_reach_out: f32,
     pub cr: f32,
     pub boxes: Vec<([f32; 3], [f32; 3])>,
     /// The second layout's table (lanes, node entry lists, vector indices) and defines;
@@ -71,6 +76,8 @@ pub struct Statics {
 #[derive(Clone, Default, Debug)]
 pub struct V2Off {
     pub touch: usize,
+    pub pairs_out: usize,
+    pub pbuild_out: usize,
     pub node: usize,
     pub rec: usize,
     pub groups: usize,
@@ -411,7 +418,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0, own: false },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, list_reach_out: list_reach + LIST_SKIN_OUT - LIST_SKIN, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new(), v2_off: V2Off::default(), pair: 0, own: false },
     ))
 }
 
@@ -1002,6 +1009,22 @@ impl Emu {
 }
 
 
+/// `--skin M` and `--skin-out M` of the command line: the working and the wide pair
+/// lists' skins (m; defaults 0.05 and 0.15; a wide skin no larger than the working one:
+/// one list, built from the clusters every time).
+pub fn list_args(st: &mut Statics) {
+    let a: Vec<String> = std::env::args().collect();
+    let arg = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).map(|x| x.parse::<f32>().unwrap());
+    let base = st.cr + engine_softbody::explicit_contact::CLIP_DEPTH;
+    if let Some(sk) = arg("--skin") {
+        st.list_reach = base + sk;
+        st.list_reach_out = base + sk + LIST_SKIN_OUT - LIST_SKIN;
+    }
+    if let Some(sk) = arg("--skin-out") {
+        st.list_reach_out = base + sk;
+    }
+}
+
 /// The second layout (kernels/floor2.metal) for this car: which lane holds which node,
 /// triangle and beam slots, each node's entry list in the reference's add order, and the
 /// vector slots of the elements whose force is not along a beam.
@@ -1134,8 +1157,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         }
     }
     // Triangles on lanes by their pair count in this pose.
-    let reach = st.list_reach;
-    let count = |t: usize| -> usize {
+    let count_at = |t: usize, reach: f32| -> usize {
         let p = s.triangles[t].nodes.map(|i| s.nodes[i as usize].pos + s.origin);
         let lo = p[0].min(p[1]).min(p[2]) - Vec3::splat(reach);
         let hi = p[0].max(p[1]).max(p[2]) + Vec3::splat(reach);
@@ -1144,12 +1166,15 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
             !(x.cmplt(lo).any() || x.cmpgt(hi).any())
         }).count()
     };
-    let counts: Vec<usize> = (0..nt).map(count).collect();
+    let counts: Vec<usize> = (0..nt).map(|t| count_at(t, st.list_reach)).collect();
+    // (A row holds the wide list's pairs: twice this pose's longest, for a crushed car's.)
+    let list2 = st.list_reach_out > st.list_reach;
+    let widest = (0..nt).map(|t| count_at(t, st.list_reach_out.max(st.list_reach))).max().unwrap_or(0);
     let mut tri_order: Vec<usize> = (0..nt).collect();
     tri_order.sort_by_key(|&t| (std::cmp::Reverse(counts[t]), t));
     anyhow::ensure!(nt <= LANES);
-    let prow = ((PAIR_CAP / nt.max(1)) & !3).min(124);
-    anyhow::ensure!(counts.iter().all(|&c| c + 2 < prow), "a triangle's pairs past its row ({} of {prow})", counts.iter().max().unwrap());
+    let prow = (((PAIR_CAP / nt.max(1)) & !3).min(124)).max((2 * widest + 16 + 3) & !3);
+    anyhow::ensure!(prow <= 1020 && widest + 2 < prow, "a triangle's pairs past its row ({widest} of {prow})");
     // The contacters in clusters of at most 28 along the car's longest extent in this pose
     // (the pair list's build tests a cluster's box first), and each triangle's allowed
     // contacters a word a cluster.
@@ -1245,6 +1270,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     o.misc = take(16);
     o.pairs = take(nt * prow);
     o.pbuild = take(nn * 4);
+    o.pairs_out = take(nt * prow);
+    o.pbuild_out = take(nn * 4 + 4);
     o.clip = take(nn * 4);
     o.hits = take(HIT_CAP * HITW * 4);
     o.scratch = take(nn * 12);
@@ -1274,7 +1301,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n"
+        "#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
+        list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out
     ) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words

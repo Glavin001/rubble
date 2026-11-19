@@ -51,8 +51,10 @@ struct Params
 // within the dispatch, and a plain load does not see another core's atomic add to a word
 // its own group stored; atomic stores and loads are seen. So 2 wherever groups share
 // words; 0 and 1 are kept to show the difference.
+// 3: atomic stores, and what another group stored atomically read with a plain vector load
+// (measured bit for bit on the GPU, one load in place of three): the default for pairs.
 #ifndef XATOM
-#define XATOM (PAIR ? 2 : 0)
+#define XATOM (PAIR ? 3 : 0)
 #endif
 #if XATOM >= 1
 #define SHL(i) atomic_load_explicit((device atomic_int*)&shift[i], memory_order_relaxed)
@@ -137,6 +139,7 @@ inline V3 v3p(packed_float3 a) { return v3(a.x, a.y, a.z); }
 #define F_HELD 8
 #define F_GDIRTY 9
 #define F_BROKE 10
+#define F_OUTER 11
 #define TG_FLAGS 12
 
 #ifndef RIGID
@@ -355,6 +358,10 @@ kernel void floorFrame(
     #define shift ((device int*)(cb + O_SHIFT))
     #define misc (cb + O_MISC)
     #define pairs (cb + O_PAIRS)
+    // The wide list the working one is filtered from (LIST2), and where its nodes (and, last,
+    // the reference node) were when it was built.
+    #define pairsOut (cb + O_PAIRSO)
+    #define pBuildOut ((device float4*)(cb + O_PBUILDO))
     #define pBuild ((device float4*)(cb + O_PBUILD))
     #define clip ((device atomic_uint*)(cb + O_CLIP))
     // A bit a node: something wrote its contact sums, its position step or a side for it
@@ -519,6 +526,7 @@ kernel void floorFrame(
         tgFlags[F_SHIFT] = misc[0]; tgFlags[F_STATUS] = misc[1]; tgFlags[F_REBUILD] = misc[3];
         tgFlags[F_HITS] = misc[4]; tgFlags[F_BUILDS] = misc[5]; tgFlags[F_MOST] = misc[6];
         tgFlags[F_REC] = misc[7]; tgFlags[F_HELD] = misc[8]; tgFlags[F_GDIRTY] = misc[9];
+        tgFlags[F_OUTER] = misc[13];
         tgFlags[F_FIRED] = 0u; tgFlags[F_BROKE] = misc[10];
         float4 pb = pBuild[REFNODE];
         tgPB[0] = pb.x; tgPB[1] = pb.y; tgPB[2] = pb.z;
@@ -732,6 +740,9 @@ kernel void floorFrame(
         }
         BAR;
         const uint ncon = atomic_load_explicit(&tgCount[3], memory_order_relaxed);
+#ifdef EMU_TRACE
+        if (lid == 0u) fprintf(stderr, "T car %u step %u: ground/box/proxy contact nodes %u, flags roll %d hits %d shift %d\n", car, step, ncon, (int)fRoll, (int)fHits, (int)fShift);
+#endif
         if (ncon != 0u)
         {
             for (uint kc = lid; kc < min(ncon, (uint)NN); kc += LANES)
@@ -1255,8 +1266,127 @@ kernel void floorFrame(
             BAR;
         }
         // ---- the pair list built (rare) ----
+#ifdef EMU_TRACE
+        if (lid == 0u && tgFlags[F_REBUILD] != 0u) fprintf(stderr, "T car %u step %u: pair list rebuilt\n", car, step);
+#endif
         if (tgFlags[F_REBUILD] != 0u)
         {
+#if LIST2
+            // Two lists. The wide one (every pair within LIST_REACH_OUT, built by the
+            // clusters) is rebuilt only when it can no longer hold every pair the working
+            // list's box could reach: each node's move against the reference node's since
+            // the wide build, at most D an axis, and the working reach and 2·D inside the
+            // wide reach. The working list is then the wide list's pairs inside the working
+            // box now: the same pairs, in the same order, as building it from the clusters
+            // (which costs a warp every cluster's nodes for its one lane that needs them).
+            if (isNode)
+            {
+                V3 rel = (Pown - v3(pBuildOut[ni])) - (TGP(REFNODE) - v3(pBuildOut[NN]));
+                float D = fmax(fmax(fabs(rel.x), fabs(rel.y)), fabs(rel.z));
+                atomic_fetch_max_explicit(&tgCount[1], as_type<uint>(D), memory_order_relaxed);
+            }
+            BAR;
+            const float dOut = as_type<float>(atomic_load_explicit(&tgCount[1], memory_order_relaxed));
+            const bool wideNow = tgFlags[F_OUTER] == 0u || !((LIST_REACH + 2.0f * dOut) + LIST_EPS <= LIST_REACH_OUT);
+#ifdef EMU_TRACE
+            if (lid == 0u && wideNow) fprintf(stderr, "T car %u step %u: wide list rebuilt\n", car, step);
+#endif
+            if (wideNow)
+            {
+                // Two levels (the same pairs as testing every contacter): each cluster of
+                // contacters' box now, then a triangle tests only the clusters its list box
+                // meets, a word of allowed bits and eight loads of node indices a cluster.
+                if (lid < NCLU)
+                {
+                    V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
+                    device const uint4* cl4 = (device const uint4*)(tab + T_CLU + lid * 32u);
+                    for (uint jj = 0; jj < 8u; jj++)
+                    {
+                        uint4 q = cl4[jj];
+                        for (uint e = 0; e < 4u; e++)
+                        {
+                            uint h = q[e];
+                            if (h == NONE) continue;
+                            V3 p = v3(0, 0, 0) + TGP(h);
+                            lo = v3(rmin(lo.x, p.x), rmin(lo.y, p.y), rmin(lo.z, p.z));
+                            hi = v3(rmax(hi.x, p.x), rmax(hi.y, p.y), rmax(hi.z, p.z));
+                        }
+                    }
+                    cluBox[lid * 2u] = f4(lo, 0);
+                    cluBox[lid * 2u + 1u] = f4(hi, 0);
+                }
+                if (isNode) pBuildOut[ni] = f4(Pown, 0);
+                if (lid == 0) pBuildOut[NN] = f4(TGP(REFNODE), 0);
+                BAR;
+                if (isTri)
+                {
+                    uint4 tn = tris[tri];
+                    V3 p0 = v3(0, 0, 0) + TGP(tn.x), p1 = v3(0, 0, 0) + TGP(tn.y), p2 = v3(0, 0, 0) + TGP(tn.z);
+                    V3 lo = v3(rmin(rmin(p0.x, p1.x), p2.x) - LIST_REACH_OUT, rmin(rmin(p0.y, p1.y), p2.y) - LIST_REACH_OUT, rmin(rmin(p0.z, p1.z), p2.z) - LIST_REACH_OUT);
+                    V3 hi = v3(rmax(rmax(p0.x, p1.x), p2.x) + LIST_REACH_OUT, rmax(rmax(p0.y, p1.y), p2.y) + LIST_REACH_OUT, rmax(rmax(p0.z, p1.z), p2.z) + LIST_REACH_OUT);
+                    uint n = 0u;
+                    if (triDead[tri] == 0u)
+                    {
+                        for (uint k = 0; k < NCLU; k++)
+                        {
+                            float4 clo = cluBox[k * 2u], chi = cluBox[k * 2u + 1u];
+                            if (chi.x < lo.x || chi.y < lo.y || chi.z < lo.z || clo.x > hi.x || clo.y > hi.y || clo.z > hi.z) continue;
+                            uint bitsw = allowed[tri * NCLU + k];
+                            if (bitsw == 0u) continue;
+                            device const uint4* cl4 = (device const uint4*)(tab + T_CLU + k * 32u);
+                            for (uint jj = 0; jj < 8u; jj++)
+                            {
+                                if (((bitsw >> (jj * 4u)) & 15u) == 0u) continue;
+                                uint4 q = cl4[jj];
+                                for (uint e = 0; e < 4u; e++)
+                                {
+                                    if ((bitsw & (1u << (jj * 4u + e))) == 0u) continue;
+                                    uint h = q[e];
+                                    V3 p = v3(0, 0, 0) + TGP(h);
+                                    if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
+                                    if (n < PROW - 2u) pairsOut[tri * PROW + 2u + n] = h;
+                                    n++;
+                                }
+                            }
+                        }
+                    }
+                    if (n > PROW - 2u) { tgFlags[F_STATUS] = tgFlags[F_STATUS] | 1u; n = PROW - 2u; }
+                    pairsOut[tri * PROW] = n;
+                    pairsOut[tri * PROW + 1u] = tn.x | tn.y << 10 | tn.z << 20;
+                }
+                BAR;
+
+            }
+            if (isNode) pBuild[ni] = f4(Pown, 0);
+            if (lid == 0) { V3 pr = TGP(REFNODE); tgPB[0] = pr.x; tgPB[1] = pr.y; tgPB[2] = pr.z; }
+            if (lid == 1) atomic_store_explicit(&tgCount[1], 0u, memory_order_relaxed);
+            if (isTri)
+            {
+                uint4 tn = tris[tri];
+                V3 p0 = v3(0, 0, 0) + TGP(tn.x), p1 = v3(0, 0, 0) + TGP(tn.y), p2 = v3(0, 0, 0) + TGP(tn.z);
+                V3 lo = v3(rmin(rmin(p0.x, p1.x), p2.x) - LIST_REACH, rmin(rmin(p0.y, p1.y), p2.y) - LIST_REACH, rmin(rmin(p0.z, p1.z), p2.z) - LIST_REACH);
+                V3 hi = v3(rmax(rmax(p0.x, p1.x), p2.x) + LIST_REACH, rmax(rmax(p0.y, p1.y), p2.y) + LIST_REACH, rmax(rmax(p0.z, p1.z), p2.z) + LIST_REACH);
+                device const uint4* out4 = (device const uint4*)(pairsOut + tri * PROW);
+                uint4 cur = out4[0];
+                const uint nOut = triDead[tri] == 0u ? min(cur.x, (uint)(PROW - 2u)) : 0u;
+                uint n = 0u;
+                #define LIST_ONE(HV) { const uint h = (HV); V3 p = v3(0, 0, 0) + TGP(h); if (!(p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z)) { pairs[tri * PROW + 2u + n] = h; n++; } }
+                if (nOut > 0u) LIST_ONE(cur.z)
+                if (nOut > 1u) LIST_ONE(cur.w)
+                for (uint k = 2u; k < nOut; k += 4u)
+                {
+                    cur = out4[(k + 2u) >> 2];
+                    LIST_ONE(cur.x)
+                    if (k + 1u < nOut) LIST_ONE(cur.y)
+                    if (k + 2u < nOut) LIST_ONE(cur.z)
+                    if (k + 3u < nOut) LIST_ONE(cur.w)
+                }
+                pairs[tri * PROW] = n;
+                pairs[tri * PROW + 1u] = tn.x | tn.y << 10 | tn.z << 20;
+            }
+            BAR;
+            if (lid == 0) { tgFlags[F_REBUILD] = 0u; tgFlags[F_BUILDS] += 1u; if (wideNow) tgFlags[F_OUTER] = 1u; }
+#else
             // Two levels (the same pairs as testing every contacter): each cluster of
             // contacters' box now, then a triangle tests only the clusters its list box
             // meets, a word of allowed bits and eight loads of node indices a cluster.
@@ -1320,6 +1450,7 @@ kernel void floorFrame(
             }
             BAR;
             if (lid == 0) { tgFlags[F_REBUILD] = 0u; tgFlags[F_BUILDS] += 1u; }
+#endif
         }
 
         // ---- S4: the beam pass gathered per node; the triangles' listed pairs ----
@@ -1568,6 +1699,9 @@ kernel void floorFrame(
 #endif
 #if COLLIDE
         const uint nhits = atomic_load_explicit(&tgCount[2], memory_order_relaxed);
+#ifdef EMU_TRACE
+        if (lid == 0u) fprintf(stderr, "T car %u step %u: self candidates %u hits %u\n", car, step, ncand, nhits);
+#endif
         if (nhits != 0u && !SKIP(8))
         {
             // ---- the step's hits: the forces published, then the two-body rule's passes ----
@@ -1798,6 +1932,7 @@ kernel void floorFrame(
     if (lid == 0)
     {
         misc[0] = tgFlags[F_SHIFT]; misc[1] = tgFlags[F_STATUS]; misc[3] = tgFlags[F_REBUILD];
+        misc[13] = tgFlags[F_OUTER];
         misc[4] = tgFlags[F_HITS]; misc[5] = tgFlags[F_BUILDS]; misc[6] = tgFlags[F_MOST];
         misc[7] = tgFlags[F_REC]; misc[8] = tgFlags[F_HELD]; misc[9] = tgFlags[F_FIRED] != 0u ? 2u : (tgFlags[F_GDIRTY] == 2u ? 2u : 0u); misc[10] = tgFlags[F_BROKE];
         misc[15] = 2u;

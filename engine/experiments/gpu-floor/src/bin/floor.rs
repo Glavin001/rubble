@@ -38,10 +38,7 @@ fn main() -> anyhow::Result<()> {
         cpu.step();
     }
     let (mut l, mut st) = layout_and_statics(&cpu)?;
-    // --skin M: the pair list's skin (m; default 0.05).
-    if let Some(sk) = arg("--skin").map(|x| x.parse::<f32>().unwrap()) {
-        st.list_reach = st.cr + engine_softbody::explicit_contact::CLIP_DEPTH + sk;
-    }
+    list_args(&mut st);
     // --v2: the second layout (kernels/floor2.metal).
     if flag("--v2") {
         // --own: the owning layout (each node's lane owns three of its beams; fast variant).
