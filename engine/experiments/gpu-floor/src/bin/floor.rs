@@ -1,0 +1,81 @@
+//! Runs the floor kernel on the lab's sedan against the CPU reference.
+//!
+//!   floor [--frames F] [--lift M] [--speed V] [--core] [--fast] [--cars N] [--time K] [--every E]
+//! --core: no self-collision (the reference with its candidates cleared).
+//! Checks every frame (bit for bit unless --fast), then times K one-frame dispatches.
+use engine_softbody::explicit_beams::JbeamWheels;
+use gpu_floor::{car, floor::*, gpu::Gpu};
+
+fn arg(k: &str) -> Option<String> {
+    let a: Vec<String> = std::env::args().collect();
+    a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned())
+}
+fn flag(k: &str) -> bool {
+    std::env::args().any(|a| a == k)
+}
+
+fn main() -> anyhow::Result<()> {
+    let frames: usize = arg("--frames").map_or(10, |x| x.parse().unwrap());
+    let lift: f32 = arg("--lift").map_or(0.05, |x| x.parse().unwrap());
+    let speed: f32 = arg("--speed").map_or(0.0, |x| x.parse().unwrap());
+    let cars: usize = arg("--cars").map_or(1, |x| x.parse().unwrap());
+    let time: usize = arg("--time").map_or(0, |x| x.parse().unwrap());
+    let every: usize = arg("--every").map_or(1, |x| x.parse().unwrap());
+    let fast = flag("--fast");
+    let t = car::load_template(&car::default_car_dir(), JbeamWheels::Raycast)?;
+    let mut cpu = car::place(&t, lift, speed);
+    cpu.drive = None;
+    if flag("--core") {
+        cpu.candidates.clear();
+    }
+    let (l, st) = layout_and_statics(&cpu)?;
+    println!("layout: nodes {} records {} lanes {} slots {} add entries {} (max {}) centred entries {} (max {}) groups {}", l.nn, l.nr, LANES, l.rs, l.nadd, l.max_add, l.ncen, l.max_cen, l.ng);
+    let gpu = Gpu::new()?;
+    let extra = if fast { "#define FAST 1" } else { "" };
+    let f = Floor::new(gpu, l, &st, cars, fast, extra)?;
+    let (mt, w, tg) = f.threads_ok();
+    println!("pipeline: max threads {mt}, simd {w}, threadgroup memory {tg} B");
+    if flag("--compile-only") {
+        return Ok(());
+    }
+    anyhow::ensure!(mt as usize >= LANES, "the kernel cannot run {LANES} lanes a threadgroup ({mt})");
+    let s0 = state_of(&cpu, &f.l, &st);
+    for c in 0..cars {
+        f.upload(c, &s0);
+    }
+    let mut first_bad = None;
+    let t0 = std::time::Instant::now();
+    let mut cpu_s = 0.0;
+    for fr in 1..=frames {
+        let ms = f.run(1);
+        let c0 = std::time::Instant::now();
+        for _ in 0..STEPS {
+            cpu.step();
+        }
+        cpu_s += c0.elapsed().as_secs_f64();
+        let g = f.download(0);
+        let (bad, notes) = compare(&cpu, &g);
+        if bad != 0 || fr % every == 0 || fr == frames {
+            let (lo, hi) = cpu.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.y), b.max(n.pos.y)));
+            let broken = cpu.beams.iter().filter(|b| b.broken).count();
+            println!("frame {fr}: gpu {ms:.3} ms, differing words {bad}; y {lo:.3}..{hi:.3}, broken {broken}");
+        }
+        if bad != 0 && first_bad.is_none() {
+            first_bad = Some(fr);
+            for n in notes {
+                println!("  {n}");
+            }
+            if !fast {
+                break;
+            }
+        }
+    }
+    println!("check: {} ({:.1} s; CPU reference {:.2} ms a frame)", match first_bad { None => "bit for bit".to_string(), Some(f) => format!("first difference at frame {f}") }, t0.elapsed().as_secs_f64(), cpu_s * 1000.0 / frames as f64);
+    if time > 0 {
+        let mut ms: Vec<f64> = (0..time).map(|_| f.run(1)).collect();
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p = |q: f64| ms[((ms.len() - 1) as f64 * q) as usize];
+        println!("timing ({} cars, one frame a dispatch, {time} dispatches): median {:.4} p95 {:.4} worst {:.4} best {:.4} ms", cars, p(0.5), p(0.95), ms[ms.len() - 1], ms[0]);
+    }
+    Ok(())
+}
