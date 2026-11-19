@@ -10,6 +10,7 @@ cd engine
 tools/scenario-matrix/run.sh perf=8388608      # any vehicle_lab --ab-switch value
 tools/scenario-matrix/run.sh --baseline        # each row's ms a frame against its target
 tools/scenario-matrix/run.sh --make            # (re)save the states (once; after a layout change)
+tools/scenario-matrix/run.sh --world           # the World's own cost a step on the scenario rows
 PROFILE_SPLIT=1 tools/scenario-matrix/run.sh perf=MASK pile8   # with the frame by dispatch kind
 ```
 
@@ -192,8 +193,47 @@ Not done here: each is a change to the harness's process model, measured first.
 
 ## Findings on the way
 
-- **A node-beam structure in the World makes the coupling's step slow.** With the barrier
-  (104 nodes, 52 anchored) beside one car, the World step's `cpl_share` pass took 50 ms
-  on the first step and the whole step 22 ms median (t ≥ 0.5 s) against 5 ms for the car
-  alone; the explicit frame itself is 5.5–6.6 ms. The matrix does not see it (it replays
-  the explicit frame). A follow-up, not part of this change.
+- **A node-beam structure in the World does not make the World's step slow** (checked
+  after this change; it was first reported here as a 50 ms `cpl_share` pass and a 22 ms
+  median step against 5 ms for the car alone). By wall clock the barrier's World step is
+  the explicit frame plus what every row pays: see "The World's own cost" below. The
+  numbers that looked slow are GPU timestamps, which do not hold on Metal here (known bug
+  C4): `cpl_share` (a loop of a few records) reads 0.06 to 7.4 ms from one second to the
+  next on the car alone as well; one barrier step's span read 70 ms while its wall time was
+  8 ms; one car-alone step's span read 2,536 ms against an 11 ms wall. The first two steps
+  of every run are the pipelines' compiles (2.2 s and 0.43 s, car alone or not), and a cold
+  shader cache compiles vehicle contact's pipelines when the car first meets the barrier.
+  What the barrier does cost is in the explicit frame, which the matrix already times:
+  with two bodies in vehicle contact the frame runs a workgroup per body instead of the
+  wide passes (`is_wide` false; the wide passes do not run vehicle contact), 7.1 ms
+  against the car alone's 3.2 ms.
+
+## The World's own cost (`run.sh --world`)
+
+The A/B rows replay the explicit frame alone, so a cost the World adds around it (the
+rigid step, the coupling's passes, the host's encoding and poll) is invisible to them.
+`run.sh --world` runs each scenario row's scene in the World up to the row's moment, then
+`vehicle_lab --end-world 20`: 20 World steps timed one by one (the step and its poll, wall
+clock), the vehicles put back to the state before them, and the same explicit steps (33,
+33, 34, ...) as 20 frames of the vehicles' solver alone; 3 rounds from that same vehicle
+state, every step pooled. The difference of the medians is what the World adds a step.
+A row fails past `WORLD_MS` (default 2.5 ms). No saved states are needed; about 30 s.
+(The restore puts back the vehicles, not the rigid bodies: a time measurement only.)
+
+Two runs (`--profile fast`, Apple M-series Metal, 2026-11-18; step and frame ms of the first):
+
+```text
+row       step ms  frame ms  World ms        what
+drive       3.859     3.249    +0.610 / +0.526  one car driving on flat ground
+wall        4.775     4.155    +0.620 / +0.518  one car into a rigid wall
+headon     16.081    15.171    +0.910 / +0.636  2 cars head-on
+side        7.922     7.232    +0.690 / +0.726  a car into a parked car's side
+bricks      5.038     3.389    +1.649 / +1.606  a car into 60 rigid bricks
+rocks       4.827     3.832    +0.994 / +1.206  4 rigid rocks on a parked car
+barrier     7.716     7.124    +0.592 / +0.594  a car into a node-beam barrier
+truss       2.065     1.585    +0.480 / +0.448  a node-beam truss, no vehicle
+```
+
+The World adds 0.5 to 0.9 ms a step on every row, and more where the rigid step has real
+bodies (bricks 1.6 ms, rocks 1.0 to 1.2 ms). Runs agree within about 0.2 ms. The barrier
+adds no more than the car alone.

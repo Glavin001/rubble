@@ -10,12 +10,18 @@ one state, the same build), compares every state word and times each frame apart
     matrix.py --make [ROW ...]          save the states into out/scenario-matrix/
     matrix.py SWITCH [ROW ...]          the A/B table and the verdict
     matrix.py --baseline [ROW ...]      each row's ms a frame against its target
+    matrix.py --world [ROW ...]         the World's own cost a step (the rigid step, the
+        coupling's passes, the host): each row's scene run in the World up to its moment,
+        then `--end-world` (N World steps, then the same explicit steps as frames alone from
+        the same state); fails a row where the World adds more than WORLD_MS. The rows with
+        a scenario file by default (the mountain rows drive for seconds first: name them).
     matrix.py --rows ARGS...            the row names ARGS pick (for the Modal runner)
 Options (environment): FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
 CAR, STATES (the states' directory), RETRIES (default 2: a row past the threshold runs again,
-the median run decides).
+the median run decides). --world: WORLD_STEPS (default 20) steps each way, WORLD_MS (default
+2.5) the most the World may add a step, WORLD_ARGS extra lab arguments.
 """
 import os
 import re
@@ -141,6 +147,45 @@ def replay(row, switch):
             "secs": time.time() - t0, "out": out, "ok": verdict is not None}
 
 
+WORLD = re.compile(r"end world: \d+ steps, World step ([\d.]+) ms, frame alone ([\d.]+) ms, the World adds (-?[\d.]+) ms")
+
+
+def world(rows):
+    """The World's own cost a step on each row (`vehicle_lab --end-world`)."""
+    n = os.environ.get("WORLD_STEPS", "20")
+    limit = float(os.environ.get("WORLD_MS", "2.5"))
+    extra = os.environ.get("WORLD_ARGS", "").split()
+    print(f"scenario matrix, the World's own cost: each row's scene to its moment, then 3 rounds of {n} World steps "
+          f"and the same explicit steps as frames alone (medians, wall ms); fails past {limit:g} ms")
+    print(f"{'row':<8} {'step ms':>8} {'frame ms':>9} {'World ms':>9} {'':<6} {'run s':>5}  what")
+    t_all = time.time()
+    bad = []
+    for row in rows:
+        t0 = time.time()
+        cmd = lab_args(row)
+        # (No GPU timestamps: wall time only, as a page waits for it.)
+        i = cmd.index("--timing")
+        del cmd[i:i + 2]
+        cmd += ["--secs", f"{row[4]:.2f}", "--end-world", n] + extra
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE)
+        out = p.stdout + p.stderr
+        m = WORLD.search(out)
+        secs = time.time() - t0
+        if p.returncode != 0 or not m:
+            bad.append(row[0])
+            print(f"{row[0]:<8} FAILED to run ({secs:.1f} s)")
+            print("\n".join("    " + l for l in out.splitlines()[-10:]))
+            continue
+        step, frame, adds = (float(m.group(k)) for k in (1, 2, 3))
+        over = adds > limit
+        if over:
+            bad.append(row[0])
+        print(f"{row[0]:<8} {step:>8.3f} {frame:>9.3f} {adds:>+9.3f} {'OVER' if over else '':<6} {secs:>5.1f}  {row[5]}")
+    verdict = "PASS" if not bad else "FAIL (" + ", ".join(bad) + ")"
+    print(f"verdict: {verdict}; {len(rows)} rows in {time.time() - t_all:.1f} s")
+    return 0 if not bad else 1
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -155,6 +200,8 @@ def main():
     if args[0] == "--make":
         make(pick(args[1:]))
         return 0
+    if args[0] == "--world":
+        return world(pick(args[1:]) if args[1:] else [r for r in ROWS if r[2]])
     baseline = args[0] == "--baseline"
     switch = "perf=0" if baseline else args[0]
     rows = pick(args[1:])
