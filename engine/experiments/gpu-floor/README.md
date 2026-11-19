@@ -55,7 +55,10 @@ profiler's sums have favoured changes that made the frame slower.
 A dispatch outside the lock is refused (`Gpu::run_n`). Strict (the default) is fast math
 off plus `#pragma clang fp contract(off)` and is bit for bit with the reference; `--fast
 --native` is the fast variant, judged by the closeness report the drivers print.
-`--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `rigid --direct`
+`--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `pair --gpu` also
+prints the contact pass by stage on whole frames, and `pair --def NAME=V` switches one of
+`pair.metal`'s options (`XT_OVERLAP`, `XB_ATOM`, `XF_MASK`, `XD_MASK`, `XG_SPLIT`,
+`XP_LANE`) for an A/B from one binary. `rigid --direct`
 tests a box a lane a pair (the whole query) instead of staged; `fqcheck --gpu --latency`
 is one query's latency by element, shape and outcome. `microbench`,
 `mathprobe` and `xsync [--data]` measure the GPU's primitives, its arithmetic and its

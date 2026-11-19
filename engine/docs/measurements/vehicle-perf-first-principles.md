@@ -3789,7 +3789,7 @@ for bit strict in every scene (`batch-twelve`, `batch-thirteen`, `batch-final-b`
 | scene | strict | fast + native | production (matrix) |
 |---|---|---|---|
 | two bodies apart (boxes apart) | 1.43 | 1.33 | |
-| head-on, 14 m/s each: mid-crush / the 30 frames' median | 4.2 | 3.5 / 3.4 | 15.4 |
+| head-on, 14 m/s each: mid-crush / the 30 frames' median | 4.2 (4.0 after the second round below) | 3.5 / 3.4 (3.2 / 3.1) | 15.4 |
 | side impact: at the impact / after it | / 2.1 | 3.6 / 1.9 | 9.3 |
 | rear impact, after it | 2.15 | | |
 
@@ -3885,6 +3885,8 @@ Slang through wgpu, one dispatch a substep, and some of this it already has in a
 | 10 | A row loop with no vector indexed by a variable (four points a load, by name) | rest 1.32 → 1.29 (−2 %) | yes | trivial |
 | 11 | Fast math with native functions | 10 to 20 % (rest 1.25 → 1.09, head-on 4.2 → 3.5) | **no**: within the closeness report above | an option, as now |
 | 12 | A lane's item given to it (a list, or `ctz` over a mask of hits) instead of a scan with a skip; appends after the loop, not inside it | 24 proxy bodies' integration 1.0 → 0.09 ms a frame (node contact on the bricks 2.69 → 1.83); surface search 0.57 → 0.17 | yes | per loop: the production kernels' own scans (a body's shapes, candidates appended inside a row or cluster loop) are to be read for it |
+| 13 | In a pass whose owners take turns, the part of every turn that reads only the pass's start (two-body: slots, hit counts, first pass) done by all owners at once, before they meet | head-on 3.40 → 3.32; those stages 0.46 → 0.32 ms | yes | with 3 only; a turn's values cross the meeting in the hit's record, not in registers |
+| 14 | A reduction done by the lanes that hold the values (atomic min and max into workgroup memory) instead of one warp walking them | head-on 3.31 → 3.23; two bodies apart 1.47 → 1.43 | yes | the body's box and its clusters' boxes; surface contact's box is the same shape (not done) |
 
 Two that are not kernel changes and paid for all of the above: the strict Metal build is
 fast math off plus `#pragma clang fp contract(off)` (no XOR barriers; that is what made
@@ -3910,6 +3912,98 @@ how far nodes have moved taken against a reference near the pair, not one node o
 car (the crush zone moves 7 mm a step against the far end and is rebuilt every two or
 three steps for it). Each is tens of percent of its group, not of the frame: the frame
 is now spread over a dozen groups, none above a quarter.
+
+**The two-body pass, second round (2026-11-19, after surface contact's).** The expectation
+was that the search's two loops with an append inside (triangle against the partner's 20
+clusters, a cluster's 32 points) held the head-on's 0.8 ms of search, as the same shape had
+held 1 ms in mechanism 3. They did not: they held 0.29 ms, and listing from a mask took
+0.13 of it. The profiler's per-substep dispatches had overstated the pass (two workgroups
+started apart wait at every meeting: 2.1 ms by its sums against 1.28 on whole frames), so
+the pass is now taken apart on whole frames: the frame from one saved state with the pass
+cut short after one more stage (`pair --gpu` prints it; `--def NAME=V` switches a kernel
+option from one binary). The head-on frame's pass, ms a frame (fast, frame 10; a substep
+is this over 34), before this round and now:
+
+| stage | before | now |
+|---|---|---|
+| the second meeting (the first is in every frame) | 0.06 | 0.07–0.14 |
+| nodes published (548 lanes, 3 to 9 atomic stores each) | 0.14 | 0.12 |
+| cluster boxes published | 0.09 | 0.035 |
+| the partner's nodes copied; triangles' cull | 0.045; 0.02 | 0.04; 0.03 |
+| triangles × clusters (285 items a body a substep) | 0.09 | 0.04 |
+| cluster points' box test (600 candidates) | 0.20 | 0.13 |
+| candidates' rule, hits recorded (10 to 20 hits) | 0.19 | 0.16–0.18 |
+| hit counts, three meetings | 0.09 | 0.10 |
+| turns: slots filled, hits counted | 0.23 | 0.18 |
+| turns: first pass, its shifts | 0.23 | 0.135 |
+| turns: residual pass | 0.08 | 0.09 |
+| **the pass** (the stages; the guard's own cost does not show, the frame is slower without it) | **1.28** | **1.09** |
+
+Kept, each bit for bit with the reference (the emulator: head-on and side in both lane
+orders, rear, a substep at a time; the GPU strict: head-on 30 frames, side 20, rear 20,
+apart 10, head-on a substep a dispatch, four pairs), with the head-on frame:
+- *The clusters met and the points passed as bits, then listed* (3.50 → 3.40). Small,
+  because every lane's turn in those loops already is the same iteration; only the store
+  ran once an iteration.
+- *Every owner's slots, hit counts and first pass at once, before the bodies meet*
+  (3.40 → 3.32; those stages 0.46 → 0.32). The owners' turns are one after the other, as
+  the reference's, but only the residual pass and the work guard read what the other
+  owner's turn left (the contact sums). The first pass is from the forces at the pass's
+  start, which the candidates' stage records, and its shifts are atomic adds that
+  commute. So each body does that part on its own core while the other does the same;
+  then owner 0's residual and guard, a meeting, owner 1's contact sums read again (each
+  node's by its own lane), its residual and guard. What a hit's lane needs after the
+  meeting (slots, first-pass force, the point's velocity) goes through the hit's record:
+  kept in registers across the meetings, those stages were 0.23 but the frame *without
+  the pass* was 0.08 ms slower and the meetings 0.07 dearer (3.36 in all).
+- *The body's box and its clusters' boxes reduced by the nodes' own lanes* (atomic min
+  and max into workgroup memory, a lane a cluster then publishing): 3.31 → 3.23, and two
+  bodies apart 1.47 → 1.43. One warp walking 17 nodes a lane, or a cluster's lane its 28
+  points, was that phase's chain at 1.3 ns a step while the core's other warps idled.
+
+Measured and not kept: the candidates' rule in two stages, a hit-to-be then its own lane
+(3.49 → 3.57: the hits' forty device words are not what a warp of candidates pays for);
+what a body publishes laid out by lane, so its stores are adjacent (3.31 → 3.37: the
+stage did not move, 0.134 both ways, and the readers' table loads cost; an atomic store to
+device memory is about 20 ns a warp wherever the words are); the reach test's shared
+words read once a lane instead of eighteen times (its stage 0.134 → 0.118, the frame
+3.227 → 3.243); every slot's sums re-read by its hit's lane (+0.05 ms on its stage: one
+warp's chain of scattered loads against 17 warps' three).
+
+The pair, ms a frame, the round's start against its end in one batch (`batch-pairx12`,
+`-x14`; today's figures at 20 pairs and more are above the table's further up, for both
+kernels and for the older pinned one alike):
+
+| | fast + native | strict |
+|---|---|---|
+| head-on, mid-crush (frame 10) | 3.50 → **3.22** | 4.37 → **3.99** |
+| head-on, the 30 frames' median | 3.36 → 3.09 | 3.88 now |
+| side impact, at the impact | 3.58 → 3.28 | 4.33 → 4.00 |
+| two bodies apart | 1.47 → 1.43 | 1.70 → 1.67 |
+| head-on, 8 / 20 / 21 / 40 / 60 pairs | 3.66 → 3.39 / 4.64 → 4.55 / 8.12 → 7.82 / 9.38 → 9.37 / 14.3 → 14.0 | |
+
+Eight percent for a pair, up to eight pairs; two to four percent at 20 pairs and none at
+40, where every core is busy. What this round cut was waiting, not work: a body idle
+through the other's turn, a core idle while one warp walked a chain. When all 40 cores
+are busy the frame is bound by what they share, and only less work would show.
+
+Two things about the model. *Values alive across a barrier and not touched cost nothing*
+(`microbench only=live`: 1 to 128 of them a lane, 0.088 µs a phase throughout), so the
+0.2 ms the registers cost above is not the barriers'. *The code's shape moves the frame
+with no change in the work done*: across this round's variants the frame without the pass
+(none of the pass's stages run) was 2.17 to 2.25 ms, and the same turns compiled in a
+restructured loop 3.40 or 3.60. It is the same thing as surface contact's 0.14 ms for its
+code's presence, it is as large as most of the changes tried here, and it is not
+explained: what is known is that it is not the kernel's size and not values across
+barriers. A change of a few hundredths of a millisecond cannot be judged on this kernel
+at all until it is.
+
+What is left in the pass, by the table: five meetings a substep in contact (about 0.3 ms;
+the reference's order fixes three of them: owner 0's guard after owner 1's candidates
+have read the start's sums, owner 1's residual after owner 0's guard); the nodes'
+publication (0.12: every node's position goes to the partner, for the side vote's
+neighbours; publishing only what the partner's box can reach, with those neighbours,
+would cut the stores, not done); the turns' 0.4, short chains on one warp of hits.
 
 **Surface contact (the car's skin against the world's shapes), added 2026-11-19.**
 Mechanism 3 above is the engine's default rule against a rigid shape, *node contact*: a
@@ -4041,9 +4135,10 @@ work 24 times, in series, each for one lane:
 
 The rule for a kernel: **give a lane its item directly (a list, or `ctz` over a mask),
 never a scan with a skip.** A scan is right only when most lanes take most iterations.
-The two-body pass has the same shape in its triangle-against-cluster and cluster-point
-loops (`pair.metal`, an append inside a loop of 20 clusters and of 32 points), which is
-where the head-on's 0.8 ms of search is; that is the next thing to do with it.
+The two-body pass has an append inside its loops over 20 clusters and over 32 points
+(`pair.metal`); that was done next and was worth far less than this paragraph expected
+(the second round above: those loops held 0.29 ms, not 0.8, and every lane's turn in them
+is already the same iteration).
 
 Measured and not kept, each because the whole frame said so: the node pass's shape tests
 behind the active shapes' union box, with the shapes' boxes in workgroup memory (the
