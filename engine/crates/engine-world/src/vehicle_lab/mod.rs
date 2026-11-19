@@ -166,6 +166,10 @@ pub struct LabOptions {
     /// anchored nodes) placed at its start. JSON `structures: [{ truck, x, z, angle,
     /// lift }]`.
     pub structures: Vec<(String, Start)>,
+    /// Raycast wheels hit bodies (`ExplicitVehiclesDef::wheels_hit_bodies`, the World's
+    /// default): the cars' wheels drive on crates, bricks, blocks and ramps that are World
+    /// bodies and push them. Live (`{ wheelsHitBodies: bool }`).
+    pub wheels_hit_bodies: bool,
 }
 
 impl Default for LabOptions {
@@ -197,6 +201,7 @@ impl Default for LabOptions {
             derby: derby::DerbySpec::default(),
             others: Vec::new(),
             structures: Vec::new(),
+            wheels_hit_bodies: true,
         }
     }
 }
@@ -343,6 +348,7 @@ impl LabOptions {
             wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
             wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
             group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
+            wheels_hit_bodies: v.get("wheelsHitBodies").and_then(Value::as_bool).unwrap_or(d.wheels_hit_bodies),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -1963,6 +1969,7 @@ impl Bench {
             "scene": self.opts.scene.name(),
             "surfaceContact": self.opts.surface_contact,
             "ownTravel": self.opts.own_travel_reach,
+            "wheelsHitBodies": self.opts.wheels_hit_bodies,
             "pieceLabels": self.opts.piece_labels,
             "debris": debris_json(self.debris.ttl),
             "vehicleSleep": vehicle_sleep_json(self.opts.vehicle_sleep, self.opts.vehicle_sleep_cfg),
@@ -2701,6 +2708,7 @@ impl Lab {
                 // (Room for vehicle sleep always: the setting is live. Off, every vehicle
                 // steps every step, bit for bit as without the room.)
                 sleep: Some(opts.vehicle_sleep_cfg),
+                wheels_hit_bodies: opts.wheels_hit_bodies,
                 ..ExplicitVehiclesDef::default()
             },
         )?;
@@ -3176,6 +3184,13 @@ impl Lab {
             self.bench.opts.vehicle_sleep = on;
             self.bench.opts.vehicle_sleep_cfg = cfg;
             return Ok(json!({ "vehicleSleep": vehicle_sleep_json(on, cfg) }));
+        }
+        // { wheelsHitBodies: bool }: raycast wheels on World bodies
+        // (LabOptions::wheels_hit_bodies), from the next step and after a restart.
+        if let Some(on) = cmd.get("wheelsHitBodies").and_then(Value::as_bool) {
+            world.set_explicit_wheels_hit_bodies(on)?;
+            self.bench.opts.wheels_hit_bodies = on;
+            return Ok(json!({ "wheelsHitBodies": on }));
         }
         // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
         if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {

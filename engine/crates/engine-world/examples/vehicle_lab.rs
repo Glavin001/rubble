@@ -134,6 +134,10 @@ fn options(script: &Value) -> LabOptions {
         }
         o.insert("vehicleSleep".into(), d);
     }
+    // `--wheels-bodies 0|1`: raycast wheels hit World bodies (on by default).
+    if let Some(s) = arg("--wheels-bodies") {
+        o.insert("wheelsHitBodies".into(), json!(s == "1"));
+    }
     // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
     if let Some(s) = arg("--pieces") {
         o.insert("pieceLabels".into(), json!(s == "1"));
@@ -1192,7 +1196,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         "selfSplit": arg("--self-split").as_deref() == Some("1"),
         // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
         "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"), "groupSplit": arg("--group-split").as_deref() != Some("0"),
-        "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
+        "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [],
+        "wheelsHitBodies": arg("--wheels-bodies").as_deref() != Some("0") });
     // `--scenario FILE`: a JSON object whose keys replace the script's (the scenario
     // matrix's rows, engine/tools/scenario-matrix/scenes/: `scene`, `cars`, `parked`,
     // `others`, `events`, `restart` (a start or crash preset, applied after the build as
@@ -1320,6 +1325,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let selfsplit_ab = arg("--ab-switch").as_deref() == Some("selfsplit");
     // `--ab-switch beams`: the beam phase on its records sorted by kind against file order.
     let beams_ab = arg("--ab-switch").as_deref() == Some("beams");
+    // `--ab-switch wheels`: raycast wheels hitting bodies (`set_wheels_see_bodies`) on
+    // against off (not bit for bit where a wheel stands on a body: its cost and effect).
+    let wheels_ab = arg("--ab-switch").as_deref() == Some("wheels");
     // `--ab-switch kernel --ab-kernel-dir DIR`: this build's explicit kernel (A) against
     // the modules' WGSL in DIR (B: e.g. a copy of an older build's OUT_DIR/wgsl;
     // `engine_webgpu::set_explicit_module_override`). B is a second lab of the same
@@ -1383,6 +1391,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.set_perf_flags(if on { f | mask } else { f & !mask });
         } else if beams_ab {
             x.set_beam_order(on);
+        } else if wheels_ab {
+            x.set_wheels_see_bodies(on);
         } else if selfsplit_ab {
             x.set_self_split(on);
         } else if coupling_ab {

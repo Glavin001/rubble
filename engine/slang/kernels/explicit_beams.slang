@@ -12767,6 +12767,9 @@ void contactGroup(uint g, uint lane)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
     {
+        // Wheels on each other (drive header bit 2): the last step's reactions, this
+        // step's rays (explicit_beams_drive.slang wheelsPartners).
+        if ((driveOn & 2u) != 0u) wheelsPartners(off, k, lane, s, true);
         coupleStepMembers(off, k, lane, s, coupleOn);
         driveStepMembers(off, k, lane, s, driveOn);
 #ifndef EB_VV_BIG_ONLY
@@ -12809,6 +12812,7 @@ void contactGroup(uint g, uint lane)
 #endif
     }
     coupleEndMembers(off, k, lane, coupleOn);
+    if ((driveOn & 2u) != 0u) wheelsPartners(off, k, lane, gP.steps, false);
     if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);
     for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }
