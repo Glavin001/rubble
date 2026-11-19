@@ -36,6 +36,13 @@
 #                        ~/Development/rubble-artifacts/sedan-live/mods/sedan_new);
 #                        shipped when an argument says @sedan, which becomes its
 #                        path in the container (/scenarios/sedan_new)
+#   --fanout             one container per executable of the selection (each test
+#                        binary), all at once; one summary and exit code
+#   --fanout-tests       one container per test (names listed at build time), all
+#                        at once: the shortest wall time for a suite
+#   --matrix             the scenario matrix, one container per row (what
+#                        tools/scenario-matrix/run.sh calls): the arguments after
+#                        `--` are matrix.py's (SWITCH | --baseline | --make, rows)
 #   --build-only         build and pack, do not call Modal
 #   --keep               keep the run directory (engine/target/gpu-run/<id>)
 set -euo pipefail
@@ -43,8 +50,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 
 gpu=T4 cpus=8 allow_cold=0 warm=1 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
+fanout=""
 sedan="$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new"
-envs=() variants=() data=()
+envs=() variants=() data=() pack_opts=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) gpu="$2"; shift 2 ;;
@@ -63,12 +71,36 @@ while [ $# -gt 0 ]; do
     --sedan) sedan="$2"; shift 2 ;;
     --build-only) build_only=1; shift ;;
     --keep) keep=1; shift ;;
+    --fanout) fanout=exe; shift ;;
+    --fanout-tests) fanout=tests; pack_opts=(--list-tests); shift ;;
+    --matrix) fanout=matrix; shift ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
     *) echo "gpu_run: unknown option $1 (the cargo selection goes after --)" >&2; exit 2 ;;
   esac
 done
 [ $# -gt 0 ] || { echo "gpu_run: nothing to run; see --help" >&2; exit 2; }
+
+# The scenario matrix: its own selection (the lab), data (matrix.py and the scenes),
+# car and knobs; the arguments are matrix.py's. Its rows are picked here (matrix.py
+# --rows) and each runs in a container of its own.
+matrix_args=() matrix_rows=()
+if [ "$fanout" = matrix ]; then
+  matrix_args=("$@")
+  matrix_py="$repo/engine/tools/scenario-matrix/matrix.py"
+  rows_out="$(python3 "$matrix_py" --rows "$@")" || exit 2
+  # shellcheck disable=SC2206
+  matrix_rows=($rows_out)
+  data+=(--data engine/tools/scenario-matrix)
+  if [ -n "${CAR:-}" ]; then sedan="$CAR"; fi
+  envs+=("CAR=@sedan")
+  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT; do
+    v="$(printenv "$k" || true)"
+    if [ -n "$v" ]; then envs+=("$k=$v"); fi
+  done
+  mkdir -p "$repo/engine/out/scenario-matrix"
+  set -- -p engine-world --example vehicle_lab
+fi
 case "$gpu" in T4|L4|L40S) ;; *) echo "gpu_run: --gpu must be T4, L4 or L40S" >&2; exit 2 ;; esac
 case "$cap" in ''|*[!0-9]*) echo "gpu_run: --timeout takes seconds" >&2; exit 2 ;; esac
 if [ "$cap" -lt 30 ] || [ "$cap" -gt 1800 ]; then echo "gpu_run: --timeout must be 30..1800 s" >&2; exit 2; fi
@@ -137,7 +169,7 @@ docker run --rm --platform linux/amd64 ${build_env[@]+"${build_env[@]}"} \
   -v "rubble-gpurun-target-$wt_key:/cache/target" \
   -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-4}" \
-  "$image" python3 /repo/engine/tools/modal/gpu_run_pack.py /out ${data[@]+"${data[@]}"} -- "${args[@]}"
+  "$image" python3 /repo/engine/tools/modal/gpu_run_pack.py /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
 t1=$(date +%s)
 echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
 rm -rf "$run/stage"
@@ -149,10 +181,13 @@ fi
 
 # The run's spec (JSON) for gpu_run.py.
 python3 - "$run/spec.json" "$gpu" "$cap" "$repeat" "$timing" "$monitor" "$queue" "$shader_cache" "$id" "$cpus" "$allow_cold" "$warm" \
+  "$fanout" "${#matrix_args[@]}" ${matrix_args[@]+"${matrix_args[@]}"} "${#matrix_rows[@]}" ${matrix_rows[@]+"${matrix_rows[@]}"} \
   "${#envs[@]}" ${envs[@]+"${envs[@]}"} ${variants[@]+"${variants[@]}"} <<'PY'
 import json, sys
-out, gpu, cap, repeat, timing, monitor, queue, shader_cache, run_id, cpus, allow_cold, warm, n, *rest = sys.argv[1:]
-n = int(n)
+out, gpu, cap, repeat, timing, monitor, queue, shader_cache, run_id, cpus, allow_cold, warm, fanout, *rest = sys.argv[1:]
+na = int(rest.pop(0)); matrix_args, rest = rest[:na], rest[na:]
+nr = int(rest.pop(0)); matrix_rows, rest = rest[:nr], rest[nr:]
+n = int(rest.pop(0))
 def kv(spec):
     # K=V,K2=V2; a comma part without `=` belongs to the value before it (EV_AB_MASKS=1,2).
     parts = []
@@ -180,7 +215,8 @@ for v in rest[n:]:
 json.dump({"gpu": gpu, "cap": int(cap), "repeat": int(repeat), "timing": timing == "1", "monitor": int(monitor), "queue": int(queue),
            "shader_cache": shader_cache == "1", "id": run_id, "cpus": int(cpus),
            "allow_cold": allow_cold == "1", "warm": warm == "1",
-           "env": env, "variants": variants}, open(out, "w"))
+           "env": env, "variants": variants,
+           "fanout": fanout, "matrix_args": matrix_args, "matrix_rows": matrix_rows}, open(out, "w"))
 PY
 
 # The Modal CLI in Docker with only this run's directory and the runner script
@@ -205,9 +241,14 @@ stop_cli() {
 }
 trap 'stop_cli; cleanup' EXIT
 trap 'exit 130' INT TERM
+# The matrix's saved states (read to upload by hash; --make writes the new ones back).
+states_mount=()
+if [ "$fanout" = matrix ]; then
+  states_mount=(-v "$repo/engine/out/scenario-matrix:/run-dir/states")
+fi
 set +e
 docker run --rm --name "$cli_name" \
-  -v "$run:/run-dir" \
+  -v "$run:/run-dir" ${states_mount[@]+"${states_mount[@]}"} \
   -v "$here/gpu_run.py:/app/gpu_run.py:ro" \
   -v rubble-modal-config:/config:ro \
   -e MODAL_CONFIG_PATH=/config/modal.toml \

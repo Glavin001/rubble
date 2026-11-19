@@ -14,11 +14,27 @@
 #   FRAMES=n (default 10) frames a half, ROUNDS=r (default 3) the halves in turn; PROFILE_SPLIT=1 each row's frame by dispatch
 #   kind (slower); PROFILE=fast|release (default fast); THRESHOLD=% and NOISE_MS=ms.
 #
+# Where it runs: on Modal by default, every row in a GPU container of its own at once
+# (tools/modal/gpu_run.sh --matrix; the build is local Docker, free). No local GPU and
+# no lock: any number of agents at once. Each row's on and off halves share one
+# container, so the verdict's speed comparison holds (directionally: a T4 through
+# Vulkan, not the Mac); bit for bit is exact. The saved states upload once (by hash).
+#   MODAL_OPTS="--gpu L4 --allow-cold-compile --timeout 1500" passes gpu_run options
+#   (a kernel version new on Modal's driver needs --allow-cold-compile once).
+#   tools/scenario-matrix/run.sh --local ...   the Mac's GPU instead (under the GPU lock):
+#       for final Metal timings.
+#
 # Rows and how the states are made: docs/measurements/scenario-matrix.md.
 here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 profile="${PROFILE:-fast}"
 cd "$engine" || exit 1
+if [ "$1" = "--local" ]; then
+  shift
+elif [ -z "$SCENARIO_MATRIX_LOCKED" ]; then
+  # shellcheck disable=SC2086
+  exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} --matrix -- "$@"
+fi
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
 export LAB_BIN="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 if [ -z "$SCENARIO_MATRIX_LOCKED" ]; then

@@ -10,6 +10,7 @@ one state, the same build), compares every state word and times each frame apart
     matrix.py --make [ROW ...]          save the states into out/scenario-matrix/
     matrix.py SWITCH [ROW ...]          the A/B table and the verdict
     matrix.py --baseline [ROW ...]      each row's ms a frame against its target
+    matrix.py --rows ARGS...            the row names ARGS pick (for the Modal runner)
 Options (environment): FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
@@ -144,6 +145,13 @@ def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    if args[0] == "--rows":
+        # The rows the rest of the arguments pick (SWITCH | --baseline | --make, then
+        # names): the Modal runner gives each its own container.
+        if len(args) < 2:
+            sys.exit("matrix.py --rows SWITCH|--baseline|--make [ROW ...]")
+        print(" ".join(r[0] for r in pick(args[2:])))
+        return 0
     if args[0] == "--make":
         make(pick(args[1:]))
         return 0

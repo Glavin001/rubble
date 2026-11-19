@@ -32,6 +32,14 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
+- GPU runs go to Modal, not this Mac's one GPU (no lock, no queue; any number of agents
+  at once): `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo
+  selection>` for tests, examples and benches (each test binary or each test in a
+  container of its own, all at once; built in local Docker, free), and the scenario
+  matrix runs there by default. The Mac's GPU (under `with-gpu-lock.py`) is only for
+  what Modal cannot run: Metal-only crates, headless Chrome/WebGPU pages, and final
+  Metal timings for a doc. Modal timing is directional (rank variants run in one
+  container); bit-for-bit verdicts are exact. `engine/tools/modal/README.md`.
 - Checking a kernel change: climb a ladder, cheapest rung first, and do not go up a
   rung until the one below passes. Never wait minutes for an answer a rung of seconds
   gives. The bar does not move: what must be bit for bit is checked bit for bit.
@@ -60,8 +68,10 @@
      before rung 2. `run.sh --baseline` prints each row's ms a frame against its target
      (one soft body 1 ms, eight in contact 3 ms); `run.sh --make` saves the states (once,
      and after a change of the buffers' layout); `PROFILE_SPLIT=1` adds each row's frame
-     by dispatch kind. 20 to 30 s warm; the first run after a kernel edit also pays the
-     pipelines' compiles (1.5 to 2.5 minutes).
+     by dispatch kind. It runs on Modal (every row in a container of its own at once;
+     `--local` for the Mac's GPU); a kernel version new on Modal's driver needs
+     `MODAL_OPTS="--allow-cold-compile --timeout 1500"` once (one warm-up container,
+     then the rows).
   2. **A minute.** The same with `FRAMES=20`, `EXTRA="--ab-profile"` for the frame by
      dispatch kind, `explicit_loop_cap`, and Chrome's validation of every module
      (`EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket

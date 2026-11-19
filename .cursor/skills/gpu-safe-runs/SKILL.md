@@ -14,12 +14,26 @@ On macOS, Metal cannot abort a kernel that is already running. A runaway loop ke
 - **The census test enforces this:** `cargo test -p engine-webgpu --test explicit_loop_cap` fails on any uncapped loop. Run it after kernel edits.
 - **Distrust indices read from GPU state** (headers, counts). Validate them in the kernel, and on the CPU before submit where it's cheap (NaN, capacities, header sanity).
 
+## Where to run: Modal first
+Native GPU work goes to Modal's cloud GPUs, not this Mac: no lock, no queue, any
+number of agents at once, and a runaway kernel cannot wedge the Mac
+(`engine/tools/modal/README.md`).
+- Tests, examples, benches (engine-webgpu, engine-world, engine-ffi, engine-cuda):
+  `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`.
+  `--fanout` runs each test binary in a container of its own, `--fanout-tests` each
+  test, all at once; one summary and exit code. The build is local Docker (free).
+- The scenario matrix: `engine/tools/scenario-matrix/run.sh SWITCH` runs on Modal by
+  default, one container per row.
+- The Mac's GPU only for what Modal cannot run: Metal-only crates (`engine-metal`,
+  `engine-viewer`), headless Chrome / WebGPU pages, and final Metal timings for a doc
+  (`run.sh --local`). Those follow the rules below.
+
 ## Launching runs
 1. **CPU reference first.**
 2. **Then a tiny GPU run:** a few steps, with a deliberately low budget.
 3. **Then the real run.**
 
-Rules for every run:
+Rules for every run on the Mac:
 - **One GPU job on the machine at a time.** Native binaries take `~/.rubble/gpu.lock` via `hold_gpu_lock()` (override the path with `RUBBLE_GPU_LOCK`; `RUBBLE_GPU_LOCK=0` turns it off).
 - **Wrap everything else,** including headless Chrome and GPU cargo tests:
   ```bash

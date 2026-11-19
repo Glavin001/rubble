@@ -80,10 +80,13 @@ def main() -> None:
     argv = sys.argv[1:]
     out = Path(argv.pop(0))
     extra: list[str] = []
+    list_tests = False
     while argv and argv[0] != "--":
         flag = argv.pop(0)
         if flag == "--data":
             extra.append(argv.pop(0))
+        elif flag == "--list-tests":
+            list_tests = True
         else:
             raise SystemExit(f"unknown option {flag}")
     if not argv:
@@ -132,6 +135,21 @@ def main() -> None:
     runs = [e for e in exes if e["role"] == "run"]
     if not runs:
         raise SystemExit("the selection built no executables (did you pass --test/--example/--bin?)")
+    if list_tests:
+        # `--fanout-tests`: each test harness's test names (libtest lists them without
+        # running anything or opening a device), with the run args' filter applied.
+        filt = [a for a in run_args if not a.startswith("-")][:1]
+        for e in runs:
+            if e["kind"] != "test":
+                continue
+            p = subprocess.run([str(e["path"]), "--list", "--format", "terse", *filt],
+                               cwd=e["cwd"], capture_output=True, text=True)
+            names = [l[: -len(": test")] for l in p.stdout.splitlines() if l.endswith(": test")]
+            if p.returncode == 0 and names:
+                e["tests"] = names
+            print(f"{e['name']}: {len(names)} test(s) to fan out"
+                  + ("" if p.returncode == 0 else f" (listing failed, exit {p.returncode}: runs whole)"),
+                  file=sys.stderr)
 
     files: dict[str, Path] = {}
 
@@ -198,7 +216,8 @@ def main() -> None:
                 arc = f"bin/{stripped.name}"
                 tar.add(stripped, arcname=arc)
                 stripped.unlink()
-                manifest["exes"].append({k: e[k] for k in ("name", "kind", "cwd", "role")} | {"file": arc})
+                manifest["exes"].append({k: e[k] for k in ("name", "kind", "cwd", "role")}
+                                        | {"file": arc} | ({"tests": e["tests"]} if "tests" in e else {}))
             for key, f in sorted([*files.items(), *staged.items()]):
                 tar.add(f, arcname="data" + key)
             blob = json.dumps(manifest, indent=1).encode()
