@@ -1298,6 +1298,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let mut alt = [(0.0f64, 0u32); 2];
     // (t, the step's GPU span, the vehicles' segments, the explicit frame's), ms.
     let mut gpu_steps: Vec<(f64, f64, f64, f64)> = Vec::new();
+    // (t, the World step's wall time: `world.step` and its `poll_blocking`, ms.)
+    let mut wall_steps: Vec<(f64, f64)> = Vec::new();
     // Vehicle sleep, per car: (the time it first slept, its wakes, asleep now).
     let mut sleep_log: Vec<(Option<f64>, u32, bool)> = Vec::new();
     let t_all = std::time::Instant::now();
@@ -2649,6 +2651,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         world.step()?;
         let frames = world.poll_blocking()?;
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        wall_steps.push((lab.bench.t, ms));
         // Vehicle sleep: each car's first sleep, its wakes, and who sleeps now.
         for e in frames.iter().flat_map(|f| f.explicit_sleep.iter()) {
             let v = e.vehicle as usize;
@@ -2950,6 +2953,61 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     if let Some(x) = world.explicit_vehicles() {
         x.kernel_status().map_err(anyhow::Error::msg)?;
     }
+    // `--end-world N`: after the run, the World's own cost a step. N World steps timed one
+    // by one (the step and its poll, as the run's), then the vehicles put back to the
+    // state before them and the same explicit steps run as N frames of the vehicles' solver
+    // alone (33, 33, 34, ... steps, as the World's clock gives them); `--end-world-rounds R`
+    // (default 3) times, each round from that same vehicle state, every step and frame
+    // pooled. The difference of the medians is what the World adds to the frame: the rigid
+    // step, the coupling's passes and the host's encoding. (Time only: the restore puts
+    // back the vehicles, not the rigid bodies.)
+    if let Some(n) = arg("--end-world").and_then(|x| x.parse::<usize>().ok()).filter(|&n| n > 0) {
+        let rounds: usize = arg("--end-world-rounds").and_then(|x| x.parse().ok()).unwrap_or(3).max(1);
+        let snap = {
+            let x = world.explicit_vehicles_mut().expect("vehicles");
+            x.wait();
+            x.snapshot()
+        };
+        let (mut steps_ms, mut frames_ms) = (Vec::new(), Vec::new());
+        for _ in 0..rounds {
+            {
+                let x = world.explicit_vehicles_mut().expect("vehicles");
+                x.restore(&snap);
+                x.wait();
+            }
+            for _ in 0..n {
+                lab.before_step(&mut world)?;
+                let t = std::time::Instant::now();
+                world.step()?;
+                world.poll_blocking()?;
+                steps_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let x = world.explicit_vehicles_mut().expect("vehicles");
+            x.wait();
+            x.restore(&snap);
+            x.wait();
+            let mut carry = 0.0f64;
+            for _ in 0..n {
+                carry += (1.0 / 60.0) / 0.0005;
+                let k = (carry + 1e-6).floor();
+                carry -= k;
+                let t = std::time::Instant::now();
+                x.frame(k as u32);
+                x.wait();
+                frames_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (w, f) = (med(&mut steps_ms), med(&mut frames_ms));
+        println!(
+            "end world: {} steps, World step {w:.3} ms, frame alone {f:.3} ms, the World adds {:.3} ms (medians, wall; {rounds} rounds of {n})",
+            n * rounds,
+            w - f
+        );
+    }
     // `--end-frames`: after the run, 20 frames of the vehicles' solver alone from the final
     // state (wall ms a frame), then the wide passes' profile when the frame is wide.
     if std::env::args().any(|a| a == "--end-frames") {
@@ -2963,6 +3021,25 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         println!("end frames: {:.2} ms a frame (wall), wide {}", t.elapsed().as_secs_f64() * 1e3 / 20.0, x.is_wide());
         let p = x.profile_wide_frame(34);
         println!("end wide profile: {}", p.iter().filter(|x| x.1 > 0.0).map(|(n, ms)| format!("{} {ms:.2}", n.trim_start_matches("explicit_beams_wide_"))).collect::<Vec<_>>().join(", "));
+    }
+    // The World step's wall time (the step and its poll; what a page waits for): median,
+    // p95 and the worst step, from t >= 0.5 s (past the pipelines' first compiles).
+    // `--wall-csv FILE`: every step's.
+    {
+        let mut v: Vec<(f64, f64)> = wall_steps.iter().filter(|x| x.0 >= 0.5).map(|x| (x.1, x.0)).collect();
+        if !v.is_empty() {
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize].0;
+            let w = v[v.len() - 1];
+            println!("wall ms a World step (t >= 0.5 s, {} steps): median {:.3}, p95 {:.3}, worst {:.3} at t {:.2}", v.len(), q(0.5), q(0.95), w.0, w.1);
+        }
+        if let Some(path) = arg("--wall-csv") {
+            let mut out = String::from("t,wall_ms\n");
+            for x in &wall_steps {
+                out.push_str(&format!("{:.4},{:.4}\n", x.0, x.1));
+            }
+            std::fs::write(path, out)?;
+        }
     }
     if !gpu_steps.is_empty() {
         // The run's GPU time a World step: median, p95 and the worst step (and when).

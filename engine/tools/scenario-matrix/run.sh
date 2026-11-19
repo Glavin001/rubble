@@ -9,6 +9,9 @@
 #       PASS only if every row is bit for bit and none is slower past the noise threshold.
 #       SWITCH: any `vehicle_lab --ab-switch` value (perf=MASK, groupsplit, wide, ...).
 #   tools/scenario-matrix/run.sh --baseline [ROW ...]   each row's ms a frame and its target
+#   tools/scenario-matrix/run.sh --world [ROW ...]      the World's own cost a step (the rigid
+#       step, the coupling's passes, the host) on the scenario rows: fails a row past
+#       WORLD_MS (default 2.5 ms; about 30 s). Needs no saved states.
 #   tools/scenario-matrix/run.sh --make [ROW ...]       (re)save the states into
 #       out/scenario-matrix/ (minutes; once, and after a change of the buffers' layout)
 #   FRAMES=n (default 10) frames a half, ROUNDS=r (default 3) the halves in turn; PROFILE_SPLIT=1 each row's frame by dispatch

@@ -3362,3 +3362,94 @@ two levels whose owners share no vehicle could be one, which the rule already ma
 them) or fewer levels (the rule's levels are the owners' partner conflicts; a finer rule,
 by contact point and triangle node rather than by vehicle, would let more hits share a
 level).
+
+### 8.38 Physics first: what the lab's drawing costs the World, and the drawing giving way (2026-11-19)
+
+The owner's Chrome (M3 Max, a 120 Hz display), the derby with four cars apart: 121 FPS,
+World 52 steps a second (86 % of real time), GPU not ready 30 %. Measured here in
+headless Chrome on the same machine (`engine/tools/vehicle-lab/physics-first.sh`: the
+page's own real-time loop for 30 s, drawing as the page draws, then 8 s with nothing
+drawn, `window.__drawOff`; the drawing's parts with the World paused, `draw-cost.js`),
+1280×720, GPU timing per step on. Headless Chrome shows 60 frames a second; a faster
+display is `vehicle-lab-record.mjs --uncapped` (frames as fast as Chrome makes them, 80
+to 110 a second here). Other sessions' GPU jobs shared the GPU during some runs (through
+the lock, and the owner's own page): steps a second move by a few between runs.
+
+**What a picture costs** (GPU ms, the World paused, drawn alone):
+
+| | 4 cars | 8 cars | mountain, 8 cars |
+|---|---|---|---|
+| skinning (all cars) | 2.9 | 6.1 | 5.8 |
+| shadow map | 0.35 | 0.6 | 0.8 |
+| picture: the cars' opaque triangles | 3.2–4.2 | 4.3–6 | 6.7–10.6 |
+| picture: glass; colliders and sky (the props are instanced already) | 0.4; 0.4 | 0.4; 0.3 | 1.1; 0.6 |
+| **a picture** | **7.5–8.5** | **12.2–14** | **15.5–19.5** |
+| a World step (physics), cars apart / in contact | 6.3 / 12.5–13 | 7.2–8.8 / 16.4 | 16–20 |
+
+The drawing is not advanced graphics but it is not small either: 427,478 opaque
+triangles a car (2 cm edges, one level of detail) and a skin of 490,997 vertices a car
+read from 157 MB of binds. Readback copies are a few kB. A picture costs more than a
+World step while the cars are apart. Drawn every display frame it takes half the GPU's
+second (four cars apart at 60 Hz: 61 pictures × 8.3 ms = 50 %, the physics 38 %); at
+120 Hz it takes more than the GPU has, which is the owner's 86 %. Physics is delayed
+behind draws: steps and pictures share one queue, a picture submitted between two steps
+runs before the second, and a step the World is not ready for is lost time.
+
+**Built.**
+* `rubble::DrawPacer` (engine-world-wasm `draw_pacer.rs`, with tests): which display
+  frames are drawn. No picture queued behind one still on the GPU, or in a frame whose
+  step was refused, until the picture is older than the floor's interval; while steps
+  are refused (two in half a second) the drawing gives way a level at a time: every
+  display frame, 60 pictures a second, 30 (the floor, a control: 60, 30, 20 or 15), then
+  75 % and 50 % of the pixels (automatic render scale only); below every frame only
+  frames that took a step are drawn (each car skinned once a World step, each picture
+  the latest state). It comes back a level after 2 s with no step refused; a level that
+  loses again within its try waits twice as long (to 16 s). The page's controls:
+  "drawing gives way to physics" (on), "at least N pictures a second", live.
+* Three World steps in flight (`setStepsInFlight`, a control: 2 to 4; pacing only, the
+  same steps). Chrome lands a step's readback well after the GPU is done with it, and
+  with two in flight the World refused steps while the GPU was idle: four cars in
+  contact, nothing drawn, 47 steps a second with two (8.9–13 ms a step), 60 with three.
+  A/B in one run (giving way on, two then three, three times): 41–45 against 49–57
+  steps a second. The lab's readings (measurements, the camera, the derby's AI) arrive
+  one step (16.7 ms) later. The frame-locked recorder waits for every readback and is
+  unchanged.
+* A frame not drawn still reads back what its steps left (measurements, the derby's AI):
+  the lab's inputs no longer follow the drawing rate. The skin and the shadow map are
+  not redone when nothing they show changed (no step, the same lead, one level of
+  detail: the World paused). The debris effects' time step spans the steps of frames
+  not drawn. Polling a landed readback before refusing a step made no measurable
+  difference (kept: it is the right order).
+
+**Before and after** (headless Chrome; real time is 60 steps a second; frame interval
+p50 / p95 / worst ms after; drawing's GPU ms a picture and its share of the GPU's second):
+
+| | World steps/s, before → after | pictures/s | frame, after | drawing, before → after | physics alone (nothing drawn), before → after |
+|---|---|---|---|---|---|
+| derby, 4 cars apart, 60 Hz | 60 (99 %) → 59 (99 %) | 61 → 31 | 16.7 / 16.8 / 17 | 8.3 ms (50 %) → 8.3 (26 %) | |
+| derby, 4 cars apart, fast display (80–110 Hz) | 42 (70 %) → 61 (100 %) | 42 → 27 | 17.4 / 18.8 / 19 | 8.0 (34 %) → 8.5 (23 %) | |
+| derby, 4 cars in contact | 38 (63 %) → 48 (81 %) | 33 → 30 | 16.7 / 16.7 / 17 | 8.3 (27 %) → 9.2 (28 %) | 47 (79 %) → 60 (100 %); 12.4–13 ms a step |
+| derby, 4 cars in contact, fast display | 36 (61 %) → 47 (78 %) | 28 → 27 | 17.2 / 18.7 / 19 | 7.8 (22 %) → 9.3 (25 %) | 38 → 61 |
+| derby, 8 cars apart | 40 (67 %) → 59 (99 %) | 48 → 30 | 16.7 / 16.7 / 17 | 12.1 (58 %) → 12.1 (37 %) | |
+| derby, 8 cars in contact | 31 (52 %) → 36 (60 %) | 29 → 28 | 16.7 / 33.3 / 50 | 10.6 (31 %) → 12.5 (35 %) | 40 (67 %) → 60 (99 %); 16.4 ms a step |
+| mountain, 8 cars | 28 (46 %) → 35 (59 %) | 31 → 28 | 16.7 / 33.3 / 50 | 15.7 (49 %) → 14.5 (40 %) | 40 (67 %) → 48 (80 %); 17–20 ms a step |
+
+(Before, the page already halved its scale and drew every other step while steps were
+refused, so the pictures a second are similar in contact. The frame p95 of 33 ms with
+eight cars is the floor's picture drawn while the GPU is still busy: 30 pictures a
+second, as the floor asks; drawing only while the GPU is free gave 15 pictures a second,
+16.7 ms frames and 1–2 more steps a second.)
+
+**What is left, and whether it is physics.** Four cars: with nothing drawn the physics
+keeps real time in contact (13 ms a step); the gap left (81 %) is the 30 pictures a
+second at 9 ms. Eight cars in contact: the physics alone fills the GPU (16.4 ms × 60 =
+98 % of it), so any drawing costs steps; the floor's 30 pictures at 12.5 ms are the
+40 % missing. The mountain's eight cars: physics alone is 17–20 ms a step, 80 % of real
+time with nothing drawn: physics is the limit there. To make a picture close to free,
+the work left is in the drawing itself, lossless first:
+* skinning: 0.73 ms a car, 1.7× its bandwidth floor, and the cars of one model each read
+  the same 157 MB of binds; one pass reading a bind once for every car would take eight
+  cars' 6.1 ms toward 1 ms;
+* the cars' opaque picture follows the triangles (a quarter of the pixels takes off only
+  10–15 %): levels of detail for the generated car (a different picture by design, the
+  asset side: §8.30's follow-up).
