@@ -40,6 +40,11 @@ fn car(name: &str) -> anyhow::Result<ExplicitBeams> {
     };
     // A local JBeam export (a directory with `files.json`, as the page's `__mods/…`): the
     // page's generated sedan, with the page's settings (air drag on).
+    // A `.truck` file of nodes and beams with no wheels (a node-beam structure: the
+    // scenario matrix's truss), as the lab's body.
+    if name.ends_with(".truck") {
+        return ExplicitBeams::from_truck(&std::fs::read_to_string(name)?, Vec3::ZERO, Vec3::ZERO, settings).map_err(anyhow::Error::msg);
+    }
     let dir = std::path::Path::new(name);
     if dir.join("files.json").is_file() {
         let list: Vec<String> =
@@ -1188,6 +1193,28 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
         "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"), "groupSplit": arg("--group-split").as_deref() != Some("0"),
         "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
+    // `--scenario FILE`: a JSON object whose keys replace the script's (the scenario
+    // matrix's rows, engine/tools/scenario-matrix/scenes/: `scene`, `cars`, `parked`,
+    // `others`, `events`, `restart` (a start or crash preset, applied after the build as
+    // the page does), `structures` with `truckFile` read relative to the file).
+    let mut script = script;
+    if let Some(file) = arg("--scenario") {
+        let text = std::fs::read_to_string(&file)?;
+        let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+        let dir = std::path::Path::new(&file).parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        for (k, x) in v.as_object().ok_or_else(|| anyhow::anyhow!("{file}: not a JSON object"))? {
+            let mut x = x.clone();
+            if k == "structures" {
+                for s in x.as_array_mut().into_iter().flatten() {
+                    if let Some(f) = s.get("truckFile").and_then(Value::as_str) {
+                        s["truck"] = json!(std::fs::read_to_string(dir.join(f))?);
+                    }
+                }
+            }
+            script[k.as_str()] = x;
+        }
+    }
+    let scene = script["scene"].as_str().unwrap_or("mountain").to_string();
     let opts = options(&script);
     println!(
         "options: {scene}, surface {} {:?}",
@@ -1210,6 +1237,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             _ => GpuTiming::Off,
         }
     })?;
+    if let Some(r) = script.get("restart") {
+        lab.restart(&mut world, r)?;
+    }
     lab.read_blocking(&world, true)?;
     lab.bench.set_script(&script)?;
     println!("debris time to live {:?}; notes {:?}", lab.bench.debris.ttl, lab.bench.notes);
@@ -2354,9 +2384,32 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out.push((ms, y.state_words(), y.coupling_words()));
                 engine_webgpu::set_explicit_module_override(None);
             }
+            // (AB_WARM_MS=n: frames from the snapshot for n ms before the timed halves, so a
+            // GPU still at its idle clock after the process's start does not slow the
+            // first half alone: a small scene's 20 ms of frames is over before it ramps.)
+            let warm: f64 = std::env::var("AB_WARM_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            if warm > 0.0 && !kernel_ab {
+                let t = std::time::Instant::now();
+                while t.elapsed().as_secs_f64() * 1e3 < warm {
+                    x.restore(&snap);
+                    for _ in 0..4 {
+                        x.frame(34);
+                    }
+                    x.wait();
+                }
+                x.restore(&snap);
+                x.wait();
+            }
             // `--ab-same`: both runs with the culls on (the harness's own repeatability).
             let second = std::env::args().any(|a| a == "--ab-same");
-            for on in if kernel_ab { vec![] } else { vec![true, second] } {
+            // (AB_ROUNDS=r: the two halves r times in turn, on, off, on, off, ..., each from
+            // the snapshot, every frame's time pooled by half: a drift of the GPU's clock
+            // or a neighbour's load falls on both halves. The state compared is the last
+            // round's.)
+            let rounds: u32 = std::env::var("AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+            let sides = if kernel_ab { vec![] } else { vec![true, second] };
+            let mut pooled: Vec<Vec<Vec<f64>>> = vec![Vec::new(); sides.len()];
+            for (round, (side, on)) in (0..rounds).flat_map(|r| sides.clone().into_iter().enumerate().map(move |s| (r, s))) {
                 x.restore(&snap);
                 switch(x, on, &labels);
                 x.wait();
@@ -2377,6 +2430,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 // (`--ab-frames N`: the frames each way, 20 unless given.)
                 let frames: u32 = arg("--ab-frames").and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
                 let mut sum = 0.0;
+                let mut each: Vec<f64> = Vec::new();
                 // (AB_STEPS=s: frames of s steps in place of 34, to find the first step two
                 // paths differ at; AB_COUNTS=1: each path's contact groups' counts after
                 // its frames.)
@@ -2391,6 +2445,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     x.wait();
                     let dt = t.elapsed().as_secs_f64();
                     sum += dt;
+                    each.push(dt * 1e3);
                     // (AB_EACH=1: each frame's wall ms and, with the kept candidates, its
                     // builds, reused passes and passes on the front's own path; the
                     // summary's counts are then of the last frame alone.)
@@ -2399,7 +2454,30 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         println!("     frame ({}): {:.2} ms, builds {} (calm {}, between {}, cover {}), reused {}, own path {}", if on { "on" } else { "off" }, dt * 1e3, fk[0], fk[5], fk[9], fk[6], fk[1], fk[3]);
                     }
                 }
-                let ms = sum * 1e3 / f64::from(frames);
+                let _ = sum;
+                pooled[side].push(each);
+                if round + 1 < rounds {
+                    continue;
+                }
+                let runs = std::mem::take(&mut pooled[side]);
+                // Frame k is the same work in every round (each starts from the snapshot):
+                // its fastest round is its time without the noise, and their mean the
+                // half's time with the frames' own mix kept (a crash's frames differ).
+                let best = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).sum::<f64>() / runs[0].len() as f64;
+                println!("     frames ({}): best of {rounds} rounds a frame, mean {best:.3} ms", if on { "on" } else { "off" });
+                let mut each: Vec<f64> = runs.concat();
+                let ms = each.iter().sum::<f64>() / each.len() as f64;
+                let frames = each.len();
+                // Each frame's own time: the median, the fastest and the slowest (the
+                // scenario matrix's numbers).
+                each.sort_by(f64::total_cmp);
+                println!(
+                    "     frames ({}): median {:.3} ms, min {:.3}, max {:.3} ({frames} frames)",
+                    if on { "on" } else { "off" },
+                    each[each.len() / 2],
+                    each[0],
+                    each[each.len() - 1]
+                );
                 // Vehicle contact's kept candidates (PERF_FLEET_KEEP), when this run used
                 // them (counted from the snapshot's own counts: a fixture's are zero).
                 let fk = x.take_fleet_keep_stats();

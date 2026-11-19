@@ -387,6 +387,8 @@ void splitGroupStep(uint g, uint lane, uint word)
         if (flLevelsOn() && fleetLevelsDefer(k, off, lane, s, !(small && (!anySize || longest > FL_SCAN_MOST)))) return;
         if (small && (!anySize || longest > FL_SCAN_MOST))
             fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
+        else if (flHitLatOn() && lvOnceOn())
+            fleetLevelsOnce(k, off, parity, lane, tag);
         else if (flHitLatOn())
             fleetLevelsLat(k, off, parity, lane, tag);
         else

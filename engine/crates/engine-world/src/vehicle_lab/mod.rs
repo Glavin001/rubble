@@ -131,6 +131,16 @@ pub struct LabOptions {
     pub vehicle_sleep_cfg: VehicleSleep,
     /// The car's named parts (beam lists) for the per-part numbers.
     pub parts: Vec<(String, Vec<u32>)>,
+    /// On the flat arena, where the other cars of [`Self::cars`] start, in order (the
+    /// second car first); a car past the list stands in the row as before. JSON
+    /// `others: [{ x, z, angle (degrees), kmh, lift }]` (the scenario matrix's head-on
+    /// crash).
+    pub others: Vec<Start>,
+    /// Node-beam structures with no wheels or drive (a steel frame, a barrier, a truss)
+    /// in the World after the cars: each a `.truck` text (nodes, beams, `fixes` for
+    /// anchored nodes) placed at its start. JSON `structures: [{ truck, x, z, angle,
+    /// lift }]`.
+    pub structures: Vec<(String, Start)>,
 }
 
 impl Default for LabOptions {
@@ -159,6 +169,8 @@ impl Default for LabOptions {
             vehicle_sleep: false,
             vehicle_sleep_cfg: VehicleSleep::default(),
             parts: Vec::new(),
+            others: Vec::new(),
+            structures: Vec::new(),
         }
     }
 }
@@ -205,6 +217,17 @@ fn debris_json(t: Option<DebrisTtl>) -> Value {
     match t {
         Some(t) => json!({ "on": true, "seconds": t.seconds, "maxKg": t.max_mass_kg, "maxNodes": t.max_nodes }),
         None => json!({ "on": false }),
+    }
+}
+
+/// `{ x, z, angle (degrees), kmh, lift }` as a [`Start`].
+fn start_from(s: &Value) -> Start {
+    Start {
+        speed: num(s, "kmh", 0.0) as f32 / 3.6,
+        yaw: deg(s, "angle", 0.0),
+        at: [num(s, "x", 0.0) as f32, num(s, "z", 0.0) as f32],
+        lift: num(s, "lift", 0.0) as f32,
+        ..Start::default()
     }
 }
 
@@ -335,6 +358,20 @@ impl LabOptions {
             vehicle_sleep: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).0,
             vehicle_sleep_cfg: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).1,
             parts,
+            others: v
+                .get("others")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(start_from).collect())
+                .unwrap_or_default(),
+            structures: v
+                .get("structures")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| Some((s.get("truck")?.as_str()?.to_string(), start_from(s))))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -2112,6 +2149,40 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
     car
 }
 
+/// A node-beam structure (`LabOptions::structures`: a `.truck` text of nodes, beams and
+/// `fixes`, no wheels) placed at `start`: its node box centred on `start.at` in x and z,
+/// turned by `start.yaw`, its lowest node `start.lift` over the ground, moving at
+/// `start.speed` along its heading (its anchored nodes still). Nothing about its physics
+/// is changed: the solver steps it as any vehicle without a drive.
+pub fn lab_structure(
+    text: &str,
+    settings: engine_softbody::explicit_beams::ExplicitBeamsSettings,
+    opts: &LabOptions,
+    start: Start,
+) -> anyhow::Result<ExplicitBeams> {
+    let mut s = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings)
+        .map_err(|e| anyhow::anyhow!("vehicle lab: a structure's .truck: {e}"))?;
+    anyhow::ensure!(!s.nodes.is_empty(), "vehicle lab: a structure with no nodes");
+    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+    for n in &s.nodes {
+        lo = lo.min(n.pos);
+        hi = hi.max(n.pos);
+    }
+    let mid = 0.5 * (lo + hi);
+    let turn = Quat::from_rotation_y(start.yaw);
+    let vel = turn * Vec3::Z * start.speed;
+    let base = if opts.scene == Scene::Mountain { 0.0 } else { GROUND };
+    for n in &mut s.nodes {
+        let p = turn * (n.pos - Vec3::new(mid.x, lo.y, mid.z));
+        n.pos = p + Vec3::new(start.at[0], base + start.lift, start.at[1]);
+        n.vel = if n.has(engine_softbody::explicit_beams::NODE_IMMOVABLE) { Vec3::ZERO } else { vel };
+    }
+    s.origin = Vec3::ZERO;
+    s.surface_contact = opts.surface_contact;
+    s.own_travel_reach = opts.own_travel_reach;
+    Ok(s)
+}
+
 /// The lab's World settings: the brick ring drive's solver (1/60 s steps of 4 iterations,
 /// persistent contacts) for a few thousand bodies.
 pub fn lab_world_def(opts: &LabOptions) -> WorldDef {
@@ -2447,7 +2518,7 @@ impl Lab {
         template: &ExplicitBeams,
         opts: &LabOptions,
         start: Option<Start>,
-    ) -> Vec<ExplicitBeams> {
+    ) -> anyhow::Result<Vec<ExplicitBeams>> {
         let car = lab_car(template, opts, start);
         let mut cars = vec![car];
         // The other cars of the multi-car benchmark (`LabOptions::cars`).
@@ -2496,14 +2567,15 @@ impl Lab {
                     }),
                 )
             } else {
-                // Standing in a row to the first car's right, clear of the arena's lanes.
+                // Standing in a row to the first car's right, clear of the arena's lanes
+                // (or where `others` starts it).
                 lab_car(
                     template,
                     opts,
-                    Some(Start {
+                    Some(opts.others.get(k - 1).copied().unwrap_or(Start {
                         at: [first.at[0] - 12.0 - 3.0 * k as f32, first.at[1] - 12.0],
                         ..Start::default()
-                    }),
+                    })),
                 )
             };
             c.origin = cars[0].origin;
@@ -2535,7 +2607,14 @@ impl Lab {
             p.shapes = cars[0].shapes.clone();
             cars.push(p);
         }
-        cars
+        for (text, at) in &opts.structures {
+            let mut s = lab_structure(text, template.settings.clone(), opts, *at)?;
+            s.origin = cars[0].origin;
+            s.ground = cars[0].ground;
+            s.shapes = cars[0].shapes.clone();
+            cars.push(s);
+        }
+        Ok(cars)
     }
 
     /// A lab World on `gpu` with the car from `template` (a vehicle on raycast wheels,
@@ -2550,7 +2629,7 @@ impl Lab {
         tweak(&mut def);
         let mut world = World::new(gpu, &def)?;
         let scene_bodies = Self::scene_bodies(&mut world, &opts)?;
-        let cars = Self::cars(template, &opts, None);
+        let cars = Self::cars(template, &opts, None)?;
         world.enable_sleep_archive(None)?;
         world.add_explicit_vehicles(
             &cars,
@@ -2701,7 +2780,7 @@ impl Lab {
                 ),
             });
         }
-        let cars = Self::cars(&self.template, &opts, start);
+        let cars = Self::cars(&self.template, &opts, start)?;
         // The car first: a fleet the World was not built for is refused before anything
         // else changes.
         world.reset_explicit_vehicles(&cars)?;
