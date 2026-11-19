@@ -78,6 +78,7 @@ pub struct V2Off {
     pub scratch: usize,
     pub hot: usize,
     pub cand: usize,
+    pub clu: usize,
     pub words: usize,
 }
 
@@ -930,10 +931,37 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     anyhow::ensure!(nt <= LANES);
     let prow = ((PAIR_CAP / nt.max(1)) & !3).min(124);
     anyhow::ensure!(counts.iter().all(|&c| c + 2 < prow), "a triangle's pairs past its row ({} of {prow})", counts.iter().max().unwrap());
+    // The contacters in clusters of at most 28 along the car's longest extent in this pose
+    // (the pair list's build tests a cluster's box first), and each triangle's allowed
+    // contacters a word a cluster.
+    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+    for n in &s.nodes {
+        lo = lo.min(n.pos);
+        hi = hi.max(n.pos);
+    }
+    let ext = hi - lo;
+    let axis = if ext.x >= ext.y && ext.x >= ext.z { 0 } else if ext.y >= ext.z { 1 } else { 2 };
+    let mut by_axis: Vec<usize> = (0..l.nc).collect();
+    by_axis.sort_by(|&x, &y| s.nodes[s.candidates[x] as usize].pos[axis].total_cmp(&s.nodes[s.candidates[y] as usize].pos[axis]).then(x.cmp(&y)));
+    let nclu = l.nc.div_ceil(28).max(1);
+    anyhow::ensure!(nclu <= LANES);
+    let mut clu = vec![NONE; nclu * 32];
+    let mut allowed_c = vec![0u32; nt * nclu];
+    for (i, &c) in by_axis.iter().enumerate() {
+        let (k, j) = (i / 28, i % 28);
+        clu[k * 32 + j] = s.candidates[c];
+        for t in 0..nt {
+            if st.allowed[t * l.ncw + c / 32] >> (c % 32) & 1 != 0 {
+                allowed_c[t * nclu + k] |= 1 << j;
+            }
+        }
+    }
     let t_lane = 0usize;
     let t_vidx = t_lane + LANES * 4;
-    let t_ent = (t_vidx + nr + 3) & !3;
+    let t_clu = (t_vidx + nr + 3) & !3;
+    let t_ent = t_clu + nclu * 32;
     let mut tab = vec![0u32; t_ent];
+    tab[t_clu..t_clu + nclu * 32].copy_from_slice(&clu);
     tab[t_vidx..t_vidx + nr].copy_from_slice(&vidx);
     let mut maxent = 0;
     for lane in 0..LANES {
@@ -980,15 +1008,17 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     o.scratch = take(nn * 12);
     o.hot = take(LANES * 24);
     o.cand = take(4096);
+    o.clu = take(nclu * 8);
     o.words = at;
     st.perm = perm;
+    st.allowed = allowed_c;
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!(
-        "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define CAR_WORDS {}\n",
-        o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.words
+        "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
+        o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words
     ) + &format!(
-        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n#define HAS_IMMOVABLE {}\n#define FULL_PLAIN_SLOTS {}\n",
+        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n#define HAS_IMMOVABLE {}\n#define FULL_PLAIN_SLOTS {}\n#define NCLU {nclu}\n#define T_CLU {t_clu}\n",
         nv.max(1), s.nodes.iter().any(|n| n.flags & 2 != 0) as u32,
         (0..3).take_while(|&sl| (0..LANES).all(|ln| st.perm[sl * LANES + ln] != NONE && s.beams[st.perm[sl * LANES + ln] as usize].kind == K::JbeamPlain)).count()
     );

@@ -188,6 +188,7 @@ kernel void floorFrame(
     #define cplV ((device float*)(cb + O_SCRATCH + NN * 11))
     #define hot ((device float4*)(cb + O_HOT))
     #define candBuf (cb + O_CAND)
+    #define cluBox ((device float4*)(cb + O_CLU))
     #define conBuf (cb + O_CAND + 2048)
     #define liftBuf ((device float*)(cb + O_CAND + 3072))
     #define ent4 ((device const uint4*)(tab + T_ENT))
@@ -830,6 +831,31 @@ kernel void floorFrame(
         // ---- the pair list built (rare) ----
         if (tgFlags[F_REBUILD] != 0u)
         {
+            // Two levels (the same pairs as testing every contacter): each cluster of
+            // contacters' box now, then a triangle tests only the clusters its list box
+            // meets, a word of allowed bits and eight loads of node indices a cluster.
+            if (lid < NCLU)
+            {
+                V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
+                device const uint4* cl4 = (device const uint4*)(tab + T_CLU + lid * 32u);
+                for (uint jj = 0; jj < 8u; jj++)
+                {
+                    uint4 q = cl4[jj];
+                    for (uint e = 0; e < 4u; e++)
+                    {
+                        uint h = q[e];
+                        if (h == NONE) continue;
+                        V3 p = v3(0, 0, 0) + TGP(h);
+                        lo = v3(rmin(lo.x, p.x), rmin(lo.y, p.y), rmin(lo.z, p.z));
+                        hi = v3(rmax(hi.x, p.x), rmax(hi.y, p.y), rmax(hi.z, p.z));
+                    }
+                }
+                cluBox[lid * 2u] = f4(lo, 0);
+                cluBox[lid * 2u + 1u] = f4(hi, 0);
+            }
+            if (isNode) pBuild[ni] = f4(TGP(ni), 0);
+            if (lid == 0) { V3 pr = TGP(REFNODE); tgPB[0] = pr.x; tgPB[1] = pr.y; tgPB[2] = pr.z; }
+            BAR;
             if (isTri)
             {
                 uint4 tn = tris[tri];
@@ -839,24 +865,33 @@ kernel void floorFrame(
                 uint n = 0u;
                 if (triDead[tri] == 0u)
                 {
-                    uint bitsw = 0u;
-                    for (uint c = 0; c < NC; c++)
+                    for (uint k = 0; k < NCLU; k++)
                     {
-                        if ((c & 31u) == 0u) bitsw = allowed[tri * NCW + (c >> 5)];
-                        if ((bitsw & (1u << (c & 31u))) == 0u) continue;
-                        uint h = cands[c];
-                        V3 p = v3(0, 0, 0) + TGP(h);
-                        if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
-                        if (n < PROW - 2u) pairs[tri * PROW + 2u + n] = h;
-                        n++;
+                        float4 clo = cluBox[k * 2u], chi = cluBox[k * 2u + 1u];
+                        if (chi.x < lo.x || chi.y < lo.y || chi.z < lo.z || clo.x > hi.x || clo.y > hi.y || clo.z > hi.z) continue;
+                        uint bitsw = allowed[tri * NCLU + k];
+                        if (bitsw == 0u) continue;
+                        device const uint4* cl4 = (device const uint4*)(tab + T_CLU + k * 32u);
+                        for (uint jj = 0; jj < 8u; jj++)
+                        {
+                            if (((bitsw >> (jj * 4u)) & 15u) == 0u) continue;
+                            uint4 q = cl4[jj];
+                            for (uint e = 0; e < 4u; e++)
+                            {
+                                if ((bitsw & (1u << (jj * 4u + e))) == 0u) continue;
+                                uint h = q[e];
+                                V3 p = v3(0, 0, 0) + TGP(h);
+                                if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
+                                if (n < PROW - 2u) pairs[tri * PROW + 2u + n] = h;
+                                n++;
+                            }
+                        }
                     }
                 }
                 if (n > PROW - 2u) { tgFlags[F_STATUS] = tgFlags[F_STATUS] | 1u; n = PROW - 2u; }
                 pairs[tri * PROW] = n;
                 pairs[tri * PROW + 1u] = tn.x | tn.y << 10 | tn.z << 20;
             }
-            if (isNode) pBuild[ni] = f4(TGP(ni), 0);
-            if (lid == 0) { V3 pr = TGP(REFNODE); tgPB[0] = pr.x; tgPB[1] = pr.y; tgPB[2] = pr.z; }
             BAR;
             if (lid == 0) { tgFlags[F_REBUILD] = 0u; tgFlags[F_BUILDS] += 1u; }
         }
