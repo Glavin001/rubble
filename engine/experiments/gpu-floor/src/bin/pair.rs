@@ -90,17 +90,17 @@ fn main() -> anyhow::Result<()> {
         if by_step {
             extra += "#define PER_STEP 1\n";
         }
-        let mut f = Floor::new(Gpu::new()?, l, &st, 3 * pairs, fast, &extra)?;
+        let mut f = Floor::new(Gpu::new()?, l, &st, 2 * pairs, fast, &extra)?;
         f.single = by_step;
         let (mt, _, tg) = f.threads_ok();
-        println!("pipeline: max threads {mt}, threadgroup memory {tg} B; {pairs} pair(s), {} workgroups", 3 * pairs);
+        println!("pipeline: max threads {mt}, threadgroup memory {tg} B; {pairs} pair(s), {} workgroups", 2 * pairs);
         if flag("--compile-only") {
             return Ok(());
         }
         anyhow::ensure!(mt as usize >= LANES);
         for p in 0..pairs {
             for c in 0..2 {
-                f.upload(3 * p + c, &state_of(&w.vehicles[c], &f.l, &st));
+                f.upload(2 * p + c, &state_of(&w.vehicles[c], &f.l, &st));
             }
         }
         if by_step {
@@ -110,10 +110,9 @@ fn main() -> anyhow::Result<()> {
                 f.run(1);
                 w.step();
                 let g: Vec<State> = (0..2).map(|c| f.download(c)).collect();
-                let x = f.download(2);
                 let bad: Vec<usize> = (0..2).map(|c| compare(&w.vehicles[c], &g[c]).0).collect();
                 if bad[0] + bad[1] != 0 || step % 34 == 0 {
-                    println!("check step {step}: differing words {bad:?}; reference hits {} candidates {}; kernel passes so far {} most hits {} status {:#x}", w.last.hits, w.last.candidates, x.misc[5], x.misc[6], x.misc[1] | g[0].misc[1] | g[1].misc[1]);
+                    println!("check step {step}: differing words {bad:?}; reference hits {} candidates {}; status {:#x}", w.last.hits, w.last.candidates, g[0].misc[1] | g[1].misc[1]);
                 }
                 if bad[0] + bad[1] != 0 {
                     for c in 0..2 {
@@ -128,7 +127,7 @@ fn main() -> anyhow::Result<()> {
             println!("check: both bodies bit for bit every step ({} steps)", frames * STEPS);
             return Ok(());
         }
-        let first: Vec<Vec<Vec<u8>>> = (0..3 * pairs).map(|g| f.snapshot(g)).collect();
+        let first: Vec<Vec<Vec<u8>>> = (0..2 * pairs).map(|g| f.snapshot(g)).collect();
         // The reference's own sensitivity: the same run from a start moved by a micron.
         let mut wp = {
             let mut cars: Vec<_> = w.vehicles.clone();
@@ -168,7 +167,7 @@ fn main() -> anyhow::Result<()> {
             }
             let g: Vec<State> = (0..2).map(|c| f.download(c)).collect();
             let bad: usize = (0..2).map(|c| compare(&w.vehicles[c], &g[c]).0).sum();
-            status |= f.download(2).misc[1] | g[0].misc[1] | g[1].misc[1];
+            status |= g[0].misc[1] | g[1].misc[1];
             let d = dev(&w, &|c, i| glam::Vec3::new(g[c].node[i * 3][0], g[c].node[i * 3][1], g[c].node[i * 3][2]));
             let dr = dev(&w, &|c, i| wp.vehicles[c].nodes[i].pos);
             if bad != 0 && first_bad.is_none() {
@@ -191,9 +190,9 @@ fn main() -> anyhow::Result<()> {
             format!("median {:.4} p95 {:.4} worst {:.4} best {:.4}", p(0.5), p(0.95), ms[ms.len() - 1], ms[0])
         };
         f.flush = false;
-        let last: Vec<Vec<Vec<u8>>> = (0..3).map(|g| f.snapshot(g)).collect();
+        let last: Vec<Vec<Vec<u8>>> = (0..2).map(|g| f.snapshot(g)).collect();
         // The run again from the start, every pair the same, timed.
-        for g in 0..3 * pairs {
+        for g in 0..2 * pairs {
             f.restore(g, &first[g]);
         }
         let mut ms: Vec<f64> = (0..frames).map(|_| f.run(1)).collect();
@@ -201,8 +200,8 @@ fn main() -> anyhow::Result<()> {
         println!("timing, the run ({pairs} pair(s), a frame a dispatch, frames 4..{frames}): {} ms a frame", q(&mut ms));
         let mut ms: Vec<f64> = (0..time)
             .map(|_| {
-                for g in 0..3 * pairs {
-                    f.restore(g, &last[g % 3]);
+                for g in 0..2 * pairs {
+                    f.restore(g, &last[g % 2]);
                 }
                 f.run(1)
             })

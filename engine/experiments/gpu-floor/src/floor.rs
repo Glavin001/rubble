@@ -58,7 +58,8 @@ pub struct Statics {
     pub v2_tab: Vec<u32>,
     pub v2_defs: String,
     pub v2_off: V2Off,
-    /// Bodies stepped in lockstep with one contact group after them (0: none; 2: a pair).
+    /// Bodies stepped in lockstep, their contact pass on their own workgroups (0: none;
+    /// 2: pairs of workgroups).
     pub pair: usize,
 }
 
@@ -489,7 +490,7 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
             l.nn, l.nr, l.nt, l.ng, l.nd, LANES, STEPS / per_frame, (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(),
             extra, st.v2_defs, helpers,
             unroll_slots(&if st.pair != 0 {
-                format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 1048576u\n{}", st.pair, st.pair + 1, include_str!("../kernels/floor2.metal").replace("//@PAIR_ROLE", include_str!("../kernels/pair.metal")))
+                format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 1048576u\n{}", st.pair, st.pair, include_str!("../kernels/floor2.metal").replace("//@PAIR_PASS", include_str!("../kernels/pair.metal")))
             } else {
                 include_str!("../kernels/floor2.metal").to_string()
             })
@@ -689,7 +690,7 @@ impl Floor {
         let steps = STEPS / self.per_frame;
         if self.pair != 0 {
             // (Each pair's cross-group barrier counter starts at zero each dispatch.)
-            for g in (2..self.cars).step_by(3) {
+            for g in (0..self.cars).step_by(2) {
                 unsafe { *((self.node.contents() as *mut u32).add(g * self.off.words + self.off.misc + 14)) = 0 };
             }
         }
@@ -836,7 +837,7 @@ impl Emu {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("emu");
         let exe = dir.join("emu");
         let out = std::process::Command::new("xcrun")
-            .args(["clang++", "-std=c++20", "-O1", "-ffp-contract=off", "-w", if st.v2_tab.is_empty() { "-DV1" } else { "-DV2" }, "-I"])
+            .args(["clang++", "-std=c++20", "-O1", "-ffp-contract=off", "-w", if std::env::var("EMU_TRACE").is_ok() { "-DEMU_TRACE" } else { "-DEMU_QUIET" }, if st.v2_tab.is_empty() { "-DV1" } else { "-DV2" }, "-I"])
             .arg(&here)
             .arg("-I")
             .arg(here.join("metal_stdlib_dir"))
@@ -871,7 +872,7 @@ impl Emu {
         bufs[27] = z(l.nn * 16);
         bufs[29] = z(HIT_CAP * HITW * 16);
         bufs[30] = z(l.nn * 48);
-        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), off: st.v2_off.clone(), groups: if st.pair != 0 { st.pair + 1 } else { 1 }, steps: STEPS })
+        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), off: st.v2_off.clone(), groups: if st.pair != 0 { st.pair } else { 1 }, steps: STEPS })
     }
 
     pub fn upload(&mut self, s: &State) {
@@ -1167,12 +1168,26 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     let (nb, nsh) = s.rigid.as_ref().map_or((0, 0), |r| (r.bodies.len(), r.shapes.len()));
     o.rig_words = if nb != 0 { nb * BDW * 4 + 64 + nsh * SHW * 4 + nsh * 6 } else { 0 };
     o.rig = take(o.rig_words);
+    // A contact pair's pass (pair.metal): what a body publishes for its partner (box, top
+    // speed, hit count); the owner's staging sums and hit counts for both bodies' nodes;
+    // its lists (triangles, triangle and cluster, candidates) and its hits.
+    let xcnd_cap = 8192usize;
+    let x_pub = take(16);
+    let x_stg = take(nn * 12);
+    let x_spl = take(nn * 2);
+    let x_tri = take(nt);
+    let x_tc = take(nt * nclp);
+    let x_cnd = take(xcnd_cap);
+    let x_hit = take(1024 * 8 * 4);
+    anyhow::ensure!(nn * 4 + nclp * 6 <= ngs && nclp < 256 && nt < 65536, "the partner's nodes do not fit the scalars' array ({} of {ngs})", nn * 4 + nclp * 6);
     o.words = at;
     st.perm = perm;
     st.allowed = allowed_c;
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig) + &format!(
+        "#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n"
+    ) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words
     ) + &format!(

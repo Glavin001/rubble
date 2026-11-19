@@ -47,8 +47,12 @@ struct Params
 #endif
 // XATOM: what crosses between a pair's workgroups (each on its own core) read with
 // atomic loads (1), and written with atomic stores too (2). 0: plain loads and stores.
+// Measured (xsync --data): a plain store is never seen by a workgroup on another core
+// within the dispatch, and a plain load does not see another core's atomic add to a word
+// its own group stored; atomic stores and loads are seen. So 2 wherever groups share
+// words; 0 and 1 are kept to show the difference.
 #ifndef XATOM
-#define XATOM 0
+#define XATOM (PAIR ? 2 : 0)
 #endif
 #if XATOM >= 1
 #define SHL(i) atomic_load_explicit((device atomic_int*)&shift[i], memory_order_relaxed)
@@ -363,20 +367,16 @@ kernel void floorFrame(
     #define rigShape ((device float4*)(cb + O_RIG + NB * BDW * 4 + 64))
     #define rigSum ((device atomic_int*)(cb + O_RIG + NB * BDW * 4 + 64 + NSH * SHW * 4))
 #endif
-#if PAIR || RIGID
-    TGDECL(atomic_int, tgX, 16);
-#endif
 #if PAIR
-    uint xround = 0u, xlate = 0u;
-    // (Groups in threes: two bodies, then their contact group, whose block holds the
-    // pair's barrier counter.)
-    device atomic_uint* const xcnt = (device atomic_uint*)(big + (car / 3u * 3u + 2u) * CAR_WORDS + O_MISC + 14);
-    if (car % 3u == 2u)
-    {
-//@PAIR_ROLE
-        if (lid == 0 && xlate != 0u) misc[1] = misc[1] | 8u;
-        KRETURN;
-    }
+    // ([0..11] the two bodies' boxes, [12..13] their top speeds, [14] near, [15..18] the
+    // pass's list counts, [19..20] the owners' hits.)
+    TGDECL(atomic_int, tgX, 24);
+    uint xround = 0u, xlate = 0u, xstep = 0u;
+    // (Groups in twos, a pair's bodies; the first one's block holds the pair's barrier
+    // counter.)
+    device atomic_uint* const xcnt = (device atomic_uint*)(big + (car & ~1u) * CAR_WORDS + O_MISC + 14);
+#elif RIGID
+    TGDECL(atomic_int, tgX, 16);
 #endif
     // This lane's roles.
     const uint nd = tab[T_LANE + lid * 4];
@@ -510,6 +510,9 @@ kernel void floorFrame(
         float4 h0 = sh[0]; h0.w = 0.0f; sh[0] = h0;
     }
     if (lid < 6u) atomic_store_explicit(&tgX[lid], lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
+#endif
+#if PAIR
+    if (lid < 24u) atomic_store_explicit(&tgX[lid], lid >= 12u ? 0 : ((lid % 6u) < 3u ? 0x7FFFFFFF : int(0x80000000)), memory_order_relaxed);
 #endif
     BAR;
 
@@ -1595,32 +1598,7 @@ kernel void floorFrame(
         BAR;
 #endif
 #if PAIR
-        // Lockstep with the pair's contact group: this body's nodes published; the contact
-        // pass runs between the two barriers; what it left for this body picked up.
-        if (isNode)
-        {
-#if XATOM >= 2
-            device atomic_uint* na = (device atomic_uint*)(nodeState + ni * 3);
-            atomic_store_explicit(&na[0], as_type<uint>(Pown.x), memory_order_relaxed); atomic_store_explicit(&na[1], as_type<uint>(Pown.y), memory_order_relaxed); atomic_store_explicit(&na[2], as_type<uint>(Pown.z), memory_order_relaxed);
-            atomic_store_explicit(&na[4], as_type<uint>(Vown.x), memory_order_relaxed); atomic_store_explicit(&na[5], as_type<uint>(Vown.y), memory_order_relaxed); atomic_store_explicit(&na[6], as_type<uint>(Vown.z), memory_order_relaxed);
-            atomic_store_explicit(&na[8], as_type<uint>(F0.x), memory_order_relaxed); atomic_store_explicit(&na[9], as_type<uint>(F0.y), memory_order_relaxed); atomic_store_explicit(&na[10], as_type<uint>(F0.z), memory_order_relaxed);
-#else
-            nodeState[ni * 3] = f4(Pown, 0);
-            nodeState[ni * 3 + 1] = f4(Vown, 0);
-            nodeState[ni * 3 + 2] = f4(F0, 0);
-#endif
-        }
-        XBAR;
-        XBAR;
-        if (lid == 0)
-        {
-            const uint xf = atomic_exchange_explicit((device atomic_uint*)&misc[12], 0u, memory_order_relaxed);
-            if ((xf & 1u) != 0u) tgFlags[F_HITS] = 1u;
-            if ((xf & 2u) != 0u) tgFlags[F_SHIFT] = 1u;
-            if ((xf & 4u) != 0u) tgFlags[F_REC] = 1u;
-            if (xlate != 0u) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 8u;
-        }
-        BAR;
+//@PAIR_PASS
 #endif
     }
 

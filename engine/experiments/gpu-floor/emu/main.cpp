@@ -45,7 +45,9 @@ int main(int argc, char** argv)
     std::vector<int> state(groups, 0); // 0 running, 1 at the cross barrier, 2 done
     for (;;) {
         bool progressed = false;
-        for (uint g = 0; g < groups; g++) {
+        for (uint gi = 0; gi < groups; gi++) {
+            // (`reverse` also runs the groups in the other order.)
+            const uint g = reverse ? groups - 1 - gi : gi;
             while (state[g] == 0) {
                 uint done = 0, atx = 0;
                 for (uint k = 0; k < LANES; k++) {
