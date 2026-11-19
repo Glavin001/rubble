@@ -10,7 +10,7 @@ one state, the same build), compares every state word and times each frame apart
     matrix.py --make [ROW ...]          save the states into out/scenario-matrix/
     matrix.py SWITCH [ROW ...]          the A/B table and the verdict
     matrix.py --baseline [ROW ...]      each row's ms a frame against its target
-Options (environment): FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
+Options (environment): EXTRA (more vehicle_lab options for the replays, e.g. "--wheels-bodies 0"), FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
 CAR, STATES (the states' directory), RETRIES (default 2: a row past the threshold runs again,
@@ -118,7 +118,7 @@ FRAME = re.compile(r"frames \((on|off)\): median ([\d.]+) ms, min ([\d.]+), max 
 
 def replay(row, switch):
     cmd = lab_args(row) + ["--from-fixture", state_file(row), "--ab-switch", switch,
-                           "--ab-frames", str(FRAMES)]
+                           "--ab-frames", str(FRAMES)] + os.environ.get("EXTRA", "").split()
     if os.environ.get("PROFILE_SPLIT") == "1":
         cmd.append("--ab-profile")
     t0 = time.time()
