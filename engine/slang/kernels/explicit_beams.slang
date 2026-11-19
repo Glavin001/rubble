@@ -8387,9 +8387,11 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         }
     }
     // PERF_HIT_SLOT_MAP: the vehicle's node map cleared (selfApplyLocal's slots; nothing
-    // here reads gsCount before it). Every lane, before the barrier below.
+    // here reads gsCount before it), before the barrier below, on a step with hits only
+    // (each lane reads the count lane 0 decides from; a step without hits clears nothing).
     uint mapNodes = hitSlotMapNodes(v);
-    for (uint k = lane, kStop = EB_END(k, mapNodes, 256u); k < kStop; k += 256u) gsCount[k].store(0u);
+    uint mapClear = mapNodes > 0u && gAcc[hitAcc(v)].load() > 0 ? mapNodes : 0u;
+    for (uint k = lane, kStop = EB_END(k, mapClear, 256u); k < kStop; k += 256u) gsCount[k].store(0u);
     sync();
     uint on = gsUniformHits;
     uint driveOn = gsUniformDrive;
