@@ -2355,11 +2355,16 @@ kernel void floorFrame(
             {
                 // The search: every element's padded box against the near slots' cull boxes
                 // (`near`, `seg_near`); a pair that passes goes on the step's list.
-                #define SURF_NEAR(e_, tlo_, thi_) for (uint hf_ = 0u; hf_ < 2u; hf_++) for (uint m_ = hf_ == 0u ? sa0 : sa1; m_ != 0u; m_ &= m_ - 1u) { \
-                    const uint sl_ = hf_ * 32u + ctz(m_); const uint o_ = SB(sl_); \
-                    if (tlo_.x <= tgG[o_ + 3u] && tlo_.y <= tgG[o_ + 4u] && tlo_.z <= tgG[o_ + 5u] && thi_.x >= tgG[o_] && thi_.y >= tgG[o_ + 1u] && thi_.z >= tgG[o_ + 2u]) { \
+                // (The slots an element is near as bits first, then its pairs listed one
+                // after another: a store inside the slots' loop ran once for every (slot,
+                // lane) hit of the warp, each lane's hits being at different slots.)
+                #define SURF_OV(sl_) ((tlo_.x <= tgG[SB(sl_) + 3u]) & (tlo_.y <= tgG[SB(sl_) + 4u]) & (tlo_.z <= tgG[SB(sl_) + 5u]) & (thi_.x >= tgG[SB(sl_)]) & (thi_.y >= tgG[SB(sl_) + 1u]) & (thi_.z >= tgG[SB(sl_) + 2u]))
+                #define SURF_NEAR(e_, tlo__, thi__) { const float3 tlo_ = tlo__, thi_ = thi__; uint h0_ = 0u, h1_ = 0u; \
+                    for (uint m_ = sa0; m_ != 0u; m_ &= m_ - 1u) { const uint sl_ = ctz(m_); h0_ |= SURF_OV(sl_) ? 1u << sl_ : 0u; } \
+                    for (uint m_ = sa1; m_ != 0u; m_ &= m_ - 1u) { const uint sl_ = ctz(m_); h1_ |= SURF_OV(32u + sl_) ? 1u << sl_ : 0u; } \
+                    for (uint hf_ = 0u; hf_ < 2u; hf_++) for (uint m_ = hf_ == 0u ? h0_ : h1_; m_ != 0u; m_ &= m_ - 1u) { \
                         const uint i_ = uint(atomic_fetch_add_explicit(&tgS[8], 1, memory_order_relaxed)); \
-                        if (i_ < SPAIR_CAP) surfPair[i_] = (e_) | sl_ << 16; } }
+                        if (i_ < SPAIR_CAP) surfPair[i_] = (e_) | (hf_ * 32u + ctz(m_)) << 16; } }
                 if (isTri)
                 {
                     uint4 tn = tris[tri];
