@@ -2766,7 +2766,7 @@ impl ExplicitBeamsGpu {
     /// ([`crate::fast_float_wgsl`]): the same equations, contact rules, iterations and
     /// tolerances, with the compilers free to fuse and reassociate their arithmetic, so
     /// results differ in the last bits from machine to machine
-    /// (`vehicle-perf-first-principles.md` §8.38). Changing it makes the pipelines again
+    /// (`vehicle-perf-first-principles.md` §8.40). Changing it makes the pipelines again
     /// (each compiled at its first use; a browser compiles them synchronously) and
     /// changes no state. The constructors other than [`Self::with_settings`] start on.
     pub fn set_bit_exact(&mut self, on: bool) {

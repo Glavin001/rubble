@@ -203,7 +203,11 @@
         when below <input type="number" id="sleepSpeed" data-opt="live" value="0.25" min="0" max="10" step="0.05" /> m/s and within <input type="number" id="sleepReach" data-opt="live" value="0.1" min="0" max="100" step="0.05" /> mm for <input type="number" id="sleepDwell" data-opt="live" value="1000" min="1" max="1000000" step="100" /> steps</div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
         <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
-      <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic keeps the physics in real time first: it lowers the picture's resolution while steps are being refused because the GPU is busy, then draws every other step (30 pictures a second, each of the current state), and brings both back when steps are no longer refused. Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
+      <div class="row"><label title="Physics first: the World's steps and the drawing share the GPU, so a picture drawn while the GPU is behind delays the next step. On: a picture is never queued behind another one still on the GPU or in a frame whose step was refused; while steps are being refused the drawing gives way a level at a time (every display frame, then 60 pictures a second, then 30, down to the floor below, then a lower resolution when the render scale is automatic), each picture of the latest state, and it comes back a level at a time when steps are no longer refused. Off: every display frame is drawn. The physics is the same either way. Applies as it runs."><input type="checkbox" id="drawYield" data-opt="live" checked /> drawing gives way to physics</label>
+        <span class="muted" title="The quality floor: the fewest pictures a second the drawing gives way to (the picture is never older than this while it gives way). Applies as it runs.">at least</span><select id="drawFloor" data-opt="live"><option value="60">60</option><option value="30" selected>30</option><option value="20">20</option><option value="15">15</option></select><span class="muted">pictures a second</span>
+        <span class="muted" id="drawLevel"></span></div>
+      <div class="row"><span class="muted" title="World steps the page keeps on the GPU ahead of their readbacks. A step is taken only while fewer than this many are still on their way back; a step not taken is simulated time lost (the run shows slower). The browser lands a readback a while after the GPU has finished the step, so with 2 the GPU sits idle waiting for the page (measured: the derby's four cars in contact took 41 to 45 steps a second with 2 and 49 to 57 with 3); more keeps it busy, and the lab's readings (measurements, the camera, the derby's AI) arrive that many steps later. Pacing only: the steps taken are the same steps. Applies as it runs.">Steps in flight</span><select id="inFlight" data-opt="live"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+      <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic: all of them, lowered to 75 % and then 50 % only while the drawing gives way to physics at its floor (above). Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
       <div class="row"><button id="perfCopy" title="Copies a text report to the clipboard: this device and display, the page's options, and a row a second for the last three minutes (display frames, steps taken and refused, frames drawn, the page's CPU time in stepping and drawing, GPU time a step when GPU timing is on). Run for a while first, then press it and paste it where the run is being looked at.">Copy perf report</button></div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
@@ -301,7 +305,7 @@
     //            or another World definition), with progress shown; parsed cars are kept.
     // Only ?record=1 (the frame-locked recorder's harness, vehicle-lab-record.mjs) has no
     // control: it is not an option of the lab.
-    import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
+    import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer, DrawPacer, setStepsInFlight } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
     import { loadMod, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
@@ -424,7 +428,8 @@
         else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
         else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront' || c.id === 'fleetAny' || c.id === 'fleetPost' || c.id === 'fleetLevels' || c.id === 'fleetHitLat' || c.id === 'levelsOnce' || c.id === 'fleetFuse' || c.id === 'fleetKeep' || c.id === 'aheadApart' || c.id === 'tyreAhead' || c.id === 'hitsLocal' || c.id === 'tyreEarly' || c.id === 'wheelsApart' || c.id === 'selfHitsLocal' || c.id === 'splitWheelsAhead') cmd({ perfFlags: perfFlags() });
         else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
-        else if (c.id === 'renderScale') { autoScale = 1; autoQuiet = 0; configure(); }
+        else if (c.id === 'renderScale' || c.id === 'drawYield' || c.id === 'drawFloor') { drawPacerSync(); configure(); }
+        else if (c.id === 'inFlight') setStepsInFlight(Number(get('inFlight')) || 3);
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
         else if (['vehicleSleep', 'sleepSpeed', 'sleepReach', 'sleepDwell'].includes(c.id)) cmd({ vehicleSleep: sleepSpec() });
         else if (['beams', 'nodes', 'beamColor'].includes(c.id)) structureOpts();
@@ -538,21 +543,19 @@
     const context = canvas.getContext('webgpu');
     const format = navigator.gpu.getPreferredCanvasFormat();
     const DEPTH = 'depth32float', SAMPLES = 4;
-    // Render scale: a fixed share of the display's pixels, or automatic (0.5 to 1 in
-    // steps of 1/8). Automatic: a second in which more than two steps were refused (the
-    // GPU behind) lowers it a step; five seconds in a row with none raises it a step.
-    let autoScale = 1, autoQuiet = 0, autoDrawEvery = 1, drawTick = 0;
-    const renderScale = () => { const v = $('renderScale')?.value ?? 'auto'; return v === 'auto' ? autoScale : Number(v); };
-    function renderAuto(refused) {
-      if (($('renderScale')?.value ?? 'auto') !== 'auto') { autoDrawEvery = 1; return; }
-      const was = autoScale;
-      // Past the lowest resolution the picture is drawn for every other step (30 a second
-      // of the current state) while steps are still refused; it comes back first.
-      if (refused > 2) { if (autoScale > 0.5) autoScale = Math.max(0.5, autoScale - 0.125); else autoDrawEvery = 2; autoQuiet = 0; }
-      else if (refused === 0) { if (++autoQuiet >= 5) { if (autoDrawEvery > 1) autoDrawEvery = 1; else autoScale = Math.min(1, autoScale + 0.125); autoQuiet = 0; } }
-      else autoQuiet = 0;
-      if (autoScale !== was) configure();
-    }
+    // Physics first (rubble::DrawPacer, draw_pacer.rs: the policy is Rust's): which
+    // display frames are drawn while the World steps, and the automatic render scale.
+    // The page tells it each frame's steps taken and refused and whether the last
+    // picture is still on the GPU; the controls "drawing gives way to physics", its
+    // floor and the render scale set it, as it runs. Made with the first build (wasm).
+    let drawPacer = null, drawBusy = false, drawScale = 1;
+    const drawPacerSync = () => {
+      if (!drawPacer) return;
+      drawPacer.setGivesWay(get('drawYield'));
+      drawPacer.setFloorFps(Number(get('drawFloor')) || 30);
+      drawPacer.setAutoScale((get('renderScale') ?? 'auto') === 'auto');
+    };
+    const renderScale = () => { const v = $('renderScale')?.value ?? 'auto'; return v === 'auto' ? (drawPacer ? drawPacer.scale() : 1) : Number(v); };
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0, buildGen = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : mode === 'derby' ? 'derby' : 'flat');
     // The derby's settings (rubble::vehicle_lab::derby::DerbySpec).
@@ -560,9 +563,11 @@
     const mountainSpec = () => ({ terrain: get('terrain'), seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
       // The drawing's resolution: the display's pixels times the render scale (the
-      // renderScale control; "auto" lowers it while the World's steps are being refused,
-      // physics first, and raises it again when they are not: renderAuto below).
-      const dpr = Math.min(devicePixelRatio || 1, 2) * renderScale();
+      // renderScale control; "auto": the draw pacer's scale, lowered only while the
+      // drawing gives way to physics at its floor, raised again when steps are no longer
+      // refused).
+      drawScale = renderScale();
+      const dpr = Math.min(devicePixelRatio || 1, 2) * drawScale;
       canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
       canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
       if (W) context.configure({ device: W.device, format, alphaMode: 'opaque' });
@@ -645,6 +650,8 @@
         w.wire = structureView(device, world);
         await gpuPhase(device, `uploading ${n === 1 ? 'the car' : `${n} cars`} to the GPU (${car.detail === 'lite' ? 'the lighter' : 'the full'} mesh)`, () => { for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i)); })
           .catch((e) => { try { w.cars.destroy(); w.env?.destroy?.(); world.free(); lab.free(); } catch {} throw e; });
+        // (Cars with one level of detail each: their skin does not follow the eye.)
+        w.singleLevel = cars.stats().every((c) => c.levels.length === 1);
         // Cutaway (drawing only): material groups left out of the car's triangles.
         $('cutaway').textContent = '';
         for (const [id, name] of (vis0.materials || []).entries()) {
@@ -656,6 +663,9 @@
         if (!$('material').options.length) for (const [name, density] of materials) $('material').add(new Option(`${name} (${density} kg/m³)`, name));
         if (qs.has('material')) put('material', qs.get('material'));
         W = w;
+        drawPacer ??= new DrawPacer();
+        drawPacer.reset(); drawBusy = false; drawPacerSync();
+        setStepsInFlight(Number(get('inFlight')) || 3);
         cmd({ perfFlags: perfFlags() });
         cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         W.spec = spec;
@@ -742,6 +752,7 @@
       // (showcase-car-render.mjs bindsLike; the same bytes, one copy on the GPU). Not a
       // cutaway's car (another mesh).
       const like = w.car.mod && !cut ? w.carIds.find((id, k) => id != null && k !== i && !(k === 0 && w.hidden.size > 0)) : undefined;
+      w.skinGen = (w.skinGen ?? 0) + 1;
       return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord(), bindsLike: like ?? null });
     }
 
@@ -770,6 +781,7 @@
         if (script) W.lab.setScript(script);
       } catch (e) { warn(errorText(e)); return; }
       watch();
+      W.skinGen = (W.skinGen ?? 0) + 1;
       simSteps = 0; pageAt = 0; lastDrive = ''; paused = false; $('pause').classList.remove('on'); cam.init = false; window.__done = false;
       pose = { c: scene() === 'mountain' ? [0, 1, 3] : [0, 0.6, 0], v: [0, 0, 0], h: [0, 0, 1], speed: 0 };
       if (RECORD) orbit.auto = 0.35;
@@ -1123,7 +1135,22 @@
       // picture itself, a drawn frame.
       const dq = drawTimer(device);
       const stamp = (k) => (dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } } : {});
-      cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead, ...stamp(0) });
+      // The cars' skin and the shadow map only when what they show changed: a World step
+      // since the last, another lead, a restart or a car added (skinGen), or (the shadow)
+      // another light focus. A level-of-detail pick follows the eye: cars with more than
+      // one level are skinned every drawn frame. The same picture, without the work.
+      const skinKey = `${world.stepCount()}|${lead}|${w.skinGen}`, focusKey = `${cam.target[0]}|${M ? cam.target[1] : 0}|${cam.target[2]}`;
+      const skinSame = skinKey === w.skinKey && w.singleLevel && !forceSkin;
+      const shadowSame = skinSame && focusKey === w.focusKey;
+      w.skinKey = skinKey; w.focusKey = focusKey;
+      if (skinSame) { if (dq) enc.beginComputePass(stamp(0)).end(); }
+      else {
+        // (The debris effects' time step: the simulated time since the cars were last
+        // skinned, which spans the steps of frames not drawn.)
+        const at = world.stepCount(), since = simDt > 0 && w.skinAt != null && at > w.skinAt ? (at - w.skinAt) / w.RATE : simDt;
+        w.skinAt = at;
+        cars.update(enc, { dt: since, floorY: M ? -1e5 : 0, lead, ...stamp(0) });
+      }
       const wire = (get('beams') || get('nodes')) ? w.wire : null;
       if (wire) {
         const f = new Float32Array(60);
@@ -1131,7 +1158,8 @@
         device.queue.writeBuffer(wire.frameBuf, 0, f);
         wire.r.gather(enc, lead);
       }
-      env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }), { ...stamp(1), perfSkip: drawSkip });
+      if (shadowSame) { if (dq) enc.beginComputePass(stamp(1)).end(); }
+      else env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }), { ...stamp(1), perfSkip: drawSkip });
       const tex = context.getCurrentTexture().createView();
       const pass = enc.beginRenderPass({
         colorAttachments: [{ view: w.msaaTex.createView(), resolveTarget: tex, loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 1] }],
@@ -1143,18 +1171,14 @@
       wire?.r.drawOpaque(pass);
       env.drawGhosts(pass, world);
       pass.end();
-      let finish = null;
-      const every = RECORD ? 1 : get('monitor') === 'auto' ? (w.lab.busy() ? 1 : 4) : Number(get('monitor'));
-      if (read && every > 0 && (simSteps % every === 0 || simDt === 0)) {
-        const now = performance.now();
-        const wantBeams = RECORD ? simSteps % 6 === 0 : now - lastBeamRead > 250;
-        finish = readback(w, enc, wantBeams);
-        if (finish && wantBeams) lastBeamRead = now;
-      }
       const camFinish = camReadback(w, enc);
-      const derbyFinish = derbyReadback(w, enc);
+      const { finish, derbyFinish } = reads(w, enc, read, simDt);
       if (dq) { enc.resolveQuerySet(dq.set, 0, 6, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 48); }
       device.queue.submit([enc.finish()]);
+      // The picture is on the GPU until its work is done: no other is queued behind it
+      // (DrawPacer's busy).
+      drawBusy = true;
+      device.queue.onSubmittedWorkDone().then(() => { if (W === w) drawBusy = false; }, () => { drawBusy = false; });
       if (dq) {
         dq.busy = true;
         dq.read.mapAsync(GPUMapMode.READ).then(() => {
@@ -1169,12 +1193,29 @@
       const df = derbyFinish ? derbyFinish() : null;
       return Promise.all([finish ? finish() : null, RECORD ? cf : null, RECORD ? df : null]);
     }
+    // What a frame's steps left, read back for the lab (Rust), encoded into `enc` (a drawn
+    // frame's or, for a frame not drawn, one of its own): the measurements (when `read`:
+    // a step was taken; every step or 15 a second, the Measurements control) and the
+    // derby's AI and round. Returns their finishers (the live page lets the derby's land
+    // when it does; a finisher handed back here is called by the caller).
+    function reads(w, enc, read, simDt) {
+      let finish = null;
+      const every = RECORD ? 1 : get('monitor') === 'auto' ? (w.lab.busy() ? 1 : 4) : Number(get('monitor'));
+      if (read && every > 0 && (simSteps % every === 0 || simDt === 0)) {
+        const now = performance.now();
+        const wantBeams = RECORD ? simSteps % 6 === 0 : now - lastBeamRead > 250;
+        finish = readback(w, enc, wantBeams);
+        if (finish && wantBeams) lastBeamRead = now;
+      }
+      const derbyFinish = derbyReadback(w, enc);
+      return { finish, derbyFinish };
+    }
     // The draw timer's queries and buffers, one set a device; null without timestamp
     // queries or while the last reading is still out (that frame is not timed).
     const drawGpu = { skin: [], shadow: [], picture: [] };
     // Profiling (window.__drawSkip): parts of the drawing left out, to measure them;
     // drawHold: the frame loop stands still (window.__drawCost draws alone).
-    let drawSkip = null, drawHold = false;
+    let drawSkip = null, drawHold = false, forceSkin = false;
     let drawQ = null;
     function drawTimer(device) {
       if (!device.features.has('timestamp-query')) return null;
@@ -1211,8 +1252,7 @@
         perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
           dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
           gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.skin.length ? [f1(median(drawGpu.skin)), f1(median(drawGpu.shadow)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
-        perfLog[perfLog.length - 1].scale = +renderScale().toFixed(3) + (autoDrawEvery > 1 ? '@1/' + autoDrawEvery : '');
-        renderAuto(r.refused);
+        perfLog[perfLog.length - 1].scale = +drawScale.toFixed(3) + (drawPacer?.levelFps() ? '@' + drawPacer.levelFps() + '/s' : '');
         if (perfLog.length > 180) perfLog.shift();
         perfSec = perfNew(now);
       }
@@ -1263,6 +1303,13 @@
     // frames: median, 95th percentile, worst), the World's step rate against real time,
     // how many frames took 0, 1 or 2+ World steps (uneven counts are judder), steps the
     // GPU was not ready for, and a trace of the frame times (16.7 ms and 33.3 ms marked).
+    // The drawing's level as the pacer has it (physics first): nothing while every frame
+    // is drawn at full scale.
+    const drawLevelText = () => {
+      if (!drawPacer || !get('drawYield') || drawPacer.level() === 0) return '';
+      const fps = drawPacer.levelFps(), sc = drawScale;
+      return ` (giving way: ${fps ? `≤ ${fps}/s` : 'every frame'}${sc < 1 ? `, ${Math.round(100 * sc)} %` : ''})`;
+    };
     function perfBar(rt) {
       const el = $('perf');
       if (RECORD) { el.style.display = 'none'; return; }
@@ -1278,6 +1325,7 @@
         + ` · World <b${cls(!paused && rt < 0.9)}>${paused ? 'paused' : `${simRate.toFixed(0)}/s, ${Math.min(100, 100 * rt).toFixed(0)} % real time`}</b>`
         + ` · steps a frame 0: ${(100 * c0 / n).toFixed(0)} %, 1: ${(100 * c1 / n).toFixed(0)} %, 2+: ${(100 * c2 / n).toFixed(0)} %`
         + ` · <span${cls(refused > 0.02 * owedAll)}>GPU not ready ${owedAll ? (100 * refused / owedAll).toFixed(1) : '0.0'} %</span>`
+        + ` · drawn ${perfLog.length ? perfLog[perfLog.length - 1].drawn : '–'}/s${drawLevelText()}`
         + (W.timing !== 'off' && gpuTotal.length ? ` · GPU ${g.total.toFixed(2)} ms/step` : '');
       const x = cv.getContext('2d'), w = cv.width, h = cv.height, top = 50;
       x.clearRect(0, 0, w, h);
@@ -1373,6 +1421,7 @@
         : `<tr><td class="muted">${W.car.visuals[0].visual.unitNames?.length ? 'no part damaged' : 'this car names no parts'}</td></tr>`;
       $('log').innerHTML = s.events.slice(-30).reverse().map((e) => `<div>${e.t.toFixed(2)} s · ${esc(e.text)}</div>`).join('') || '<span class="muted">nothing yet</span>';
       perfBar(rt);
+      $('drawLevel').textContent = drawLevelText();
       const tag = $('slowTag');
       tag.style.display = paused || slow() < 1 ? 'block' : 'none';
       tag.textContent = paused ? 'PAUSED' : `SLOW MOTION ×${slow() === 0.25 ? '¼' : '1⁄16'}`;
@@ -1420,23 +1469,28 @@
       return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
     }
     window.__perfReport = perfReport;
+    // The per-second rows (perfLog) as objects; window.__drawOff = true: nothing drawn
+    // (a measurement: the World alone, engine/tools/vehicle-lab/physics-first.js).
+    window.__perfLog = () => perfLog.map((r) => { const { dts, ...o } = r; return o; });
     // The drawing's cost, measured (engine/tools/vehicle-lab/draw-cost.js): parts left
     // out (the car renderer's setPerfSkip names; boxes, spheres: the scene's), the
     // medians of the last drawn frames' GPU ms, what is drawn (a car's levels), and the
     // wall time of `n` draws alone, each waited for (pause the World first).
-    window.__drawSkip = (names) => { drawSkip = names?.length ? new Set(names) : null; W.cars.setPerfSkip(['reflect', ...(names ?? [])]); drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0; };
-    window.__recut = () => W.cars.recut();
+    window.__drawSkip = (names) => { if (W) W.skinGen++; drawSkip = names?.length ? new Set(names) : null; W.cars.setPerfSkip(['reflect', ...(names ?? [])]); drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0; };
+    window.__recut = () => { W.skinGen++; W.cars.recut(); };
     window.__drawGpu = () => ({ n: drawGpu.skin.length, skin: median(drawGpu.skin), shadow: median(drawGpu.shadow), picture: median(drawGpu.picture) });
     window.__drawStats = () => ({ canvas: [canvas.width, canvas.height], colliders: W.world.colliderCount(), bodies: W.world.bodyCount(), cars: W.cars.stats() });
     window.__drawCost = async (n = 30, batch = 1) => {
       const w = W;
-      drawHold = true;
+      // (Every draw skinned and shadowed, as a drawn frame of a stepping World: the
+      // parts' costs, not the skip of unchanged state.)
+      drawHold = true; forceSkin = true;
       try {
         await w.device.queue.onSubmittedWorkDone();
         const t0 = performance.now();
         for (let i = 0; i < n; i += batch) { for (let k = 0; k < batch; k++) draw(0, 0, 0, false); await w.device.queue.onSubmittedWorkDone(); }
         return (performance.now() - t0) / (Math.ceil(n / batch) * batch);
-      } finally { drawHold = false; }
+      } finally { drawHold = false; forceSkin = false; }
     };
     $('perfCopy').onclick = async () => {
       const b = $('perfCopy'), text = await perfReport();
@@ -1490,7 +1544,7 @@
       };
       hud();
     } else {
-      let lastNow = null, hudAt = 0, refusedAt = -1e9;
+      let lastNow = null, hudAt = 0;
       function frame(now) {
         requestAnimationFrame(frame);
         const w = W;
@@ -1511,6 +1565,10 @@
           const t0 = performance.now();
           for (let k = 0; k < owed; k++) {
             if (holdAt !== null && w.lab.time() >= holdAt - 1e-9) { window.__hold(true); break; }
+            // (A readback that landed since the last frame is taken back first: until it
+            // is polled it counts as in flight, and the step would be refused for a
+            // reading already here.)
+            if (!w.world.canStep()) pollFrame(w.world, onFrame);
             if (!w.world.canStep()) { refused = owed - k; break; }
             before();
             w.world.step();
@@ -1529,15 +1587,21 @@
           const t2 = performance.now();
           pollFrame(w.world, onFrame);
           const t3 = performance.now();
-          // A display faster than the World (120 Hz: a step every other frame) draws
-          // frames between steps. While the GPU is the limit (a step refused in the
-          // last 3 s) those in-between frames are not drawn: they would take the time
-          // the next step needs (measured: 16 steps/s instead of 60). The frames that
-          // owe a step are drawn as on a 60 Hz display.
-          if (refused > 0) refusedAt = now;
-          let drew = !(owed === 0 && scale > 0 && now - refusedAt < 3000);
-          if (drew && autoDrawEvery > 1 && scale > 0 && (++drawTick % autoDrawEvery) !== 0) drew = false;
+          // Physics first (DrawPacer, the module above): whether this frame is drawn.
+          // A display faster than the World (120 Hz: a step every other frame) draws the
+          // frames between steps only while the GPU has room for them; a picture is never
+          // queued behind one still on the GPU or in a frame whose step was refused.
+          let drew = drawPacer.frame(now / 1000, taken, refused, scale > 0, drawBusy);
+          if (window.__drawOff) drew = false;
+          if (drawScale !== renderScale()) configure();
           if (drew) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          // A frame not drawn still reads back what its steps left (the lab's
+          // measurements and the derby's AI): the lab's inputs do not follow the drawing.
+          else if (taken > 0) {
+            const enc = w.device.createCommandEncoder(), r = reads(w, enc, true, taken / w.RATE);
+            w.device.queue.submit([enc.finish()]);
+            r.finish?.(); r.derbyFinish?.();
+          }
           perfTick(now, dt * 1000, taken, refused, owed, drew, t1 - t0, t3 - t2, drew ? performance.now() - t3 : 0);
           if (now - hudAt > 250) { hud(); hudAt = now; if (lastStats?.scriptDone) window.__done = true; }
         } catch (e) { fail(e); }

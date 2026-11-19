@@ -1,5 +1,5 @@
 //! The explicit vehicles' kernels without strict float arithmetic: the WGSL of the
-//! fast setting (`bit_exact` off; `vehicle-perf-first-principles.md` §8.38).
+//! fast setting (`bit_exact` off; `vehicle-perf-first-principles.md` §8.40).
 //!
 //! The kernels' strict helpers (`slang/physics/strict.slang`) give IEEE single precision
 //! in the CPU reference's order: every intermediate passes through `nf`, an XOR with a

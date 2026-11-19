@@ -1,7 +1,7 @@
 //! The fast setting (bit-exact results off, `ExplicitBeamsGpu::set_bit_exact(false)`):
 //! the same equations, contact rules, iterations and tolerances as the bit-exact
 //! kernels, with the compilers free to fuse and reassociate the arithmetic
-//! (`engine_webgpu::fast_float_wgsl`; vehicle-perf-first-principles.md §8.38). Its
+//! (`engine_webgpu::fast_float_wgsl`; vehicle-perf-first-principles.md §8.40). Its
 //! results differ from the CPU reference in the last bits, and a crash amplifies last
 //! bits, so "the same within a tolerance" needs a yardstick that is not chosen by hand.
 //!
