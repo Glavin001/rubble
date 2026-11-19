@@ -51,7 +51,22 @@
     body.clean #hud { width: 21rem; }
     body.clean #right { width: 22rem; }
     .mode { display: none; }
-    body.shoot .mode.shoot, body.compactor .mode.compactor, body.mountain .mode.mountain, body.drive .mode.drive, body.crash .mode.crash { display: block; }
+    body.shoot .mode.shoot, body.compactor .mode.compactor, body.mountain .mode.mountain, body.drive .mode.drive, body.crash .mode.crash, body.derby .mode.derby { display: block; }
+    /* The derby's round: cars left, the player's damage, the clock; knock-outs; the result. */
+    /* The derby's clean layout (and its recordings) is the game's view: no lab readouts. */
+    body.clean.derby #hud, body.clean.derby #right { display: none; }
+    #derbyHud { left: 50%; transform: translateX(-50%); top: 10px; display: none; gap: 18px; align-items: center; font-size: 15px; font-weight: 650; z-index: 3; white-space: nowrap; }
+    body.derby #derbyHud { display: flex; }
+    #derbyHud .big { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    #derbyHud .bar { width: 110px; height: 10px; background: #263046; border-radius: 5px; overflow: hidden; display: inline-block; vertical-align: middle; }
+    #derbyHud .bar i { display: block; height: 100%; background: linear-gradient(90deg, #ffd166, #ff6b4a); }
+    #derbyFeed { position: fixed; right: 14px; bottom: 60px; display: none; flex-direction: column; gap: 4px; align-items: flex-end; pointer-events: none; z-index: 3; }
+    body.derby #derbyFeed { display: flex; }
+    #derbyFeed div { background: rgba(12, 15, 22, 0.85); border-radius: 6px; padding: 3px 10px; font-weight: 600; }
+    #derbyOver { left: 50%; top: 38%; transform: translate(-50%, -50%); display: none; text-align: center; padding: 18px 28px; z-index: 4; }
+    #derbyOver b { display: block; font-size: 30px; font-weight: 850; margin-bottom: 6px; }
+    #derbyOver button { margin-top: 10px; font-size: 16px; padding: 8px 18px; background: #e8613a; border-color: #ff8a62; }
+    @media (max-width: 760px) { #derbyHud { top: 52px; font-size: 12px; gap: 10px; } #derbyHud .big { font-size: 16px; } #derbyHud .bar { width: 60px; } }
     .note { color: #8d96aa; font-size: 11.5px; }
     .tog { position: fixed; top: 10px; z-index: 6; padding: 6px 12px; font-weight: 650; background: rgba(12, 15, 22, 0.92); }
     #togHud { left: 14px; } #togRight { right: 14px; }
@@ -127,6 +142,15 @@
         <div class="row"><button data-ob="wall">Wall</button><button data-ob="pole">Pole</button><button data-ob="kerb">Kerb</button><button data-ob="ramp">Ramp</button><button data-ob="bricks">Brick stack</button></div>
         <div class="row"><span class="muted">distance</span><input type="number" id="ahead" data-opt="live" value="15" min="2" max="200" step="1" /> m <button id="clearObs">Clear</button></div>
         <div class="row"><span class="muted">start speed</span><input type="range" id="startKmh" data-opt="restart" min="0" max="200" step="5" value="0" /><b id="startKmhOut"></b></div>
+      </div>
+      <div class="mode derby">
+        <h2>Demolition derby</h2>
+        <div class="row"><label class="muted" for="derbyCars" title="Cars in the arena (yours and the AI's). Rebuilds the arena in place.">cars</label><select id="derbyCars" data-opt="build"><option>4</option><option>6</option><option>8</option><option>12</option><option>16</option><option>32</option></select>
+          <label title="Car 1 is yours (WASD or arrows, space handbrake). Off: every car is the AI's, and you watch. Applies as it runs."><input type="checkbox" id="derbyPlayer" data-opt="live" checked /> you drive car 1</label>
+          <label title="Ramps, two brick walls that break apart, tyre stacks, barrels, crates and concrete blocks. Restarts the round."><input type="checkbox" id="derbyObstacles" data-opt="restart" checked /> obstacles</label></div>
+        <div class="row"><span class="muted">AI aggression</span><input type="range" id="aggression" data-opt="live" min="0" max="1" step="0.05" value="0.6" /><b id="aggressionOut"></b></div>
+        <div class="row"><span class="muted">AI seed</span><input type="number" id="derbySeed" data-opt="restart" value="1" min="0" step="1" /><button id="derbyNew">New round <kbd>R</kbd></button></div>
+        <div class="note">Last car moving wins. A car is out on its roof or side for 3 s, with two wheels torn off, thrown out of the arena, or not moving 2 m in 12 s; at 3 minutes the least damaged car still in wins.</div>
       </div>
       <div class="mode crash">
         <h2>Crash test</h2>
@@ -207,6 +231,9 @@
     <h2>Parts</h2><table id="parts"></table>
     <h2>Events</h2><div id="log"></div>
   </div>
+  <div id="derbyHud" class="panel" aria-live="polite"></div>
+  <div id="derbyFeed"></div>
+  <div id="derbyOver" class="panel" role="status"><b id="derbyResult"></b><span id="derbyResultSub" class="muted"></span><br /><button id="derbyAgain">New round</button></div>
   <div id="slowTag" class="panel"></div>
   <div id="perf" class="panel"></div>
   <div id="busy" class="panel"></div>
@@ -294,7 +321,9 @@
     const progress = (text) => { busyEl.textContent = text; busyEl.style.display = text ? 'block' : 'none'; statusEl.textContent = text || statusEl.textContent; };
 
     // ---------------------------------------------------------------- options: controls ↔ URL
-    const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test' };
+    const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test', derby: 'Derby' };
+    // The derby's camera per mode (Derby: the chase camera on the player's car).
+    const modeCam = (k) => (k === 'mountain' ? 'overhead' : k === 'drive' || k === 'derby' ? 'chase' : 'orbit');
     const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks'];
     $('script').add(new Option('none (free play)', ''));
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
@@ -331,7 +360,9 @@
     // self-collision passes across the GPU run only on frames without it. A control.
     // The kernels' lossless schedule switches (explicit_plan::PERF_*).
     const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0) | (get('fleetAny') ? 16384 : 0) | (get('fleetPost') ? 65536 : 0) | (get('fleetLevels') ? 524288 : 0) | (get('fleetHitLat') ? 8388608 : 0) | (get('levelsOnce') ? 4 : 0) | (get('fleetFuse') ? 16777216 : 0) | (get('fleetKeep') ? 32768 : 0) | (get('aheadApart') ? 131072 : 0) | (get('tyreAhead') ? 262144 : 0) | (get('hitsLocal') ? 1048576 : 0) | (get('tyreEarly') ? 2097152 : 0) | (get('wheelsApart') ? 4194304 : 0) | (get('selfHitsLocal') ? 33554432 : 0) | (get('splitWheelsAhead') ? 67108864 : 0);
-    const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain';
+    // (The derby too: its walls and ramps are the cars' own static shapes, and the
+    // fleet-wide passes keep many cars in real time without it.)
+    const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby';
     if (!surfaceChosen) put('surface', surfaceDefault());
     function syncUrl() {
       const q = new URLSearchParams();
@@ -341,6 +372,7 @@
       history.replaceState(null, '', `${location.pathname}?${q}`);
     }
     const outs = { speed: (v) => `${v} m/s`, pspeed: (v) => `${v.toFixed(2)} m/s`, steepness: (v) => `${v}°`, roughness: (v) => v.toFixed(2), launch: (v) => `${(3.6 * v).toFixed(0)} km/h`,
+      aggression: (v) => `${(100 * v).toFixed(0)} %`,
       startKmh: (v) => `${v} km/h`, kmh: (v) => `${v} km/h`, overlap: (v) => `${(100 * v).toFixed(0)} %`, offset: (v) => `${v.toFixed(2)} m`, angle: (v) => `${v}°` };
     const showOuts = () => { for (const [k, f] of Object.entries(outs)) $(`${k}Out`).textContent = f(get(k)); };
     const shapeUi = () => {
@@ -351,20 +383,26 @@
       const k = get('crashKind'); $('rowOverlap').style.display = k === 'offset' ? '' : 'none'; $('rowOffset').style.display = k === 'pole' || k === 'sidepole' ? '' : 'none'; $('rowAngle').style.display = k === 'wall' || k === 'offset' ? '' : 'none';
       document.body.classList.toggle('clean', get('clean') || RECORD);
     };
+    // The scene the simulation was last built for (null: none yet).
+    let builtScene = null;
     function setMode(m) {
       for (const k of Object.keys(MODES)) document.body.classList.toggle(k, k === m);
       mode = m;
       for (const b of $('modes').children) b.classList.toggle('on', b.dataset.mode === m);
-      // Returns whether the simulation must be rebuilt (surface contact is a build option).
-      if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); return true; }
-      return false;
+      // Returns whether the simulation must be rebuilt (surface contact is a build option,
+      // and the derby's arena is a build of its own).
+      let rebuild = builtScene !== null && (m === 'derby') !== (builtScene === 'derby');
+      if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); rebuild = true; }
+      return rebuild;
     }
     for (const [k, v] of Object.entries(MODES)) {
       const b = document.createElement('button'); b.textContent = v; b.dataset.mode = k;
-      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'overhead' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
+      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', modeCam(k)); if (k === 'derby') put('follow', '0'); syncUrl(); if (rebuild && W) build(); else restart(); };
       $('modes').append(b);
     }
-    if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'overhead' : mode === 'drive' ? 'chase' : 'orbit');
+    // (?cars=N with the derby: its cars control, so `vehicle-lab.html?mode=derby&cars=8` links.)
+    if (qs.get('mode') === 'derby' && qs.has('cars') && !qs.has('derbyCars')) put('derbyCars', qs.get('cars'));
+    if (!qs.has('cam')) put('cam', modeCam(mode));
     setMode(mode); showOuts(); shapeUi();
     let restartTimer = null;
     for (const c of controls) {
@@ -376,6 +414,7 @@
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
         else if (c.id === 'cam' || c.id === 'follow') cam.init = false;
+        else if (c.id === 'derbyPlayer' || c.id === 'aggression') { cmd({ derby: derbySpec() }); if (c.id === 'derbyPlayer') { lastDrive = ''; canvas.focus(); } }
         else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
@@ -513,7 +552,9 @@
       if (autoScale !== was) configure();
     }
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0, buildGen = 0;
-    const scene = () => (mode === 'mountain' ? 'mountain' : 'flat');
+    const scene = () => (mode === 'mountain' ? 'mountain' : mode === 'derby' ? 'derby' : 'flat');
+    // The derby's settings (rubble::vehicle_lab::derby::DerbySpec).
+    const derbySpec = () => ({ obstacles: get('derbyObstacles'), player: get('derbyPlayer'), aggression: get('aggression'), seed: get('derbySeed') ?? 1 });
     const mountainSpec = () => ({ terrain: get('terrain'), seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
       // The drawing's resolution: the display's pixels times the render scale (the
@@ -536,14 +577,16 @@
       try {
         const car = buildingCar = await carOf(get('car'));
         // A device the auto detail found short of memory runs SMALL_DEVICE_CARS (the status says so).
-        const asked = Math.min(8, Math.max(1, Math.round(get('cars') || 1)));
-        const nCars = smallDevice ? Math.min(SMALL_DEVICE_CARS, asked) : asked, n = nCars + (get('parked') ? 1 : 0);
+        // (The derby: its own cars control, up to 32 cars; no parked car.)
+        const derby = mode === 'derby';
+        const asked = derby ? Math.min(32, Math.max(2, Number(get('derbyCars')) || 4)) : Math.min(8, Math.max(1, Math.round(get('cars') || 1)));
+        const nCars = smallDevice ? Math.min(derby ? 2 : SMALL_DEVICE_CARS, asked) : asked, n = nCars + (get('parked') && !derby ? 1 : 0);
         // The second car's paint: built when first asked for (kept, like the first).
         while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), parked: get('parked'), cars: nCars, mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
@@ -588,10 +631,15 @@
         const nv = lab.vehicleCount(), was = followWant ?? get('follow');
         followWant = null;
         $('follow').textContent = '';
-        for (let k = 0; k < nv; k++) $('follow').add(new Option(k === 0 ? 'car 1 (readouts)' : get('parked') && k === nv - 1 ? `car ${k + 1} (parked)` : `car ${k + 1}`, String(k)));
+        for (let k = 0; k < nv; k++) $('follow').add(new Option(k === 0 ? (derby ? 'car 1 (yours; readouts)' : 'car 1 (readouts)') : get('parked') && !derby && k === nv - 1 ? `car ${k + 1} (parked)` : `car ${k + 1}`, String(k)));
         put('follow', Number(was) >= 0 && Number(was) < nv ? String(Number(was)) : '0');
         $('followRow').style.display = nv > 1 ? '' : 'none';
         w.pacer = new FramePacer(w.RATE, 0);
+        // The derby's readback every drawn frame: every car's origin and wheel records
+        // (a few kB), for the AI and the round (Rust).
+        const dp = lab.derbyPlan(world);
+        w.derbyPlan = dp.length === 4 ? dp : null;
+        w.derbyPool = w.derbyPlan ? Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: dp[1] + dp[3], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) : [];
         w.wire = structureView(device, world);
         await gpuPhase(device, `uploading ${n === 1 ? 'the car' : `${n} cars`} to the GPU (${car.detail === 'lite' ? 'the lighter' : 'the full'} mesh)`, () => { for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i)); })
           .catch((e) => { try { w.cars.destroy(); w.env?.destroy?.(); world.free(); lab.free(); } catch {} throw e; });
@@ -609,6 +657,7 @@
         cmd({ perfFlags: perfFlags() });
         cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         W.spec = spec;
+        builtScene = spec.scene;
         configure();
         structureOpts();
         gpuSeg.clear(); gpuTotal = []; gpuRun = [];
@@ -704,7 +753,7 @@
     function watch() {
       document.getElementById('stopped')?.remove();
       W.stop = createStabilityStop(W.world.explicitHealth() ?? null, { params: { mode, script: script?.name ?? null, spec: { ...W.spec, vehicle: undefined, parts: undefined } } });
-      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || mode === 'mountain');
+      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || mode === 'mountain' || mode === 'derby');
     }
     async function restart(first = false) {
       if (!W) return;
@@ -712,7 +761,8 @@
       const k = get('crashKind');
       const spec = { scene: scene(), mountain: mountainSpec(),
         crash: mode === 'crash' ? { kind: k, kmh: get('kmh'), overlap: get('overlap'), offset: get('offset'), angle: get('angle') } : null,
-        start: mode === 'drive' && get('startKmh') > 0 && !script ? { kmh: get('startKmh') } : null };
+        start: mode === 'drive' && get('startKmh') > 0 && !script ? { kmh: get('startKmh') } : null,
+        ...(mode === 'derby' ? { derby: derbySpec() } : {}) };
       try {
         W.lab.restart(W.world, spec);
         if (script) W.lab.setScript(script);
@@ -724,9 +774,11 @@
       $('ppause').textContent = 'Pause';
       for (const p of W.pool) p.stale = p.busy;
       for (const p of W.camPool) p.stale = p.busy;
+      for (const p of W.derbyPool) p.stale = p.busy;
+      derbyShown = null; $('derbyFeed').textContent = '';
       restartMs = performance.now() - t0; restartAt = t0; if (!first) restarts++;
       const name = W.car.name;
-      $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'mountain' ? `${get('terrain') === 'ledges' ? 'ledged ' : ''}mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
+      $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'derby' ? `demolition derby, ${W.lab.vehicleCount()} cars${get('derbyObstacles') ? ', obstacles' : ''}` : scene() === 'mountain' ? `${get('terrain') === 'ledges' ? 'ledged ' : ''}mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
       $('capTitle').textContent = script?.title || `Vehicle Lab · ${MODES[mode]}${mode === 'crash' ? `: ${$('crashKind').selectedOptions[0].text}, ${get('kmh')} km/h` : ''}`;
       $('capSub').textContent = `${name}, 2 kHz node–beam, in one GPU World${get('surface') ? ' · surface contact on' : ''}`;
       // The first reading, before any step: the aim, the plates and the camera need the car.
@@ -841,6 +893,8 @@
     let lastDrive = '';
     function applyDrive() {
       if (script || mode === 'mountain' || mode === 'crash') return;
+      // (The derby with no player: every car is the AI's.)
+      if (mode === 'derby' && !get('derbyPlayer')) return;
       const d = { forward: (key('KeyW', 'ArrowUp') ? 1 : 0) - (key('KeyS', 'ArrowDown') ? 1 : 0), steer: (key('KeyD', 'ArrowRight') ? 1 : 0) - (key('KeyA', 'ArrowLeft') ? 1 : 0), brake: 0, handbrake: key('Space') ? 1 : 0 };
       const k = JSON.stringify(d);
       if (k !== lastDrive) { lastDrive = k; cmd({ drive: d }); }
@@ -907,6 +961,21 @@
             const a = slot.buf.getMappedRange();
             w.lab.ingestFollow(k, new Uint32Array(a, 0, len / 4), new Uint32Array(a, len, 4), taken);
           }
+        } catch (e) { console.warn(e); } finally { slot.buf.unmap(); slot.busy = false; }
+      };
+    }
+    // The derby's readback (w.derbyPool): every car's origin and wheel records, handed to
+    // the lab (Rust) for the AI and the round.
+    function derbyReadback(w, enc) {
+      const p = w.derbyPlan, slot = p && w.derbyPool.find((s) => !s.busy);
+      if (!slot) return null;
+      slot.busy = true; slot.stale = false;
+      enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), p[0], slot.buf, 0, p[1]);
+      enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), p[2], slot.buf, p[1], p[3]);
+      return async () => {
+        try { await slot.buf.mapAsync(GPUMapMode.READ); } catch { slot.busy = false; return; }
+        try {
+          if (W === w && !slot.stale) { const a = slot.buf.getMappedRange(); w.lab.ingestDerby(w.world, new Uint32Array(a, 0, p[1] / 4), new Uint32Array(a, p[1], p[3] / 4)); }
         } catch (e) { console.warn(e); } finally { slot.buf.unmap(); slot.busy = false; }
       };
     }
@@ -1081,6 +1150,7 @@
         if (finish && wantBeams) lastBeamRead = now;
       }
       const camFinish = camReadback(w, enc);
+      const derbyFinish = derbyReadback(w, enc);
       if (dq) { enc.resolveQuerySet(dq.set, 0, 6, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 48); }
       device.queue.submit([enc.finish()]);
       if (dq) {
@@ -1094,7 +1164,8 @@
       }
       // (The recorder waits for both; the live page lets the camera's land when it does.)
       const cf = camFinish ? camFinish() : null;
-      return Promise.all([finish ? finish() : null, RECORD ? cf : null]);
+      const df = derbyFinish ? derbyFinish() : null;
+      return Promise.all([finish ? finish() : null, RECORD ? cf : null, RECORD ? df : null]);
     }
     // The draw timer's queries and buffers, one set a device; null without timestamp
     // queries or while the last reading is still out (that frame is not timed).
@@ -1214,9 +1285,42 @@
       stepHist.forEach((ms, i) => { const px = w * i / 600, py = h - h * Math.min(top, ms) / top; if (i) x.lineTo(px, py); else x.moveTo(px, py); });
       x.stroke();
     }
+    // The derby's round on screen (every number from the lab's DerbyGame::json): cars
+    // left, the player's damage, the clock, the knock-outs as they happen, the result.
+    let derbyShown = null;
+    const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+    function derbyHud() {
+      const g = mode === 'derby' ? W.lab.derby() : null;
+      window.__derbyState = g;
+      if (!g) { $('derbyOver').style.display = 'none'; return; }
+      const me = g.player != null ? g.cars[g.player] : null;
+      const shown = g.player != null ? me : null;
+      $('derbyHud').innerHTML = `<span><span class="big">${g.left}</span> / ${g.cars.length} cars left</span>`
+        + (shown ? `<span>${shown.out ? `<span class="bad">OUT: ${esc(shown.out)}</span>` : `damage <span class="bar"><i style="width:${(100 * shown.damage).toFixed(0)}%"></i></span> ${(100 * shown.damage).toFixed(0)} %`}</span><span>${nf(Math.abs(shown.kmh))} km/h</span>` : '<span class="muted">spectating</span>')
+        + `<span class="big">${clock(g.t)}</span><span class="muted">of ${clock(g.limit)}</span>`;
+      // New events (knock-outs, the result) for the feed, newest at the bottom.
+      const feed = $('derbyFeed');
+      const key = g.events.map((e) => e.t + e.text).join('|');
+      if (key !== derbyShown) {
+        derbyShown = key;
+        feed.innerHTML = g.events.slice(0, 6).reverse().map((e) => `<div>${clock(e.t)} · ${esc(e.text)}</div>`).join('');
+      }
+      const over = $('derbyOver');
+      over.style.display = g.over ? 'block' : 'none';
+      if (g.over) {
+        const w = g.winner;
+        $('derbyResult').textContent = w == null ? 'No winner' : w === g.player ? 'You win!' : `Car ${w + 1} wins`;
+        const place = me ? 1 + g.cars.filter((c, k) => k !== g.player && (!c.out || (me.out && c.outAt > me.outAt))).length : null;
+        $('derbyResultSub').textContent = `after ${clock(g.t)}` + (me && w !== g.player ? ` · you came ${place} of ${g.cars.length}${me.out ? ` (${me.out})` : ''}` : '');
+      }
+    }
+    $('derbyAgain').onclick = () => { restart(); canvas.focus(); };
+    $('derbyNew').onclick = () => { restart(); canvas.focus(); };
+    window.__derby = () => W?.lab.derby();
     let lastStats = null;
     function hud() {
       if (!W) return;
+      derbyHud();
       const s = W.lab.stats(); lastStats = s;
       const c = s.car, p = c.penetration, g = gpuSplit(), RATE = W.RATE;
       const rt = simRate / RATE / (slow() || 1);

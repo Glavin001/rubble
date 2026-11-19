@@ -18,6 +18,7 @@
 //! Nothing here changes solver behaviour: the lab places bodies, reads state and counts.
 
 pub mod cpu;
+pub mod derby;
 pub mod monitor;
 pub mod mountain;
 
@@ -59,6 +60,28 @@ pub const MAX_OBSTACLE_BODIES: usize = 240;
 pub enum Scene {
     Flat,
     Mountain,
+    /// The demolition derby's walled arena ([`derby`]): a scene of its own build (its
+    /// cars' static shapes are the arena's walls and ramps, not the flat arena's).
+    Derby,
+}
+
+impl Scene {
+    pub fn name(self) -> &'static str {
+        match self {
+            Scene::Flat => "flat",
+            Scene::Mountain => "mountain",
+            Scene::Derby => "derby",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "flat" => Some(Scene::Flat),
+            "mountain" => Some(Scene::Mountain),
+            "derby" => Some(Scene::Derby),
+            _ => None,
+        }
+    }
 }
 
 /// How a lab is built.
@@ -131,6 +154,8 @@ pub struct LabOptions {
     pub vehicle_sleep_cfg: VehicleSleep,
     /// The car's named parts (beam lists) for the per-part numbers.
     pub parts: Vec<(String, Vec<u32>)>,
+    /// The derby's settings (the Derby scene).
+    pub derby: derby::DerbySpec,
     /// On the flat arena, where the other cars of [`Self::cars`] start, in order (the
     /// second car first); a car past the list stands in the row as before. JSON
     /// `others: [{ x, z, angle (degrees), kmh, lift }]` (the scenario matrix's head-on
@@ -169,6 +194,7 @@ impl Default for LabOptions {
             vehicle_sleep: false,
             vehicle_sleep_cfg: VehicleSleep::default(),
             parts: Vec::new(),
+            derby: derby::DerbySpec::default(),
             others: Vec::new(),
             structures: Vec::new(),
         }
@@ -292,11 +318,7 @@ impl LabOptions {
             }
         }
         Self {
-            scene: if v.get("scene").and_then(Value::as_str) == Some("mountain") {
-                Scene::Mountain
-            } else {
-                Scene::Flat
-            },
+            scene: v.get("scene").and_then(Value::as_str).and_then(Scene::from_name).unwrap_or(Scene::Flat),
             surface_contact: v
                 .get("surface")
                 .and_then(Value::as_bool)
@@ -358,6 +380,7 @@ impl LabOptions {
             vehicle_sleep: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).0,
             vehicle_sleep_cfg: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).1,
             parts,
+            derby: derby::DerbySpec::from_json(v.get("derby").unwrap_or(&Value::Null), d.derby),
             others: v
                 .get("others")
                 .and_then(Value::as_array)
@@ -846,7 +869,7 @@ impl Bench {
 
     fn ground(&self) -> f64 {
         match self.opts.scene {
-            Scene::Flat => f64::from(GROUND),
+            Scene::Flat | Scene::Derby => f64::from(GROUND),
             Scene::Mountain => self.car.centre.y - 1.0,
         }
     }
@@ -1834,7 +1857,7 @@ impl Bench {
         if best.is_finite() {
             return (o + (d * best).as_dvec3(), "car");
         }
-        if self.opts.scene == Scene::Flat && d.y < -1e-4 {
+        if self.opts.scene != Scene::Mountain && d.y < -1e-4 {
             let t = (f64::from(GROUND) - o.y) / f64::from(d.y);
             if t > 0.0 && t < 500.0 {
                 return (o + d.as_dvec3() * t, "ground");
@@ -1883,8 +1906,21 @@ impl Bench {
         if let Some(t) = self.mountain_ray(target, d).0 {
             free = free.min(f64::from(t) - MARGIN);
         }
-        if self.opts.scene == Scene::Flat && d.y < -1e-6 {
+        if self.opts.scene != Scene::Mountain && d.y < -1e-6 {
             free = free.min((f64::from(GROUND) + 0.3 - target.y) / f64::from(d.y));
+        }
+        if self.opts.scene == Scene::Derby {
+            // The arena's walls (about a circle; up to their top): the eye stays inside.
+            let r = f64::from(derby::RADIUS) - MARGIN;
+            let (o, h) = (DVec3::new(target.x, 0.0, target.z), DVec3::new(f64::from(d.x), 0.0, f64::from(d.z)));
+            let (a, b, c) = (h.length_squared(), o.dot(h), o.length_squared() - r * r);
+            if a > 1e-9 && c < 0.0 {
+                let t = (-b + (b * b - a * c).sqrt()) / a;
+                let y = target.y + f64::from(d.y) * t;
+                if t < free && y < f64::from(GROUND + derby::WALL_HEIGHT) {
+                    free = t;
+                }
+            }
         }
         free.clamp(0.5f64.min(len), len)
     }
@@ -1924,7 +1960,7 @@ impl Bench {
         });
         json!({
             "t": self.t,
-            "scene": if self.opts.scene == Scene::Mountain { "mountain" } else { "flat" },
+            "scene": self.opts.scene.name(),
             "surfaceContact": self.opts.surface_contact,
             "ownTravel": self.opts.own_travel_reach,
             "pieceLabels": self.opts.piece_labels,
@@ -2050,6 +2086,16 @@ pub fn arena_fixtures() -> Vec<(Vec3, Vec3, Quat)> {
     ]
 }
 
+/// The scene's fixtures (in the cars' solver and as World fixture bodies): the flat
+/// arena's ramp and kerb (far overhead on the mountain), or the derby's walls and ramps.
+pub fn scene_fixtures(opts: &LabOptions) -> Vec<(Vec3, Vec3, Quat)> {
+    if opts.scene == Scene::Derby {
+        derby::arena_fixtures(opts.derby.obstacles)
+    } else {
+        arena_fixtures()
+    }
+}
+
 /// Where and how the car starts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Start {
@@ -2135,7 +2181,7 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
             d.roll(start.speed);
         }
     }
-    for (centre, half, rot) in arena_fixtures() {
+    for (centre, half, rot) in scene_fixtures(opts) {
         let up = if mountain {
             Vec3::new(0.0, 1.0e4, 0.0)
         } else {
@@ -2443,6 +2489,8 @@ pub struct Lab {
     /// camera's readback of the car it follows.
     spans: Vec<(u64, u64)>,
     follow: FollowPose,
+    /// The derby's round (the Derby scene).
+    pub derby: Option<derby::DerbyGame>,
 }
 
 fn deg(v: &Value, k: &str, d: f64) -> f32 {
@@ -2482,7 +2530,7 @@ impl Lab {
             },
             [400.0, 0.5, 400.0],
         )?;
-        for (k, (_, half, _)) in arena_fixtures().into_iter().enumerate() {
+        for (k, (_, half, _)) in scene_fixtures(opts).into_iter().enumerate() {
             let b = world.create_body(&BodyDef {
                 position: poses[k + 1].position,
                 rotation: poses[k + 1].rotation,
@@ -2496,7 +2544,7 @@ impl Lab {
 
     /// Where the scene's bodies stand: the slab, then the fixtures.
     fn scene_poses(opts: &LabOptions) -> Vec<Transform> {
-        let away = if opts.scene == Scene::Flat {
+        let away = if opts.scene != Scene::Mountain {
             0.0
         } else {
             2.0e5
@@ -2505,7 +2553,7 @@ impl Lab {
             [0.0, GROUND - 0.5 - away, 0.0],
             Quat::IDENTITY.to_array(),
         )];
-        for (centre, _, rot) in arena_fixtures() {
+        for (centre, _, rot) in scene_fixtures(opts) {
             out.push(Transform::new(
                 (centre - Vec3::new(0.0, away, 0.0)).to_array(),
                 rot.to_array(),
@@ -2519,6 +2567,20 @@ impl Lab {
         opts: &LabOptions,
         start: Option<Start>,
     ) -> anyhow::Result<Vec<ExplicitBeams>> {
+        if opts.scene == Scene::Derby {
+            // Round the arena's edge facing the middle (derby::starts); no parked car.
+            let mut cars: Vec<ExplicitBeams> = Vec::new();
+            for (x, z, yaw) in derby::starts(opts.cars.clamp(1, MAX_CARS) as usize) {
+                let mut c = lab_car(template, opts, Some(Start { yaw, at: [x, z], ..Start::default() }));
+                if let Some(first) = cars.first() {
+                    c.origin = first.origin;
+                    c.ground = first.ground;
+                    c.shapes = first.shapes.clone();
+                }
+                cars.push(c);
+            }
+            return Ok(cars);
+        }
         let car = lab_car(template, opts, start);
         let mut cars = vec![car];
         // The other cars of the multi-car benchmark (`LabOptions::cars`).
@@ -2709,13 +2771,84 @@ impl Lab {
             fleet: Vec::new(),
             spans,
             follow: FollowPose::default(),
+            derby: None,
         };
         lab.fleet_reset(fleet_cars);
         lab.bench.begin(&mut WorldRig {
             world: &mut world,
             bodies: &mut lab.bodies,
         })?;
+        lab.derby_begin(&mut world)?;
         Ok((world, lab))
+    }
+
+    /// The Derby scene's round, new: the AI and the round state, and the arena's props
+    /// (with the obstacles on). Nothing in other scenes.
+    fn derby_begin(&mut self, world: &mut World) -> anyhow::Result<()> {
+        let opts = &self.bench.opts;
+        if opts.scene != Scene::Derby {
+            self.derby = None;
+            return Ok(());
+        }
+        let n = opts.cars.clamp(1, MAX_CARS) as usize;
+        let spec = opts.derby;
+        self.derby = Some(derby::DerbyGame::new(spec, n, self.car.drive.as_deref()));
+        if spec.obstacles {
+            let mut rig = WorldRig {
+                world,
+                bodies: &mut self.bodies,
+            };
+            for d in derby::arena_props() {
+                self.bench.obstacles.push(rig.spawn(&d)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Where the derby's poses are read each frame: every vehicle's origin record and
+    /// drive region in the misc buffer, as (byte offset, bytes) pairs; empty outside the
+    /// Derby scene.
+    pub fn derby_plan(&self, world: &World) -> Vec<u64> {
+        let (Some(_), Some(x)) = (&self.derby, world.explicit_vehicles()) else {
+            return Vec::new();
+        };
+        let Some(d) = x.layout().drive else {
+            return Vec::new();
+        };
+        let n = x.vehicle_count() as u64;
+        vec![0, 16 * n, u64::from(d.vehicle(0)) * 16, u64::from(d.stride) * 16 * n]
+    }
+
+    /// The derby's poses from a [`Self::derby_plan`] reading.
+    pub fn ingest_derby(&mut self, world: &World, origins: &[u32], drive: &[u32]) {
+        let stride = world.explicit_vehicles().and_then(|x| x.layout().drive).map_or(0, |d| d.stride as usize);
+        if let (Some(g), true) = (self.derby.as_mut(), stride > 0) {
+            g.ingest_drive(origins, drive, stride);
+        }
+    }
+
+    /// The derby's round for the page (`DerbyGame::json`); null outside the Derby scene.
+    pub fn derby_json(&self) -> Value {
+        self.derby.as_ref().map_or(Value::Null, derby::DerbyGame::json)
+    }
+
+    /// Per car of a beam reading (the first car's then its copies'): damage and which
+    /// wheels are on its main body, for the derby.
+    fn derby_damage(g: &mut derby::DerbyGame, model: &CarModel, car: &ExplicitBeams, v: usize, beams: &[(bool, f32)], pieces: &Pieces) {
+        let nb = model.beams.len().min(beams.len()).min(model.rest0.len());
+        let (mut broken, mut yielded) = (0u32, 0u32);
+        for j in 0..nb {
+            broken += u32::from(beams[j].0);
+            yielded += u32::from(!beams[j].0 && (beams[j].1 - model.rest0[j]).abs() > 1e-3 * model.rest0[j].abs());
+        }
+        let attached = car.drive.as_ref().map(|d| {
+            d.config
+                .wheels
+                .iter()
+                .map(|w| pieces.piece.get(w.node1 as usize).is_some_and(|p| *p == pieces.main))
+                .collect()
+        });
+        g.set_damage(v, yielded, broken, nb as u32, attached);
     }
 
     /// Start over in place, in well under a second: no device, pipeline or buffer is
@@ -2735,7 +2868,16 @@ impl Lab {
         match v.get("scene").and_then(Value::as_str) {
             Some("mountain") => opts.scene = Scene::Mountain,
             Some("flat") => opts.scene = Scene::Flat,
+            Some("derby") => opts.scene = Scene::Derby,
             _ => {}
+        }
+        // (The derby's arena is its own build: its cars' static shapes are other ones.)
+        anyhow::ensure!(
+            (opts.scene == Scene::Derby) == (self.bench.opts.scene == Scene::Derby),
+            "vehicle lab: the derby arena and the other scenes are separate builds (rebuild to switch)"
+        );
+        if let Some(d) = v.get("derby").filter(|d| !d.is_null()) {
+            opts.derby = derby::DerbySpec::from_json(d, opts.derby);
         }
         if v.get("mountain").is_some() {
             let mut merged = json!({ "mountain": v["mountain"] });
@@ -2806,11 +2948,15 @@ impl Lab {
         for (c, stale) in self.fleet.iter_mut().zip(stale) {
             c.labels_due = stale.then(Vec::new);
         }
+        self.bench.begin(&mut WorldRig {
+            world,
+            bodies: &mut self.bodies,
+        })?;
+        self.derby_begin(world)?;
         let mut rig = WorldRig {
             world,
             bodies: &mut self.bodies,
         };
-        self.bench.begin(&mut rig)?;
         if let Some(c) = crash {
             // The car's box as placed (facing +z; its left is +x).
             let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
@@ -2983,6 +3129,27 @@ impl Lab {
     }
 
     pub fn command(&mut self, world: &mut World, cmd: &Value) -> anyhow::Result<Value> {
+        // { derby: { player, aggression } }: the derby's live settings (the obstacles are a
+        // restart's: `restart({ derby: { obstacles } })`).
+        if let Some(d) = cmd.get("derby") {
+            let spec = derby::DerbySpec::from_json(d, self.bench.opts.derby);
+            self.bench.opts.derby.player = spec.player;
+            self.bench.opts.derby.aggression = spec.aggression;
+            if let Some(g) = self.derby.as_mut() {
+                g.set_spec(spec);
+            }
+            return Ok(json!({ "derby": self.bench.opts.derby.json() }));
+        }
+        // The player's keys in the derby: only for the player's car while it is in (with
+        // no player, or once it is out, the round drives it).
+        if cmd.get("drive").is_some() {
+            if let Some(g) = self.derby.as_mut() {
+                match g.player() {
+                    Some(p) if g.cars.get(p).is_some_and(|c| c.out.is_none()) && !g.over => g.player_input(),
+                    _ => return Ok(Value::Null),
+                }
+            }
+        }
         // { ownTravel: bool }: the cars' anti-clip padding by each contacter's own travel
         // (LabOptions::own_travel_reach), now and after a restart.
         if let Some(on) = cmd.get("ownTravel").and_then(Value::as_bool) {
@@ -3172,6 +3339,15 @@ impl Lab {
                 x.set_coupling_groups(v, &self.groups[v]);
             }
         }
+        // The derby: the round's knock-outs and the AI's drive input (only changes sent).
+        if let Some(g) = self.derby.as_mut() {
+            let inputs = g.tick(self.bench.dt);
+            if let Some(x) = world.explicit_vehicles_mut() {
+                for (v, i) in inputs {
+                    x.set_drive_input(v, i);
+                }
+            }
+        }
         self.bench.before_step(&mut WorldRig {
             world,
             bodies: &mut self.bodies,
@@ -3251,6 +3427,7 @@ impl Lab {
             use engine_softbody::explicit_debris::piece_labels;
             let ttl = self.bench.debris.ttl;
             let label = self.bench.opts.piece_labels;
+            let mut v_next = 1;
             for (c, b) in self.fleet.iter_mut().zip(rest.chunks_exact(own)) {
                 let broken: Vec<bool> = (0..own / 8).map(|j| f(b[8 * j + 6]) != 0.0).collect();
                 let pieces = Pieces::from_beams(
@@ -3262,6 +3439,11 @@ impl Lab {
                     c.retire_due = Some(c.debris.retired.clone());
                 }
                 c.debris.take_events();
+                if let Some(g) = self.derby.as_mut() {
+                    let read: Vec<(bool, f32)> = (0..own / 8).map(|j| (broken[j], f(b[8 * j]))).collect();
+                    Self::derby_damage(g, &self.bench.model, &self.car, v_next, &read, &pieces);
+                }
+                v_next += 1;
                 if label {
                     let labels = if pieces.mass.len() > 1 { piece_labels(&self.car, &pieces, &broken) } else { Vec::new() };
                     if labels != c.labels {
@@ -3280,6 +3462,9 @@ impl Lab {
             &frame,
             taken,
         );
+        if let (Some(b), Some(pieces), Some(g)) = (beams.as_deref(), self.bench.pieces.as_ref(), self.derby.as_mut()) {
+            Self::derby_damage(g, &self.bench.model, &self.car, 0, b, pieces);
+        }
         if let (Some(b), Some(pieces), true) = (beams.as_deref(), self.bench.pieces.as_ref(), self.bench.opts.piece_labels) {
             use engine_softbody::explicit_debris::piece_labels;
             let broken: Vec<bool> = b.iter().map(|x| x.0).collect();

@@ -265,4 +265,24 @@ impl WebVehicleLab {
     pub fn time(&self) -> f64 {
         self.lab.bench.t
     }
+
+    /// The derby's readback each frame (`Lab::derby_plan`): every car's origin record and
+    /// drive records in `explicitMiscBuffer`, as byte (offset, size) pairs; empty outside
+    /// the Derby scene.
+    #[wasm_bindgen(js_name = derbyPlan)]
+    pub fn derby_plan(&self, world: &WebWorld) -> Vec<f64> {
+        self.lab.derby_plan(&world.world).iter().map(|&x| x as f64).collect()
+    }
+
+    /// One [`Self::derby_plan`] reading: the cars' poses for the derby's AI and round.
+    #[wasm_bindgen(js_name = ingestDerby)]
+    pub fn ingest_derby(&mut self, world: &WebWorld, origins: &[u32], drive: &[u32]) {
+        self.lab.ingest_derby(&world.world, origins, drive);
+    }
+
+    /// The derby's round (`rubble::vehicle_lab::derby::DerbyGame::json`): time, cars left,
+    /// each car's state, the winner; null outside the Derby scene.
+    pub fn derby(&self) -> JsValue {
+        js(&self.lab.derby_json())
+    }
 }

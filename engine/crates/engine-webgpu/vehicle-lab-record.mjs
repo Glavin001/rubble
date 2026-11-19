@@ -266,7 +266,10 @@ for (const run of runs.length ? runs : ['shoot-box']) {
   }
   await grabTo(join(OUT, 'stills', `${name}-end.jpg`), 85);
   const stats = await evaluate('window.__stats()');
-  writeFileSync(join(OUT, `${name}.stats.json`), JSON.stringify({ name, query, videoSeconds: frameNo / FPS, simulatedSeconds: st.t, stats }, null, 1));
+  // (The derby's round too, when the run is one: Lab::derby_json; with --eval
+  // tools/vehicle-lab/derby-probe.js, its log a second.)
+  const derby = await evaluate('window.__derby?.() ? { ...window.__derby(), log: window.__abLog ?? null } : null');
+  writeFileSync(join(OUT, `${name}.stats.json`), JSON.stringify({ name, query, videoSeconds: frameNo / FPS, simulatedSeconds: st.t, stats, ...(derby ? { derby } : {}) }, null, 1));
   writeFileSync(join(OUT, `${name}.table.txt`), await evaluate('window.__table()'));
   const file = join(OUT, `vehicle-lab-${name}.mp4`);
   const enc = spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-framerate', String(FPS), '-i', join(frameDir, 'f%06d.jpg'),

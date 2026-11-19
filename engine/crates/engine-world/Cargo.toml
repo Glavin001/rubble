@@ -14,6 +14,8 @@ engine-webgpu.workspace = true
 engine-terrain.workspace = true
 engine-vehicle.workspace = true
 engine-softbody.workspace = true
+# The raycast wheels' records in the solver's misc buffer (the derby's poses).
+engine-exec.workspace = true
 engine-fracture.workspace = true
 engine-gpu-wait.workspace = true
 wgpu.workspace = true

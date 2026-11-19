@@ -303,7 +303,7 @@ impl CpuLab {
             proxied[i] = true;
         }
         // The lab's stand-in for the rigid solver.
-        let flat = self.bench.opts.scene == Scene::Flat;
+        let flat = self.bench.opts.scene != Scene::Mountain;
         for (ob, proxied) in self.objs.iter_mut().zip(proxied) {
             if ob.motion == Motion::Static {
                 continue;
