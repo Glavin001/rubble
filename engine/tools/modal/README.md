@@ -195,6 +195,32 @@ cannot hold the banks' pointer rewrites as host writes, and the device copies th
 them cost more than the small host copies the driver puts in the stream. With no gaps left
 between launches, a graph has nothing to remove.
 
+Where CUDA stands against the Mac (2026-11-19, `run.sh --cuda perf=0`, ms a frame; Mac =
+`run.sh --baseline`, wgpu on an M3 Max, the same fixtures). One thing changed at a time:
+
+| row | T4 strict | T4 default floats | T4 strict, L1 loads | L4 strict | Mac |
+|---|---|---|---|---|---|
+| drive | 3.90 | 3.71 | 3.65 | 3.28 | 3.93 |
+| tumble | 4.35 | 4.31 | 3.79 | 3.76 | 3.79 |
+| wall | 4.22 | 4.01 | 3.66 | 3.65 | 4.73 |
+| pile2 | 11.79 | 11.87 | 9.90 | 9.58 | 8.44 |
+| pile8 | 24.37 | 24.48 | 21.41 | 16.17 | 15.40 |
+| pile32 | 75.39 | 74.95 | 65.92 | 42.68 | 38.03 |
+| headon | 17.91 | 17.98 | 16.64 | 14.69 | 13.99 |
+| side | 13.48 | 13.45 | 12.12 | 10.64 | 9.88 |
+| truss | 1.68 | 2.34 | 1.27 | 1.33 | 1.53 |
+
+- Strict floats (`ENGINE_CUDA_FMAD=0`) cost nothing measurable: the bit-for-bit test mode is
+  also the timing mode.
+- `-dlcm=cg` (plain loads cached in L2 only, the correctness rule in `fatbin_threads`) costs 3
+  to 16 % a row; `ENGINE_CUDA_LOAD_CACHE=ca` is measurement only (a plain load may then read a
+  value another block changed by atomics). Keeping the speed means making those reads atomic
+  or coherent in the CUDA build, not flipping the flag.
+- The rest of the T4's gap on contact rows is the T4: on an L4 the same build is 0.75 to 1.1
+  times the Mac's time (pile32 1.12). Use the T4 for verdicts and ranking (cheapest, nearly
+  always available); an L4 for absolute numbers (Modal had none for some rows at times:
+  `NO RESULT (NO GPU)`).
+
 ## Cold kernel compiles (WebGPU route; read this first)
 
 wgpu creates each compute pipeline from SPIR-V, and NVIDIA's driver compiles it on the
