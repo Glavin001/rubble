@@ -38,6 +38,10 @@ fn main() -> anyhow::Result<()> {
         cpu.step();
     }
     let (mut l, mut st) = layout_and_statics(&cpu)?;
+    // --skin M: the pair list's skin (m; default 0.05).
+    if let Some(sk) = arg("--skin").map(|x| x.parse::<f32>().unwrap()) {
+        st.list_reach = st.cr + engine_softbody::explicit_contact::CLIP_DEPTH + sk;
+    }
     // --v2: the second layout (kernels/floor2.metal).
     if flag("--v2") {
         make_v2(&cpu, &mut l, &mut st)?;
@@ -163,6 +167,29 @@ fn main() -> anyhow::Result<()> {
         refs.push(c);
     }
     let cpu_ms = c0.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+    // The reference's own one-frame spread: each frame again from its start moved by up
+    // to a micron a node (what the one-frame defect is judged against).
+    let mut one: Vec<Defect> = Vec::new();
+    for fr in 1..=frames {
+        let mut c = refs[fr - 1].clone();
+        let mut sd = 0x1234_5679u32.wrapping_mul(fr as u32);
+        for n in &mut c.nodes {
+            let mut r = || {
+                sd = sd.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((sd >> 8) as f32 / 8388608.0 - 1.0) * 1.0e-6
+            };
+            n.pos += glam::Vec3::new(r(), r(), r());
+        }
+        for _ in 0..STEPS {
+            c.step();
+        }
+        let (mut d, r) = (Defect::default(), &refs[fr]);
+        for (a, b) in c.nodes.iter().zip(&r.nodes) {
+            d.pos = d.pos.max((a.pos - b.pos).length() as f64);
+            d.vel = d.vel.max((a.vel - b.vel).length() as f64);
+        }
+        one.push(d);
+    }
     println!("reference: {frames} frames and three perturbed runs in {:.1} s ({cpu_ms:.2} ms a frame, with clones)", t0.elapsed().as_secs_f64());
     // Car 0 runs free from the start; car 1 starts every frame from the reference's state
     // (the one-frame defect: what a frame of the GPU differs by, before chaos amplifies it).
@@ -171,8 +198,11 @@ fn main() -> anyhow::Result<()> {
     let first = f.snapshot(0);
     let mut first_bad = None;
     let mut worst = Defect::default();
+    let mut worst_ref = Defect::default();
+    let (mut defect_ok, mut defect_first) = (true, String::new());
     let mut verdict_ok = true;
-    println!("frame | gpu ms (2 cars) | one-frame defect: words, max pos mm, max vel mm/s | free run vs reference: node max mm, rms mm, com mm, KE %, broken, bent | reference's own spread: node max mm, com mm, KE %, broken, bent");
+    let mut verdict_first = String::new();
+    println!("frame | gpu ms (2 cars) | one-frame defect: words, max pos mm, max vel mm/s (the reference's own from a micron) | free run vs reference: node max mm, rms mm, com mm, KE %, broken, bent | reference's own spread: node max mm, com mm, KE %, broken, bent");
     for fr in 1..=frames {
         f.upload(1, &state_of(&refs[fr - 1], &f.l, &st));
         let ms = f.run(1);
@@ -180,6 +210,12 @@ fn main() -> anyhow::Result<()> {
         let (bad1, notes) = compare(&refs[fr], &g1);
         let d1 = Defect::of(&refs[fr], &g1);
         worst = worst.max(d1);
+        worst_ref = worst_ref.max(one[fr - 1]);
+        // (Inside ten times the reference's own one-frame spread, with a floor of 1 µm, 1 mm/s.)
+        if !(d1.pos <= 10.0 * one[fr - 1].pos + 1e-6 && d1.vel <= 10.0 * one[fr - 1].vel + 1e-3) && defect_ok {
+            defect_ok = false;
+            defect_first = format!(" (first at frame {fr}: pos {:.5} mm against {:.5}, vel {:.3} mm/s against {:.3})", d1.pos * 1e3, one[fr - 1].pos * 1e3, d1.vel * 1e3, one[fr - 1].vel * 1e3);
+        }
         let (bad0, _) = compare(&refs[fr], &g0);
         let mr = Metrics::of_cpu(&refs[fr]);
         let mg = Metrics::of_gpu(&refs[fr], &g0);
@@ -188,11 +224,14 @@ fn main() -> anyhow::Result<()> {
         // Inside three times the reference's own spread (with a floor of 0.01 mm, 0.01 %).
         let ok = !mg.nan && dev.node_max <= 3.0 * spread.node_max + 1e-5 && dev.com <= 3.0 * spread.com + 1e-5 && dev.ke <= 3.0 * spread.ke + 1e-4
             && dev.broken <= 3.0 * spread.broken + 2.0 && dev.bent <= 3.0 * spread.bent + 5.0;
+        if !ok && verdict_ok {
+            verdict_first = format!(" (first at frame {fr}: node {:.3} mm against {:.3}, com {:.3} against {:.3}, KE {:.3} % against {:.3}, broken {} against {}, bent {} against {}{})", dev.node_max * 1e3, spread.node_max * 1e3, dev.com * 1e3, spread.com * 1e3, dev.ke * 100.0, spread.ke * 100.0, dev.broken, spread.broken, dev.bent, spread.bent, if mg.nan { ", NaN" } else { "" });
+        }
         verdict_ok &= ok;
         if fr % every == 0 || fr == frames || (!ok && fr % every.max(1) == 0) {
             println!(
-                "{fr:5} | {ms:7.3} | {bad1:6} {:9.5} {:9.4} | {:9.4} {:8.4} {:8.4} {:7.3} {:3} {:4}{} | {:9.4} {:8.4} {:7.3} {:3} {:4}",
-                d1.pos * 1e3, d1.vel * 1e3, dev.node_max * 1e3, dev.node_rms * 1e3, dev.com * 1e3, dev.ke * 100.0, dev.broken, dev.bent,
+                "{fr:5} | {ms:7.3} | {bad1:6} {:9.5} {:9.4} ({:.5} {:.4}) | {:9.4} {:8.4} {:8.4} {:7.3} {:3} {:4}{} | {:9.4} {:8.4} {:7.3} {:3} {:4}",
+                d1.pos * 1e3, d1.vel * 1e3, one[fr - 1].pos * 1e3, one[fr - 1].vel * 1e3, dev.node_max * 1e3, dev.node_rms * 1e3, dev.com * 1e3, dev.ke * 100.0, dev.broken, dev.bent,
                 if mg.nan { " NaN" } else if bad0 == 0 { " =" } else { "" },
                 spread.node_max * 1e3, spread.com * 1e3, spread.ke * 100.0, spread.broken, spread.bent
             );
@@ -205,10 +244,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!(
-        "check: one-frame defect {} (worst over the run: pos {:.6} mm, vel {:.5} mm/s); free run {} the reference's own micron spread (x3); reference {cpu_ms:.2} ms a frame on the CPU",
-        match first_bad { None => "none: bit for bit every frame".to_string(), Some(f) => format!("first at frame {f}") },
-        worst.pos * 1e3, worst.vel * 1e3, if verdict_ok { "INSIDE" } else { "OUTSIDE" }
+        "check: one-frame defect {}; worst over the run pos {:.6} mm, vel {:.5} mm/s (the reference's own from a micron: {:.6} mm, {:.5} mm/s): {} ten times the reference's own{}",
+        match first_bad { None => "none: bit for bit every frame".to_string(), Some(f) => format!("first differing word at frame {f}") },
+        worst.pos * 1e3, worst.vel * 1e3, worst_ref.pos * 1e3, worst_ref.vel * 1e3, if defect_ok { "INSIDE" } else { "OUTSIDE" }, defect_first
     );
+    println!("check: free run {} three times the reference's own micron spread{}; reference {cpu_ms:.2} ms a frame on the CPU", if verdict_ok { "INSIDE" } else { "OUTSIDE" }, verdict_first);
     // Timing: `cars` cars, all from the free run's last state.
     let last = f.snapshot(0);
     f.cars = cars;
@@ -240,6 +280,7 @@ fn main() -> anyhow::Result<()> {
     if flag("--phases") {
         // Each phase's cost: a frame with it left out against the whole frame, from the
         // same state each time (saved after the check), medians of `--time` dispatches.
+        let v2names = [(0u32, "S0 node pass"), (1, "S1 centred scalars"), (2, "C1+C2 centred gather"), (3, "S3 beams"), (6, "S3 pair list check"), (4, "S4 force gather"), (5, "S4 pair rows"), (8, "hit passes")];
         let names = [(0u32, "S0 node pass"), (9, "S0 triangle breaks"), (11, "S0 groups bookkeeping"), (1, "S1 centred slots"), (2, "S2 centred per node"), (3, "S3 beams"), (4, "S4 node beam sums"), (10, "S4 records' groups"), (5, "S5a triangle frames"), (7, "S5c pair tests"), (8, "S6-S8 hits")];
         let k = time.max(20);
         let med = |skip: u32| {
@@ -250,7 +291,7 @@ fn main() -> anyhow::Result<()> {
         let all = med(0);
         let none = med(u32::MAX);
         println!("phases ({cars} cars; ms a frame, medians of {k}): whole {all:.4}, every phase left out {none:.4}");
-        for (bit, name) in names {
+        for (bit, name) in if flag("--v2") { v2names.to_vec() } else { names.to_vec() } {
             let t = med(1 << bit);
             println!("  {name:24} {:.4} ms (frame without it {t:.4})", all - t);
         }
