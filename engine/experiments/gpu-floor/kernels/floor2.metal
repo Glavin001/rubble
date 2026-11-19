@@ -25,6 +25,60 @@ struct Params
     uint rtLanes, rtNN, rtNT, rtNC, rtSteps, rtNG, rtRS, pad2;
 };
 #define SKIP(k) ((P.skip & (1u << (k))) != 0u)
+// (COLD_OPAQUE, measured and without effect: a pass that rarely runs taking its bases (the
+// car's block, the table, the lane, its node) through a workgroup word that is always 0,
+// so that nothing of it is computed before the substeps' loop. In `microbench
+// only=unchanging` such values in code that never runs slowed a phase updating 48
+// registers 2.3 times; here the parked frame was the same, 1.512 and 1.515.)
+// What a phase uses that does not change (its lane's roles and entry counts, the car's
+// block, the table) taken again at the phase's start, behind a load the compiler cannot see
+// through, instead of from the values read at the kernel's start. Those are alive through
+// every phase of every substep, and the compiler keeps such a value in a register
+// everywhere or in memory everywhere: the more code the kernel holds, the more of them are
+// in memory, and a hot loop then reads its bounds and bases from the stack every turn.
+// (LANE_LOCAL 0: as before; 1: the two gathers' entry counts only; 2: every phase marked;
+// 3: the gathers' copy of the node's position too, measured and erratic.)
+#ifndef LANE_LOCAL
+#define LANE_LOCAL 2
+#endif
+#define LANE_ROW_ \
+    const uint lz_ = atomic_load_explicit(&tgCount[2], memory_order_relaxed) >> 31; \
+    const uint4 lt_ = ((device const uint4*)(tabO_ + T_LANE))[lidO_ + lz_];
+#if LANE_LOCAL == 1
+#define LANE_ENTRIES LANE_ROW_ \
+    const uint entStart = lt_.y, entScalar = lt_.z & 255u, entPreAero = (lt_.z >> 8) & 255u, entCount = lt_.z >> 16;
+#define PHASE_LOCAL
+#elif LANE_LOCAL >= 2
+#define PHASE_LOCAL LANE_ROW_ \
+    const uint lid = lidO_ + lz_; \
+    device uint* const cb = cbO_ + lz_; \
+    device const uint* const tab = tabO_ + lz_; \
+    const uint ni = lt_.x == NONE ? 0u : lt_.x, tri = lt_.w; \
+    const uint entStart = lt_.y, entScalar = lt_.z & 255u, entPreAero = (lt_.z >> 8) & 255u, entCount = lt_.z >> 16;
+#define LANE_ENTRIES PHASE_LOCAL
+#else
+#define LANE_ENTRIES
+#define PHASE_LOCAL
+#endif
+#if LANE_LOCAL >= 3
+#define OPQF(x_) as_type<float>(as_type<uint>(x_) ^ lz_)
+#define OPQ3(v_) v3(OPQF((v_).x), OPQF((v_).y), OPQF((v_).z))
+#else
+#define OPQ3(v_) (v_)
+#endif
+#ifndef COLD_OPAQUE
+#define COLD_OPAQUE 0
+#endif
+#if COLD_OPAQUE
+#define COLD_BEGIN(word_) { \
+    const uint oz_ = (uint)atomic_load_explicit(&(word_), memory_order_relaxed); \
+    const uint niO_ = ni; \
+    { device uint* const cb = cbO_ + oz_; device const uint* const tab = tabO_ + oz_; const uint lid = lidO_ + oz_; const uint ni = niO_ + oz_;
+#define COLD_END } }
+#else
+#define COLD_BEGIN(word_) { {
+#define COLD_END } }
+#endif
 #if RUNTIME_SIZES
 #define Z_STEPS P.rtSteps
 #else
@@ -484,6 +538,9 @@ kernel void floorFrame(
     // One derived pointer a lane (a pointer a buffer was twenty live registers, past the
     // spill cliff: every operation then cost three times its price).
     device uint* const cb = big + car * CAR_WORDS;
+    device uint* const cbO_ = cb;
+    device const uint* const tabO_ = tab;
+    const uint lidO_ = lid;
     #define nodeState ((device float4*)(cb + O_NODE))
     #define recState ((device float4*)(cb + O_REC))
     #define groupsLast (cb + O_GROUPS)
@@ -585,6 +642,59 @@ kernel void floorFrame(
     // (The node's mass in a register: three device loads a step otherwise. Friction and the
     // flags are read where a contact or an immovable node needs them.)
     const float massN = nodeStatic[ni].x;
+    // (LIVE_DUMMY n, a measurement: n more values read here and needed at the kernel's
+    // end, on a path that never runs: what a value alive through the whole kernel costs.)
+#ifndef LIVE_DUMMY
+#define LIVE_DUMMY 0
+#endif
+#if LIVE_DUMMY > 0
+    const float ld0 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 0u);
+    const float ld1 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 2654435761u);
+    const float ld2 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 1013904226u);
+    const float ld3 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 3668339987u);
+#endif
+#if LIVE_DUMMY > 4
+    const float ld4 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 2027808452u);
+    const float ld5 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 387276917u);
+    const float ld6 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 3041712678u);
+    const float ld7 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 1401181143u);
+#endif
+#if LIVE_DUMMY > 8
+    const float ld8 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 4055616904u);
+    const float ld9 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 2415085369u);
+    const float ld10 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 774553834u);
+    const float ld11 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 3428989595u);
+#endif
+#if LIVE_DUMMY > 12
+    const float ld12 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 1788458060u);
+    const float ld13 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 147926525u);
+    const float ld14 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 2802362286u);
+    const float ld15 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 1161830751u);
+#endif
+#if LIVE_DUMMY > 16
+    const float ld16 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 3816266512u);
+    const float ld17 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 2175734977u);
+    const float ld18 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 535203442u);
+    const float ld19 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 3189639203u);
+#endif
+#if LIVE_DUMMY > 20
+    const float ld20 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 1549107668u);
+    const float ld21 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 4203543429u);
+    const float ld22 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 2563011894u);
+    const float ld23 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 922480359u);
+#endif
+#if LIVE_DUMMY > 24
+    const float ld24 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 3576916120u);
+    const float ld25 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 1936384585u);
+    const float ld26 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 295853050u);
+    const float ld27 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 2950288811u);
+#endif
+#if LIVE_DUMMY > 28
+    const float ld28 = as_type<float>(tab[T_LANE + lid * 4u + 0u] ^ 1309757276u);
+    const float ld29 = as_type<float>(tab[T_LANE + lid * 4u + 1u] ^ 3964193037u);
+    const float ld30 = as_type<float>(tab[T_LANE + lid * 4u + 2u] ^ 2323661502u);
+    const float ld31 = as_type<float>(tab[T_LANE + lid * 4u + 3u] ^ 683129967u);
+#endif
     if (isNode)
     {
         float4 p = nodeState[ni * 3], v = nodeState[ni * 3 + 1];
@@ -848,6 +958,7 @@ kernel void floorFrame(
         const bool anyTouch = fRoll || fHits || fShift;
         if (isNode && !SKIP(0))
         {
+            PHASE_LOCAL
             const float mass = massN;
             if (anyTouch) tw = (atomic_load_explicit(&touched[ni >> 3], memory_order_relaxed) >> ((ni & 7u) * 4u)) & 15u;
 #if HAS_IMMOVABLE
@@ -1078,7 +1189,22 @@ kernel void floorFrame(
         // ---- S1: the centred damping's scalars (last beam pass's slopes) ----
 #if SURF
         // (The body's box for this step's surface pass: the nodes are where the node pass
-        // left them. A warp reduces them from threadgroup memory.)
+        // left them. Each node's lane from its own registers (SURF_BOX_ATOM); one warp
+        // walking them from threadgroup memory was a chain of 17 loads a lane.)
+#ifndef SURF_BOX_ATOM
+#define SURF_BOX_ATOM 1
+#endif
+#if SURF_BOX_ATOM
+        if (isNode && !SKIP(21))
+        {
+            atomic_fetch_min_explicit(&tgS[0], ordF(Pown.x), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgS[1], ordF(Pown.y), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgS[2], ordF(Pown.z), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgS[3], ordF(Pown.x), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgS[4], ordF(Pown.y), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgS[5], ordF(Pown.z), memory_order_relaxed);
+        }
+#else
         if (lid < 32u && !SKIP(21))
         {
             V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
@@ -1095,6 +1221,7 @@ kernel void floorFrame(
             atomic_fetch_max_explicit(&tgS[4], ordF(hi.y), memory_order_relaxed);
             atomic_fetch_max_explicit(&tgS[5], ordF(hi.z), memory_order_relaxed);
         }
+#endif
 #endif
 #if OWN
         cOwn = v3(0, 0, 0);
@@ -1198,7 +1325,8 @@ kernel void floorFrame(
         V3 Pn = v3(0, 0, 0), Vn = v3(0, 0, 0);
         if (isNode && !SKIP(2))
         {
-            V3 Ps = Pown;
+            LANE_ENTRIES
+            V3 Ps = OPQ3(Pown);
 #if OWN
             V3 c = cOwn;
 #else
@@ -1249,6 +1377,7 @@ kernel void floorFrame(
         // ---- C2: published ----
         if (isNode && !SKIP(2))
         {
+            PHASE_LOCAL
             { Pown = (Pn); SETP(ni, Pown); }
             { Vown = (Vn); SETV(ni, Vown); }
         }
@@ -1449,6 +1578,7 @@ kernel void floorFrame(
         // box covers the reach now and 2·D.
         if (isNode && !SKIP(6))
         {
+            PHASE_LOCAL
             float4 pb = pBuild[ni];
             V3 rel = (Pown - v3(pb)) - (TGP(REFNODE) - v3(tgPB[0], tgPB[1], tgPB[2]));
             float D = fmax(fmax(fabs(rel.x), fabs(rel.y)), fabs(rel.z));
@@ -1695,7 +1825,8 @@ kernel void floorFrame(
         // ---- S4: the beam pass gathered per node; the triangles' listed pairs ----
         if (isNode && !SKIP(4))
         {
-            V3 Ps = Pown;
+            LANE_ENTRIES
+            V3 Ps = OPQ3(Pown);
             V3 f = v3(0.0f, massN * GRAVITY, 0.0f);
 #if OWN
             f = f + fOwn;
@@ -1748,6 +1879,7 @@ kernel void floorFrame(
 #if COLLIDE
         if (isTri && !SKIP(5))
         {
+            PHASE_LOCAL
             // (No node holds a side unless the last step had a contact: the held byte is read
             // only then.)
             const bool anyHeld = tgFlags[F_HELD] != 0u;
@@ -2307,9 +2439,21 @@ kernel void floorFrame(
 #endif
         // (SURF_EMPTY, a measurement: the pass's code left out of the kernel, the words
         // around it kept; it tells the pass's cost from its code's presence.)
+// (SURF_CUT k, a measurement: the pass with its later stages left out of the kernel, for
+// what a stage's presence costs a frame that does not run it: 1 no apply, 2 no staged
+// stages, 3 no narrow tests, 4 nothing after the search, 5 no search.)
+#ifndef SURF_CUT
+#define SURF_CUT 0
+#endif
+// (SURF_SUB bits, the same for the staged stages apart: 1 no stage A, 2 no B, 4 no R of
+// triangles, 8 no R of beams.)
+#ifndef SURF_SUB
+#define SURF_SUB 0
+#endif
 #if !SURF_EMPTY
         if (!SKIP(21))
         {
+            COLD_BEGIN(tgS[10])
             // A slot is near when the body's box (reduced in the S1 phase, after the node
             // pass), padded by the band, meets its cull box: an element's padded box is inside
             // the body's, so no other slot passes `near`. A near slot goes into the scalars'
@@ -2400,6 +2544,7 @@ kernel void floorFrame(
                     for (uint hf_ = 0u; hf_ < 2u; hf_++) for (uint m_ = hf_ == 0u ? h0_ : h1_; m_ != 0u; m_ &= m_ - 1u) { \
                         const uint i_ = uint(atomic_fetch_add_explicit(&tgS[8], 1, memory_order_relaxed)); \
                         if (i_ < SPAIR_CAP) surfPair[i_] = (e_) | (hf_ * 32u + ctz(m_)) << 16; } }
+#if SURF_CUT < 5
                 if (isTri)
                 {
                     uint4 tn = tris[tri];
@@ -2423,22 +2568,26 @@ kernel void floorFrame(
                     float3 thi = sadd3(x0, float3(CR, CR, CR));
                     SURF_NEAR(NT + NSEG + ni, tlo, thi)
                 }
+#endif
                 BAR;
                 const uint npair = uint(atomic_load_explicit(&tgS[8], memory_order_relaxed));
 #ifdef EMU_TRACE
                 if (lid == 0u) fprintf(stderr, "T car %u step %u: surface slots near %u, pairs %u\n", car, step, popcount(sa0) + popcount(sa1), npair);
 #endif
+#if SURF_CUT < 4
                 if (npair != 0u && !SKIP(22))
                 {
                     if (lid == 0 && npair > SPAIR_CAP) atomic_fetch_or_explicit(&tgS[11], 16, memory_order_relaxed);
                     // Every node's force as the next node pass will take it (forces_now: with
                     // this step's contact sums; a node no hit has written has an empty sum),
                     // for the hits' lanes.
+#if SURF_CUT < 3
                     if (isNode)
                     {
                         V3 fnow = F0 + v3(float(atomic_load_explicit(&acc[ni * 3], memory_order_relaxed)), float(atomic_load_explicit(&acc[ni * 3 + 1], memory_order_relaxed)), float(atomic_load_explicit(&acc[ni * 3 + 2], memory_order_relaxed))) * (1.0f / 32.0f);
                         tgG[SFB + ni * 3u] = fnow.x; tgG[SFB + ni * 3u + 1u] = fnow.y; tgG[SFB + ni * 3u + 2u] = fnow.z;
                     }
+#endif
                     // The narrow tests. A point, and any element against a sphere, is tested
                     // here, a lane a pair (cheap). A triangle or a beam against a box is the
                     // heavy query (12 box edges, each several closest-point candidates, walked
@@ -2472,6 +2621,7 @@ kernel void floorFrame(
                         TOUCHK(n0_, 3u); \
                         if (n1_ != n0_) TOUCHK(n1_, 3u); \
                         if (n2_ != n0_) TOUCHK(n2_, 3u); }
+#if SURF_CUT < 3
                     for (uint kp = lid; kp < min(npair, SPAIR_CAP); kp += LANES)
                     {
                         const uint pw = surfPair[kp];
@@ -2551,12 +2701,14 @@ kernel void floorFrame(
                         if (SKIP(23)) continue;
                         SURF_EMIT(n0, n1, n2, slot, w, g, nn, q, two, w2, q2)
                     }
+#endif
                     BAR;
                     const uint nTriH = min(uint(atomic_load_explicit(&tgS[12], memory_order_relaxed)), HTRI), nSegH = min(uint(atomic_load_explicit(&tgS[13], memory_order_relaxed)), HSEG);
                     const uint nTriT = uint(atomic_load_explicit(&tgS[14], memory_order_relaxed)), nSegT = uint(atomic_load_explicit(&tgS[15], memory_order_relaxed));
 #ifdef EMU_TRACE
                     if (lid == 0u) fprintf(stderr, "T car %u step %u: staged pairs %u + %u of %u + %u, tasks %u + %u\n", car, step, uint(atomic_load_explicit(&tgS[12], memory_order_relaxed)), uint(atomic_load_explicit(&tgS[13], memory_order_relaxed)), (uint)HTRI, (uint)HSEG, nTriT, nSegT);
 #endif
+#if SURF_CUT < 2
                     if ((nTriH | nSegH) != 0u && !SKIP(24))
                     {
                         // A staged pair's nodes, element and shape, from the scalars' array.
@@ -2584,10 +2736,12 @@ kernel void floorFrame(
                             taskG4[(hh_ * 13u + ed_) * 2u] = float4(gs_[0], gs_[1], gs_[2], gs_[3]); \
                             taskG4[(hh_ * 13u + ed_) * 2u + 1u] = float4(gs_[4], gs_[5], gmin_, 0.0f); \
                             atomic_fetch_min_explicit(HPGX(hh_), ordF(gmin_), memory_order_relaxed); }
+#if !(SURF_SUB & 1)
                         for (uint t = lid; t < nTriT; t += LANES) { const uint tw = surfTaskL[t]; SURF_TASK_A(true, tw & 0xFFFFu, tw >> 16) }
                         for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) { const uint tw = surfTaskL[HTRI * 13u + t]; SURF_TASK_A(false, tw & 0xFFFFu, tw >> 16) }
                         if (lid < nTriH) SURF_TASK_A(true, lid, 12u)
                         if (lid >= LANES - nSegH) SURF_TASK_A(false, HTRI + ((LANES - 1u) - lid), 12u)
+#endif
                         BAR;
                         // Stage B: a task's candidates within the tie of the pair's least gap,
                         // each walked again alone (the pair's second pass: its sum is the
@@ -2617,6 +2771,7 @@ kernel void floorFrame(
                                         device float4* rec_ = HPREC(hh_) + idx_ * 3u; \
                                         rec_[0] = f4(a.w, as_type<float>(ed_ * 8u + i_)); \
                                         rec_[1] = f4(a.q, 0.0f); rec_[2] = f4(a.cs, 0.0f); } } } }
+#if !(SURF_SUB & 2)
                         if (!SKIP(25))
                         {
                             for (uint t = lid; t < nTriT; t += LANES) { const uint tw = surfTaskL[t]; SURF_TASK_B(true, tw & 0xFFFFu, tw >> 16) }
@@ -2624,6 +2779,7 @@ kernel void floorFrame(
                             if (lid < nTriH) SURF_TASK_B(true, lid, 12u)
                             if (lid >= LANES - nSegH) SURF_TASK_B(false, HTRI + ((LANES - 1u) - lid), 12u)
                         }
+#endif
                         BAR;
                         // Stage R, a lane a pair: the query's steps between its walks
                         // (triangle_contact, segment_contact), its later passes over the kept
@@ -2637,6 +2793,7 @@ kernel void floorFrame(
                                 for (uint i_ = 0u; i_ < kc_; i_++) rank_ += keys_[i_] < keys_[j_] ? 1u : 0u; \
                                 if (rank_ < 8u) ordA_ |= j_ << (rank_ * 4u); else ordB_ |= j_ << ((rank_ - 8u) * 4u); }
                         #define SURF_REC(hh_, r_) (HPREC(hh_) + (((r_) < 8u ? ordA_ >> ((r_) * 4u) : ordB_ >> (((r_) - 8u) * 4u)) & 15u) * 3u)
+#if !(SURF_SUB & 4)
                         if (lid < nTriH && !SKIP(26))
                         {
                             const uint hh = lid;
@@ -2726,6 +2883,8 @@ kernel void floorFrame(
                                 if (hit && !SKIP(23)) SURF_EMIT(n0, n1, n2, slot_, w, g, nn, q, two, w2, q2)
                             }
                         }
+#endif
+#if !(SURF_SUB & 8)
                         if (lid >= LANES - nSegH && !SKIP(26))
                         {
                             const uint hh = HTRI + ((LANES - 1u) - lid);
@@ -2810,12 +2969,15 @@ kernel void floorFrame(
                                 if (hit && !SKIP(23)) SURF_EMIT(n0, n1, n2, slot_, w, g, nn, q, two, w2, q2)
                             }
                         }
+#endif
                         BAR;
                     }
+#endif
                     const uint nsHits = uint(atomic_load_explicit(&tgS[9], memory_order_relaxed));
 #ifdef EMU_TRACE
                     if (lid == 0u) fprintf(stderr, "T car %u step %u: surface hits %u\n", car, step, nsHits);
 #endif
+#if SURF_CUT < 1
                     if (nsHits != 0u)
                     {
                         const uint nsh = min(nsHits, SHIT_CAP);
@@ -2932,8 +3094,11 @@ kernel void floorFrame(
                         if (lid < NB) atomic_store_explicit(&surfBH[lid], 0u, memory_order_relaxed);
 #endif
                     }
+#endif
                 }
+#endif
             }
+            COLD_END
         }
 #endif
 #endif
@@ -2993,6 +3158,30 @@ kernel void floorFrame(
     if (isNode)
     {
         nodeState[ni * 3] = f4(Pown, 0);
+#if LIVE_DUMMY > 0
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld0 + ld1 + ld2 + ld3;
+#endif
+#if LIVE_DUMMY > 4
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld4 + ld5 + ld6 + ld7;
+#endif
+#if LIVE_DUMMY > 8
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld8 + ld9 + ld10 + ld11;
+#endif
+#if LIVE_DUMMY > 12
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld12 + ld13 + ld14 + ld15;
+#endif
+#if LIVE_DUMMY > 16
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld16 + ld17 + ld18 + ld19;
+#endif
+#if LIVE_DUMMY > 20
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld20 + ld21 + ld22 + ld23;
+#endif
+#if LIVE_DUMMY > 24
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld24 + ld25 + ld26 + ld27;
+#endif
+#if LIVE_DUMMY > 28
+        if (P.skip == 0xDEADBEEFu) nodeState[ni * 3 + 2].w += ld28 + ld29 + ld30 + ld31;
+#endif
         nodeState[ni * 3 + 1] = f4(Vown, 0);
         nodeState[ni * 3 + 2] = f4(F0, 0);
     }

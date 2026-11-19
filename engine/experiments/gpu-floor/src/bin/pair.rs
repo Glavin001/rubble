@@ -5,18 +5,6 @@ use engine_softbody::explicit_beams::JbeamWheels;
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
 use gpu_floor::{car, floor::*, gpu::Gpu};
 
-/// `--def NAME=V ...`: kernel switches, for an A/B from one binary.
-fn defs() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    args.windows(2)
-        .filter(|w| w[0] == "--def")
-        .map(|w| {
-            let (k, v) = w[1].split_once('=').unwrap_or((w[1].as_str(), "1"));
-            format!("#define {k} {v}\n")
-        })
-        .collect()
-}
-
 fn arg(k: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
     a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned())
@@ -41,8 +29,7 @@ fn main() -> anyhow::Result<()> {
         st.pair = 2;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/gpu-floor/emu-pair");
         let by_step = std::env::args().any(|a| a == "--by-step");
-        let mut xa = arg("--xatom").map_or(String::new(), |m| format!("#define XATOM {m}\n"));
-        xa += &defs();
+        let xa = arg("--xatom").map_or(String::new(), |m| format!("#define XATOM {m}\n"));
         let mut e = Emu::new(l, &st, &format!("{}{xa}", if by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" }), &dir)?;
         e.reverse = std::env::args().any(|a| a == "--reverse");
         for c in 0..2 {
@@ -103,7 +90,6 @@ fn main() -> anyhow::Result<()> {
         if let Some(m) = arg("--xatom") {
             extra += &format!("#define XATOM {m}\n");
         }
-        extra += &defs();
         let by_step = flag("--by-step");
         let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
         if by_step || prof.is_some() {

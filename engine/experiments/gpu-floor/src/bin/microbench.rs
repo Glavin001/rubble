@@ -128,6 +128,102 @@ fn main() -> anyhow::Result<()> {
         let body = format!("acc = acc * 0.9999f + 0.5f;\nif (r + 1u == p.rounds) {{ acc += {sum}; }}");
         rows.push((format!("{n} values live across the barrier, untouched, 32 warps"), pre, body, tgb, 32, 0));
     }
+    // Code that never runs (behind a uniform the host sets to 0): does its presence cost
+    // the phases that do run? By what it is: many values live at once, long, a barrier.
+    {
+        let dead = |n: usize| -> String {
+            let decl = (0..n).map(|i| format!("float d{i} = acc * {}.5f;", i + 1)).collect::<Vec<_>>().join(" ");
+            let upd = (0..n).map(|i| format!("d{i} = d{i} * 0.9999f + d{};", (i + 1) % n)).collect::<Vec<_>>().join(" ");
+            let sum = (0..n).map(|i| format!("d{i}")).collect::<Vec<_>>().join(" + ");
+            format!("if (p.zero != 0u) {{ {decl} for (uint z = 0; z < p.zero; z++) {{ {upd} }} acc += {sum}; }}")
+        };
+        rows.push(("dead: none; work 128 fma".into(), String::new(), fma(128), tgb, 32, 0));
+        for n in [16usize, 48, 80, 112, 160] {
+            rows.push((format!("dead in the loop: {n} values live at once; work 128 fma"), String::new(), format!("{}\n{}", fma(128), dead(n)), tgb, 32, 0));
+        }
+        for n in [80usize, 160] {
+            rows.push((format!("dead before the loop: {n} values live at once; work 128 fma"), dead(n), fma(128), tgb, 32, 0));
+        }
+        let long = format!("if (p.zero != 0u) {{ {} }}", (0..2000).map(|i| format!("v.x = fma(v.x, 0.999{}f, 0.001f);", i % 7)).collect::<Vec<_>>().join(" "));
+        rows.push(("dead in the loop: 2,000 fma on one value; work 128 fma".into(), String::new(), format!("{}\n{long}", fma(128)), tgb, 32, 0));
+        let bar = |n: usize| -> String {
+            let decl = (0..n).map(|i| format!("float d{i} = acc * {}.5f;", i + 1)).collect::<Vec<_>>().join(" ");
+            let sum = (0..n).map(|i| format!("d{i}")).collect::<Vec<_>>().join(" + ");
+            format!("if (p.zero != 0u) {{ {decl} threadgroup_barrier(mem_flags::mem_threadgroup); acc += {sum}; }}")
+        };
+        for n in [1usize, 80] {
+            rows.push((format!("dead before the loop: a barrier with {n} values across it; work 128 fma"), bar(n), fma(128), tgb, 32, 0));
+        }
+        // The same with the work's own values live through the dead code (a lane's state
+        // across a pass that does not run).
+        let (pre, body) = regs(48);
+        rows.push(("dead: none; work 48 registers updated".into(), pre.clone(), body.clone(), tgb, 32, 0));
+        for n in [16usize, 48, 112] {
+            rows.push((format!("dead in the loop: {n} values live at once; work 48 registers updated"), pre.clone(), format!("{body}\n{}", dead(n)), tgb, 32, 0));
+        }
+        rows.push(("dead in the loop: 2,000 fma on one value; work 48 registers updated".into(), pre.clone(), format!("{body}\n{long}"), tgb, 32, 0));
+        // Dead code whose values do not change from phase to phase (addresses, products
+        // of uniforms): a compiler may compute them once before the loop, and they are
+        // then alive through the work.
+        let inv = |n: usize| -> String {
+            let decl = (0..n).map(|i| format!("float k{i} = float(p.n + {i}u) * 1.5f + float(p.warps * {}u);", i + 3)).collect::<Vec<_>>().join(" ");
+            let sum = (0..n).map(|i| format!("k{i} * tg[(lid + {i}u) & 4095u]")).collect::<Vec<_>>().join(" + ");
+            format!("if (p.zero != 0u) {{ {decl} acc += {sum}; }}")
+        };
+        let invp = |n: usize| -> String {
+            let decl = (0..n).map(|i| format!("device float4* a{i} = dev + (p.n * {}u + p.warps * {}u);", i + 1, 2 * i + 1)).collect::<Vec<_>>().join(" ");
+            let sum = (0..n).map(|i| format!("a{i}[lid].y")).collect::<Vec<_>>().join(" + ");
+            format!("if (p.zero != 0u) {{ {decl} acc += {sum}; }}")
+        };
+        let (pre, body) = regs(48);
+        for n in [16usize, 48, 112] {
+            rows.push((format!("dead in the loop: {n} unchanging values; work 48 registers updated"), pre.clone(), format!("{body}\n{}", inv(n)), tgb, 32, 0));
+        }
+        for n in [16usize, 48, 112] {
+            rows.push((format!("dead in the loop: {n} unchanging addresses; work 48 registers updated"), pre.clone(), format!("{body}\n{}", invp(n)), tgb, 32, 0));
+        }
+        let (pre, body) = regs(16);
+        for n in [48usize, 112] {
+            rows.push((format!("dead in the loop: {n} unchanging values; work 16 registers updated"), pre.clone(), format!("{body}\n{}", inv(n)), tgb, 32, 0));
+        }
+        // Which part of the unchanging values costs: where they come from (the uniforms
+        // alone, the lane's number) or the memory loads beside them.
+        {
+            let (pre, body) = regs(48);
+            let mut one = |name: &str, dead: String| rows.push((format!("which: {name}; work 48 registers updated"), pre.clone(), format!("{body}\nif (p.zero != 0u) {{ {dead} }}"), tgb, 32, 0));
+            for n in [16usize, 48] {
+                one(&format!("{n} threadgroup loads"), format!("acc += {};", (0..n).map(|i| format!("tg[(lid + {i}u) & 4095u]")).collect::<Vec<_>>().join(" + ")));
+                one(&format!("{n} values of the uniforms alone"), format!("{} acc += {};", (0..n).map(|i| format!("float k{i} = float(p.n + {i}u) * 1.5f + float(p.warps * {}u);", i + 3)).collect::<Vec<_>>().join(" "), (0..n).map(|i| format!("k{i}")).collect::<Vec<_>>().join(" + ")));
+                one(&format!("{n} values of the lane's number"), format!("{} acc += {};", (0..n).map(|i| format!("float m{i} = float(lid * {}u + {i}u) * 1.5f;", i + 3)).collect::<Vec<_>>().join(" "), (0..n).map(|i| format!("m{i}")).collect::<Vec<_>>().join(" + ")));
+                one(&format!("{n} device loads"), format!("acc += {};", (0..n).map(|i| format!("dev[lid * 4u + {i}u].y")).collect::<Vec<_>>().join(" + ")));
+                one(&format!("{n} values of the lane's number times loads"), format!("{} acc += {};", (0..n).map(|i| format!("float m{i} = float(lid * {}u + {i}u) * 1.5f;", i + 3)).collect::<Vec<_>>().join(" "), (0..n).map(|i| format!("m{i} * tg[(lid + {i}u) & 4095u]")).collect::<Vec<_>>().join(" + ")));
+            }
+        }
+        // Dead code with a stack array of its own: does the frame's size cost the work?
+        // Work with a small stack array of its own (indexed by a variable, so it stays in
+        // memory), or with more values than registers (80), or none of either.
+        let stk = |n: usize| -> String { format!("if (p.zero != 0u) {{ float big[{n}]; for (uint z = 0; z < {n}u; z++) big[z] = acc + float(z); acc += big[(lid + r) & {}u] + big[ix & {}u]; }}", n - 1, n - 1) };
+        let sa_pre = "float sa[8]; for (uint i = 0; i < 8u; i++) sa[i] = acc + float(i);".to_string();
+        let sa_body = (0..4).map(|k| format!("{{ uint j = (lid + r + {k}u) & 7u; sa[j] = sa[j] * 0.9999f + acc; acc = sa[(j + 3u) & 7u]; }}")).collect::<Vec<_>>().join("\n");
+        rows.push(("stack: dead none; work a stack array of 8".into(), sa_pre.clone(), sa_body.clone(), tgb, 32, 0));
+        for n in [64usize, 512, 2048] {
+            rows.push((format!("stack: dead array of {n} floats; work a stack array of 8"), sa_pre.clone(), format!("{sa_body}\n{}", stk(n)), tgb, 32, 0));
+        }
+        let (pre80, body80) = regs(80);
+        rows.push(("stack: dead none; work 80 registers updated".into(), pre80.clone(), body80.clone(), tgb, 32, 0));
+        for n in [64usize, 512, 2048] {
+            rows.push((format!("stack: dead array of {n} floats; work 80 registers updated"), pre80.clone(), format!("{body80}\n{}", stk(n)), tgb, 32, 0));
+        }
+        let (pre48, body48) = regs(48);
+        for n in [512usize, 2048] {
+            rows.push((format!("stack: dead array of {n} floats; work 48 registers updated"), pre48.clone(), format!("{body48}\n{}", stk(n)), tgb, 32, 0));
+        }
+        rows.push(("stack: dead array of 2048 floats; work 128 fma".into(), String::new(), format!("{}\n{}", fma(128), stk(2048)), tgb, 32, 0));
+        rows.push(("dead: none; work 16 registers updated".into(), pre.clone(), body.clone(), tgb, 32, 0));
+        for n in [48usize, 112] {
+            rows.push((format!("dead in the loop: {n} values live at once; work 16 registers updated"), pre.clone(), format!("{body}\n{}", dead(n)), tgb, 32, 0));
+        }
+    }
     // Work in half the warps: does an idle warp cost?
     rows.push(("128 dependent fma in 16 of 32 warps".into(), String::new(), fma(128), tgb, 16, 0));
     // Threadgroup loads with no modulo in the index (a mask): what a load itself costs.

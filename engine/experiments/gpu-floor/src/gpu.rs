@@ -19,6 +19,10 @@ impl Gpu {
 
     /// `fast`: Metal's fast math (contraction, approximate division and square root).
     pub fn pipeline(&self, src: &str, entry: &str, fast: bool) -> anyhow::Result<ComputePipelineState> {
+        // (GPU_FLOOR_DUMP=file: the assembled source, for `xcrun metal -S -emit-llvm`.)
+        if let Ok(path) = std::env::var("GPU_FLOOR_DUMP") {
+            std::fs::write(&path, src)?;
+        }
         let o = CompileOptions::new();
         o.set_fast_math_enabled(fast);
         o.set_language_version(MTLLanguageVersion::V3_0);

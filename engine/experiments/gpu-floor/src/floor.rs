@@ -531,7 +531,7 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
             st.boxes.len(), st.boxes.iter().map(|b| f3(b.1)).collect::<Vec<_>>().join(", ")
         )
     };
-    let extra = format!("{extra}\n{boxes}");
+    let extra = format!("{extra}\n{}{boxes}", cli_defs());
     if !st.v2_tab.is_empty() {
         let v1 = include_str!("../kernels/floor.metal");
         let helpers = &v1[..v1.find("// ---- buffers ---").expect("the marker")];
@@ -599,7 +599,20 @@ impl Floor {
         // Strict: fast math off still lets Metal fuse a·b + c (llvm.fmuladd); the pragma
         // turns contraction off, which leaves IEEE single operations in source order.
         let pragma = if fast { "" } else { "#pragma clang fp contract(off)\n" };
-        let pso = gpu.pipeline(&format!("{pragma}{}", msl(&l, st, extra, per_frame)), "floorFrame", fast)?;
+        let mut src = msl(&l, st, extra, per_frame);
+        // (GPU_FLOOR_INLINE=1, a measurement: every helper marked to be inlined always.)
+        if std::env::var("GPU_FLOOR_INLINE").is_ok() {
+            const TY: [&str; 12] = ["float ", "float2 ", "float3 ", "float4 ", "void ", "bool ", "uint ", "int ", "FqAcc ", "FqShape ", "FqPair ", "uint2 "];
+            src = src
+                .lines()
+                .map(|ln| {
+                    let fq = TY.iter().any(|t| ln.starts_with(t) && ln[t.len()..].starts_with("fq")) && ln.contains('(') && !ln.trim_end().ends_with(';');
+                    if ln.starts_with("inline ") || fq { format!("__attribute__((always_inline)) {}{ln}", if fq { "inline " } else { "" }) } else { ln.to_string() }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        let pso = gpu.pipeline(&format!("{pragma}{src}"), "floorFrame", fast)?;
         let stat = vec![
             gpu.buffer(&st.node_static),
             gpu.buffer(&st.node_range),
@@ -800,6 +813,19 @@ pub fn profile(f: &Floor, blocks: usize, frame: usize, reps: usize, groups: &[(&
         println!("  {:30} {:.4}", g.0, t[k + 1] - t[k]);
     }
     println!("  {:30} {:.4}", "all groups", t[groups.len()] - t[0]);
+}
+
+/// `--def NAME=V ...` on any driver's command line: kernel switches, for an A/B from one
+/// binary.
+pub fn cli_defs() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .filter(|w| w[0] == "--def")
+        .map(|w| {
+            let (k, v) = w[1].split_once('=').unwrap_or((w[1].as_str(), "1"));
+            format!("#define {k} {v}\n")
+        })
+        .collect()
 }
 
 /// The one-body substep's groups for [`profile`], in the kernel's order.
