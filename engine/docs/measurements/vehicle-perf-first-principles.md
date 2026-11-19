@@ -3410,7 +3410,7 @@ threadgroup; 40 threadgroups give the same figures, one a core):
 | 128 dependent fma: 1 / 8 / 32 warps active | 0.24 / 0.42 / 1.51 | a phase is bound by the core's throughput, 0.35 ns a warp-instruction, not by its longest chain (1.3 ns a step with one warp) |
 | 4 chains of 32 fma one after another / interleaved | 1.47 / 1.44 | interleaving buys nothing |
 | the same work in 16 of 32 warps | half | an idle warp is free |
-| threadgroup-memory loads | ≈0.4 ns a warp-load | about one instruction |
+| threadgroup-memory loads | 3.4 ns a warp for a scalar, 4.2 ns for three adjacent floats | about ten instructions an access, the same as a streamed device load; adjacent words nearly free |
 | device loads: 4 streamed / 4 scattered / 16 scattered a lane | 3.9 / 23 / 29 ns a warp-load | 10 to 80 instructions each |
 | device atomic add: own word / 4 scattered | 2.6 / 38 ns | |
 | live registers a lane, each updated a phase: 16 / 48 / 80 / 112 / 160 | 0.19 / 0.32 / 1.1 / 5.0 / 4.2 ns an update | past about 48 they spill: 3× at 80, 15× at 112 |
@@ -3418,5 +3418,84 @@ threadgroup; 40 threadgroups give the same figures, one a core):
 
 This corrects §8.35's reading (8 ns a dependent step was eight warps sharing the core) and
 §2.2's cause (it is not latency): **a car's step on one core costs its warps' instructions,
-its device-memory accesses at 10 to 80 instructions each, and whatever its lanes keep
-alive past about 48 registers.**
+its memory accesses at about ten instructions each (threadgroup or streamed device; 20 to
+80 for scattered device), and whatever its lanes keep alive past about 48 registers.** A
+core is saturated by about eight busy warps, so a workgroup's phases do not overlap and a
+second workgroup on the same core waits.
+
+Two things the compiler does that the source does not show (both seen in
+`xcrun metal -S -emit-llvm`, both cost the first kernels most of their time):
+- with fast math off it still fuses a·b + c (above);
+- it does not unroll a constant loop with a large body, and an array indexed by the loop
+  variable then stays in stack memory: the kernel's four "register" slots a lane were
+  loads and stores until the loop was written out once a slot.
+
+**The kernels.** `kernels/floor.metal` (first layout, kept for the ledger) and
+`kernels/floor2.metal` (second layout, from the cost model), one workgroup of 1,024 lanes a
+body, all 34 substeps a dispatch, every count a compile-time constant:
+- a beam's hot words (its ends, k, c, rest length, last extension rate) in registers, four
+  slots a lane; everything else of a beam read only on the step it yields, breaks, or is
+  one of the car's 71 special elements;
+- a beam hands its ends one scalar (force over length) through threadgroup memory; a node
+  gathers its beams in the reference's order from a streamed list as (x_self − x_other)·g,
+  which is the reference's push bit for bit at both ends (IEEE subtraction and
+  multiplication are sign-symmetric), and a broken beam's scalar is zero (adding ±0 changes
+  no bit of a sum that began at +0 or at the weight);
+- self-collision: a lane a triangle over its own row of an exact pair list (every pair the
+  reference's box test could pass, rebuilt when a node has moved more than the skin
+  allows), each pair filtered by two plane distances (now and a step ago); pairs that pass,
+  and nodes in ground or box contact, go on compact lists and get their full rule a lane an
+  item (a warp pays for its slowest lane);
+- contact sums, side memory, break groups and triangle breaks live in device memory and are
+  touched only on steps flagged as having them; a hot-state image starts a dispatch with six
+  streamed loads a lane.
+
+A substep without contacts is seven barrier phases (0.5 µs of barriers).
+
+**One body and a fixed world (mechanism 1), measured.** ms a frame of 34 substeps, one car,
+medians (`batch-v2k`); production's figures are §8.37's scenario-matrix rows on the same
+machine a day earlier (not re-run here: the GPU queue):
+
+| | at rest | wall crash, 16 m/s | 3 m fall | bit for bit |
+|---|---|---|---|---|
+| production (matrix rows drive / tumble / wall) | 3.5–3.7 | 4.7 | | (its own suites) |
+| first layout, strict | 3.00 | 3.68 | 3.17 | yes |
+| second layout, strict | 1.32 | 2.60 | 1.51 | yes |
+| second layout, fast math + native functions | 1.23 | 2.16 | | no: see closeness |
+| the reference on one CPU core | ≈10.5 | ≈10.4 | ≈10.5 | |
+
+A dispatch with every phase left out is 0.10 ms. At rest the second layout's phases are
+(ms a frame): node pass 0.14, centred gather 0.17, beams 0.27, force gather 0.26, pair rows
+0.39, the rest the centred scalars and the fixed cost. In the crash the pair rows (1.2–1.4,
+with the list rebuilt on a fifth of the steps) and the hit passes (0.6–0.9) lead.
+
+**It did not reach §1.3's 0.3–0.5 ms, and why.** That estimate charged memory at cache
+bandwidth and arithmetic at the core's FLOPS. The core charges otherwise: a substep here is
+about 3,500 warp memory accesses (≈13 µs) and about 30,000 warp instructions (≈10 µs),
+against the ≈9 µs of §1.3. Three rounds of changes that cut instructions (unrolled gathers,
+compact lists, a two-level list build, static slot classes) did not move the total, which is
+what memory-bound looks like. The next lever is fewer memory accesses a beam (18 a substep
+now: its four end vectors in two phases, its scalar written twice, its two entries read in
+two gathers): positions and velocities interleaved so an end is one access, and node-major
+lanes that own their beams so one end is already in registers. Not built.
+
+**Many bodies apart: a staircase of 40.** One workgroup is one core's work, so (fast, at
+rest, ms a frame): 1 car 1.31, 8: 1.37, 40: 1.51, **41: 2.81**, 80: 3.12, **81: 4.33**, 120:
+4.63, 121: 6.00, 160: 6.20, 161: 7.40, 200: 7.63, 400: 16.0. N cars cost
+⌈N / 40⌉ × one car's time; 100 cars in a wall crash, strict, 10.5 ms. Production's 32 cars
+apart were 11.75 ms (§1.5).
+
+**Closeness of the fast builds.** At rest the one-frame defect is inside the reference's
+own (median 0.015 mm against 0.049 mm from a micron; worst 0.49 against 0.72). In the wall
+crash it is the same size as the reference's own over the run (median 0.06 mm against 0.22,
+p90 2.7 against 4.9, worst 8.1 against 9.7) though single frames differ (a contact or a
+yield lands a frame apart), and the free run stays inside three times the reference's own
+spread. Fast math is worth 7 % at rest and 17 % in the crash here, most of it the strict
+divisions and square roots of the contact rules.
+
+**The ledger (first layout, wall crash, fast math, ms a frame; `batch-v1`):** counts as
+uniforms instead of constants +6 % (3.40 → 3.60); a dispatch a substep instead of a frame
++72 % (5.84: 34 loads of the state); unordered force sums through device atomics +18 %
+(slower, not faster: device atomics cost more than the ordered gather); native functions
+in place of the specified sequences 0 % there (memory-bound) and 5 % on the second layout;
+strict against fast +8 %.
