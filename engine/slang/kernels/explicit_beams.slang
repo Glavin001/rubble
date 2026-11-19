@@ -1629,6 +1629,11 @@ static const uint PERF_FLEET_POST = 65536u;
 // rebuilt when the vehicles have moved past it, in place of the gather, grids, sorted
 // copy and walk every substep. The exact tests are the same on the same pairs.
 static const uint PERF_FLEET_KEEP = 32768u;
+// perfFlags bit 8 (explicit_plan::PERF_KEEP_TRACK_REST; set by the host, never by a
+// caller): with PERF_FLEET_KEEP, the fused scans (PERF_FLEET_FUSE) and the members' rest
+// dispatches, the kept candidates' tracking of every node in the members' rest
+// (explicit_beams_fleet_track.slang fkTrackVehicle), in place of the scans' own dispatch.
+static const uint PERF_KEEP_TRACK_REST = 8u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
 // dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
@@ -5929,7 +5934,11 @@ uint fkListed(uint gt) { return flCtlNext(FL_CTL) + gt; }
 uint fkCover(uint v, uint i) { return fkListed(gP.totalTris) + v * (FK_COVER + 1u) + i; }
 uint fkRun(uint v) { return fkCover(gP.vehicles, 0u) + v; }
 uint fkPrefix(uint v) { return fkRun(gP.vehicles + 1u) + v; }
-uint fkOrigin(uint v) { return fkPrefix(gP.vehicles + 1u) + 3u * v; }
+// (The kept pairs' places: per owner the prefix of its share of the fleet's room at the
+// build, fkAlloc; one more for the total; then per owner its share at the last build.)
+uint fkAlloc(uint v) { return fkPrefix(gP.vehicles + 1u) + v; }
+uint fkShareAt(uint v) { return fkAlloc(gP.vehicles + 1u) + v; }
+uint fkOrigin(uint v) { return fkShareAt(gP.vehicles + 1u) + 3u * v; }
 // (Per vehicle six words, float bits: its reference motion of this pass, 0..2, and its
 // tracked nodes' mean motion of the pass before, 3..5.)
 uint fkMean(uint v, uint i) { return fkOrigin(gP.vehicles) + 6u * v + i; }
@@ -12816,6 +12825,7 @@ void contactGroup(uint g, uint lane)
 // The split group path (contact-groups-design.md): a contact group's substeps across
 // workgroups, a member's step in its own.
 #ifdef EB_VV_SPLIT
+#include "explicit_beams_fleet_track.slang"
 #include "explicit_beams_split.slang"
 #ifdef EB_VV_FLEET
 #include "explicit_beams_fleet.slang"

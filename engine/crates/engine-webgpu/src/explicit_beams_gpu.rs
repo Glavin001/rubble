@@ -4062,6 +4062,16 @@ impl ExplicitBeamsGpu {
             // The owners' state by vehicle only where its dispatches and regions are (the
             // groups' dispatches' copies carry the flags that hold this frame).
             let flags = self.fleet_flags_for(slots);
+            // (The kept candidates' tracking in the members' rest: the steps' copies, which
+            // the scans and the first plan read, say so too.)
+            if flags & plan::PERF_KEEP_TRACK_REST != 0 {
+                let stride = PARAM_STRIDE as usize;
+                let at = 4 * plan::W_PERF_FLAGS;
+                for k in 0..=steps as usize {
+                    let w = u32::from_le_bytes(bytes[stride * k + at..stride * k + at + 4].try_into().unwrap());
+                    bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(w | plan::PERF_KEEP_TRACK_REST).to_le_bytes());
+                }
+            }
             let mut put = |k: u32, word: u32| {
                 let mut w = self.planner.words;
                 w[plan::W_PERF_FLAGS] = flags;
@@ -4478,14 +4488,26 @@ impl ExplicitBeamsGpu {
             // (Groups of any size on the fleet-wide passes: only with the front there.)
             flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST | plan::PERF_FLEET_FUSE | plan::PERF_FLEET_HITLAT | plan::PERF_FLEET_KEEP);
         }
-        // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates stay
-        // in the groups' levels, which find them by each owner's listed count. The
-        // throttles' own dispatch is sized and indexed by the walk's prefix of the listed
-        // triangles, which a pass that reuses the kept pairs does not compute; and the
-        // levels across the GPU leave the throttles to that dispatch. The kernel's
-        // flPostOn says the same.)
+        // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates
+        // across the fleet, PERF_FLEET_POST, take the elements' dispatch, a thread a
+        // triangle (a pass that reuses the kept pairs computes no walk, so no prefix of the
+        // listed triangles: the kernel's fkPost). The levels across the GPU are not taken
+        // with them.)
         if flags & plan::PERF_FLEET_KEEP != 0 {
-            flags &= !(plan::PERF_FLEET_POST | plan::PERF_FLEET_LEVELS);
+            flags &= !plan::PERF_FLEET_LEVELS;
+        }
+        // (The kept candidates' tracking in the members' rest, PERF_KEEP_TRACK_REST: the
+        // host's alone, when the frame has the rest dispatches and the fused scans, and no
+        // wheels in the rest's dispatch beside the members; else the scans' dispatch.)
+        flags &= !plan::PERF_KEEP_TRACK_REST;
+        let rest = plan::PERF_FLEET_FRONT | plan::PERF_FLEET_KEEP | plan::PERF_FLEET_FUSE | plan::PERF_MEMBER_LIST;
+        if front
+            && self.group_split_tests
+            && flags & rest == rest
+            && flags & plan::PERF_SPLIT_WHEELS_AHEAD == 0
+            && self.member_rest_on(self.self_split_vv.get())
+        {
+            flags |= plan::PERF_KEEP_TRACK_REST;
         }
         // (The levels across the GPU: with groups of any size and the throttles across the
         // fleet, once their module is compiled.)
@@ -4639,8 +4661,10 @@ impl ExplicitBeamsGpu {
                 // grids' workgroups.)
                 // (With the kept candidates the scans' dispatch stays: it also tracks every
                 // node, fkTrack; the kernel's fuseScansOn.)
+                // (PERF_KEEP_TRACK_REST: the tracking in the members' rest, the scans fused.)
                 let fuse = self.fleet_flags() & plan::PERF_FLEET_FUSE != 0;
-                if !fuse || self.fleet_flags() & plan::PERF_FLEET_KEEP != 0 {
+                let keep = self.fleet_flags() & (plan::PERF_FLEET_KEEP | plan::PERF_KEEP_TRACK_REST) == plan::PERF_FLEET_KEEP;
+                if !fuse || keep {
                     out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
                 }
                 out.push(GroupOp::Fleet { copy: c0, kernel: 1, args: FLEET_FIRST_ARGS, from: 0, part: 1 });
@@ -4654,8 +4678,13 @@ impl ExplicitBeamsGpu {
                 out.push(GroupOp::Fleet { copy: cl, kernel: 1, args: FLEET_ONE_ARGS, from: 1, part: 7 });
                 out.push(GroupOp::Fleet { copy: cl, kernel: 2, args: FLEET_PAIRS_ARGS, from: 2, part: 8 });
                 // (The listed triangles' throttle updates, a thread each: the walk's size.)
+                // (With the kept candidates: a thread a triangle, the elements' size.)
                 if self.fleet_flags() & plan::PERF_FLEET_POST != 0 {
-                    out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                    if self.fleet_flags() & plan::PERF_FLEET_KEEP != 0 {
+                        out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_ELEMENT_ARGS, from: 1, part: 9 });
+                    } else {
+                        out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                    }
                 }
                 out.push(GroupOp::Group { copy: cl, tests: false, args: SPLIT_GROUP_ARGS, part: 4 });
                 // The levels across the GPU (explicit_beams_fleet_levels.slang): the plan (one
