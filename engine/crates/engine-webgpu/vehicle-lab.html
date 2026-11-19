@@ -1418,6 +1418,9 @@
       return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
     }
     window.__perfReport = perfReport;
+    // The per-second rows (perfLog) as objects; window.__drawOff = true: nothing drawn
+    // (a measurement: the World alone, engine/tools/vehicle-lab/physics-first.js).
+    window.__perfLog = () => perfLog.map((r) => { const { dts, ...o } = r; return o; });
     // The drawing's cost, measured (engine/tools/vehicle-lab/draw-cost.js): parts left
     // out (the car renderer's setPerfSkip names; boxes, spheres: the scene's), the
     // medians of the last drawn frames' GPU ms, what is drawn (a car's levels), and the
@@ -1535,6 +1538,7 @@
           if (refused > 0) refusedAt = now;
           let drew = !(owed === 0 && scale > 0 && now - refusedAt < 3000);
           if (drew && autoDrawEvery > 1 && scale > 0 && (++drawTick % autoDrawEvery) !== 0) drew = false;
+          if (window.__drawOff) drew = false;
           if (drew) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
           perfTick(now, dt * 1000, taken, refused, owed, drew, t1 - t0, t3 - t2, drew ? performance.now() - t3 : 0);
           if (now - hudAt > 250) { hud(); hudAt = now; if (lastStats?.scriptDone) window.__done = true; }
