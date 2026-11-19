@@ -41,7 +41,7 @@ const OUT = opt('--out', join(homedir(), 'Development', 'rubble-artifacts', 'veh
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
 const PROBE = args.includes('--probe'), RESTARTS = args.includes('--restarts');
 const EXTRA = opt('--query', '');
-const FLAGS = ['--probe', '--restarts', '--segments', '--locked'];
+const FLAGS = ['--probe', '--restarts', '--segments', '--locked', '--uncapped'];
 const runs = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsWith('--') || FLAGS.includes(args[i - 1])));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -79,7 +79,10 @@ const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', `--window-size=${W},${H}`, '--no-first-run', '--no-default-browser-check',
-  '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
+  '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+  // (--uncapped: frames as fast as Chrome makes them, not headless's 60 a second: a display
+  // faster than the World, as a 120 Hz one is.)
+  ...(args.includes('--uncapped') ? ['--disable-frame-rate-limit', '--disable-gpu-vsync'] : []), 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
 process.on('exit', cleanup);

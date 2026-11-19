@@ -33,6 +33,8 @@ mod demo;
 mod explicit;
 mod explicit_world;
 mod frame;
+/// Physics first: which displayed frames a page draws while the World steps.
+mod draw_pacer;
 /// Real-time pacing of the explicit solver's fixed steps on a display.
 mod frame_pacer;
 mod guidance;
@@ -53,6 +55,7 @@ mod vehicle;
 
 pub use city::WebCity;
 pub use frame::WebFrame;
+pub use draw_pacer::DrawPacer;
 pub use frame_pacer::FramePacer;
 pub use lab::{check_lab_chunk_order, LabRun, LabScene, LabSettleJob};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
@@ -190,6 +193,18 @@ pub fn device_lost_js() -> bool {
 /// taken is not owed later (the simulation runs slower instead). Pacing only: the
 /// steps taken are the same steps.
 pub const EXPLICIT_STEPS_IN_FLIGHT: usize = 2;
+static STEPS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(EXPLICIT_STEPS_IN_FLIGHT);
+
+/// World steps with explicit vehicles kept in flight (1 to 4; the default is
+/// [`EXPLICIT_STEPS_IN_FLIGHT`]): more lets the GPU start a step while the last one's
+/// readback is still on its way back (the browser lands a map a while after the GPU is
+/// done), at the cost of the host's readings arriving that many steps later. Pacing
+/// only: the steps taken are the same steps.
+#[wasm_bindgen(js_name = setStepsInFlight)]
+pub fn set_steps_in_flight(n: u32) {
+    STEPS_IN_FLIGHT.store((n as usize).clamp(1, 4), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// A page's optional progress function as a [`Hear`].
 pub(crate) fn hear_fn(progress: Option<js_sys::Function>) -> Hear {
@@ -583,7 +598,7 @@ impl WebWorld {
     pub fn can_step(&self) -> bool {
         self.world.can_step_without_waiting()
             && !device_lost()
-            && (self.world.explicit_vehicles().is_none() || self.world.readbacks_in_flight() < EXPLICIT_STEPS_IN_FLIGHT)
+            && (self.world.explicit_vehicles().is_none() || self.world.readbacks_in_flight() < STEPS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The stability check of this world's explicit vehicles (`stability.rs`:
