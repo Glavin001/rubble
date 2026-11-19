@@ -394,17 +394,18 @@ inline V3 noPositiveWorkBody(V3 c, V3 f, V3 v, float m, V3 n, BodyK bk)
 #define SURF_STATIC 0xFFFFu
 #define SPAIR_CAP 4096u
 #define SHIT_CAP 512u
-// The staged box tests: the pairs (triangles' in the first half, beams' in the second),
+// The staged box tests: the pairs (192 triangles', then 320 beams'),
 // each its pair word, the least gap (ordered bits), the kept candidates' count and 16
 // kept candidates of three rows (weights and walk order, point, shape point); the tasks
 // (pair, box edge; 12: the element's run inside), two words each.
 #ifndef SURF_STAGED
 #define SURF_STAGED 1
 #endif
-#define HHALF 128u
+#define HTRI 192u
+#define HSEG 320u
 #define HPW 200u
 #define KCAP 16u
-#define STASK_CAP 1664u
+#define STASK_T (HTRI * 13u)
 // One task's candidates in the walk's order (x_candidates, seg_candidates: a box's edge e,
 // then the run inside).
 inline void surfEdgeWalk(bool tri, FqShape fs, float3 x0, float3 x1, float3 x2, uint e, thread FqAcc& a)
@@ -522,8 +523,8 @@ kernel void floorFrame(
     #define HPGX(h_) ((device atomic_int*)(surfHP + (h_) * HPW + 1u))
     #define HPKC(h_) ((device atomic_uint*)(surfHP + (h_) * HPW + 2u))
     #define HPREC(h_) ((device float4*)(surfHP + (h_) * HPW + 4u))
-    #define surfTask (surfHP + 2u * HHALF * HPW)
-    #define SSLOT0 (NSS * 7u)
+    #define surfTask (surfHP + (HTRI + HSEG) * HPW)
+    #define SSLOT0 (NSS * 6u)
     #define SSLOT_CAP ((NGS - SSLOT0) / 6u)
 #endif
 #if RIGID
@@ -1045,6 +1046,26 @@ kernel void floorFrame(
         }
 
         // ---- S1: the centred damping's scalars (last beam pass's slopes) ----
+#if SURF
+        // (The body's box for this step's surface pass: the nodes are where the node pass
+        // left them. A warp reduces them from threadgroup memory.)
+        if (lid < 32u && !SKIP(21))
+        {
+            V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
+            for (uint j = lid; j < NN; j += 32u)
+            {
+                V3 x = v3(0, 0, 0) + TGP(j);
+                lo = v3(rmin(lo.x, x.x), rmin(lo.y, x.y), rmin(lo.z, x.z));
+                hi = v3(rmax(hi.x, x.x), rmax(hi.y, x.y), rmax(hi.z, x.z));
+            }
+            atomic_fetch_min_explicit(&tgS[0], ordF(lo.x), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgS[1], ordF(lo.y), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgS[2], ordF(lo.z), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgS[3], ordF(hi.x), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgS[4], ordF(hi.y), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgS[5], ordF(hi.z), memory_order_relaxed);
+        }
+#endif
 #if OWN
         cOwn = v3(0, 0, 0);
 #endif
@@ -2253,26 +2274,10 @@ kernel void floorFrame(
         uint sMy = NONE;
         if (!SKIP(21))
         {
-            // The body's box now (a warp reduces the nodes from threadgroup memory).
-            if (lid < 32u)
-            {
-                V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
-                for (uint j = lid; j < NN; j += 32u)
-                {
-                    V3 x = v3(0, 0, 0) + TGP(j);
-                    lo = v3(rmin(lo.x, x.x), rmin(lo.y, x.y), rmin(lo.z, x.z));
-                    hi = v3(rmax(hi.x, x.x), rmax(hi.y, x.y), rmax(hi.z, x.z));
-                }
-                atomic_fetch_min_explicit(&tgS[0], ordF(lo.x), memory_order_relaxed);
-                atomic_fetch_min_explicit(&tgS[1], ordF(lo.y), memory_order_relaxed);
-                atomic_fetch_min_explicit(&tgS[2], ordF(lo.z), memory_order_relaxed);
-                atomic_fetch_max_explicit(&tgS[3], ordF(hi.x), memory_order_relaxed);
-                atomic_fetch_max_explicit(&tgS[4], ordF(hi.y), memory_order_relaxed);
-                atomic_fetch_max_explicit(&tgS[5], ordF(hi.z), memory_order_relaxed);
-            }
-            BAR;
-            // A slot is near when the body's box, padded by the band, meets its cull box: an
-            // element's padded box is inside the body's, so no other slot passes `near`.
+            // A slot is near when the body's box (reduced in the S1 phase, after the node
+            // pass), padded by the band, meets its cull box: an element's padded box is inside
+            // the body's, so no other slot passes `near`. A near slot's cull box goes into the
+            // scalars' array (free until the next beam pass).
             if (lid < NSS)
             {
                 device const float4* row = surfRow + lid * SRW;
@@ -2280,33 +2285,25 @@ kernel void floorFrame(
                 V3 clo = v3(unordF(atomic_load_explicit(&tgS[0], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[1], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[2], memory_order_relaxed)));
                 V3 chi = v3(unordF(atomic_load_explicit(&tgS[3], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[4], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[5], memory_order_relaxed)));
                 if (clo.x - CR <= hi.x && clo.y - CR <= hi.y && clo.z - CR <= hi.z && chi.x + CR >= lo.x && chi.y + CR >= lo.y && chi.z + CR >= lo.z)
+                {
+                    const uint o = lid * 6u;
+                    tgG[o] = lo.x; tgG[o + 1u] = lo.y; tgG[o + 2u] = lo.z;
+                    tgG[o + 3u] = hi.x; tgG[o + 4u] = hi.y; tgG[o + 5u] = hi.z;
                     atomic_fetch_or_explicit(&tgS[6u + (lid >> 5)], int(1u << (lid & 31u)), memory_order_relaxed);
+                }
             }
             BAR;
             const uint sa0 = uint(atomic_load_explicit(&tgS[6], memory_order_relaxed)), sa1 = uint(atomic_load_explicit(&tgS[7], memory_order_relaxed));
             if ((sa0 | sa1) != 0u)
             {
-                // The near slots' cull boxes into the scalars' array (free until the next
-                // beam pass), in slot order.
                 const uint nsa = popcount(sa0) + popcount(sa1);
-                if (lid < NSS && (((lid < 32u ? sa0 : sa1) >> (lid & 31u)) & 1u) != 0u)
-                {
-                    const uint below = (1u << (lid & 31u)) - 1u;
-                    const uint a = lid < 32u ? popcount(sa0 & below) : popcount(sa0) + popcount(sa1 & below);
-                    device const float4* row = surfRow + lid * SRW;
-                    float4 lo = row[5], hi = row[6];
-                    const uint o = a * 7u;
-                    tgG[o] = lo.x; tgG[o + 1u] = lo.y; tgG[o + 2u] = lo.z;
-                    tgG[o + 3u] = hi.x; tgG[o + 4u] = hi.y; tgG[o + 5u] = hi.z;
-                    tgG[o + 6u] = as_type<float>(lid);
-                }
-                BAR;
                 // The search: every element's padded box against the near slots' cull boxes
                 // (`near`, `seg_near`); a pair that passes goes on the step's list.
-                #define SURF_NEAR(e_, tlo_, thi_) for (uint a_ = 0u; a_ < nsa; a_++) { const uint o_ = a_ * 7u; \
+                #define SURF_NEAR(e_, tlo_, thi_) for (uint hf_ = 0u; hf_ < 2u; hf_++) for (uint m_ = hf_ == 0u ? sa0 : sa1; m_ != 0u; m_ &= m_ - 1u) { \
+                    const uint sl_ = hf_ * 32u + ctz(m_); const uint o_ = sl_ * 6u; \
                     if (tlo_.x <= tgG[o_ + 3u] && tlo_.y <= tgG[o_ + 4u] && tlo_.z <= tgG[o_ + 5u] && thi_.x >= tgG[o_] && thi_.y >= tgG[o_ + 1u] && thi_.z >= tgG[o_ + 2u]) { \
                         const uint i_ = uint(atomic_fetch_add_explicit(&tgS[8], 1, memory_order_relaxed)); \
-                        if (i_ < SPAIR_CAP) surfPair[i_] = (e_) | as_type<uint>(tgG[o_ + 6u]) << 16; } }
+                        if (i_ < SPAIR_CAP) surfPair[i_] = (e_) | sl_ << 16; } }
                 if (isTri)
                 {
                     uint4 tn = tris[tri];
@@ -2412,9 +2409,9 @@ kernel void floorFrame(
                                 if (isT) { if (!(fqLen(scross(ssub3(x1, x0), ssub3(x2, x0))) > 1e-8f)) continue; }
                                 else { float3 d = ssub3(x1, x0); if (!(sdot(d, d) > 1e-12f)) continue; }
                                 const uint h = uint(atomic_fetch_add_explicit(&tgS[isT ? 12 : 13], 1, memory_order_relaxed));
-                                if (h < HHALF)
+                                if (h < (isT ? HTRI : HSEG))
                                 {
-                                    const uint hh = isT ? h : HHALF + h;
+                                    const uint hh = isT ? h : HTRI + h;
                                     surfHP[hh * HPW] = pw;
                                     atomic_store_explicit(HPGX(hh), 0x7FFFFFFF, memory_order_relaxed);
                                     atomic_store_explicit(HPKC(hh), 0u, memory_order_relaxed);
@@ -2431,7 +2428,7 @@ kernel void floorFrame(
                                             if (fqFar(e0, e1, tlo, thi, CR)) continue;
                                         }
                                         const uint t = uint(atomic_fetch_add_explicit(&tgS[isT ? 14 : 15], 1, memory_order_relaxed));
-                                        surfTask[(isT ? 0u : STASK_CAP * 2u) + t * 2u] = hh | ed << 16;
+                                        surfTask[(isT ? 0u : STASK_T * 2u) + t * 2u] = hh | ed << 16;
                                     }
                                     continue;
                                 }
@@ -2445,12 +2442,12 @@ kernel void floorFrame(
                         SURF_EMIT(n0, n1, n2, slot, w, g, nn, q, two, w2, q2)
                     }
                     BAR;
-                    const uint nTriH = min(uint(atomic_load_explicit(&tgS[12], memory_order_relaxed)), HHALF), nSegH = min(uint(atomic_load_explicit(&tgS[13], memory_order_relaxed)), HHALF);
+                    const uint nTriH = min(uint(atomic_load_explicit(&tgS[12], memory_order_relaxed)), HTRI), nSegH = min(uint(atomic_load_explicit(&tgS[13], memory_order_relaxed)), HSEG);
                     const uint nTriT = uint(atomic_load_explicit(&tgS[14], memory_order_relaxed)), nSegT = uint(atomic_load_explicit(&tgS[15], memory_order_relaxed));
 #ifdef EMU_TRACE
-                    if (lid == 0u) fprintf(stderr, "T car %u step %u: staged pairs %u + %u, tasks %u + %u\n", car, step, nTriH, nSegH, nTriT, nSegT);
+                    if (lid == 0u) fprintf(stderr, "T car %u step %u: staged pairs %u + %u, tasks %u + %u\n", car, step, uint(atomic_load_explicit(&tgS[12], memory_order_relaxed)), uint(atomic_load_explicit(&tgS[13], memory_order_relaxed)), nTriT, nSegT);
 #endif
-                    if ((nTriH | nSegH) != 0u)
+                    if ((nTriH | nSegH) != 0u && !SKIP(24))
                     {
                         // A staged pair's element and shape, from its pair word.
                         #define SURF_LOAD(isT_, hh_) \
@@ -2473,7 +2470,7 @@ kernel void floorFrame(
                             surfTask[(base_) + (t_) * 2u + 1u] = as_type<uint>(a.gx); \
                             atomic_fetch_min_explicit(HPGX(hh_), ordF(a.gx), memory_order_relaxed); }
                         for (uint t = lid; t < nTriT; t += LANES) SURF_TASK_A(true, t, 0u)
-                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_A(false, t, STASK_CAP * 2u)
+                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_A(false, t, STASK_T * 2u)
                         BAR;
                         // Stage B: a task that owns a candidate within the tie of the pair's
                         // least gap walks again (the pair's second pass, alone); one kept
@@ -2497,8 +2494,11 @@ kernel void floorFrame(
                                         rec_[0] = f4(a.w, as_type<float>(ed_ * 8u + (att_ == 0u ? 0u : att_ - 1u))); \
                                         rec_[1] = f4(a.q, 0.0f); rec_[2] = f4(a.cs, 0.0f); } \
                                     if (att_ == 0u) break; } } }
+                        if (!SKIP(25))
+                        {
                         for (uint t = lid; t < nTriT; t += LANES) SURF_TASK_B(true, t, 0u)
-                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_B(false, t, STASK_CAP * 2u)
+                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_B(false, t, STASK_T * 2u)
+                        }
                         BAR;
                         // Stage R, a lane a pair: the query's steps between its walks
                         // (triangle_contact, segment_contact), its later passes over the kept
@@ -2512,7 +2512,7 @@ kernel void floorFrame(
                                 for (uint i_ = 0u; i_ < kc_; i_++) rank_ += keys_[i_] < keys_[j_] ? 1u : 0u; \
                                 if (rank_ < 8u) ordA_ |= j_ << (rank_ * 4u); else ordB_ |= j_ << ((rank_ - 8u) * 4u); }
                         #define SURF_REC(hh_, r_) (HPREC(hh_) + (((r_) < 8u ? ordA_ >> ((r_) * 4u) : ordB_ >> (((r_) - 8u) * 4u)) & 15u) * 3u)
-                        if (lid < nTriH)
+                        if (lid < nTriH && !SKIP(26))
                         {
                             const uint hh = lid;
                             const float GX = unordF(atomic_load_explicit(HPGX(hh), memory_order_relaxed));
@@ -2530,6 +2530,9 @@ kernel void floorFrame(
                                 float g = GX;
                                 if (ok && (kc == 0u || kc > KCAP))
                                 {
+#ifdef EMU_TRACE
+                                    fprintf(stderr, "FALLBACK tri kc %u\n", kc);
+#endif
                                     // (More candidates at the least gap than a pair keeps: the
                                     // whole query, the same result.)
                                     hit = fqContact(fs, x0, x1, x2, CR, w, nn, g, q);
@@ -2593,9 +2596,9 @@ kernel void floorFrame(
                                 if (hit && !SKIP(23)) SURF_EMIT(n0, n1, n2, slot_, w, g, nn, q, two, w2, q2)
                             }
                         }
-                        if (lid >= LANES - nSegH)
+                        if (lid >= LANES - nSegH && !SKIP(26))
                         {
-                            const uint hh = HHALF + ((LANES - 1u) - lid);
+                            const uint hh = HTRI + ((LANES - 1u) - lid);
                             const float GX = unordF(atomic_load_explicit(HPGX(hh), memory_order_relaxed));
                             if (GX <= CR)
                             {
@@ -2611,6 +2614,9 @@ kernel void floorFrame(
                                 float g = GX;
                                 if (ok && (kc == 0u || kc > KCAP))
                                 {
+#ifdef EMU_TRACE
+                                    fprintf(stderr, "FALLBACK seg kc %u\n", kc);
+#endif
                                     hit = fqSegContact(fs, x0, x1, CR, w, nn, g, q, two, w2, q2);
                                 }
                                 else if (ok)

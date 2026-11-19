@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
             let mut groups = vec![("S0 node pass, no shapes", 1u32 << 0), ("rigid shapes and proxies", 1 << 13)];
             groups.extend_from_slice(&GROUPS[1..]);
             if c.surface_contact {
-                groups.extend_from_slice(&[("surface: box, near slots, search", 1 << 21), ("surface: narrow tests", 1 << 22), ("surface: slots, hits applied", 1 << 23)]);
+                groups.extend_from_slice(&[("surface: near slots, search", 1 << 21), ("surface: cull, tasks, direct tests", 1 << 22), ("surface: A, an edge's least gap", 1 << 24), ("surface: B, kept candidates", 1 << 25), ("surface: R, a pair's contact", 1 << 26), ("surface: slots, hits applied", 1 << 23)]);
             }
             profile(&f, 1, fr, time.max(9), &groups);
             return Ok(());

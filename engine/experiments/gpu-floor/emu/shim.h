@@ -44,6 +44,7 @@ inline float3 abs(float3 a) { return float3(fabs(a.x), fabs(a.y), fabs(a.z)); }
 inline float dot(float3 a, float3 b) { return ((a.x * b.x) + (a.y * b.y)) + (a.z * b.z); }
 inline float3 FQXYZ(float4 v) { return float3(v.x, v.y, v.z); }
 inline uint popcount(uint x) { return (uint)__builtin_popcount(x); }
+inline uint ctz(uint x) { return (uint)__builtin_ctz(x); }
 inline float clamp(float x, float lo, float hi) { return fmin(fmax(x, lo), hi); }
 inline uint min(uint a, uint b) { return a < b ? a : b; }
 inline uint max(uint a, uint b) { return a > b ? a : b; }
