@@ -3524,3 +3524,81 @@ the work left is in the drawing itself, lossless first:
 * the cars' opaque picture follows the triangles (a quarter of the pixels takes off only
   10–15 %): levels of detail for the generated car (a different picture by design, the
   asset side: §8.30's follow-up).
+
+### 8.43 A dedicated kernel for a solo car: step 0, does it fit in a Chrome workgroup? (2026-11-19)
+
+The decision (made): a production kernel for one explicit car touching nothing but the World,
+modelled on PR #137's floor kernel (`floor2.metal`, its §8.39) and the design at the end of
+PR #138's §8.42: one dispatch a frame, beams on fixed lanes with their hot words in
+registers, positions and velocities in workgroup memory, every production feature a solo
+car uses as a phase inside it. Step 0 is whether its workgroup memory fits Chrome's limits
+for the lab's generated sedan, with the phases sharing memory in time. It does; the numbers
+below are measured, not estimated.
+
+**The car** (`cargo run --profile fast -p engine-world --example solo_census`): 548 nodes;
+4,251 beam records: 3,550 whose force on each end is one scalar along the beam (3,164 plain,
+334 support, 33 anisotropic, 15 bounded, 4 hub plains) and the vector elements, 335 aero
+triangles (two records each), 7 couplers and 12 torsion bars (two records each); incidence
+8,502 entries, 15.5 a node, 32 at most; 528 collision triangles, 424 contacters, 136 break
+groups; no wings, slides, shocks2 or commands.
+
+**Chrome's limits on this machine** (M3 Max; the page and the native host both request the
+adapter's limits): workgroup storage 32,768 B, 1,024 invocations a workgroup. Dawn counts
+each workgroup variable rounded up to 16 B.
+
+**The layout** (`tools/solo-car/wg_layout.py`: WGSL skeletons that declare every region and
+use it in its phase, 1,024 lanes):
+
+| region | lives | words | bytes (Dawn's count) |
+|---|---|---|---|
+| positions, as scalars (an array of `vec3<f32>` has a 16-byte stride in WGSL) | whole frame | 1,644 | 6,576 |
+| velocities, as scalars | whole frame | 1,644 | 6,576 |
+| held sides, 2 bits a node (atomic: set by contacts) | whole frame | 35 | 144 |
+| counters (compact lists, hits, fastest node), atomic | whole frame | 16 | 64 |
+| uniform words (`workgroupUniformLoad`: the barriers' gates) | whole frame | 8 | 32 |
+| **the time-shared pool** | | **4,720** | **18,880** |
+| **total** | | | **32,272 of 32,768 (496 B spare)** |
+
+The pool's tenants, one at a time (its size is set by the largest):
+
+| phase | holds | words of 4,720 |
+|---|---|---|
+| beam pass → force gather | a scalar a scalar record (3,550) and a vector an element (390 × 3: aero 335, couplers 7, torsion 4 × 12) | 4,720 |
+| centred damping (§39): the records' correction scalars → their gather | a scalar a JBeam record | ≤ 3,550 |
+| the World's coupling, count pass → node pass: the proxies' spheres (production's cap, 256 × 4 words) and each node's first and last shape (548) | | 1,604 |
+| self-collision hits, after the gather: a slot a hit node (the floor's 11 words a slot) | | up to 429 slots |
+| raycast wheels, drivetrain, sleep, debris, surface contact, break groups | their state stays in device memory; a few words of flags in the counters | — |
+
+What it takes, each a measured constraint and not a preference:
+- *Nothing else holds memory for the whole frame.* Production's frame modules declare
+  31,628 B (`explicit_beams_solo_aero_wide`: the self-collision grid's buckets, offsets
+  and lists about 23 KB, the coupling's spheres and node ranges 8.3 KB, all for the whole
+  frame). None of that can sit beside the floor's state: the solo kernel finds
+  self-collision's pairs from device-memory pair lists (the floor's exact list, rebuilt
+  when a node has moved past the skin: the same pairs the reference's box test passes),
+  and the coupling's spheres are read into the pool each substep (one streamed load a
+  lane) instead of once a frame.
+- *WGSL cannot alias workgroup memory.* The pool is one array viewed through `bitcast`;
+  atomics need an atomic array, so either the pool is typed `atomic<u32>` (every plain
+  access an `atomicLoad`/`atomicStore`; the same size, `solo_layout_atomic_pool` passes)
+  or the hit sums stay in device memory as production keeps them (`gAcc`). Which costs
+  less is the first thing phase 1 measures.
+- *The beams on lanes.* Three full slots (3,072 scalar records) and a fourth with the other
+  478 and the 354 vector elements (832 of 1,024 lanes); four slots of hot words (ends, k,
+  c, rest length, last extension rate) are about 24 live registers a lane, the node's own
+  state 6 more: under the floor's measured spill point (about 48).
+
+**Chrome's verdict** (pipeline creation in Chrome, `explicit-wgsl-check.mjs` on the
+skeletons): the layout (32,272 B) and its atomic-pool variant pass; the layout grown to
+32,768 B passes; one 16-byte unit more is refused ("The total use of workgroup storage
+(32784 bytes) is larger than the maximum allowed (32768 bytes)"). So the accounting above
+is Dawn's own, to the byte.
+
+**Verdict: it fits, with 496 B (124 words) to spare.** The margin is the sedan's: a car
+with 124 more scalar records, or 41 more nodes, does not fit, so the host would pick the
+kernel per car only when its counts fit (they are pipeline constants: a compile per car
+shape), and a car that does not fit stays on today's path. Two risks this step cannot
+settle, both for phase 1: whether Tint's Metal output for a kernel this size keeps
+`maxTotalThreadsPerThreadgroup` at 1,024 (Dawn refuses the pipeline otherwise; the floor's
+Metal kernel kept it), and what Chrome's bounds checks on every workgroup access cost
+against the floor's unchecked Metal.
