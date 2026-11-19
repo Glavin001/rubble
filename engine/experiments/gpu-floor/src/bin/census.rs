@@ -41,6 +41,21 @@ fn main() -> anyhow::Result<()> {
     let mut sorted = true; let mut loops = 0;
     for (i, l) in s.incidence.iter().enumerate() { if l.windows(2).any(|w| w[0] > w[1]) { sorted = false; } for &j in l { let b = &s.beams[j as usize]; if b.a == b.b && b.a == i as u32 { loops += 1; } } }
     println!("incidence sorted {sorted} self-loop entries {loops}");
+    // Parameter redundancy among the JBeam plain and support beams.
+    let uniq = |f: &dyn Fn(&Beam) -> Vec<u32>| s.beams.iter().filter(|b| matches!(b.kind, ExplicitKind::JbeamPlain | ExplicitKind::JbeamSupport)).map(f).collect::<std::collections::BTreeSet<_>>().len();
+    println!("distinct (k, c) {}, k {}, c {}, tc {}, tt {}, gate {}, strength {}, limit_k {}, short/rest0 {}, long/rest0 {}, plastic {}, (k,c,tc,tt,strength,limit_k) {}",
+        uniq(&|b| vec![b.k.to_bits(), b.c.to_bits()]), uniq(&|b| vec![b.k.to_bits()]), uniq(&|b| vec![b.c.to_bits()]), uniq(&|b| vec![b.tc.to_bits()]), uniq(&|b| vec![b.tt.to_bits()]),
+        uniq(&|b| vec![b.gate.to_bits()]), uniq(&|b| vec![b.strength.to_bits()]), uniq(&|b| vec![b.limit_k.to_bits()]),
+        uniq(&|b| vec![((b.short_bound / b.rest0) * 1e4).round() as u32]), uniq(&|b| vec![((b.long_bound / b.rest0) * 1e4).round() as u32]), uniq(&|b| vec![b.plastic.to_bits()]),
+        uniq(&|b| vec![b.k.to_bits(), b.c.to_bits(), b.tc.to_bits(), b.tt.to_bits(), b.strength.to_bits(), b.limit_k.to_bits()]));
+    let mut deg: Vec<usize> = s.incidence.iter().map(|v| v.len()).collect();
+    deg.sort();
+    println!("degree percentiles: min {} p50 {} p90 {} max {}; sum of each 32-node group's max (sorted) {}", deg[0], deg[deg.len() / 2], deg[deg.len() * 9 / 10], deg[deg.len() - 1], deg.chunks(32).map(|c| c[c.len() - 1]).sum::<usize>());
+    let first = |f: &dyn Fn(&Beam) -> bool| s.beams.iter().position(f);
+    let last = |f: &dyn Fn(&Beam) -> bool| s.beams.iter().rposition(f);
+    println!("first aero record {:?}, last non-aero {:?}; couplers {:?}..{:?}, torsion {:?}..{:?}", first(&|b| b.kind == ExplicitKind::JbeamAeroTri), last(&|b| !matches!(b.kind, ExplicitKind::JbeamAeroTri | ExplicitKind::JbeamAeroTri2)), first(&|b| b.kind == ExplicitKind::JbeamCoupler), last(&|b| b.kind == ExplicitKind::JbeamCoupler), first(&|b| b.kind == ExplicitKind::JbeamTorsion), last(&|b| b.kind == ExplicitKind::JbeamTorsion));
+    let sup: Vec<f32> = s.beams.iter().filter(|b| b.kind == ExplicitKind::JbeamSupport).map(|b| b.long_bound / b.rest0).collect();
+    println!("support long/rest0 min {:?} max {:?}; gate/k*rest0 ...", sup.iter().cloned().fold(f32::MAX, f32::min), sup.iter().cloned().fold(f32::MIN, f32::max));
     let tot: f32 = s.nodes.iter().map(|n| n.mass).sum();
     println!("mass {tot}");
     if let Some(d) = &s.drive { println!("drive: {:?}", d.config.wheels.len()); }
