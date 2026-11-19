@@ -540,6 +540,14 @@ kernel void floorFrame(
         fs_.hull = 0u; fs_.nv = 0u; fs_.nf = 0u; fs_.ne = 0u; fs_.moved = 0u; fs_.off = float3(0.0f, 0.0f, 0.0f); }
 #endif
 #if RIGID
+    // (The active shapes' boxes' union, for the node pass: the surface pass's counters are
+    // free from the node pass's end to the surface pass, so with it they hold the union.)
+#if SURF
+    #define UNI(i_) tgS[(i_) < 4u ? 12u + (i_) : 4u + (i_)]
+#else
+    TGDECL(atomic_int, tgU, 6);
+    #define UNI(i_) tgU[i_]
+#endif
     TGDECL(atomic_uint, tgAct, 2);
     #define rigBody ((device float4*)(cb + O_RIG))
     #define rigCount ((device atomic_uint*)(cb + O_RIG + NB * BDW * 4))
@@ -799,6 +807,7 @@ kernel void floorFrame(
 #endif
         }
         if (lid < 2u) atomic_store_explicit(&tgAct[lid], 0u, memory_order_relaxed);
+        if (lid < 6u) atomic_store_explicit(&UNI(lid), lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
         BAR;
         if (lid < NSH)
         {
@@ -808,11 +817,23 @@ kernel void floorFrame(
             V3 clo = v3(unordF(atomic_load_explicit(&tgX[0], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[1], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[2], memory_order_relaxed)));
             V3 chi = v3(unordF(atomic_load_explicit(&tgX[3], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[4], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[5], memory_order_relaxed)));
             if (!(hi.x < clo.x || hi.y < clo.y || hi.z < clo.z || lo.x > chi.x || lo.y > chi.y || lo.z > chi.z))
+            {
                 atomic_fetch_or_explicit(&tgAct[lid >> 5], 1u << (lid & 31u), memory_order_relaxed);
+                // The union of the active shapes' boxes: a node outside it is in none (the
+                // face test's first step), so only a node inside it tests the shapes.
+                atomic_fetch_min_explicit(&UNI(0), ordF(lo.x), memory_order_relaxed);
+                atomic_fetch_min_explicit(&UNI(1), ordF(lo.y), memory_order_relaxed);
+                atomic_fetch_min_explicit(&UNI(2), ordF(lo.z), memory_order_relaxed);
+                atomic_fetch_max_explicit(&UNI(3), ordF(hi.x), memory_order_relaxed);
+                atomic_fetch_max_explicit(&UNI(4), ordF(hi.y), memory_order_relaxed);
+                atomic_fetch_max_explicit(&UNI(5), ordF(hi.z), memory_order_relaxed);
+            }
         }
         BAR;
         // (SKIP(13), timing only: no shape is tested and no proxy integrates.)
         const uint act0 = SKIP(13) ? 0u : atomic_load_explicit(&tgAct[0], memory_order_relaxed), act1 = SKIP(13) ? 0u : atomic_load_explicit(&tgAct[1], memory_order_relaxed);
+        const V3 ulo = v3(unordF(atomic_load_explicit(&UNI(0), memory_order_relaxed)), unordF(atomic_load_explicit(&UNI(1), memory_order_relaxed)), unordF(atomic_load_explicit(&UNI(2), memory_order_relaxed)));
+        const V3 uhi = v3(unordF(atomic_load_explicit(&UNI(3), memory_order_relaxed)), unordF(atomic_load_explicit(&UNI(4), memory_order_relaxed)), unordF(atomic_load_explicit(&UNI(5), memory_order_relaxed)));
         if (lid < 6u) atomic_store_explicit(&tgX[lid], lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
 #endif
         // ---- S0: the node pass ----
@@ -893,20 +914,9 @@ kernel void floorFrame(
             }
 #endif
 #if RIGID
-            if ((act0 | act1) != 0u)
-            {
-                // The nodes inside each body's shapes, counted (the rule's mass split).
-                for (uint k = 0; k < NSH; k++)
-                {
-                    if (((k < 32u ? act0 : act1) & (1u << (k & 31u))) == 0u) continue;
-                    V3 nrm;
-                    if (rigidFace(rigShape + k * SHW, x, nrm))
-                    {
-                        atomic_fetch_add_explicit(&rigCount[as_type<uint>(rigShape[k * SHW].x)], 1u, memory_order_relaxed);
-                        inC = true;
-                    }
-                }
-            }
+            // (A node inside the active shapes' union goes on the list: its lane tests the
+            // shapes there, a lane a node, not every node here.)
+            if ((act0 | act1) != 0u && x.x > ulo.x && x.x < uhi.x && x.y > ulo.y && x.y < uhi.y && x.z > ulo.z && x.z < uhi.z) inC = true;
 #endif
             if (inC)
             {
@@ -943,6 +953,30 @@ kernel void floorFrame(
 #endif
         if (ncon != 0u)
         {
+#if RIGID
+            // The listed nodes inside each body's shapes, counted (the rule's mass split:
+            // begin_step), a lane a node; the shapes a node is inside kept as bits for its
+            // rule.
+            uint cm0 = 0u, cm1 = 0u;
+            if ((act0 | act1) != 0u)
+            {
+                if (lid < min(ncon, (uint)NN))
+                {
+                    V3 x = v3(0, 0, 0) + TGP(conBuf[lid]);
+                    for (uint k = 0; k < NSH; k++)
+                    {
+                        if (((k < 32u ? act0 : act1) & (1u << (k & 31u))) == 0u) continue;
+                        V3 nrm;
+                        if (rigidFace(rigShape + k * SHW, x, nrm))
+                        {
+                            atomic_fetch_add_explicit(&rigCount[as_type<uint>(rigShape[k * SHW].x)], 1u, memory_order_relaxed);
+                            if (k < 32u) cm0 |= 1u << k; else cm1 |= 1u << (k - 32u);
+                        }
+                    }
+                }
+                BAR;
+            }
+#endif
             for (uint kc = lid; kc < min(ncon, (uint)NN); kc += LANES)
             {
                 const uint n = conBuf[kc];
@@ -979,13 +1013,13 @@ kernel void floorFrame(
                 }
 #endif
 #if RIGID
-                if ((act0 | act1) != 0u)
+                if ((cm0 | cm1) != 0u)
                 {
                     // node_contact_with: every shape the node is inside, in shape order.
                     V3 total = v3(0, 0, 0);
-                    for (uint k = 0; k < NSH; k++)
+                    for (uint hf = 0u; hf < 2u; hf++) for (uint mk = hf == 0u ? cm0 : cm1; mk != 0u; mk &= mk - 1u)
                     {
-                        if (((k < 32u ? act0 : act1) & (1u << (k & 31u))) == 0u) continue;
+                        const uint k = hf * 32u + ctz(mk);
                         device const float4* sh = rigShape + k * SHW;
                         V3 normal;
                         if (!rigidFace(sh, x, normal)) continue;
