@@ -1654,6 +1654,12 @@ static const uint PERF_HITS_LOCAL = 1048576u;
 // contact group's member: memberRest): selfApplyLocal in place of selfApply for a
 // two-body dissipative car with 1..HITS_LOCAL_CAP hits (selfApplyLocalKeep).
 static const uint PERF_SELF_HITS_LOCAL = 33554432u;
+// perfFlags bit 134217728 (explicit_plan::PERF_HIT_SLOT_MAP, with PERF_HITS_LOCAL): in the
+// wide hits kernel, each node's slot (the first item naming it) found through a map of the
+// vehicle's nodes in workgroup memory (an atomic maximum of 256 - q at the node's word)
+// instead of each item scanning every item before it: the same slots, so the same sums of
+// the same bits in the same order. vehicle-perf-first-principles.md §8.45.
+static const uint PERF_HIT_SLOT_MAP = 134217728u;
 // perfFlags bit 67108864 (explicit_plan::PERF_SPLIT_WHEELS_AHEAD, with PERF_MEMBER_LIST and
 // self-collision split): a contact group member's raycast wheels' rays and bars of step
 // s + 1 on a workgroup of their own in step s's rest dispatch (explicit_beams_split.slang
@@ -7972,7 +7978,15 @@ void localAdd(uint at, int3 d)
     gsCount[at + 2u].add(asuint(d.z));
 }
 
-void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity);
+void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity, uint mapNodes);
+// PERF_HIT_SLOT_MAP (uniform): how many of vehicle v's nodes the slot map holds (all of them,
+// at gsCount's first words, or 0: no map, each item scans the items before it).
+uint hitSlotMapNodes(uint v)
+{
+    if ((gP.perfFlags & PERF_HIT_SLOT_MAP) == 0u) return 0u;
+    uint n = gStatic[v * 4u].y;
+    return n <= GRID_BUCKETS ? n : 0u;
+}
 // PERF_SELF_HITS_LOCAL (lane 0, the step's hit count final): whether vehicle v's hits of
 // this step take selfApplyLocal on the self split path, as the wide hits kernel decides
 // for PERF_HITS_LOCAL (a workgroup of at least 256 lanes: 4 · HITS_LOCAL_CAP items and
@@ -7995,15 +8009,19 @@ void selfApplyLocalKeep(uint v, uint lane, uint beamOff, uint groupOff, uint gro
 {
     uint kept = lane < REUSE_WORDS ? gsCount[GRID_BUCKETS + lane].load() : 0u;
     GroupMemoryBarrierWithGroupSync();
-    selfApplyLocal(v, lane, beamOff, groupOff, groupCount, parity);
+    selfApplyLocal(v, lane, beamOff, groupOff, groupCount, parity, 0u);
     sync();
     if (lane < REUSE_WORDS) gsCount[GRID_BUCKETS + lane].store(kept);
     if (lane == 0u) gsUniformHits = 1u;
 }
 
 // selfApply for vehicle v with PERF_HITS_LOCAL (the caller checked: hitRolesOn(v), 1..
-// HITS_LOCAL_CAP hits, every lane here: the barriers are unconditional).
-void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity)
+// HITS_LOCAL_CAP hits, every lane here: the barriers are unconditional). mapNodes > 0
+// (PERF_HIT_SLOT_MAP, uniform): gsCount's first mapNodes words are zero (the caller cleared
+// them before a barrier), a word a node of v; the slots are found there, and each slot's
+// copies of A and B are written one phase later (the round reads none of them), when no
+// lane reads the map any more.
+void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity, uint mapNodes)
 {
     uint count = uint(gAcc[hitAcc(v)].load());
     uint q = lane;
@@ -8032,10 +8050,17 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
     float3 f1 = float3(0.0, 0.0, 0.0);
     // Load: hitFbFill's beam force (and its record), the node's mass, flags, hit count
     // and accumulators; the lead lane the hit's record.
+    uint mapAt = 0xFFFFFFFFu;
     if (item)
     {
         uint nodeOff = gStatic[v * 4u].x;
         x = role == 0u ? nodeOff + (gNext[at] & 0xFFFFu) : gNext[at + 7u + role];
+        // The slot map: the first item naming x keeps the largest 256 - q (q < 256).
+        if (x - nodeOff < mapNodes)
+        {
+            mapAt = x - nodeOff;
+            gsCount[mapAt].max(256u - q);
+        }
         uint info = gStatic[gP.nodeInfoBase + x].x;
         immovable = (info & NODE_IMMOVABLE) != 0u;
         float mass = gNodes[x * 3u].w;
@@ -8086,16 +8111,22 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
     uint slot = q;
     if (item)
     {
-        for (uint k = 0u, kStop = EB_END(k, q, 1u); k < kStop; k++)
+        // (A node the map does not hold: every item naming it scans, as without the map.)
+        if (mapAt != 0xFFFFFFFFu)
+            slot = 256u - gsCount[mapAt].load();
+        else
         {
-            if (gsTested[k * LQ] == x)
+            for (uint k = 0u, kStop = EB_END(k, q, 1u); k < kStop; k++)
             {
-                slot = k;
-                break;
+                if (gsTested[k * LQ] == x)
+                {
+                    slot = k;
+                    break;
+                }
             }
         }
         gsTested[q * LQ + 1u] = slot | (immovable ? 0x80000000u : 0u);
-        if (slot == q)
+        if (slot == q && mapNodes == 0u)
         {
             gsCount[q * 3u].store(asuint(a0.x));
             gsCount[q * 3u + 1u].store(asuint(a0.y));
@@ -8106,6 +8137,16 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         }
     }
     GroupMemoryBarrierWithGroupSync();
+    // PERF_HIT_SLOT_MAP: the slots' copies of A and B now (the map is no longer read).
+    if (item && slot == q && mapNodes > 0u)
+    {
+        gsCount[q * 3u].store(asuint(a0.x));
+        gsCount[q * 3u + 1u].store(asuint(a0.y));
+        gsCount[q * 3u + 2u].store(asuint(a0.z));
+        gsCount[LB_BASE + q * 3u].store(asuint(b0.x));
+        gsCount[LB_BASE + q * 3u + 1u].store(asuint(b0.y));
+        gsCount[LB_BASE + q * 3u + 2u].store(asuint(b0.z));
+    }
     float gamma = nf(nf(1.0 - alpha) - beta);
     // The round (selfRound's two-body branch, selfTwoBodyCore with shifts): the hit's
     // four items are q, q + 1 (n0 = t0), q + 2 (n1 = t1), q + 3 (n2 = t2).
@@ -8345,6 +8386,10 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
             }
         }
     }
+    // PERF_HIT_SLOT_MAP: the vehicle's node map cleared (selfApplyLocal's slots; nothing
+    // here reads gsCount before it). Every lane, before the barrier below.
+    uint mapNodes = hitSlotMapNodes(v);
+    for (uint k = lane, kStop = EB_END(k, mapNodes, 256u); k < kStop; k += 256u) gsCount[k].store(0u);
     sync();
     uint on = gsUniformHits;
     uint driveOn = gsUniformDrive;
@@ -8355,7 +8400,7 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     DrvPostIn tyreIn = (DrvPostIn)0;
     if (tyreEarly) tyreIn = drvTyreLoad(v, 255u - lane, vehicleStep(v) + 1u);
     if (on == 2u)
-        selfApplyLocal(v, lane, x.beamOff, x.groupOff, x.groupCount, parity);
+        selfApplyLocal(v, lane, x.beamOff, x.groupOff, x.groupCount, parity, mapNodes);
     else if (on != 0u)
         selfApply(v, true, lane, 256u, lane, vehicleOrigin(v), x.range, x.beamOff, x.groupOff, x.groupCount, parity);
     // The next step's tyres (PERF_WIDE_FUSED), after this step's hits: their hubs'

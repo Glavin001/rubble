@@ -438,6 +438,12 @@ pub const PERF_SELF_HITS_LOCAL: u32 = 33554432;
 /// step s's rest dispatch (its second row), its tyres at step s + 1's start (the kernel's
 /// PERF_SPLIT_WHEELS_AHEAD, `splitWheelsAhead`, `splitTyres`). §8.36.
 pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
+/// [`W_PERF_FLAGS`], with [`PERF_HITS_LOCAL`]: in the wide hits kernel each hit node's
+/// slot (the first (hit, role) item naming it) is found through a map of the vehicle's nodes
+/// in workgroup memory (one atomic maximum an item) instead of each item scanning every
+/// item before it, a chain that grew with the step's hits (the kernel's PERF_HIT_SLOT_MAP,
+/// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.45.
+pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
