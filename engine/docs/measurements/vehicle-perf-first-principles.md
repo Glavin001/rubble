@@ -3888,6 +3888,7 @@ Slang through wgpu, one dispatch a substep, and some of this it already has in a
 | 13 | In a pass whose owners take turns, the part of every turn that reads only the pass's start (two-body: slots, hit counts, first pass) done by all owners at once, before they meet | head-on 3.40 → 3.32; those stages 0.46 → 0.32 ms | yes | with 3 only; a turn's values cross the meeting in the hit's record, not in registers |
 | 14 | A reduction done by the lanes that hold the values (atomic min and max into workgroup memory) instead of one warp walking them | head-on 3.31 → 3.23; two bodies apart 1.47 → 1.43; surface contact's box 0.02 | yes | the body's box, its clusters' boxes, surface contact's box |
 | 15 | What a phase's loop reads that does not change (the lane's roles and entry counts, the bases) taken again at the phase's start, not kept from the kernel's | 2 to 7 %: parked with surface contact 1.51 → 1.41, bricks 3.47 → 3.36, at rest 1.09 → 1.06 | yes | grows with the kernel's size, so production's general kernels have the most to gain; needs a load the compiler cannot fold |
+| 16 | The kernel chosen a body a frame by what is in reach: a contact-free kernel with a one-compare guard, the whole kernel taking the frame up at the substep the guard ended it | a frame with nothing in reach 1.41 → 1.07 (surface contact), 1.23 → 1.07 (node contact); the post's run 1.95 → 1.78; frames in contact unchanged | yes | the World's proxy gather gives the plan; the guard, not the plan, carries the safety; pairs not covered |
 
 Two that are not kernel changes and paid for all of the above: the strict Metal build is
 fast math off plus `#pragma clang fp contract(off)` (no XOR barriers; that is what made
@@ -4076,8 +4077,110 @@ What follows for a kernel that holds every mechanism: its always-run loops shoul
 their bounds and bases at the phase's start, not from the kernel's; and a body with
 nothing in reach in a frame is cheapest in a kernel that has no contact code at all (1.06
 at rest against 1.23 with node contact compiled in and 1.41 with surface contact). The
-World builds each body's proxy set every frame; an empty set could pick that kernel. Not
-built here.
+World builds each body's proxy set every frame; an empty set could pick that kernel. Built
+next.
+
+**The kernel by what is in reach (2026-11-19).** Three pipelines from the one source
+(`floor2.metal` `REACH`), a body's choice made every frame:
+
+- *the one kernel*, as it was;
+- *the contact-free kernel* (`REACH 1`): no code for the proxies' shapes and none for
+  surface contact. It keeps the ground, the world's boxes by node, self-collision, and
+  the window's start; it has a guard; and at its end it does the proxies' free flight for
+  the substeps it did (the reference's `end_step` with no reaction, a substep after
+  another, the same arithmetic);
+- *the kernel that takes a frame up* (`REACH 2`): the whole kernel starting at the substep
+  a word gives it, and returning at once when none is left.
+
+*The plan* (`floor.rs` `reach_plan`, the host, from what it knows at the frame's start;
+in the World, where it gathers the body's proxies). Everything the body could touch in
+the frame goes in one box: each proxy shape's extent as posed, widened by what its
+turning can move in the frame, swept along its free flight; with surface contact the
+world's fixed boxes too. The plane is the box's face the body is farthest outside of,
+moved out by the contact's reach (the 2.5 cm band and a millimetre). The margin is four
+times what the fastest node moves a substep, 2 cm at least. The contact-free kernel is
+chosen when the body is clear of the plane by the margin and by 1.25 times what it would
+travel in the frame.
+
+*The guard* makes that choice safe whatever the host gave it: one compare a node at each
+substep's end (n·x − offset against the margin). A node within the margin ends the
+dispatch with that substep; the body's count of substeps done is written, and the whole
+kernel's dispatch, next in the same command buffer, takes the frame up there. Its
+workgroups are read from three words (an indirect dispatch): none unless a body was given
+the whole kernel or a guard asked. A plan that does not hold at the start ends the first
+kernel at substep 0. Nothing is done twice and nothing is undone.
+
+*Why the frame is the one kernel's.* At the start of a substep the contact-free kernel
+runs, every node is farther from the plane than the margin, so none is inside a shape's
+bounds and node contact would have found nothing. Surface contact's first test is the
+body's box, taken where the nodes are after the node pass, against the shapes' boxes
+padded by the band: the contact-free kernel checks there that every node is still on the
+clear side, so no shape would have been near and the pass would have done nothing. If
+that check fails (a node crossed the whole margin in one substep, four times what the
+fastest node was moving) the kernel's status says so (0x1000) and the frame does not
+count; no run here set it. The proxies have no reaction, so their substeps are free
+flight, and what the frame's later substeps need of them is where they are, which the
+whole kernel reads at its start.
+
+*Checked.* Emulator (`reach-emu.sh`, a minute): 24 runs bit for bit with the reference in
+every state word of the body and the proxies; with `--reach-eager` frames change kernel
+part way, at substeps 1, 6, 12, 13, 15, 16, 17, 19, 22, 25, 26, 31 and 33; both lane
+orders; proxies at rest, falling, and spinning after being struck; a fixed pole with
+surface contact and a wall by node contact (the one-body driver). GPU strict, bit for bit
+every frame: the post over 60 frames (approach, contact, left behind), bricks and rocks
+with and without surface contact, the hand-over on the GPU; two bodies given different
+kernels in one dispatch against each alone, no differing word. The one kernel's own
+suites unchanged (three emulator suites, the strict GPU runs of every scene).
+
+*What it gives* (ms a frame at a fixed state; fast | strict):
+
+| scene | fast: the one kernel → the choice | strict |
+|---|---|---|
+| one body, no proxies in the build (the bound) | 1.05 | 1.21 |
+| parked by the post, surface contact | 1.41 → 1.07 | 1.58 → 1.22 |
+| parked by the post, node contact | 1.23 → 1.07 | 1.40 → 1.21 |
+| parked by 24 bricks, surface contact | 1.44 → 1.08 | 1.61 → 1.22 |
+| 8 bodies parked, surface contact, one dispatch | 1.43 → 1.10 | 1.62 → 1.25 |
+| in contact (post / bricks / rocks with surface contact; bricks by node) | 3.40 / 3.36 / 2.40 / 1.80, the same | 4.24 / 4.10 / 2.93 / 2.01, the same |
+
+A frame with nothing in reach is within 0.02 ms of a build that has no proxies at all:
+the 0.35 (surface contact) and 0.16 (node contact) the contact code cost a frame that did
+not use it are gone. A frame in contact is the one kernel's pipeline and costs what it
+did. Whole runs, each frame timed (`--list 7`):
+
+| run | frames by kernel | fast, mean ms a frame: one kernel → the choice | strict |
+|---|---|---|---|
+| the post 2 m ahead at 11 m/s, surface contact, 60 frames | 10 contact-free (approach), 28 whole, 22 contact-free (the post left behind) | 1.95 → 1.78 | 2.34 → 2.17 |
+| four rocks 1.5 m above at 6 m/s, surface contact, 40 frames | 14 contact-free, 26 whole | 2.00 → 1.87 | 2.36 → 2.25 |
+
+The approach frames are 1.30–1.51 → 0.99–1.17 fast; the frames after the post is left
+behind 1.74–1.86 → 1.42–1.51 (the car is bent and in self-contact there).
+
+*What its parts cost.* The guard: under 0.01 ms a frame, inside the noise (1.069 with,
+1.078 without, fast; 1.220 and 1.213 strict). The whole kernel's dispatch after a
+contact-free one that finished: nothing measurable, by indirect count or over every
+group (1.153, 1.149; 1.148 with no such dispatch). The proxies' free flight: 0.04 ms a
+frame done a substep at a time in the loop, nothing measurable done at the dispatch's
+end. The kernel that takes a frame up, used from substep 0 in place of the one kernel
+(`--reach-cont`): within 0.035 ms either way (post +0.03, bricks −0.01, rocks −0.01,
+bricks by node +0.03 fast; +0.02, +0.03, +0.02, −0.02 strict), which is this kernel's
+code-shape noise; the default uses the one kernel for a frame with no contact-free body,
+so such a frame cannot be slower.
+
+*A measurement trap found on the way.* The first numbers had every in-contact frame 0.02
+to 0.03 ms slower with the choice. It was the host: reading the body's block (its nodes
+and proxies, for the plan) from the shared buffer just before the dispatch adds that to
+the dispatch's GPU time with any kernel (`--reach-host`, `REACH_HOST`: the read alone
+does it; writing eight words does not, nor a 20 µs wait). Timed frames are given plans
+worked out before; in the World the plan comes from what the host already holds.
+
+*Not covered.* Two soft bodies (a pair's bodies would have to end at the same substep,
+which takes a meeting a substep; not built: bodies with no partner in the frame are this
+kernel's, and that is the broad phase's choice). One box for everything a body could
+touch: the car among the scattered bricks is inside it and runs the whole kernel (10 of
+60 frames contact-free in that run); the World's gather of proxies a body is the finer
+filter. A frame handed over part way pays both kernels' start and end (once an
+approach; not measured apart).
 
 **Surface contact (the car's skin against the world's shapes), added 2026-11-19.**
 Mechanism 3 above is the engine's default rule against a rigid shape, *node contact*: a
