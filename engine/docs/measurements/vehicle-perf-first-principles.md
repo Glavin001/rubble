@@ -3524,3 +3524,210 @@ the work left is in the drawing itself, lossless first:
 * the cars' opaque picture follows the triangles (a quarter of the pixels takes off only
   10–15 %): levels of detail for the generated car (a different picture by design, the
   asset side: §8.30's follow-up).
+
+### 8.40 Three small lessons of the gpu-floor review tried on production's kernels: none pays (2026-11-20)
+
+(Numbered after §8.39 of the gpu-floor branch, PR #137, which is not on `main` yet.)
+
+The gpu-floor experiment's review (`gpu-floor-vs-production.md` on PR #137, §6.1) lists
+three small changes to production's kernels as they are: (a) contact words read and
+cleared only for nodes a contact wrote; (b) loops where each lane's turn is a different
+iteration given their items directly; (c) what a phase's hot loop reads that does not
+change read again at the phase's start. Each was measured before anything was built.
+**None reaches 5 % of a frame on its best row, so none is kept: `main`'s kernels and
+defaults are as they were, and no perf switch was added.** Native M3 Max, `main` at
+96904a44, the scenario matrix (`--profile fast`), the page's sedan.
+
+| | bound or result, of a frame | built | kept |
+|---|---|---|---|
+| (a) contact words only for written nodes | 0 to 2 % a row (0.01 to 0.17 ms), the whole read-and-clear | no | no |
+| (b) the proxies' integration | 0 (−0.2 to +0.5 %): each body already scans its own range | no | no |
+| (b) the pair list's walk | under 3.5 % for the whole walk (0.1 to 1.1 ms); its appends are a part | no | no |
+| (b) surface contact's loops, the in-workgroup walks | not in any saved state: not timed, not changed | no | no |
+| (c) bounds and bases read again a phase | member step −0.7 to +0.6 %, frame kernel −0.8 to +0.3 %: nothing | yes, bit for bit | no |
+
+**How it was measured.** Temporary perf bits in a build of its own, A/B through the matrix
+(`run.sh perf=BIT`), each build's binary kept apart so that nothing compiled while a
+matrix ran. Two kinds of time-only bit:
+- *leave the work out* (results wrong): what the perf doc's ablations do. It is a bound
+  only while the scene stays the same. Leaving out the nodes' force sums took the
+  head-on's contact forces away and the row came out −19 %: that is another scene, not a
+  bound.
+- *do the work once more* (results the same): where the work is idempotent, the kernel
+  repeats it and the difference is its cost. Every state word stays the same, so both
+  halves run the same physics, and the matrix prints its usual verdict. Used for (a) and
+  for the walk of (b).
+
+The two measurement builds are commits c2b8b478 and 05b15b41 on
+`claude/port-gpu-floor-lessons-1289bd`, each reverted by the commit after it.
+
+**Baseline** (`run.sh --baseline`, ms a frame of 34 steps, two runs in a row):
+
+| row | run 1 | run 2 | | row | run 1 | run 2 |
+|---|---|---|---|---|---|---|
+| drive | 3.80 | 3.29 | | headon | 14.00 | 13.82 |
+| tumble | 3.55 | 3.48 | | side | 9.30 | 9.85 |
+| wall | 4.75 | 4.68 | | bricks | 4.03 | 4.05 |
+| pile2 | 8.64 | 8.65 | | rocks | 4.39 | 4.33 |
+| pile8 | 14.99 | 14.60 | | barrier | 7.51 | 7.73 |
+| pile32 | 39.10 | 38.54 | | truss | 1.81 | 1.80 |
+
+A one-car row's level moves between about 3.2 to 3.5 and 3.9 to 4.1 ms from one process
+to the next with the same binary (drive, tumble, bricks; same-against-same runs showed
+both levels). The two halves of one process sit at the same level, so the matrix's A/B
+holds; a one-car row's baseline needs several runs.
+
+**(a) Contact words only for nodes a contact wrote.** On the wide passes and in the
+member step every node, every substep, rolls its anti-clip memory, clears its two-body
+count, takes its position steps and reads and clears its force sums: 8 atomic loads and
+11 stores (`nodeUpdateShapes`, `nodeUpdateCoupled`). Two measurements:
+
+- *the rolls, the count and the position steps left out* (5 loads, 8 stores; perf bit
+  2^27 of 05b15b41): −1.7 to +1.2 % on every row, the size of the matrix's noise. (The
+  first run's −11 % on the drive row was the level change above: three more runs gave
+  −0.2, −0.8 and +0.3 %.)
+- *every contact word read and written once more*, each store the value already there
+  (`contactWordsAgain`, bit 2^28; bit for bit on all 20 fixtures and all 12 rows). What
+  it adds is what the node phase's whole read-and-clear costs:
+
+| row | once more, % (runs) | ms a frame |
+|---|---|---|
+| drive | +0.4, +0.8, −0.6, +0.3 | 0.01 |
+| tumble | +1.4, +1.8, +1.5 | 0.06 |
+| wall | +1.1, +1.4 | 0.06 |
+| pile2 | +1.4, +1.7, +1.0, +1.3, +1.6 | 0.12 |
+| pile8 | +0.6, +1.3 | 0.15 |
+| pile32 | +0.5, +0.4 | 0.17 |
+| headon | +0.8, +0.7, −0.1, +1.0, +1.4 | 0.11 |
+| side | +1.8, +2.7, +0.6, +1.2, +1.4 | 0.14 |
+| bricks | +2.9, +2.9, −2.3, +1.7, +0.6, +1.2, +1.8 | 0.07 |
+| rocks | +2.8, +0.2, −0.1, +2.3 | 0.06 |
+| barrier | +2.0, +2.1, +1.7, +2.1, +2.3 | 0.16 |
+| truss | +1.3, −0.1, −1.3, −0.5 | 0 |
+
+So the bound is 0.01 to 0.17 ms a frame, 1 to 2 % of most rows. A switch could keep less
+than that: it adds a flag word a node that the node phase loads and every writer sets,
+and a node written in the last two steps still pays in full (the anti-clip roll moves
+last step's recorded words to the held ones, so a node written at step s resets its held
+words at s + 2). The review's estimate was "at most 0.2 ms of the 0.85"; measured, it is
+under that. The experiment's own kernel paid 1 to 2 ms a frame for the same words
+(−8 % on its head-on and −11 % on its wall crash when it stopped); production's node
+phase pays 0.05 to 0.16. One car's 548 nodes are 18 warps of 19 accesses, 11,600 warp
+accesses a frame: 0.06 to 0.12 ms is 5 to 10 ns each, inside the experiment's own 4 to
+29 ns for a warp's access to device memory.
+
+*Not built.* What it would take, for whoever returns to it: one word a node in `gAcc`
+(bits: force sums written, anti-clip recorded, anti-clip held, count, position steps),
+set inside `accAdd` (the hits', the levels', surface contact's and the wheels'),
+`clipRecord`, `shiftAdd` and the count's adds, and by the adds to the force sums that do
+not go through `accAdd` (`explicit_beams.slang` near 6278, 6414 and 8296); the node phase
+loads it once and, when it is zero, touches nothing. The clear state of every word is
+then what it is today, so every word stays bit for bit. The bound does not shrink with
+the frame: at the one-car target of 1 ms a frame the same 0.06 ms is 6 %, and that is
+when to build it.
+
+**(b) Loops where each lane's turn is a different iteration.**
+
+- *The proxies' integration* (`cplIntegrateBody`, `cplIntegrateBodySplit`). The plan's
+  shape range a body is set on the lab's path: the fallback to every shape
+  (`gsCpl[0] & 4`) is the tests' cache-off bit (`set_coupling_workgroup_cache`), off by
+  default. A lossless A/B that forces every shape (bit 2^29 of 05b15b41): wall −0.2 %,
+  bricks +0.5 %, rocks +0.2 %, all bit for bit. So even the whole scan costs nothing
+  here: the shapes' reactions are already a lane a shape (`cplReactBy`) and the body's
+  loop reads workgroup memory. The experiment's 1.0 → 0.09 ms was its own loop;
+  production does not have it.
+- *The pair list's walk.* On the lab's path (wide passes with the reused list, self
+  split) the list is built by `selfWalkList` in the walk dispatch
+  (`explicit_beams_self_walk`: 64-thread workgroups, 32 shares a triangle), the same
+  loop as `triangleGridWalk`'s and `pairReuseList`'s with the append inside the bucket
+  loop. It runs on building steps only: 9, 16 and 29 of a frame's 34 dispatches at
+  pile2, pile8 and pile32; 3 at the head-on. The whole walk once more with every append
+  an atomic that changes nothing (bit 2^29 of c2b8b478, bit for bit on all 12 rows), two
+  runs: pile2 +1.7 and +3.5 %, pile8 +2.4 and 0.0 %, pile32 +2.9 and +3.0 %, every other
+  row between −1.1 and +3.0 % and none above +2 % in both runs. GPU timestamps agree
+  (`PROFILE_SPLIT=1`): the walk dispatch is 0.24, 0.62 and 1.82 ms a frame at pile2,
+  pile8 and pile32 (2.1, 3.8 and 4.7 % of the timed span), under 0.1 ms elsewhere.
+  Moving the appends after the loop cannot gain more than a part of that. Not changed.
+- *`triangleGridWalk`'s `triPairAdd`, `pairReuseList`, `trianglePairs`.* None runs in a
+  saved state. The first lists only with the reused pair list off
+  (`RUBBLE_PAIR_REUSE=0`); the second builds the list inside a workgroup, which the
+  lab's self split replaces with the walk dispatch above; the third is the frame
+  kernel's early list on a step with few listed triangles, and the matrix's rows do not
+  run the frame kernel (one car runs the wide passes, cars in contact the member step).
+  Not timed, not changed.
+- *Surface contact's `surfPairList` and static-slot loops.* Surface contact is off in
+  every matrix scene and every fast-check fixture (`--surface 1` is in none). Left for a
+  task that first saves a state with it on.
+
+**(c) Bounds and bases read again at a phase's start.** Built as the review describes
+(c2b8b478): `memberNodesLocal` and `memberBeamsLocal` for `contactMemberStep`,
+`frameNodesLocal` and `frameBeamsLocal` for the frame kernel, each its own function
+behind a perf bit (2^27 the node phase, 2^28 the beam phase). Each loads the vehicle's
+four records, its origin and its step again through `v + phaseZero()`, where `phaseZero`
+is a workgroup atomic's top bit (`gsTestedCount[0].load() >> 31`, always 0), so no
+compiler can fold the copy into the entry's.
+
+- *Does it survive the toolchain?* Yes. The WGSL holds the call and the separate loads
+  (`phaseZero_0()` four times in the member module), Chrome compiles all 124 modules
+  (`EXPLICIT_WGSL_MODULES_ONLY=1`), and it is bit for bit on all 20 fixtures and all 12
+  rows.
+- *Does it pay?* No.
+
+| row (cars in contact: the member step) | node phase | beam phase | both |
+|---|---|---|---|
+| pile2 | +0.4 % | −0.0 % | +0.4 % |
+| pile8 | +0.6 % | +0.2 % | +0.5 % |
+| pile32 | +0.4 % | −0.1 % | −0.2 % |
+| headon | −0.7 % | +0.5 % | −0.0 % |
+| side | −0.3 % | +0.0 % | −0.7 % |
+| barrier | −0.6 % | +0.0 % | −0.1 % |
+
+| the frame kernel, one car (`--wide 0`), on / off ms a frame, 3 rounds | t 2.5 | t 6 | t 20 |
+|---|---|---|---|
+| node phase | 4.66 / 4.66 | 6.33 / 6.31 | 6.27 / 6.27 |
+| beam phase | 4.65 / 4.67 | 6.29 / 6.31 | 6.25 / 6.25 |
+| both | 4.67 / 4.67 | 6.29 / 6.29 | 6.19 / 6.24 |
+
+  (The one-car rows of the matrix run the wide passes, which hold neither function;
+  their deltas in those runs, −9.9 to +4.9 % on a different row each time, are the
+  level changes described under the baseline.)
+- *Why not, as far as it was looked at.* A measurement, then a guess. Measured: the
+  member step is 5.0 to 5.9 ms a frame at two to eight cars (its node phase 1.3 and its
+  beam phase 0.75 of that, §8.36), and neither moved. The guess: a lane here takes one
+  or two nodes and eight beams a phase, each hundreds of instructions and tens of device
+  loads, so a bound or a base loaded from the stack once a turn is too small to see. The
+  experiment's kernel is 1.1 to 1.3 ms for the whole frame with its counts known at
+  compile time; the same load is a larger share there. Not kept: a switch that changes
+  nothing is only more code in the largest kernels.
+
+**What else the runs showed** (`PROFILE_SPLIT=1`, GPU ms a frame; for ranking):
+
+| row | member step | members' hits | split levels | fleet walk | self walk + pairs |
+|---|---|---|---|---|---|
+| pile2 (8.6) | 5.76 | 1.65 | 0.53 | 0.04 | 0.77 |
+| pile8 (15.4) | 5.94 | 1.74 | 1.14 | 1.45 | 1.49 |
+| pile32 (39.3) | 7.15 | 3.00 | 14.10 | 3.68 | 4.37 |
+| headon (14.0) | 5.39 | 1.85 | 4.80 | 0.73 | 0.66 |
+| side (9.9) | 5.01 | 1.71 | 0.71 | 0.15 | 0.63 |
+
+The member step is a third to a half of every row with cars in contact, and the levels
+are a third of the head-on and of pile32. The three changes above act on parts of the
+node phase and of the walk that are a few per cent of that. The gap to the experiment
+(1.7 to 3.9 times) is in the schedule and the layout, the review's §6.2 to §6.4, not in
+these.
+
+**Defaults.** Nothing to decide: no switch exists. Recommendation: keep (a) as a note
+for when one car's frame is near 1 ms; drop (b) for the lab's path and take the surface
+loops with the surface pass's own item (the review's §6.1 d); drop (c).
+
+**To run again.**
+```sh
+cd engine
+git checkout 05b15b41 -- slang/kernels && tools/scenario-matrix/run.sh perf=268435456    # (a) once more
+tools/scenario-matrix/run.sh perf=134217728                                               # (a) the rolls left out
+tools/scenario-matrix/run.sh perf=536870912 wall bricks rocks                             # (b) every shape
+git checkout c2b8b478 -- slang/kernels && tools/scenario-matrix/run.sh perf=402653184     # (c) both phases
+tools/scenario-matrix/run.sh perf=536870912                                               # (b) the walk once more
+EXTRA="--wide 0" FRAMES=10 AB_ROUNDS=3 AB_WARM_MS=150 tools/explicit-2khz/fast-check.sh perf=402653184 cars1   # (c) the frame kernel
+git checkout HEAD -- slang/kernels
+```
