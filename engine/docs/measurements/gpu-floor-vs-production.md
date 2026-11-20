@@ -37,11 +37,12 @@ The claims I think most likely to be wrong, and so most worth a reviewer's time:
 - that the like-for-like gap for one car is "near 2" (§2): it rests on an old figure for
   the wheels' cost;
 - that flagged contact words are worth at most 0.2 ms in production (§6.1 a): an estimate
-  from counts, not a measurement;
+  from counts, not a measurement (since measured: 0.01 to 0.17 ms, §6.1's outcome);
 - that a vehicle with an empty proxy set can skip the coupling's code with no guard
   (§6.2 step 1): an argument from the coupling's design, not tested;
 - that re-reading loop bounds helps through naga and Tint as it did in hand-written Metal
-  (lesson 5, §6.1 c);
+  (lesson 5, §6.1 c) (since measured: it was wrong for production, the reload survives
+  both compilers and changes nothing, §6.1's outcome);
 - that two workgroups of one dispatch always run at the same time (§6.4): measured on one
   GPU, promised by no API.
 
@@ -167,7 +168,9 @@ as a benchmark result.
 
 1. Small changes to production's kernels as they are: flagged contact words, the
    scan-with-a-skip audit, bounds re-read at a phase's start, and the surface pass's
-   staging. Days each, bit for bit, gated by the scenario matrix.
+   staging. Days each, bit for bit, gated by the scenario matrix. **Tried since
+   (2026-11-20): the first three were measured on production and none pays, 0 to 3.5 %
+   of a frame each (§6.1's outcome). The order now starts at item 2.**
 2. The kernel choice by what is in reach, first in its guard-free form, which the
    coupling's own window already makes exact.
 3. A new native frame kernel in Slang with the experiment's layout, for a body alone or
@@ -203,7 +206,12 @@ Three cautions on the figures in §1:
   So the like-for-like gap for one car is smaller than 2.6, probably near 2. It is not
   known more exactly than that.
 - **Production's figures are the matrix's baseline** (`scenario-matrix.md`, main at
-  366bc068), not re-run for this review.
+  366bc068), not re-run for this review. A later run on main at 96904a44 (the port
+  session's baseline, two runs, §8.40 on `claude/port-gpu-floor-lessons-1289bd`) gave
+  drive 3.80 and 3.29, wall 4.75 and 4.68, head-on 14.00 and 13.82, side 9.30 and 9.85,
+  bricks 4.03 and 4.05, rocks 4.39 and 4.33. A one-car row sits at 3.2 to 3.5 ms in one
+  process and 3.9 to 4.1 in the next with the same binary, so §1's one-car ratios are
+  known to about 20 %; the head-on's is nearer 3.5 than 3.9.
 - **Fast is not what production runs.** Production's kernels give the reference's bits, so
   the strict column is the comparison. The fast column is what a fast mode would add (10 to
   20 %), which matters now that bit-identical is to become a test mode.
@@ -443,6 +451,26 @@ starts with a measurement.
 | f | A wide pair list rebuilt rarely, the working list filtered from it | one kept list, rebuilt through the grid sort (5 more `sync()` on a build step) on 14 to 37 % of the late mountain's steps | head-on −9 %, wall-crash run −7 % | count rebuilds a frame on the wall and head-on fixtures, and time a build step against a reuse step | medium |
 | g | Reductions done by the lanes that hold the values (atomic min and max) | to check: `vv_bounds`, the surface pass's body box | 0.02 to 0.08 ms each | read those two | low, small |
 
+**Outcome of (a), (b) and (c), 2026-11-20.** A separate session measured each on
+production's kernels (main at 96904a44, the scenario matrix) before building it. None
+reaches 5 % of a frame on its best row and none is kept; main's kernels are unchanged.
+The write-up is §8.40 of the perf doc on branch `claude/port-gpu-floor-lessons-1289bd`
+(docs only, not merged; its two measurement builds are commits c2b8b478 and 05b15b41,
+each reverted). This review's estimates for these three rows were too high:
+
+| # | measured on production | why it differs from the experiment |
+|---|---|---|
+| a | the node phase's whole read-and-clear of the contact words is 0.01 to 0.17 ms a frame, 0 to 2 % of a row (each word read and written once more, bit for bit) | the same words cost the experiment 1 to 2 ms a frame; production's are 5 to 10 ns a warp access. Worth building when one car's frame is near 1 ms, where the same 0.06 ms is 6 % |
+| b | the proxies' integration forced over every shape: −0.2 to +0.5 %; the pair list's whole walk once more: at most +3.5 % (piles), so moving its appends gains a part of that | the plan's per-body range is set on the lab's path, and the body's loop reads workgroup memory. `triangleGridWalk`'s append, `pairReuseList` and `trianglePairs` run in no saved state; surface contact is on in none, so its loops were not timed |
+| c | built (its own functions behind a perf bit, a load no compiler can fold, bit for bit on 20 fixtures and 12 rows, Chrome compiles every module): member step −0.7 to +0.6 %, frame kernel −0.8 to +0.3 % | a lane takes one or two nodes and eight beams a phase, each hundreds of instructions; one reload is too small a share. (The session's guess, not measured further.) |
+
+Two things follow for the rest of this section. First, the small lessons do not transfer
+to production's kernels one at a time: its time is in the schedule and the layout (the
+member step is a third to a half of every row with cars in contact, the split levels a
+third of the head-on and of pile32), which are §6.2 to §6.4. Second, (d) and the surface
+half of (b) still have no production measurement, because no saved state has surface
+contact on; a matrix row with it on comes before either.
+
 ### 6.2 The kernel by what is in reach
 
 Production chooses its module once an upload. The experiment shows a choice a body a frame
@@ -587,8 +615,10 @@ lane. The candidates' rule in two stages. Each is in §8.39 with its figure.
 
 ## 8. Suggested order
 
-1. §6.1 (a), (b), (c) on the existing kernels, each through the matrix. A week. This also
-   tells how much of the experiment's lessons survive Slang and naga.
+1. §6.1 (a), (b), (c) on the existing kernels, each through the matrix. **Done
+   2026-11-20: none pays (§6.1's outcome).** (c) survives Slang, naga and Tint as a real
+   load and still changes nothing, so the experiment's small lessons depend on its
+   layout; the steps below are where the gap is.
 2. §6.2 step 1, the guard-free kernel choice, with its measurement first.
 3. A matrix row of 32 cars apart, and the microbenchmark on CUDA. Both decide the shape of
    step 4 before it is built.
@@ -597,6 +627,8 @@ lane. The candidates' rule in two stages. Each is in §8.39 with its figure.
 6. §6.4, pairs in lockstep on native; then the design for groups of three or more, which
    is new work.
 7. §6.1 (d), the surface pass, when surface contact is to be the default configuration.
+   A scenario-matrix row and a fast-check fixture with surface contact on come first:
+   there is none today.
 
 ## Appendix A. The experiment, in full
 
