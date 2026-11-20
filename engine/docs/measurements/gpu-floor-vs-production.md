@@ -14,17 +14,118 @@ production and how.
   `crates/engine-webgpu/src/explicit_beams_gpu.rs`, read at `main` 96904a44. Line numbers
   below are at that commit.
 
-Terms used throughout:
+## 0. Read this first
+
+### Who this is for and what is asked
+
+This file is written to be reviewed by someone who has seen neither the experiment nor the
+work that led to it. Everything needed to follow the argument is in the file: the
+background below, the experiment in Appendix A, production's path in Appendix B. The
+paths and line numbers are for checking a claim, not for understanding it.
+
+A reviewer is asked four things:
+
+1. Are the statements about production right? Each has a file and line; Appendix C says
+   which I read myself and which rest on a second reader's report.
+2. Are the comparisons fair? §2 lists what differs between the two sides.
+3. Does each port item in §6 hold up: does the lesson survive Slang, WGSL and two shader
+   compilers, and is the expected gain honest?
+4. Is the order in §8 right, given the constraints below?
+
+The claims I think most likely to be wrong, and so most worth a reviewer's time:
+
+- that the like-for-like gap for one car is "near 2" (§2): it rests on an old figure for
+  the wheels' cost;
+- that flagged contact words are worth at most 0.2 ms in production (§6.1 a): an estimate
+  from counts, not a measurement;
+- that a vehicle with an empty proxy set can skip the coupling's code with no guard
+  (§6.2 step 1): an argument from the coupling's design, not tested;
+- that re-reading loop bounds helps through naga and Tint as it did in hand-written Metal
+  (lesson 5, §6.1 c);
+- that two workgroups of one dispatch always run at the same time (§6.4): measured on one
+  GPU, promised by no API.
+
+### Background: the system
+
+- **Rubble** is a physics engine with one GPU `World` that runs two solvers together: a
+  rigid-body solver stepping at 60 Hz, built for 100,000 bodies and more, and an
+  **explicit node-beam solver** for soft bodies (deformable vehicles and structures)
+  stepping at 2 kHz, so 33 or 34 substeps inside each World step. This file is about the
+  second.
+- **A soft body** is nodes (point masses with position and velocity), beams (spring and
+  damper between two nodes, which can yield and break), collision triangles over three
+  nodes, and contact points (nodes that can touch triangles). A substep computes every
+  beam's force, sums forces per node, handles contact, and integrates.
+- **Contact has three kinds**, and they differ in mechanism:
+  - *self-collision*: a body's nodes against its own triangles;
+  - *vehicle contact*: one soft body's nodes against another's triangles. The body whose
+    triangles are hit is the **owner** of those hits, and the specification applies owners
+    one after another in a fixed order;
+  - *the coupling*: a soft body against the World's rigid bodies. Once a World step the
+    rigid bodies near a vehicle are copied into its frame as **proxies**; during the 34
+    substeps they move as free bodies and take the vehicle's reactions; the summed
+    impulses go back to the rigid solver for its next step. By default only a node inside
+    a shape is a contact (*node contact*). The opt-in *surface contact* also tests
+    triangles and beams against shapes, so thin shapes cannot slip between nodes.
+- **The CPU reference** (`crates/engine-softbody`) is the specification in code. A GPU
+  kernel is **bit for bit** when every word of state it leaves (positions, velocities,
+  forces, beam state, broken flags, contact sums) equals the reference's after the same
+  frame. Contact sums are integers in fixed point so that their order does not matter.
+- **The settings in play** are the lab sedan's: centred damping (a correction pass after
+  the node update, two extra phases a substep), anti-clip (each node remembers which side
+  of a triangle it was on), the two-body rule (a hit splits masses between the bodies),
+  and dissipative contact (contact may not add energy; it also moves positions by small
+  fixed-point steps).
+
+### Constraints any port must meet
+
+These are the project's rules (`AGENTS.md`) and its owner's decisions. They bound §6.
+
+- **Lossless only.** A performance change may not alter results: no dropped contacts, no
+  looser tolerances, no simplified shapes. A limit must be an explicit setting that fails
+  with a clear error.
+- **Forward-only.** No step is ever undone and solved again.
+- **A fixed checking ladder.** After every kernel edit `fast-check.sh` replays saved
+  states both ways and compares every state word (seconds). Before a change is kept, the
+  **scenario matrix** replays a dozen saved use cases with the change on and off and
+  passes only if every row is bit for bit and none is slower.
+- **Native and Chrome.** Production's kernels must compile and run under WebGPU in
+  Chrome, which is stricter than native (uniform control flow around barriers, 32,768
+  bytes of workgroup memory, at most 256 threads a workgroup unless more is requested).
+- **Targets.** One soft body 1 ms a frame; eight in contact 3 ms; a hundred-car derby as
+  the goal behind them. CUDA is a wanted backend.
+- **Bit-identical is to become a test mode** (decided 2026-11-19): strict arithmetic
+  opt-in, a faster default. So a way to accept a non-identical build is needed (§6.5).
+
+### References and terms
+
+"§8.31" and the like mean sections of `engine/docs/measurements/vehicle-perf-first-principles.md`
+(the perf doc). "Handoff" is `engine/docs/handoff/soft-rigid-world.md`. Where a figure is
+taken from either, the figure is restated here.
 
 - A **frame** is 34 substeps of 0.5 ms (1/60 s of simulated time). All times are ms a frame
   on a native M3 Max unless marked.
 - A **workgroup** is the set of threads a compute kernel runs together (Metal's
   threadgroup); a **lane** is one of its threads; a **warp** is 32 lanes that execute the
   same instruction at once. On this GPU one workgroup runs on one of 40 cores.
+- A **barrier** is the point in a kernel where every lane of a workgroup waits for the
+  others; a **phase** is the code between two barriers. A **dispatch** is one launch of a
+  kernel over some number of workgroups. A dispatch is **dependent** when it must wait for
+  the one before it.
+- **Workgroup memory** is shared by a workgroup's lanes and gone when the dispatch ends;
+  **device memory** is the GPU buffers, which persist. A **register** is a value a lane
+  holds itself.
 - **Strict** means the GPU's floats are the CPU reference's bits. **Fast** means the
   compiler may fuse and approximate; it is judged by closeness, not equality.
 - A **proxy** is a rigid body's shape, pose and mass copied into the soft body's frame for
-  the 34 substeps.
+  the 34 substeps. The **window** is that frame.
+- A **hit** is one node found in contact with one triangle in a substep. A **contact
+  group** is a set of soft bodies whose boxes overlap; its **levels** are its owners'
+  turns in order.
+- A **pair list** is the kept set of (triangle, node) pairs close enough to touch, reused
+  over several substeps until nodes have moved more than its margin (the **skin**).
+- The **wide passes** are production's kernels that run a thread an element over the
+  whole fleet, as opposed to a workgroup a vehicle.
 
 ## 1. Summary
 
@@ -497,7 +598,295 @@ lane. The candidates' rule in two stages. Each is in §8.39 with its figure.
    is new work.
 7. §6.1 (d), the surface pass, when surface contact is to be the default configuration.
 
-Where to look in the experiment: `engine/experiments/gpu-floor/README.md` (how to run and
-check it), `kernels/floor2.metal` (the kernel; its header is the layout), `kernels/pair.metal`
-(two bodies), `src/floor.rs` (`reach_plan`, the layout's tables), `reach-emu.sh` and
-`surf-emu.sh` (the emulator suites).
+## Appendix A. The experiment, in full
+
+Enough to judge §3 to §6 without opening its code.
+
+### A.1 Scope
+
+`engine/experiments/gpu-floor` is a workspace crate nothing depends on: about 5,700 lines
+of Metal in `kernels/` and 4,400 of Rust in `src/`. It steps the lab's generated sedan as
+the CPU reference does, with these of the reference's features: centred damping, anti-clip
+with the swept test, the two-body rule with its residual pass and work guard, fixed-point
+contact sums, dissipative contact with exact friction, beam yield and break, break groups,
+breakable triangles. It was built in four parts, each bit for bit before the next:
+
+1. one body and a fixed world (a ground plane, static boxes);
+2. a body against another soft body (two bodies);
+3. a body against rigid proxies, two-way, by node contact;
+4. surface contact (triangles, beams and nodes against boxes and spheres), then the
+   kernel chosen a frame by what is in reach.
+
+### A.2 The layout
+
+One workgroup of 1,024 lanes a body. One dispatch runs all 34 substeps. Every count is a
+compile-time constant, so the kernel is compiled for one car model.
+
+- **Beams.** Each lane holds up to four beams. A beam's hot words (its two ends, stiffness,
+  damping, rest length, last extension rate) stay in the lane's registers for the frame.
+  Everything else about a beam is read only on a substep where it yields, breaks, or is one
+  of the car's 71 special elements.
+- **Forces.** A beam writes one scalar (force over length) to workgroup memory. A node
+  reads its beams' scalars from a streamed list in the reference's order and rebuilds each
+  push as (x_self − x_other)·scalar. IEEE subtraction and multiplication are
+  sign-symmetric, so both ends get the reference's bits.
+- **Nodes.** Each of the first 548 lanes owns a node and keeps its position, velocity and
+  force in registers. Positions and velocities are also published to workgroup memory for
+  the beams and the contact tests.
+- **Self-collision.** A lane a triangle walks its row of an exact pair list (every pair
+  the reference's box test could pass). The list has two levels: a wide one (skin 0.30 m)
+  built rarely, and a working one (skin 0.05 m) filtered from it. Each pair gets the
+  contact rule's cheap tests in the row; pairs that pass go on a compact list and get the
+  full rule, a lane a pair.
+- **Hits.** Each node touched by a hit gets a slot in workgroup memory (in the beam
+  scalars' array, which is free between two beam passes). The contact rule's passes read
+  and sum there, not in device memory.
+- **Device memory** holds what is rare or persistent: contact sums, anti-clip memory,
+  break groups, the pair lists, and an image of the hot state that starts the next
+  dispatch.
+
+A substep with no contact is seven phases. Workgroup memory is 29,120 bytes for the
+one-body kernel.
+
+### A.3 Two soft bodies
+
+Each body keeps its own workgroup, so its own core. Metal has no barrier across
+workgroups, so each group's lane 0 adds one to a counter in device memory after its own
+barrier and then loads the counter, a bounded number of times, until every group has
+added. A wait that runs out sets a status bit; it never did.
+
+Each substep: each body publishes its box and top speed; the bodies meet; if the boxes are
+apart that is all. Otherwise each publishes its nodes with atomic stores, they meet again,
+and each body tests its own triangles against the partner's contact points (grouped in
+clusters whose boxes the partner publishes). Hits are then applied owner by owner in the
+reference's order. The part of each owner's turn that reads only the state at the pass's
+start is done by both bodies at once; only the residual pass and the work guard wait for
+the other owner.
+
+### A.4 Rigid proxies and surface contact
+
+The reference's proxy set lives in the body's workgroup for the frame. Each substep the
+shapes are posed, a node tests the shapes whose bounds it is inside, a node in contact
+takes the two-body rule against that body, reactions are summed per shape in fixed point,
+and a lane a body integrates them.
+
+Surface contact adds a pass of seven stages after the self hits: the body's box against
+the shapes' boxes; a search for (element, shape) pairs; a cull and the direct tests
+(points, and anything against a sphere); then for a triangle or beam against a box, three
+staged steps (a lane a box edge computes candidate gaps, the candidates at the least gap
+are walked again and recorded, a lane a pair finishes the query); then a lane a hit applies
+the response. The geometry is production's own `feature_query.slang`, converted to Metal
+as text, and checked against the Rust twin on 300,000 random cases with no difference.
+
+### A.5 The kernel chosen by what is in reach
+
+Three pipelines are compiled from the one source:
+
+- *the whole kernel*;
+- *the contact-free kernel*: no code for proxy shapes or surface contact. It keeps the
+  ground, the world's boxes by node, and self-collision;
+- *the kernel that takes a frame up*: the whole kernel, starting at a given substep.
+
+Before a frame the host puts everything the body could touch in that frame in one box
+(each shape as posed, widened by its turning, swept along its free flight) and gives the
+kernel one plane: the face of that box the body is farthest outside. The contact-free
+kernel is chosen when the body is clear of the plane by a margin (four times what its
+fastest node moves a substep, 2 cm at least) plus what it would travel in the frame.
+
+The **guard** makes the choice safe whatever the host computed. At each substep's end
+every node compares its distance to the plane with the margin. If any node is within it,
+the dispatch ends at that substep and writes how many substeps it did. The next dispatch
+in the same command buffer is the take-up kernel, launched by indirect count, which is
+zero unless a guard asked. Why this is exact:
+
+- node contact at a substep tests positions from the substep's start, which the guard
+  checked at the previous substep's end;
+- surface contact's first test is the body's box after the node update, and the
+  contact-free kernel checks there that every node is still on the clear side. If that
+  second check fails the frame is flagged as not proven. No run set the flag;
+- the proxies take no reaction while nothing touches them, so the contact-free kernel
+  moves them by free flight, with the reference's arithmetic.
+
+Nothing is computed twice and nothing is undone.
+
+### A.6 How it was checked
+
+- **An emulator.** The Metal source is compiled as C++ behind a small header. A lane is a
+  coroutine, a barrier is the point where every lane has finished its phase. It runs
+  against the CPU reference and compares every state word after each frame or substep,
+  with lanes and workgroups in either order. No GPU is involved.
+- **Strict on the GPU.** Fast math off plus `#pragma clang fp contract(off)`. With fast
+  math off alone Metal still fuses a·b + c, and 9 % of results differ from the CPU's; with
+  the pragma none of 4 million did. Every scene of every part matched the reference in
+  every state word every frame: drops, a 16 m/s wall crash over 120 frames, head-on, side
+  and rear impacts, 24 bricks, four falling rocks, a loose post, a fixed pole.
+- **Closeness, for the fast build.** Two measures, each against the reference's own spread
+  when its start is moved by a micron: the error after one frame from the reference's
+  state, and the drift of a free run. The fast build is inside that spread on position;
+  its kinetic-energy measure misleads for a car at rest.
+- **Timing.** Every figure is GPU time of a whole frame from a fixed saved state, medians,
+  two builds side by side in one batch under the machine's GPU lock. A state repeats to
+  1 %; equivalent builds differ by 0.03 to 0.04 ms.
+
+### A.7 The cost model it measured
+
+Microsecond figures are for one phase of one workgroup of 1,024 lanes.
+
+| what | measured |
+|---|---|
+| an empty phase | 0.073 µs |
+| 128 dependent multiply-adds with 1 / 8 / 32 warps busy | 0.24 / 0.42 / 1.51 µs |
+| the same work in 16 of 32 warps | half |
+| a workgroup-memory load | 2.5 to 4.9 ns a warp |
+| device loads, streamed / scattered | 3.9 / 23 to 29 ns a warp-load |
+| a device atomic add, own word / scattered | 2.6 / 38 ns |
+| values a lane keeps and updates each phase: 16 / 48 / 80 / 112 | 0.19 / 0.32 / 1.1 / 5.0 ns an update |
+| square root or division, fast / strict | 0.7 / 2.7 to 4.1 ns a warp |
+| a meeting of workgroups on different cores | +0.1 to 0.7 µs, none missed for 2 to 40 groups |
+| a plain store read by another workgroup in the same dispatch | stale on every read; atomic store: right on every read |
+
+### A.8 Results beyond §1's table
+
+- **The kernel choice** (fast | strict): parked by a post with surface contact
+  1.41 → 1.07 | 1.58 → 1.22; with node contact 1.23 → 1.07 | 1.40 → 1.21; a build with no
+  proxy code at all 1.05 | 1.21. A 60-frame drive at a post, mean 1.95 → 1.78 |
+  2.34 → 2.17. Frames in contact unchanged.
+- **Surface contact in contact** (fast | strict): a loose post 3.40 | 4.24; 24 bricks
+  3.36 | 4.10; four rocks 2.40 | 2.93.
+- **Copies in one dispatch** (fast): 40 bodies at rest 1.21, 41 bodies 2.31, 200 bodies
+  6.23; 20 head-on pairs about 4.5, 60 pairs about 14. A step up every 40 workgroups, one
+  a core.
+- **The CPU reference** on one core: about 10.5 ms a frame.
+
+## Appendix B. Production's path, in full
+
+Enough to judge §3 without opening its code. All of it is at `main` 96904a44.
+
+### B.1 Data
+
+State is in device buffers shared by every vehicle: per node three records of four floats
+(position and mass, velocity and friction, force); per beam static records (ends, kind,
+stiffness, damping, bounds) and two state records; per node a list of **incidence
+entries**, one per beam end, each holding that beam's force on that node; integer
+accumulators per node for contact sums, anti-clip memory and position steps; lists and
+grids for the searches. Counts and offsets per vehicle are read from a table at run time.
+Arithmetic that must match the CPU goes through helpers that stop the compiler fusing or
+reordering (`slang/physics/strict.slang`). Every loop is capped and draws on a per-frame
+budget, so a corrupt count cannot run away (`explicit_loop_cap.slang`); a stopped loop
+fails the step.
+
+### B.2 The frame kernel (the engine's default for one small vehicle)
+
+`explicit_beams_frame`: a workgroup of 256 or 512 lanes a vehicle, one dispatch a frame,
+the substep loop inside. Lanes stride over the vehicle's nodes, beams and triangles. A
+substep is a node phase (sum incidence forces, contact with ground and shapes, integrate),
+two centred-damping phases, a beam phase (force, yield, break; the end forces written to
+the incidence entries), the pair tests, and the hits' application, with barriers between.
+
+### B.3 The wide passes (the lab's default, and what the matrix times)
+
+Small kernels dispatched every substep, a thread an element over the whole fleet: nodes;
+centred damping's beams and nodes; beams; then self-collision as three dispatches (a
+single-workgroup *list* kernel that tracks node travel and rebuilds the kept pair list
+through a grid sort when needed, a *walk*, and *pairs* with a thread a pair); then a
+single-workgroup *hits* kernel that applies the contact rule. Raycast wheels and the
+coupling run in a workgroup a vehicle of their own beside the list kernel. A frame is 243
+dispatches (§8.31). One car at rest, each pass timed apart: hits 1.22, list 1.51, nodes
+0.85, beams 0.54, walk and pairs 0.51, centred damping 0.50 (§8.33). The whole frame by
+the matrix: 3.22.
+
+### B.4 Vehicle contact
+
+A plan, made once for at least 34 substeps, takes each vehicle's box padded by its travel
+and forms **contact groups** of vehicles whose boxes overlap. Two paths then exist.
+
+- *Group path* (engine default): each group runs in one workgroup for the whole frame, its
+  members' steps and the contact pass together.
+- *Split path* (lab default): once any group exists, every vehicle is stepped one dispatch
+  a substep. Each substep is a member step (a workgroup a vehicle), about eight fleet-wide
+  dispatches that find candidates and hits (a thread a triangle, a part of a triangle, a
+  pair), and the group's workgroup applying the owners' levels in a loop with barriers.
+  Nothing stays in workgroup memory between dispatches. Candidates are found every
+  substep; a kept list exists but is off because the page in Chrome ended in another state
+  with it.
+
+Measured by the matrix: two cars head-on 15.41, side impact 9.30, eight cars piling up
+14.43, thirty-two 56.39.
+
+### B.5 The coupling and surface contact
+
+GPU passes in the World gather each vehicle's proxies once a World step by a swept test
+(a collider's bounding sphere swept over the window against the vehicle's swept box).
+Inside the frame each substep integrates the proxy bodies from the last substep's sums,
+counts nodes against shapes for the mass split, and applies contact in the node phase.
+Each node keeps a list of up to 16 nearby shapes, rebuilt when it leaves its skin.
+Reactions are fixed-point sums a shape. Proxies are boxes, spheres, capsules and hulls.
+
+Surface contact is opt-in, off in the lab and the matrix. Each element scans the shapes'
+bounds and lists pairs; one lane a pair runs the whole closest-feature query; hits are
+applied. When the vehicle is also coupled to the World the pass runs as nine separate
+pipelines between segments of the frame kernel, dispatched every substep.
+
+### B.6 Variants and switches
+
+Modules are compiled per fleet, not per model: 256 or 512 lanes; with or without aero and
+commands; solo, small-group and large-group contact; with or without surface contact;
+with or without the coupling. About two dozen lossless speed-ups are bits of one mask
+(`perf_flags_default`); those on by default were each proved bit for bit on saved states
+first. Vehicle sleep is on in the World and off in the lab; a sleeping vehicle is not
+dispatched.
+
+## Appendix C. Where each statement comes from, and how sure it is
+
+| statement | source | confidence |
+|---|---|---|
+| the experiment's figures (§1, A.7, A.8) | measured in this work, whole frames from fixed states, under the GPU lock; logs in `~/Development/rubble-artifacts/gpu-floor/` | high for sizes; differences under 0.04 ms are noise |
+| the experiment is bit for bit | every state word compared every frame, emulator and GPU | high |
+| production's matrix figures (§1, B.3, B.4) | quoted from `scenario-matrix.md`, measured at main 366bc068, not re-run | as good as that doc; main has moved since |
+| production's per-pass figures (§3.2, B.3) | quoted from §8.31 and §8.33, each pass timed in a pass of its own | each is high by about 0.1 ms; they are for ranking |
+| the wheels' cost, 0.85 ms | quoted from §8.31, before the wheels moved to their own core | stale; it is the weak point of "near 2" |
+| the planner's schedules, the wide plan, the lab's defaults, the perf mask | read by me: `explicit_plan.rs:440-472`, `:3236-3372`; `vehicle_lab/mod.rs:172-196` | high |
+| what a beam and a node load every substep; the per-node contact words; `hits` always true on the wide path | read by me: `explicit_beams.slang:1081-1092`, `:1183-1215`, `:1438-1458`, `:872-890`, `:926-948`, `:2955-2985`, `:7630-7650` | high |
+| production's workgroup arrays; the 1,024-lane note; the pair list's margin and reuse rate | read by me: `explicit_beams.slang:391-397`, `:3898-3900`, `:4115-4117`; `explicit_plan.rs:494-507`, `:3675-3700` | high |
+| the proxies' integration loop and its range; the per-node shape list | read by me: `explicit_beams_rigid.slang:1-30`, `:612-634`, `:664-678`, `:773`, `:948-954` | high |
+| the surface pass: pairs appended inside the loop, a lane a pair, nine pipelines a substep | read by me: `explicit_beams_surface.slang:555-585`, `:996-1018`, `:1096-1114`; `explicit_plan.rs:3276-3285` | high |
+| the split path steps every vehicle a dispatch a substep | read by me: `explicit_beams_gpu.rs:3236-3252`, `:3495-3506` | high |
+| "about ten dispatches a substep" on the split path | counted from the list of operations by a second reader (`explicit_beams_gpu.rs:4606-4689`), not by me | medium |
+| vehicle contact's caps, the levels' loop, sleep, how kernels are compiled and cached, shape kinds and casts in the surface pass | a second reader's report with lines; I checked a sample of the lines, not all | medium |
+| fast math is on in production's Metal builds; strict by XOR helpers | read by me: `engine-metal/src/explicit.rs:6-14`, `:100-106`; `strict.slang:1-40` | high |
+| expected gains in §6 | the experiment's own kernel, unless marked | they bound nothing in production; each item names a first measurement |
+| WebGPU's default of 256 threads a workgroup; that no API promises concurrent workgroups | general knowledge of the specifications, not tested here | check before relying on it |
+
+"A second reader" is a read-only search agent given a narrow question and asked for file
+and line on every answer.
+
+## Appendix D. How to re-check
+
+From `engine/`. GPU runs go through the machine's lock and are bounded; never start two.
+
+```sh
+# The experiment: build, then the checks that need no GPU.
+cargo build --profile fast -p gpu-floor
+./target/fast/floor --v2 --emu --frames 20 --wall 3 --speed 16    # one body, a wall crash
+./target/fast/pair --scene headon --emu --frames 12 --reverse     # two bodies, lanes reversed
+./target/fast/rigid --scene bricks --emu --frames 12              # rigid proxies
+experiments/gpu-floor/surf-emu.sh                                 # surface contact
+experiments/gpu-floor/reach-emu.sh                                # the kernel choice, 24 runs
+
+# The experiment on the GPU: strict is the default; add --fast --native for the fast build.
+python3 scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 ./target/fast/floor --v2 --frames 60 --phases
+python3 scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 ./target/fast/pair --scene headon --gpu --frames 12
+python3 scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 ./target/fast/rigid --scene post --surface --gpu --reach --list 7
+
+# Production's figures.
+tools/scenario-matrix/run.sh --make        # once: save the states
+tools/scenario-matrix/run.sh --baseline    # each row's ms a frame
+PROFILE_SPLIT=1 tools/scenario-matrix/run.sh perf=0 drive   # one row by dispatch kind
+```
+
+Each driver prints "bit for bit" or the first differing word, and the frame times. Flags
+and the comparison switches are in `engine/experiments/gpu-floor/README.md`.
+
+Where to look in the experiment's code: `kernels/floor2.metal` (the kernel; its header is
+the layout), `kernels/pair.metal` (two bodies), `src/floor.rs` (the layout's tables, and
+`reach_plan`), `src/gpu.rs` (the host, 115 lines).
