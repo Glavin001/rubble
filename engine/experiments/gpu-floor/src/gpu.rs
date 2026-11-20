@@ -67,6 +67,30 @@ impl Gpu {
         cb.wait_until_completed();
         gpu_ms(cb)
     }
+
+    /// Dependent dispatches of different kernels over the same buffers, in order, in one
+    /// serial encoder: (kernel, threadgroups) each; the GPU ms of them all.
+    /// (`Err((buffer, byte offset))`: the threadgroups from three words of a buffer, which
+    /// an earlier dispatch of the sequence may write.)
+    pub fn run_seq(&self, seq: &[(&ComputePipelineState, Result<u64, (&Buffer, u64)>)], bufs: &[&Buffer], threads: u64) -> f64 {
+        assert!(self.locked, "GPU work only under engine/scripts/with-gpu-lock.py (-- env RUBBLE_GPU_LOCK=0 ...)");
+        let cb = self.queue.new_command_buffer();
+        let enc = cb.new_compute_command_encoder();
+        for (pso, groups) in seq {
+            enc.set_compute_pipeline_state(pso);
+            for (i, b) in bufs.iter().enumerate() {
+                enc.set_buffer(i as u64, Some(b), 0);
+            }
+            match groups {
+                Ok(n) => enc.dispatch_thread_groups(MTLSize::new(*n, 1, 1), MTLSize::new(threads, 1, 1)),
+                Err((b, at)) => enc.dispatch_thread_groups_indirect(b, *at, MTLSize::new(threads, 1, 1)),
+            }
+        }
+        enc.end_encoding();
+        cb.commit();
+        cb.wait_until_completed();
+        gpu_ms(cb)
+    }
 }
 
 pub fn read<T: bytemuck::Pod + Default + Clone>(b: &Buffer, n: usize) -> Vec<T> {

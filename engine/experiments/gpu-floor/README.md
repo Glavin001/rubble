@@ -31,11 +31,22 @@ EMU_TRACE=1 ./target/fast/floor --v2 --emu --frames 1                # the kerne
 ./target/fast/rigid --scene post --surface --emu --frames 24        # surface contact
 ./target/fast/floor --v2 --emu --pole 0.3 --speed 11 --surface --frames 14   # a fixed pole
 ./surf-emu.sh                                                        # surface contact's scenes, both lane orders
+./target/fast/rigid --scene post --surface --emu --reach --gap 0.8 --frames 10   # a frame by the kernel its plan gives it
+./reach-emu.sh                                                       # the kernel choice: every scene, the hand-over at many substeps
 ./target/fast/fqcheck 300000                                         # the converted queries against the engine's
 ./target/fast/surfdemo                                               # what surface contact changes (CPU reference)
 ```
 
 One emulator run at a time: they share `out/gpu-floor/emu*`.
+
+`--reach` (on `rigid`, and on `floor --v2 --emu`) runs a frame by the kernel the body's
+plan gives it (`floor.rs` `reach_plan`): the contact-free kernel (`REACH 1`: no code for
+the proxies' shapes or surface contact, a guard of one compare a node a substep) while
+everything is out of reach, and the whole kernel otherwise. A guard that finds a node
+within the margin ends the contact-free dispatch at that substep's end and the whole
+kernel (`REACH 2`) takes the frame up from there, in the same command buffer; nothing is
+done twice. `--reach-eager` hands frames over part way on purpose; `--gap M` sets the
+scene's distance to its shapes.
 
 ## On the GPU
 
@@ -55,7 +66,11 @@ profiler's sums have favoured changes that made the frame slower.
 A dispatch outside the lock is refused (`Gpu::run_n`). Strict (the default) is fast math
 off plus `#pragma clang fp contract(off)` and is bit for bit with the reference; `--fast
 --native` is the fast variant, judged by the closeness report the drivers print.
-`--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `pair --gpu` also
+`--cars N` / `--pairs N` put N copies in one dispatch (the staircase). `rigid --gpu
+--reach` is the kernel choice on the GPU (`--list N`: the run's frames timed one by one
+with what ran; `--reach-mix --cars 2`: two bodies with different kernels in one dispatch
+against each alone; comparisons `--reach-cont`, `--reach-direct`, `--reach-nocont`,
+`--reach-host`, `--def REACH_GUARD=0`, `--def REACH_NORIG=1`). `pair --gpu` also
 prints the contact pass by stage on whole frames. `--def NAME=V` on any driver switches a
 kernel option for an A/B from one binary: `pair.metal`'s `XT_OVERLAP`, `XB_ATOM`,
 `XF_MASK`, `XD_MASK`, `XG_SPLIT`, `XP_LANE`; `floor2.metal`'s `LANE_LOCAL`, `SURF_BOX_ATOM`,

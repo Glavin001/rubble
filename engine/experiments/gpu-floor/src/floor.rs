@@ -11,6 +11,7 @@ pub const STEPS: usize = 34;
 const NONE: u32 = u32::MAX;
 const SENT: u32 = 0x7FC0_DEAD;
 
+#[derive(Clone)]
 pub struct Layout {
     pub nn: usize,
     pub nr: usize,
@@ -105,6 +106,12 @@ pub struct V2Off {
     /// slots' rows as uploaded (the proxies' are the kernel's).
     pub surf: usize,
     pub surf_rows: Vec<u32>,
+    /// The frame's choice of kernel (`reach_plan`): the plane, the margin, the choice, the
+    /// substeps done.
+    pub reach: usize,
+    /// Proxies and their shapes.
+    pub nb: usize,
+    pub nsh: usize,
     pub words: usize,
 }
 
@@ -557,6 +564,131 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
     )
 }
 
+/// A body's kernel for a frame, from its block at the frame's start (in the World: from
+/// what the host knows when it gathers the body's proxies): the eight words of the
+/// block's `reach` part, and whether the contact-free kernel is to run. Everything the body
+/// could touch in the frame (the proxies' shapes over their free flight through the
+/// frame; with surface contact the world's boxes too) is boxed; the plane is the box's
+/// face the body is farthest outside of, moved out by the contact's reach; the margin is
+/// four times what the fastest node moves a substep (2 cm at least). The contact-free
+/// kernel is chosen when the body is clear of the plane by the margin and by what it would
+/// move in the frame (`eager`: by the margin alone, so that frames change kernel part way:
+/// a check of the hand-over). The kernel's guard makes the choice safe whatever is given
+/// here; this only decides how often a frame is done by two dispatches.
+pub fn reach_plan(block: &[u8], o: &V2Off, l: &Layout, st: &Statics, eager: bool) -> ([u32; 8], bool) {
+    const H: f32 = 0.0005;
+    let frame = STEPS as f32 * H;
+    let node: Vec<[f32; 4]> = get_at(block, o.node, l.nn * 3);
+    let (mut lo, mut hi, mut vtop) = ([f32::MAX; 3], [f32::MIN; 3], 0.0f32);
+    for i in 0..l.nn {
+        let (p, v) = (node[i * 3], node[i * 3 + 1]);
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+        vtop = vtop.max((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt());
+    }
+    // (A state that is not finite: the whole kernel.)
+    let finite = lo.iter().chain(&hi).all(|x| x.is_finite()) && vtop.is_finite();
+    let (mut glo, mut ghi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    let mut grow = |a: [f32; 3], b: [f32; 3]| {
+        for k in 0..3 {
+            glo[k] = glo[k].min(a[k]);
+            ghi[k] = ghi[k].max(b[k]);
+        }
+    };
+    if o.nb != 0 {
+        let bd: Vec<[f32; 4]> = get_at(block, o.rig, o.nb * BDW);
+        let sh: Vec<[f32; 4]> = get_at(block, o.rig + o.nb * BDW * 4 + 64, o.nsh * SHW);
+        for k in 0..o.nsh {
+            let s0 = sh[k * SHW];
+            let b = s0[0].to_bits() as usize;
+            let hf = sh[k * SHW + 1];
+            let sphere = s0[1].to_bits() == 1;
+            let r = if sphere { s0[2] } else { (hf[0] * hf[0] + hf[1] * hf[1] + hf[2] * hf[2]).sqrt() };
+            let (p, q, v, w) = (bd[b * BDW], bd[b * BDW + 1], bd[b * BDW + 2], bd[b * BDW + 3]);
+            // The shape's extent along each axis as it is posed now (a box's from its
+            // rotation; anything not finite: its sphere), wider by what its turning in the
+            // frame can move a point of it.
+            let n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+            let mut ext = [r; 3];
+            if !sphere && n2 > 0.5 && n2 < 2.0 {
+                let (x, y, z, ww) = (q[0], q[1], q[2], q[3]);
+                let s2 = 2.0 / n2;
+                let m = [
+                    [1.0 - s2 * (y * y + z * z), s2 * (x * y - ww * z), s2 * (x * z + ww * y)],
+                    [s2 * (x * y + ww * z), 1.0 - s2 * (x * x + z * z), s2 * (y * z - ww * x)],
+                    [s2 * (x * z - ww * y), s2 * (y * z + ww * x), 1.0 - s2 * (x * x + y * y)],
+                ];
+                for x in 0..3 {
+                    ext[x] = (m[x][0].abs() * hf[0] + m[x][1].abs() * hf[1] + m[x][2].abs() * hf[2]).min(r);
+                }
+            }
+            let turn = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt() * frame * r;
+            let (mut a, mut c) = ([0.0f32; 3], [0.0f32; 3]);
+            for x in 0..3 {
+                let (p0, p1) = (p[x], p[x] + v[x] * frame);
+                // (The kernel pads a shape's bounds by 1 cm and 1e-5 of the largest
+                // coordinate.)
+                let pad = (ext[x] + turn) * 1.001 + 0.012 + 4e-5 * p0.abs().max(p1.abs());
+                a[x] = p0.min(p1) - pad;
+                c[x] = p0.max(p1) + pad;
+            }
+            grow(a, c);
+        }
+    }
+    if st.surface {
+        for b in &st.boxes {
+            grow([b.0[0] - 1e-3, b.0[1] - 1e-3, b.0[2] - 1e-3], [b.1[0] + 1e-3, b.1[1] + 1e-3, b.1[2] + 1e-3]);
+        }
+    }
+    let reach = if st.surface { st.cr + 1e-3 } else { 1e-3 };
+    let margin = (4.0 * vtop * H).max(0.02);
+    let mut w = [0u32; 8];
+    w[4] = margin.to_bits();
+    if glo[0] > ghi[0] {
+        // (Nothing to touch: any plane the body is far from.)
+        w[1] = 1.0f32.to_bits();
+        w[3] = (-1.0e30f32).to_bits();
+        w[5] = finite as u32;
+        return (w, finite);
+    }
+    // The face the body is farthest outside of: (clearance, axis, side).
+    let mut best = (f32::MIN, 0usize, 1.0f32);
+    for a in 0..3 {
+        for (t, side) in [(lo[a] - (ghi[a] + reach), 1.0f32), (glo[a] - reach - hi[a], -1.0)] {
+            if t > best.0 {
+                best = (t, a, side);
+            }
+        }
+    }
+    let (clear, a, side) = best;
+    w[a] = side.to_bits();
+    w[3] = (if side > 0.0 { ghi[a] + reach } else { reach - glo[a] }).to_bits();
+    let lean = finite && glo.iter().chain(&ghi).all(|x| x.is_finite()) && clear > margin + if eager { 0.0 } else { 1.25 * vtop * frame + 0.005 };
+    w[5] = lean as u32;
+    (w, lean)
+}
+
+/// How `Floor::run_reach` runs a frame.
+#[derive(Default)]
+pub struct ReachOpt {
+    /// The contact-free kernel whenever the body starts the frame clear by the margin.
+    pub eager: bool,
+    /// A frame with no car for the contact-free kernel by the kernel that takes a frame
+    /// up, from substep 0 (else by the one kernel as it always was, so that such a frame
+    /// costs what it did): a comparison of the two (within 0.035 ms of each other, either
+    /// way, in the scenes measured).
+    pub cont_always: bool,
+    /// The whole kernel's dispatch after the contact-free one always over every group
+    /// (else its groups are the words the host and the guards write: none when no car
+    /// needs it): a comparison.
+    pub direct: bool,
+    /// No dispatch after the contact-free one (a measurement of that dispatch alone; a
+    /// frame its guard ends early is then left unfinished).
+    pub no_cont: bool,
+}
+
 /// The GPU side: N cars' buffers.
 pub struct Floor {
     pub gpu: Gpu,
@@ -573,6 +705,9 @@ pub struct Floor {
     pub l: Layout,
     pub cars: usize,
     pso: ComputePipelineState,
+    /// The frame's choice of kernel (`enable_reach`): the contact-free kernel and the whole
+    /// kernel that takes a frame up part way.
+    pso_reach: Option<(ComputePipelineState, ComputePipelineState)>,
     params: Buffer,
     stat: Vec<Buffer>,
     node: Buffer,
@@ -658,9 +793,106 @@ impl Floor {
             l,
             cars,
             pso,
+            pso_reach: None,
             params,
             stat,
         })
+    }
+
+    /// The two kernels of the frame's choice (`run_reach`), from the same source and layout.
+    pub fn enable_reach(&mut self, st: &Statics, fast: bool, extra: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(self.v2 && self.pair == 0 && self.per_frame == 1, "the frame's choice: one body a group, a frame a dispatch");
+        let pragma = if fast { "" } else { "#pragma clang fp contract(off)\n" };
+        let k = |reach: u32| self.gpu.pipeline(&format!("{pragma}{}", msl(&self.l, st, &format!("{extra}#define REACH {reach}\n"), 1)), "floorFrame", fast);
+        self.pso_reach = Some((k(1)?, k(2)?));
+        Ok(())
+    }
+
+    /// A frame of every car, each by the kernel its plan gives it (`reach_plan`): the
+    /// contact-free kernel and then the whole one in one command buffer (a car runs in one
+    /// of them, or in both when its guard ends the first part way); with no car for the
+    /// first, the one kernel alone, as without the choice. The GPU ms, the cars given the
+    /// contact-free kernel, and the substeps car 0 did in it.
+    pub fn run_reach(&self, st: &Statics, opt: &ReachOpt) -> (f64, usize, u32) {
+        self.run_planned(&self.plans(st, opt.eager), opt)
+    }
+
+    /// Every car's plan from its block as it is now. (The host reading a body's block
+    /// just before the dispatch adds 0.02 to 0.03 ms to the dispatch's GPU time, whatever
+    /// kernel runs: `--reach-host`. A timed frame is given plans worked out before.)
+    pub fn plans(&self, st: &Statics, eager: bool) -> Vec<([u32; 8], bool)> {
+        let n = self.off.words * 4;
+        (0..self.cars).map(|car| reach_plan(unsafe { std::slice::from_raw_parts((self.node.contents() as *const u8).add(car * n), n) }, &self.off, &self.l, st, eager)).collect()
+    }
+
+    /// `run_reach` with the cars' plans given (a plan from an older state is as safe: the
+    /// guard ends the contact-free kernel where the plan does not hold).
+    pub fn run_planned(&self, plans: &[([u32; 8], bool)], opt: &ReachOpt) -> (f64, usize, u32) {
+        let (lean_pso, cont_pso) = self.pso_reach.as_ref().expect("enable_reach");
+        let n = self.off.words * 4;
+        let block = |car: usize| unsafe { std::slice::from_raw_parts_mut((self.node.contents() as *mut u8).add(car * n), n) };
+        let mut lean = 0;
+        for car in 0..self.cars {
+            let (w, is_lean) = plans[car];
+            put_at(block(car), self.off.reach, bytemuck::cast_slice(&w));
+            lean += is_lean as usize;
+        }
+        // (The whole kernel's dispatch after the contact-free one: every group when a car
+        // was given the whole kernel; else none, unless a guard asks.)
+        put_at(block(0), self.off.reach + 8, bytemuck::cast_slice(&[if lean < self.cars { self.cars as u32 } else { 0 }, 1u32, 1]));
+        self.write_params(1, 0);
+        let bufs = self.bufs();
+        let all = Ok(self.cars as u64);
+        let seq: Vec<(&ComputePipelineState, Result<u64, (&Buffer, u64)>)> = if lean == 0 {
+            vec![(if opt.cont_always { cont_pso } else { &self.pso }, all)]
+        } else if opt.no_cont {
+            vec![(lean_pso, all)]
+        } else {
+            vec![(lean_pso, all), (cont_pso, if opt.direct { all } else { Err((&self.node, (self.off.reach as u64 + 8) * 4)) })]
+        };
+        let ms = self.gpu.run_seq(&seq, &bufs, LANES as u64);
+        let done: Vec<u32> = get_at(block(0), self.off.reach + 6, 1);
+        (ms, lean, done[0])
+    }
+
+    /// (A measurement: the host's part of `run_reach` alone, the plans read and written,
+    /// before a frame by the one kernel; `rigid --reach-host`.)
+    pub fn plan_only(&self, st: &Statics) {
+        let n = self.off.words * 4;
+        for car in 0..self.cars {
+            let b = unsafe { std::slice::from_raw_parts_mut((self.node.contents() as *mut u8).add(car * n), n) };
+            // (REACH_HOST: which part. `read` the plan worked out and not written; `write`
+            // eight words written and nothing read; `spin` neither, 20 µs of waiting.)
+            match std::env::var("REACH_HOST").as_deref() {
+                Ok("read") => {
+                    std::hint::black_box(reach_plan(b, &self.off, &self.l, st, false));
+                }
+                Ok("write") => put_at(b, self.off.reach, bytemuck::cast_slice(&[0u32; 8])),
+                Ok("spin") => {
+                    let t = std::time::Instant::now();
+                    while t.elapsed().as_micros() < 20 {
+                        std::hint::spin_loop();
+                    }
+                }
+                _ => {
+                    let (w, _) = reach_plan(b, &self.off, &self.l, st, false);
+                    put_at(b, self.off.reach, bytemuck::cast_slice(&w));
+                }
+            }
+        }
+    }
+
+    fn write_params(&self, frames: u32, skip: u32) {
+        let l = &self.l;
+        let steps = STEPS / self.per_frame;
+        write(&self.params, &[self.cars as u32, if self.per_frame > 1 { 1 } else { frames }, 0.0f32.to_bits(), skip, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, steps as u32, l.ng as u32, l.rs as u32, self.flush as u32]);
+    }
+
+    fn bufs(&self) -> Vec<&Buffer> {
+        let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
+        bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
+        bufs.extend([&self.stat[11], &self.stat[12], &self.stat[13], &self.tri_geo, &self.pairs, &self.pbuild, &self.clip, &self.hits, &self.stage]);
+        bufs
     }
 
     pub fn threads_ok(&self) -> (u64, u64, u64) {
@@ -752,18 +984,14 @@ impl Floor {
 
     /// Timing only: `skip` leaves phases out (bit k: phase k of the kernel).
     pub fn run_skip(&self, frames: u32, skip: u32) -> f64 {
-        let l = &self.l;
-        let steps = STEPS / self.per_frame;
         if self.pair != 0 {
             // (Each pair's cross-group barrier counter starts at zero each dispatch.)
             for g in (0..self.cars).step_by(2) {
                 unsafe { *((self.node.contents() as *mut u32).add(g * self.off.words + self.off.misc + 14)) = 0 };
             }
         }
-        write(&self.params, &[self.cars as u32, if self.per_frame > 1 { 1 } else { frames }, 0.0f32.to_bits(), skip, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, steps as u32, l.ng as u32, l.rs as u32, self.flush as u32]);
-        let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
-        bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
-        bufs.extend([&self.stat[11], &self.stat[12], &self.stat[13], &self.tri_geo, &self.pairs, &self.pbuild, &self.clip, &self.hits, &self.stage]);
+        self.write_params(frames, skip);
+        let bufs = self.bufs();
         let n = if self.single { 1 } else if self.per_frame > 1 { self.per_frame * frames as usize } else { 1 };
         self.gpu.run_n(&self.pso, &bufs, self.cars as u64, LANES as u64, n)
     }
@@ -1072,6 +1300,39 @@ impl Emu {
             clip: g(&self.bufs[28]),
             rig: Vec::new(),
         }
+    }
+
+    /// This kernel's two others for the frame's choice (`REACH` 1 and 2), each its own
+    /// executable in a folder beside this one's.
+    pub fn reach_kernels(&self, st: &Statics, extra: &str) -> anyhow::Result<(Emu, Emu)> {
+        let k = |reach: u32, tag: &str| -> anyhow::Result<Emu> {
+            let dir = std::path::PathBuf::from(format!("{}-{tag}", self.dir.display()));
+            let mut e = Emu::new(self.l.clone(), st, &format!("{extra}#define REACH {reach}\n"), &dir)?;
+            e.reverse = self.reverse;
+            e.steps = self.steps;
+            Ok(e)
+        };
+        Ok((k(1, "lean")?, k(2, "cont")?))
+    }
+
+    /// A frame by the plan, as `Floor::run_reach`: whether the contact-free kernel was
+    /// chosen, and the substeps it did.
+    pub fn run_reach(&mut self, lean: &mut Emu, cont: &mut Emu, st: &Statics, eager: bool) -> anyhow::Result<(bool, u32)> {
+        let n = self.off.words * 4;
+        let (w, is_lean) = reach_plan(&self.bufs[1][..n], &self.off, &self.l, st, eager);
+        put_at(&mut self.bufs[1][..n], self.off.reach, bytemuck::cast_slice(&w));
+        if is_lean {
+            std::mem::swap(&mut self.bufs, &mut lean.bufs);
+            let r = lean.run(1);
+            std::mem::swap(&mut self.bufs, &mut lean.bufs);
+            r?;
+        }
+        std::mem::swap(&mut self.bufs, &mut cont.bufs);
+        let r = cont.run(1);
+        std::mem::swap(&mut self.bufs, &mut cont.bufs);
+        r?;
+        let done: Vec<u32> = get_at(&self.bufs[1][..n], self.off.reach + 6, 1);
+        Ok((is_lean, done[0]))
     }
 
     pub fn run(&mut self, frames: u32) -> anyhow::Result<()> {
@@ -1619,13 +1880,16 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     let x_cnd = take(xcnd_cap);
     let x_hit = take(1024 * 8 * 4);
     anyhow::ensure!(nn * 4 + nclp * 6 <= ngs && nclp < 256 && nt < 65536, "the partner's nodes do not fit the scalars' array ({} of {ngs})", nn * 4 + nclp * 6);
+    o.reach = take(12);
+    o.nb = nb;
+    o.nsh = nsh;
     o.words = at;
     st.perm = perm;
     st.allowed = allowed_c;
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define T_BSH {t_bsh}u\n#define T_NLANE {t_nlane}u\n#define T_NCL {t_ncl}u\n#define O_SURF {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf
+        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define T_BSH {t_bsh}u\n#define T_NLANE {t_nlane}u\n#define T_NCL {t_ncl}u\n#define O_SURF {}u\n#define O_REACH {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf, o.reach
     ) + &format!(
         "#define O_HMAP {}\n#define O_XMAP {}\n#define O_XCLB {x_clb}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
         o.hmap, o.xmap, list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out

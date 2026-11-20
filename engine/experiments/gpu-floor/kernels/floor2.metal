@@ -25,6 +25,41 @@ struct Params
     uint rtLanes, rtNN, rtNT, rtNC, rtSteps, rtNG, rtRS, pad2;
 };
 #define SKIP(k) ((P.skip & (1u << (k))) != 0u)
+// REACH: the kernel by what is in the body's reach in a frame (the host's choice a body a
+// frame; `rigid --reach`). 0: the one kernel. 1: the kernel with no code for the proxies'
+// shapes or surface contact, for a frame that starts with everything out of reach: its
+// guard (a compare a node a substep against the frame's plane) ends the dispatch at a
+// substep's end when a node comes within the margin of the plane, and says how many
+// substeps it did. 2: the whole kernel, taking a frame up at the substep the first left
+// it (none left: nothing). A frame's result is the one kernel's in every case: nothing is
+// done again, and the guard does not rest on the host's guess (a wrong plane ends the
+// first kernel at substep 0).
+#ifndef REACH
+#define REACH 0
+#endif
+#if REACH == 1
+#if SURF
+#define REACH_S1 1
+#endif
+#undef SURF
+#define SURF 0
+// (REACH_NORIG, a measurement: the contact-free kernel without the proxies' integration
+// either, which is the kernel of a body with no proxies; for still proxies only.)
+#ifdef REACH_NORIG
+#undef RIGID
+#define RIGID 0
+#endif
+#endif
+#ifndef REACH_S1
+#define REACH_S1 0
+#endif
+// (REACH_GUARD 0, a measurement: the contact-free kernel without its guard.)
+#ifndef REACH_GUARD
+#define REACH_GUARD 1
+#endif
+#ifndef EMU
+#define KRETURN return
+#endif
 // (COLD_OPAQUE, measured and without effect: a pass that rarely runs taking its bases (the
 // car's block, the table, the lane, its node) through a workgroup word that is always 0,
 // so that nothing of it is computed before the substeps' loop. In `microbench
@@ -207,6 +242,9 @@ inline V3 v3p(packed_float3 a) { return v3(a.x, a.y, a.z); }
 #ifndef RIGID
 #define RIGID 0
 #endif
+// (The proxies' contact code: all of it but the window's start and the proxies' own
+// integration, which the contact-free kernel keeps.)
+#define RIGID_C (RIGID && REACH != 1)
 #if RIGID
 // ---- mechanism 3: rigid bodies as proxies (explicit_rigid.rs ProxySet) ----------------
 // The reference's quaternion arithmetic is glam's NEON code: written out here in its
@@ -600,6 +638,7 @@ kernel void floorFrame(
         fs_.hull = 0u; fs_.nv = 0u; fs_.nf = 0u; fs_.ne = 0u; fs_.moved = 0u; fs_.off = float3(0.0f, 0.0f, 0.0f); }
 #endif
 #if RIGID
+#if RIGID_C
     // (The active shapes' boxes' union, for the node pass: the surface pass's counters are
     // free from the node pass's end to the surface pass, so with it they hold the union.)
 #if SURF
@@ -609,6 +648,7 @@ kernel void floorFrame(
     #define UNI(i_) tgU[i_]
 #endif
     TGDECL(atomic_uint, tgAct, 2);
+#endif
     #define rigBody ((device float4*)(cb + O_RIG))
     #define rigCount ((device atomic_uint*)(cb + O_RIG + NB * BDW * 4))
     #define rigShape ((device float4*)(cb + O_RIG + NB * BDW * 4 + 64))
@@ -622,8 +662,29 @@ kernel void floorFrame(
     // (Groups in twos, a pair's bodies; the first one's block holds the pair's barrier
     // counter.)
     device atomic_uint* const xcnt = (device atomic_uint*)(big + (car & ~1u) * CAR_WORDS + O_MISC + 14);
-#elif RIGID
+#elif RIGID_C
     TGDECL(atomic_int, tgX, 6);
+#endif
+#if REACH
+    // The body's words for the frame's choice: [0..3] the frame's plane (a unit normal n and
+    // an offset: everything the body could touch in the frame is where n·x − offset < 0),
+    // [4] the margin (m), [5] 1: the contact-free kernel runs this frame, [6] the frame's
+    // substeps done. In the first body's block, [8..10]: the workgroups of the whole
+    // kernel's dispatch after the contact-free one (the host's count of the bodies it gave
+    // the whole kernel, or none; a body whose guard ends its dispatch early asks for all).
+    #define reachW (cb + O_REACH)
+    #define REACH_PLANE const float4 rp_ = ((device const float4*)reachW)[0]; const float rd_ = ((device const float*)reachW)[4];
+    #define REACH_T(P_) ((((P_).x * rp_.x) + ((P_).y * rp_.y)) + (((P_).z * rp_.z) - rp_.w))
+#endif
+#if REACH == 1
+    // ([0] a node within the margin: the dispatch ends with this substep. [1] a node past
+    // the plane where the surface pass would have looked: the status says so.)
+    TGDECL(atomic_uint, tgReach, 2);
+    if (reachW[5] == 0u) KRETURN;
+#endif
+#if REACH == 2
+    const uint rStart = reachW[6];
+    if (rStart >= Z_STEPS) KRETURN;
 #endif
     // This lane's roles.
     const uint nd = tab[T_LANE + lid * 4];
@@ -811,6 +872,10 @@ kernel void floorFrame(
     }
 #if RIGID
     // begin_window: each shape's impulse, moment and peak cleared, its reference its pose.
+#if REACH == 2
+    // (A frame taken up part way: its window began in the first kernel.)
+    if (rStart == 0u)
+#endif
     if (lid < NSH)
     {
         device float4* sh = rigShape + lid * SHW;
@@ -820,7 +885,9 @@ kernel void floorFrame(
         sh[3] = float4(0); sh[4] = float4(0);
         float4 h0 = sh[0]; h0.w = 0.0f; sh[0] = h0;
     }
+#if RIGID_C
     if (lid < 6u) atomic_store_explicit(&tgX[lid], lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
+#endif
 #endif
 #if PAIR
     if (lid < 24u) atomic_store_explicit(&tgX[lid], lid >= 12u ? 0 : ((lid % 6u) < 3u ? 0x7FFFFFFF : int(0x80000000)), memory_order_relaxed);
@@ -828,12 +895,33 @@ kernel void floorFrame(
 #if SURF
     if (lid < 16u) atomic_store_explicit(&tgS[lid], lid < 3u ? 0x7FFFFFFF : (lid < 6u ? int(0x80000000) : 0), memory_order_relaxed);
 #endif
+#if REACH == 1
+    if (lid < 2u) atomic_store_explicit(&tgReach[lid], 0u, memory_order_relaxed);
+#endif
     BAR;
 
+#if REACH == 1
+    // The guard at the frame's start: a body with a node within the margin of the plane
+    // does no substep here (the whole kernel does the frame).
+    uint rDone = 0u;
+    if (REACH_GUARD && isNode)
+    {
+        REACH_PLANE
+        if (!(REACH_T(Pown) > rd_)) atomic_store_explicit(&tgReach[0], 1u, memory_order_relaxed);
+    }
+    BAR;
+    // (One frame a dispatch.)
+    for (uint frame = 0; frame < 1u; frame++)
+    for (uint step = atomic_load_explicit(&tgReach[0], memory_order_relaxed) != 0u ? Z_STEPS : 0u; step < Z_STEPS; step++)
+#elif REACH == 2
+    for (uint frame = 0; frame < P.frames; frame++)
+    for (uint step = frame == 0u ? rStart : 0u; step < Z_STEPS; step++)
+#else
     for (uint frame = 0; frame < P.frames; frame++)
     for (uint step = 0; step < Z_STEPS; step++)
+#endif
     {
-#if RIGID
+#if RIGID_C
         // ---- R0: the proxies placed (explicit_rigid.rs begin_step) ----
         // (The body's box: a warp reduces the nodes from threadgroup memory.)
         if (lid < 32u)
@@ -1003,7 +1091,7 @@ kernel void floorFrame(
                 if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z) inC = true;
             }
 #endif
-#if RIGID
+#if RIGID_C
             // (A node inside the active shapes' union goes on the list: its lane tests the
             // shapes there, a lane a node, not every node here.)
             if ((act0 | act1) != 0u && x.x > ulo.x && x.x < uhi.x && x.y > ulo.y && x.y < uhi.y && x.z > ulo.z && x.z < uhi.z) inC = true;
@@ -1039,7 +1127,7 @@ kernel void floorFrame(
         BAR;
         const uint ncon = atomic_load_explicit(&tgCount[3], memory_order_relaxed);
 #ifdef EMU_TRACE
-#if RIGID
+#if RIGID_C
         if (lid == 0u) fprintf(stderr, "T car %u step %u: ground/box/proxy contact nodes %u, flags roll %d hits %d shift %d, active shapes %u\n", car, step, ncon, (int)fRoll, (int)fHits, (int)fShift, popcount(act0) + popcount(act1));
 #else
         if (lid == 0u) fprintf(stderr, "T car %u step %u: ground/box/proxy contact nodes %u, flags roll %d hits %d shift %d\n", car, step, ncon, (int)fRoll, (int)fHits, (int)fShift);
@@ -1047,7 +1135,7 @@ kernel void floorFrame(
 #endif
         if (ncon != 0u)
         {
-#if RIGID
+#if RIGID_C
             // The listed nodes inside each body's shapes, counted (the rule's mass split:
             // begin_step), a lane a node; the shapes a node is inside kept as bits for its
             // rule.
@@ -1107,7 +1195,7 @@ kernel void floorFrame(
                     }
                 }
 #endif
-#if RIGID
+#if RIGID_C
                 if ((cm0 | cm1) != 0u)
                 {
                     // node_contact_with: every shape the node is inside, in shape order.
@@ -1187,6 +1275,17 @@ kernel void floorFrame(
         }
 
         // ---- S1: the centred damping's scalars (last beam pass's slopes) ----
+#if REACH == 1 && REACH_S1
+        // (Where the surface pass's box of the body is taken: with every node on the plane's
+        // clear side here, the pass would have found no shape near. A node past it, having
+        // been farther than the margin a substep ago: the status says the frame is not
+        // the one kernel's.)
+        if (REACH_GUARD && isNode)
+        {
+            REACH_PLANE
+            if (!(REACH_T(Pown) > 0.0f)) atomic_store_explicit(&tgReach[1], 1u, memory_order_relaxed);
+        }
+#endif
 #if SURF
         // (The body's box for this step's surface pass: the nodes are where the node pass
         // left them. Each node's lane from its own registers (SURF_BOX_ATOM); one warp
@@ -3102,7 +3201,16 @@ kernel void floorFrame(
         }
 #endif
 #endif
-#if RIGID
+#if REACH == 1
+        // ---- the guard: a node within the margin of the plane ends the dispatch here ----
+        // (The next substep's node pass tests the proxies' shapes where the nodes are now.)
+        if (REACH_GUARD && isNode)
+        {
+            REACH_PLANE
+            if (!(REACH_T(Pown) > rd_)) atomic_store_explicit(&tgReach[0], 1u, memory_order_relaxed);
+        }
+#endif
+#if RIGID_C
         // ---- the proxies integrate the step's reactions (end_step) ----
         // (SKIP(27), timing only: no proxy integrates.)
         if (lid < NB && !SKIP(13) && !SKIP(27))
@@ -3149,11 +3257,49 @@ kernel void floorFrame(
         }
         BAR;
 #endif
+#if REACH == 1
+        BAR;
+        rDone = step + 1u;
+        if (atomic_load_explicit(&tgReach[0], memory_order_relaxed) != 0u) break;
+#endif
 #if PAIR
 //@PAIR_PASS
 #endif
     }
 
+#if REACH == 1 && RIGID
+    // ---- the proxies' free flight through the substeps done ----
+    // (end_step's arithmetic with no reaction on any shape, a substep after another: a
+    // proxy's substeps here need nothing of the body's, so they are done together.)
+    if (lid < NB && rDone != 0u)
+    {
+        device float4* bd = rigBody + lid * BDW;
+        V3 bpos = v3(bd[0]), bvel = v3(bd[2]), bang = v3(bd[3]);
+        float4 brot = bd[1];
+        const float invMass = bd[0].w;
+        const V3 invI = v3(bd[4]);
+        for (uint k = 0u; k < rDone; k++)
+        {
+            const V3 force = v3(0, 0, 0), torque = v3(0, 0, 0);
+            if (invMass != 0.0f)
+            {
+                bvel = bvel + force * (invMass * H);
+                bang = bang + invInertiaMul(brot, invI, torque) * H;
+            }
+            bpos = bpos + bvel * H;
+            if (!isZero3(bang))
+            {
+                float4 dq = qmul(float4(bang.x, bang.y, bang.z, 0.0f), brot);
+                brot = qnormalize(float4(brot.x + (0.5f * H) * dq.x, brot.y + (0.5f * H) * dq.y, brot.z + (0.5f * H) * dq.z, brot.w + (0.5f * H) * dq.w));
+            }
+        }
+        bd[0] = f4(bpos, invMass);
+        bd[1] = brot;
+        bd[2] = f4(bvel, bd[2].w);
+        bd[3] = f4(bang, 0);
+        bd[4] = f4(invI, as_type<float>(atomic_exchange_explicit(&rigCount[lid], 0u, memory_order_relaxed)));
+    }
+#endif
     // ---- write back ----
     if (isNode)
     {
@@ -3215,6 +3361,11 @@ kernel void floorFrame(
     {
 #if SURF
         tgFlags[F_STATUS] = tgFlags[F_STATUS] | uint(atomic_load_explicit(&tgS[11], memory_order_relaxed));
+#endif
+#if REACH == 1
+        reachW[6] = rDone;
+        if (rDone < Z_STEPS) atomic_store_explicit((device atomic_uint*)(big + O_REACH + 8), P.cars, memory_order_relaxed);
+        if (atomic_load_explicit(&tgReach[1], memory_order_relaxed) != 0u) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 0x1000u;
 #endif
         misc[0] = tgFlags[F_SHIFT]; misc[1] = tgFlags[F_STATUS]; misc[3] = tgFlags[F_REBUILD];
         misc[13] = tgFlags[F_OUTER];

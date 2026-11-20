@@ -133,6 +133,12 @@ pub fn pair_scene(template: &ExplicitBeams, name: &str, speed: f32, gap: f32) ->
 /// car does to them). "bricks": the car at `speed` into a wall of 25 kg boxes; "rocks":
 /// four spheres of 0.5 to 1 t coming down on the parked car at 6 m/s.
 pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::Result<ExplicitBeams> {
+    rigid_scene_at(template, name, speed, None)
+}
+
+/// `rigid_scene` with the shapes `gap` metres from the body (ahead of its nose; the rocks
+/// above its roof) instead of the scene's own distance.
+pub fn rigid_scene_at(template: &ExplicitBeams, name: &str, speed: f32, gap: Option<f32>) -> anyhow::Result<ExplicitBeams> {
     use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
     let mut car = place(template, 0.02, if name == "bricks" || name == "post" { speed } else { 0.0 });
     car.drive = None;
@@ -156,7 +162,7 @@ pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::
             for row in 0..4 {
                 for col in 0..6 {
                     let x = (col as f32 - 2.5) * 0.41 + if row % 2 == 1 { 0.2 } else { 0.0 };
-                    body(&mut set, Vec3::new(x, 0.13 + row as f32 * 0.255, hi.z + 0.3 + half.z), Vec3::ZERO, m, i, ProxyGeom::Box { half });
+                    body(&mut set, Vec3::new(x, 0.13 + row as f32 * 0.255, hi.z + gap.unwrap_or(0.3) + half.z), Vec3::ZERO, m, i, ProxyGeom::Box { half });
                 }
             }
         }
@@ -164,7 +170,7 @@ pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::
             for (k, (r, m)) in [(0.35f32, 500.0f32), (0.4, 700.0), (0.45, 850.0), (0.5, 1000.0)].into_iter().enumerate() {
                 let z = lo.z + (hi.z - lo.z) * (0.2 + 0.2 * k as f32);
                 let x = if k % 2 == 0 { -0.3 } else { 0.3 };
-                body(&mut set, Vec3::new(x, hi.y + r + 0.2 + 0.3 * k as f32, z), Vec3::new(0.0, -6.0, 0.0), m, Vec3::splat(0.4 * m * r * r), ProxyGeom::Sphere { radius: r });
+                body(&mut set, Vec3::new(x, hi.y + r + gap.unwrap_or(0.2) + 0.3 * k as f32, z), Vec3::new(0.0, -6.0, 0.0), m, Vec3::splat(0.4 * m * r * r), ProxyGeom::Sphere { radius: r });
             }
         }
         "post" => {
@@ -173,7 +179,7 @@ pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::
             let half = Vec3::new(0.06, 1.0, 0.06);
             let m = 3000.0f32;
             let i = Vec3::new(half.y * half.y + half.z * half.z, half.x * half.x + half.z * half.z, half.x * half.x + half.y * half.y) * (m / 3.0);
-            body(&mut set, Vec3::new(0.13, 1.0, hi.z + 0.3 + half.z), Vec3::ZERO, m, i, ProxyGeom::Box { half });
+            body(&mut set, Vec3::new(0.13, 1.0, hi.z + gap.unwrap_or(0.3) + half.z), Vec3::ZERO, m, i, ProxyGeom::Box { half });
         }
         other => anyhow::bail!("unknown rigid scene {other} (bricks, rocks, post)"),
     }

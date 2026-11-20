@@ -126,8 +126,20 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         e.upload(&state_of(&cpu, &e.l, &st));
+        // --reach (--reach-eager): a frame by the kernel its plan gives it (`reach_plan`;
+        // with surface contact the world's fixed shapes are what the body may reach).
+        let mut rk = if flag("--reach") { Some(e.reach_kernels(&st, &extra)?) } else { None };
+        let (mut by, mut handed) = ([0usize; 3], Vec::new());
         for fr in 1..=frames {
-            e.run(1)?;
+            if let Some((lean, cont)) = rk.as_mut() {
+                let (is_lean, done) = e.run_reach(lean, cont, &st, flag("--reach-eager"))?;
+                by[if !is_lean { 2 } else if done as usize == STEPS { 0 } else { 1 }] += 1;
+                if is_lean && (done as usize) < STEPS {
+                    handed.push(format!("{fr}: {done}"));
+                }
+            } else {
+                e.run(1)?;
+            }
             for _ in 0..STEPS {
                 cpu.step();
             }
@@ -143,6 +155,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 anyhow::bail!("emu: first difference at frame {fr}");
             }
+        }
+        if rk.is_some() {
+            println!("frames by kernel: contact-free alone {}, contact-free then whole {}, whole alone {}; handed over at (frame: substeps done) {}", by[0], by[1], by[2], if handed.is_empty() { "none".to_string() } else { handed.join(", ") });
         }
         println!("emu: bit for bit over {frames} frames");
         return Ok(());
