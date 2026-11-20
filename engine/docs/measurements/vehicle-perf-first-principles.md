@@ -3890,6 +3890,10 @@ Slang through wgpu, one dispatch a substep, and some of this it already has in a
 | 15 | What a phase's loop reads that does not change (the lane's roles and entry counts, the bases) taken again at the phase's start, not kept from the kernel's | 2 to 7 %: parked with surface contact 1.51 → 1.41, bricks 3.47 → 3.36, at rest 1.09 → 1.06 | yes | grows with the kernel's size, so production's general kernels have the most to gain; needs a load the compiler cannot fold |
 | 16 | The kernel chosen a body a frame by what is in reach: a contact-free kernel with a one-compare guard, the whole kernel taking the frame up at the substep the guard ended it | a frame with nothing in reach 1.41 → 1.07 (surface contact), 1.23 → 1.07 (node contact); the post's run 1.95 → 1.78; frames in contact unchanged | yes | the World's proxy gather gives the plan; the guard, not the plan, carries the safety; pairs not covered |
 
+The table read against production's code as it stands (what production does at each of
+these points, what applies to its kernels as they are, what needs a new kernel, what does
+not carry to Chrome or CUDA, and an order of work): `gpu-floor-vs-production.md`.
+
 Two that are not kernel changes and paid for all of the above: the strict Metal build is
 fast math off plus `#pragma clang fp contract(off)` (no XOR barriers; that is what made
 "bit for bit" checkable at all), and the two instruments, an emulator that runs the kernel
