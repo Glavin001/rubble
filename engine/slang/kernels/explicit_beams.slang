@@ -936,6 +936,29 @@ void clipRoll(uint gi, uint flagsV)
     gAcc[at + 2u].store(int(CLIP_EMPTY));
     gAcc[at + 3u].store(int(CLIP_EMPTY));
 }
+// TIME ONLY (lossless; removed after the measurement): node gi's contact words read and
+// written once more after the node phase's own read and clear, every store the value the
+// word already holds: what one read-and-clear of them costs a frame.
+float3 contactWordsAgain(uint gi, uint flagsV, float3 f)
+{
+    if (gP.clipMem != 0u && (flagsV & FLAG_CLIP_MEM) != 0u)
+    {
+        uint at = clipAt(gi);
+        gAcc[at].store(gAcc[at].load());
+        gAcc[at + 1u].store(gAcc[at + 1u].load());
+        gAcc[at + 2u].store(int(CLIP_EMPTY));
+        gAcc[at + 3u].store(int(CLIP_EMPTY));
+    }
+    if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
+    float3 d = shiftTake(gi, flagsV);
+    float3 a = accForce(gi);
+    gAcc[gi * 3u].store(0);
+    gAcc[gi * 3u + 1u].store(0);
+    gAcc[gi * 3u + 2u].store(0);
+    // (Both are zero: the words were cleared just before.)
+    if (any(d != float3(0.0, 0.0, 0.0)) || any(a != float3(0.0, 0.0, 0.0))) f = f + a + d;
+    return f;
+}
 uint clipVmaxAt(uint v, uint parity) { return gP.clipVmax + v * 2u + parity; }
 // The node phase: the vehicle's fastest node this step (|v| as the CPU's
 // Vec3::length; NaN and 0 leave it).
@@ -1440,10 +1463,15 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     if (solo && any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
 #endif
     float4 V = gNodes[gi * 3u + 1u];
-    cfRoll(gi, groupOff, flagsV);
-    clipRoll(gi, flagsV);
-    if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
-    float3 shift = shiftTake(gi, flagsV);
+    // TIME ONLY (results wrong; removed after the measurement): 2^27 no rolls, 2^28 no sums.
+    bool tRoll = (gP.perfFlags & 134217728u) != 0u;
+    if (!tRoll)
+    {
+        cfRoll(gi, groupOff, flagsV);
+        clipRoll(gi, flagsV);
+        if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
+    }
+    float3 shift = tRoll ? float3(0.0, 0.0, 0.0) : shiftTake(gi, flagsV);
     float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
@@ -1454,6 +1482,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         gAcc[gi * 3u + 1u].store(0);
         gAcc[gi * 3u + 2u].store(0);
     }
+    if ((gP.perfFlags & 268435456u) != 0u) f = contactWordsAgain(gi, flagsV, f);
 #ifdef EB_AERO
     if ((info.x >> NODE_SLOT_SHIFT) != 0u) f = slideTake(f, info.x >> NODE_SLOT_SHIFT);
 #endif

@@ -621,7 +621,8 @@ void cplIntegrateBody(uint v, uint j)
     // Its shapes' range from the plan (c4.w, vehicle_coupling.slang cpl_plan; 0 every
     // shape): the shapes outside it are another body's, skipped either way. The shape
     // records from one base (the same addresses as cplShape).
-    uint range = (gsCpl[0] & 4u) != 0u ? 0u : asuint(c4.w);
+    // TIME ONLY (lossless; removed after the measurement): 2^29 every shape scanned.
+    uint range = ((gsCpl[0] & 4u) != 0u || (gP.perfFlags & 536870912u) != 0u) ? 0u : asuint(c4.w);
     uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
     uint k1 = range == 0u ? hdr.y : min(range >> 16, hdr.y);
     uint s0 = cplShape(v, 0u);
@@ -663,7 +664,8 @@ void cplIntegrateBodySplit(uint v, uint j)
     // Its shapes' range from the plan (c4.w, vehicle_coupling.slang cpl_plan; 0 every
     // shape): the shapes outside it are another body's, skipped either way. The shape
     // records from one base (the same addresses as cplShape).
-    uint range = (gsCpl[0] & 4u) != 0u ? 0u : asuint(c4.w);
+    // TIME ONLY (lossless; removed after the measurement): 2^29 every shape scanned.
+    uint range = ((gsCpl[0] & 4u) != 0u || (gP.perfFlags & 536870912u) != 0u) ? 0u : asuint(c4.w);
     uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
     uint k1 = range == 0u ? hdr.y : min(range >> 16, hdr.y);
     // The shapes' terms from cplReactBy, summed in shape order; each shape's body slot
@@ -1388,10 +1390,15 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     if (solo && any(abs(P.xyz - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(vehicle);
 #endif
     float4 V = gNodes[gi * 3u + 1u];
-    cfRoll(gi, groupOff, flagsV);
-    clipRoll(gi, flagsV);
-    if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
-    float3 shift = shiftTake(gi, flagsV); // §37's contact position step
+    // TIME ONLY (results wrong; removed after the measurement): 2^27 no rolls, 2^28 no sums.
+    bool tRoll = (gP.perfFlags & 134217728u) != 0u;
+    if (!tRoll)
+    {
+        cfRoll(gi, groupOff, flagsV);
+        clipRoll(gi, flagsV);
+        if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
+    }
+    float3 shift = tRoll ? float3(0.0, 0.0, 0.0) : shiftTake(gi, flagsV); // §37's contact position step
     float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w;
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
@@ -1402,6 +1409,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         gAcc[gi * 3u + 1u].store(0);
         gAcc[gi * 3u + 2u].store(0);
     }
+    if ((gP.perfFlags & 268435456u) != 0u) f = contactWordsAgain(gi, flagsV, f);
 #ifdef EB_AERO
     if ((info.x >> NODE_SLOT_SHIFT) != 0u) f = slideTake(f, info.x >> NODE_SLOT_SHIFT);
 #endif
