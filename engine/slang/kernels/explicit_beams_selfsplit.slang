@@ -183,7 +183,8 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
 // past the list's room is tested here, so every pair is tested once (the workgroup walked
 // with its tests there instead).
 void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
-                  uint parity, uint listAt, float margin, uint offBase, uint beamOff, uint groupOff, uint groupCount)
+                  uint parity, uint listAt, float margin, uint offBase, uint beamOff, uint groupOff, uint groupCount,
+                  bool dry)
 {
     uint4 tn = gStatic[gP.triBase + gt];
     float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
@@ -271,6 +272,13 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
                 float sp = vh < vm ? vh : vm;
                 float q = nf(nf(r + smul(nf(tv + sp), STEP)) + CLIP_DEPTH) + margin;
                 if (any(p < mn - float3(q, q, q)) || any(p > mx + float3(q, q, q))) continue;
+            }
+            // TIME ONLY (lossless; removed after the measurement): the walk once more with
+            // no pair listed, each would-be append an atomic that changes nothing.
+            if (dry)
+            {
+                gAcc[selfWalkAt(v) + 1u].max(1);
+                continue;
             }
             uint n = uint(gAcc[selfWalkAt(v)].add(1));
             if (n < TRI_PAIR_CAP)
@@ -405,8 +413,13 @@ void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         {
             uint t = r1.x + p / WALK_SUBS;
             if (!(piecesOn(v) && pieceVolatile(t)))
+            {
+                if ((gP.perfFlags & 536870912u) != 0u)
+                    selfWalkList(v, t, p % WALK_SUBS, origin, range, cell, r2.x, r2.y, parity, triPairsAt(v),
+                                 asfloat(gP.pairReuse), gP.gridOffBase + v * (GRID_BUCKETS + 1u), r0.z, r2.z, r2.w, true);
                 selfWalkList(v, t, p % WALK_SUBS, origin, range, cell, r2.x, r2.y, parity, triPairsAt(v),
-                             asfloat(gP.pairReuse), gP.gridOffBase + v * (GRID_BUCKETS + 1u), r0.z, r2.z, r2.w);
+                             asfloat(gP.pairReuse), gP.gridOffBase + v * (GRID_BUCKETS + 1u), r0.z, r2.z, r2.w, false);
+            }
         }
     }
     ebLoopCapFlush();

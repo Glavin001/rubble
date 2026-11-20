@@ -6816,6 +6816,62 @@ void soloStepLoad(uint v, uint lane)
 // The surface pass as its own pipelines (EB_SURF_PIPE modules only).
 #include "explicit_beams_surface_pipes.slang"
 
+// --- PERF_PHASE_LOCAL (explicit_plan::PERF_PHASE_LOCAL; vehicle-perf-first-principles.md
+// §8.40 c) ---
+// What a phase's hot loop reads that does not change within a step (the vehicle's offsets,
+// counts, flags, origin and step) from copies taken at the phase's own start, in place of
+// the values the kernel read at its entry. Those are alive through every phase of the
+// kernel, and a compiler keeps such a value in one place for its whole life: as the kernel
+// grows they go to memory, and a hot loop then loads its bounds and bases every turn. The
+// copies are loads of the same words through an index the compilers cannot fold with the
+// entry's (phaseZero: a workgroup atomic's top bit, always 0: a count of at most TRI_LIST):
+// the same values, so the same results bit for bit. Each phase its own function behind an
+// early return, so the paths without the switch are as they were.
+static const uint PERF_PHASE_LOCAL = 134217728u;
+static const uint PERF_PHASE_LOCAL_BEAMS = 268435456u;
+uint phaseZero() { return gsTestedCount[0].load() >> 31; }
+
+// The frame's node phase (explicit_beams_frame, explicitBeamsFrameStep): its node loop.
+void frameNodesLocal(uint v0, uint lane, uint s, bool hits)
+{
+    uint v = v0 + phaseZero();
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint4 r3 = gStatic[v * 4u + 3u];
+    uint4 misc = gMisc[v];
+    float3 origin = asfloat(misc.xyz);
+    uint step = misc.w + s;
+    uint flagsV = r3.x;
+    bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
+    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+    {
+        if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(r0.x + i);
+        float3 w0 = centredV ? gNodes[(r0.x + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
+#ifdef EB_VV_SOLO
+        nodeUpdateSolo(r0.x + i, gStatic[gP.nodeInfoBase + r0.x + i], v, i, step, origin, flagsV, asfloat(r3.y), r1.z,
+                       r1.w, r0.z, r2.z, r2.w, hits);
+#else
+        nodeUpdate(r0.x + i, gStatic[gP.nodeInfoBase + r0.x + i], v, i, step, origin, flagsV, asfloat(r3.y), r1.z,
+                   r1.w, r0.z, r2.z, r2.w, hits);
+#endif
+        if (centredV) centredDelta(r0.x + i, w0);
+    }
+}
+
+// The frame's beam phase (beamPhaseSorted).
+void frameBeamsLocal(uint v0, uint lane, uint s)
+{
+    uint v = v0 + phaseZero();
+    uint4 r0 = gStatic[v * 4u];
+    uint groupOff = gStatic[v * 4u + 2u].z;
+    uint flagsV = gStatic[v * 4u + 3u].x;
+    uint parity = (gMisc[v].w + s) & 1u;
+    uint4 head = gP.beamOrder != 0u ? gStatic[gP.beamOrder + v] : uint4(0u, 0u, 0u, 0u);
+    beamPhaseSorted(v, lane, LANES, head, r0.w != 0u, r0.x, r0.z, (flagsV & FLAG_FAST_INV_SQRT) != 0u, groupOff, parity,
+                    flagsV, r0.w);
+}
+
 #ifdef EB_SOLO_STEP
 // The split group path's solo vehicles (explicit_beams_split.slang): step gP.pad2 of the
 // frame alone, a function of the members' entry (the frame's start in step 0, its end in
@@ -7090,6 +7146,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
+#ifndef EB_ABLATE
+        // (PERF_PHASE_LOCAL: the phase on its own copies of what it reads, frameNodesLocal.)
+        if ((gP.perfFlags & PERF_PHASE_LOCAL) != 0u) frameNodesLocal(v, lane, s, hits);
+        else
+#endif
+        {
 #ifdef EB_VV_SOLO
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
@@ -7116,6 +7178,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (centredV) centredDelta(nodeOff + i, v0);
         }
 #endif
+        }
         if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if (sleepOn) sleepMove = sleepTrack(nodeOff, nodeCount, lane, sleepMove);
 #ifdef EB_ABLATE
@@ -7230,7 +7293,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint beamEnd = beamCount;
 #endif
         // (Sorted records or, gP.beamOrder 0, file order: one call site of beamUpdate.)
-        beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV, beamEnd);
+#ifndef EB_ABLATE
+        if ((gP.perfFlags & PERF_PHASE_LOCAL_BEAMS) != 0u) frameBeamsLocal(v, lane, s);
+        else
+#endif
+        {
+            beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV, beamEnd);
+        }
         // The next step's rays (driveAheadPart), on the lanes with the fewest beams.
         if (driveAhead && s + 1u < gP.steps)
         {
@@ -9598,6 +9667,43 @@ void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, u
 }
 #endif
 
+// contactMemberStep's node phase: its nodes, the next parity's box keys, its box.
+void memberNodesLocal(uint v0, uint lane, uint s)
+{
+    uint v = v0 + phaseZero();
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint4 r3 = gStatic[v * 4u + 3u];
+    uint4 misc = gMisc[v];
+    float3 origin = asfloat(misc.xyz);
+    uint step = misc.w + s;
+    uint parity = step & 1u;
+    uint flagsV = r3.x;
+    bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
+    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+    {
+        if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(r0.x + i);
+        float3 w0 = centredV ? gNodes[(r0.x + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
+        nodeUpdate(r0.x + i, gStatic[gP.nodeInfoBase + r0.x + i], v, i, step, origin, flagsV, asfloat(r3.y), r1.z,
+                   r1.w, r0.z, r2.z, r2.w, true);
+        if (centredV) centredDelta(r0.x + i, w0);
+    }
+    if (lane < 6u) gAcc[vvBoxKey(v, parity ^ 1u) + lane].store(lane < 3u ? VV_INT_MAX : VV_INT_MIN);
+    memberBox(v, r0.x, r0.y, origin, parity, lane, LANES);
+}
+
+// contactMemberStep's beam phase.
+void memberBeamsLocal(uint v0, uint lane, uint s)
+{
+    uint v = v0 + phaseZero();
+    uint4 r0 = gStatic[v * 4u];
+    uint groupOff = gStatic[v * 4u + 2u].z;
+    bool fast = (gStatic[v * 4u + 3u].x & FLAG_FAST_INV_SQRT) != 0u;
+    uint parity = (gMisc[v].w + s) & 1u;
+    for (uint j = lane, jStop = EB_END(j, r0.w, LANES); j < jStop; j += LANES) beamUpdate(r0.z + j, j, fast, groupOff, parity);
+}
+
 void contactMemberStep(uint v, uint lane, uint s, bool first)
 {
     uint4 r0 = gStatic[v * 4u];
@@ -9649,6 +9755,10 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 #endif
     }
     sync();
+    // (PERF_PHASE_LOCAL: the phase on its own copies of what it reads, memberNodesLocal.)
+    if ((gP.perfFlags & PERF_PHASE_LOCAL) != 0u)
+        memberNodesLocal(v, lane, s);
+    else
     {
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
@@ -9747,7 +9857,12 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         for (uint k = lane; k < KEYS; k += LANES) gNext[keySlot(v, parity ^ 1u, k)] = 0u;
     }
 #endif
-    for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+    if ((gP.perfFlags & PERF_PHASE_LOCAL_BEAMS) != 0u)
+        memberBeamsLocal(v, lane, s);
+    else
+    {
+        for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+    }
     // The grid this step (lane 0's decision above, from the same counts): each tested
     // triangle's geometry of this step for its walk, which loads it (triangleGridWalk,
     // triGeoLoad). Without this fill the walk read whatever the last solo or wide frame
