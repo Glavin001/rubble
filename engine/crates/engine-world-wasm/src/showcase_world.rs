@@ -150,7 +150,7 @@ impl WebWorld {
             &town_coupling(),
         ))?;
         crate::creation_check(&s.world).await?;
-        Ok(WebWorld { world: s.world })
+        Ok(WebWorld::of(s.world))
     }
 
     /// The explicit vehicles' beam state `GPUBuffer` (2 `vec4<f32>` per beam: rest

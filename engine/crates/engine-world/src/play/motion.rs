@@ -18,12 +18,16 @@ pub const SCENES: [(&str, &str); 3] = [
 ];
 
 /// A motion scene and the page's switches.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MotionSceneDef {
     pub scene: String,
     /// Speculative velocity (`?lookahead=`, on by default).
     pub look_ahead: bool,
+    /// The gallery's shot speed (m/s, `?speed=`).
+    pub speed: f64,
+    /// Volleys and bursts on their own cadence (`?autofire=0`: only on F).
+    pub autofire: bool,
 }
 
 impl Default for MotionSceneDef {
@@ -31,6 +35,8 @@ impl Default for MotionSceneDef {
         Self {
             scene: "ccd".into(),
             look_ahead: true,
+            speed: 250.0,
+            autofire: true,
         }
     }
 }

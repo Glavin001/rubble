@@ -103,7 +103,7 @@
     // Physics: rubble's Rust World (engine-world-wasm), the host native and Unreal run.
     // This page keeps rendering, input, UI and its scene scripts; the street, meteor
     // and run builders (engine-vehicle-wasm) are Rust that only describe launches.
-    import { createScene, sceneFromQuery, pollFrame as poll, stepFrames, saveState, errorText } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, pollFrame as poll, stepFrames, macrotask, saveState, errorText } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft } from './soft.mjs';
@@ -188,17 +188,18 @@
     const guided = scene === 'gauntlet' || scene === 'meteors' || scene === 'run';
     // ?strength=k scales every mount limit (1 = the rated joints, smaller = more fragile).
     const strength = Math.max(0.01, Number(qs.get('strength')) || 1);
-    // Gauntlet: the street's shelling state. Meteor gauntlet: the run (engine-vehicle-wasm
-    // run.rs: the street, the meteor director, judging and score).
-    const street = scene === 'gauntlet' ? new Gauntlet() : null;
+    // Gauntlet, meteor range, meteor gauntlet: their scripts (shelling, volleys and
+    // scoring, the meteor director and judge, directed debris) run in Rust
+    // (rubble::play::vehicle_director); the page draws and shows what they report.
+    const street = scene === 'gauntlet';
     const range = scene === 'meteors';
-    const run = scene === 'run' ? new MeteorRun() : null;
+    const run = scene === 'run';
     if (run) document.body.classList.add('run');
     // The scene as Rust reads the URL (rubble::play::SceneDef::from_query); Rust builds the
     // street, run and range layouts too (engine_vehicle::streets). The page keeps its own
     // copies for its scripts (blasts, meteors, scoring).
     const sceneDef = await sceneFromQuery('vehicle', location.search);
-    const layout = street ? JSON.parse(street.layout()) : run ? JSON.parse(run.layout()) : null;
+    const layout = street ? JSON.parse(new Gauntlet().layout()) : run ? JSON.parse(new MeteorRun().layout()) : null;
     const rangeLayout = range ? JSON.parse(MeteorRange.range()) : null;
     // The world opens the device; the page renders on it and reads the world's buffers in place.
     const world = await createScene(sceneDef);
@@ -245,10 +246,9 @@
     const blocks = { list: placed.blocks, count: placed.blocks.length, layout: layout?.blocks, parked: placed.parked, launched: new Set() };
     // Meteor range: launched meteors and their touchdown markers.
     const meteors = {
-      pads: placed.pads, moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0',
+      pads: placed.pads, moving: sceneDef.targetsMoving, routes: sceneDef.routes,
       list: placed.meteors, count: placed.meteors.length, markerList: placed.markers, markers: placed.markers.length,
-      radius: rangeLayout?.radius, mass: rangeLayout?.mass,
-      next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]],
+      radius: rangeLayout?.radius, mass: rangeLayout?.mass, score: [[0, 0], [0, 0]],
     };
     const bridgeBolts = placed.bridgeBolts; // breakable joints in the scene (bridge)
     const cannon = placed.cannon;
@@ -267,158 +267,38 @@
         const showRoutes = () => { document.getElementById('routesRow').hidden = !meteors.moving; };
         rt.checked = meteors.routes;
         showRoutes();
-        mv.onchange = () => { meteors.moving = mv.checked; mv.blur(); showRoutes(); resetScene(); };
-        rt.onchange = () => { meteors.routes = rt.checked; rt.blur(); resetScene(); };
+        mv.onchange = () => { meteors.moving = mv.checked; world.act({ action: 'targets', moving: mv.checked }); mv.blur(); showRoutes(); resetScene(); };
+        rt.onchange = () => { meteors.routes = rt.checked; world.act({ action: 'targets', routes: rt.checked }); rt.blur(); resetScene(); };
       }
       document.getElementById('gauntletUi').hidden = false;
       guideStatsEl.hidden = false;
-      if (qs.get('guide') === '0') guideOn.checked = false;
-      if (qs.get('strength')) guideStrength.value = qs.get('strength');
+      guideOn.checked = sceneDef.guide;
+      guideStrength.value = String(sceneDef.guideStrength);
       guideOn.onchange = guideStrength.onchange = () => { applyGuidance(); guideOn.blur(); guideStrength.blur(); };
+      shellOn.onchange = () => { world.setAutofire(shellOn.checked); shellOn.blur(); };
     }
-    let guideZoneCount = 0;
-    // The player chassis' height over the ground once it has settled (the zones
-    // around it lie on the ground); a guess until then.
-    let chassisRest = 0;
-    const guidanceSettings = () => JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked));
-    function applyGuidance(rearm = true) {
-      if (range) {
-        // Carts start where their motion has them at time 0.
-        for (const p of rearm ? meteors.pads : []) {
-          world.bodySetType(p.body, 'kinematic', [MeteorRange.pad_x(p.lane, p.pad, 0, meteors.moving), p.y, p.z], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
-        }
-        const steeredPads = Uint32Array.from(meteors.pads.filter((p) => p.lane === 0).map((p) => p.slot));
-        const zones = JSON.parse(MeteorRange.zones(steeredPads, meteors.moving, meteors.routes, steps() * DT));
-        guideZoneCount = zones.length;
-        world.setGuidance(guidanceSettings());
-        world.setGuidanceZones(zones);
-        return;
+    // Directed debris: the script's zones and settings, from the menu.
+    const applyGuidance = () => world.act({ action: 'guide', on: guideOn.checked, strength: Number(guideStrength.value) });
+    // The scripts' events: shells, volleys, touchdowns (marked and scored), the run's
+    // judged near misses and hits, its status.
+    let lastShell = 0, runStatus = null;
+    function onEvents() {
+      for (const e of world.takeEvents()) {
+        const d = e.data;
+        if (e.what === 'shell' || e.what === 'volley') lastShell = e.step;
+        if ((e.what === 'shell' || e.what === 'blast') && d) for (const i of d.blocks) blocks.launched.add(i);
+        else if (e.what === 'touchdown') {
+          meteors.score = d.score;
+          meteors.log?.push({ lane: d.lane, pad: d.pad, at: d.at, hit: d.hit, turned: d.turned, body: d.body });
+          setKind(d.marker, d.hit ? MAT_HIT : MAT_MISS);
+          const [a, b] = meteors.score;
+          guideStatsEl.innerHTML = `<b>On target</b> · steered lane (left, x &gt; 0): <b>${a[0]}/${a[1]}</b> · unsteered lane (right): <b>${b[0]}/${b[1]}</b>`
+            + (guideOn.checked ? '' : ' · steering off');
+        } else if (e.what === 'judge') {
+          callOut(d.event);
+          runLog?.push({ t: Math.round(d.t * 100) / 100, event: d.event, meteor: d.meteor, index: d.index, at: d.at.map((x) => Math.round(x * 10) / 10), car: d.car.map((x) => Math.round(x * 10) / 10) });
+        } else if (e.what === 'status') { runStatus = d.status; runHud(); }
       }
-      if (!street && !run) return;
-      const zones = JSON.parse((run || street).zones(chassisSlot(vehicles[0].h), chassisRest || 0.8, Uint32Array.from(blocks.parked.map(chassisSlot))));
-      guideZoneCount = zones.length;
-      world.setGuidance(guidanceSettings());
-      world.setGuidanceZones(zones);
-      if (rearm) for (const b of blocks.list) world.bodySetGuidedTags(b.id, 1);
-    }
-    applyGuidance();
-    let lastShell = 0;
-    // Meteor range: launch the next volley into both lanes (meteors.rs volley).
-    function fireVolley() {
-      lastShell = steps();
-      const t = steps() * DT;
-      // Known routes cover the next few seconds: refresh them for this volley.
-      if (meteors.moving && meteors.routes) applyGuidance(false);
-      for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, GRAVITY_Y, t, meteors.moving))) {
-        const m = meteors.list[meteors.next++ % meteors.count];
-        launch(m, l.p, l.v);
-        world.bodySetGuidedTags(m.id, l.tags);
-        meteors.flying = meteors.flying.filter((x) => x.m !== m);
-        meteors.landed = meteors.landed.filter((x) => x.m !== m);
-        meteors.flying.push({ m, lane: l.lane, pad: l.pad, prev: null, prevStep: 0, t0: t });
-      }
-    }
-    // Touchdowns since the last call (meteors' first crossing of their resting
-    // height, interpolated between reads): marked on the ground and scored.
-    async function trackMeteors() {
-      if (!meteors.flying.length) return;
-      const f = await world.readBodies(meteors.list.map((m) => m.slot));
-      const now = steps();
-      const rest = meteors.radius + 0.05;
-      for (const x of [...meteors.flying]) {
-        const o = meteors.list.indexOf(x.m) * 14;
-        const p = [f[o], f[o + 1], f[o + 2]];
-        if (x.prev && x.prev[1] > rest && p[1] <= rest) {
-          const s = (x.prev[1] - rest) / (x.prev[1] - p[1]);
-          const at = [0, 1, 2].map((k) => x.prev[k] + s * (p[k] - x.prev[k]));
-          const t = (x.prevStep + s * (now - x.prevStep)) * DT;
-          const hit = MeteorRange.on_pad(x.lane, x.pad, at[0], at[1], at[2], t, meteors.moving);
-          meteors.score[x.lane][0] += hit ? 1 : 0;
-          // Did the cart turn around while this meteor was in the air?
-          const dir = (u) => Math.sign(MeteorRange.pad_x(x.lane, x.pad, u + 0.01, true) - MeteorRange.pad_x(x.lane, x.pad, u, true));
-          const turned = meteors.moving && dir(x.t0) !== dir(t);
-          meteors.log?.push({ lane: x.lane, pad: x.pad, at, hit, turned, body: x.m.slot });
-          meteors.score[x.lane][1] += 1;
-          const mk = meteors.markerList[meteors.nextMarker++ % meteors.markers];
-          world.bodySetType(mk.id, 'static', [at[0], 0.07, at[2]], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
-          setKind(mk.collider, hit ? MAT_HIT : MAT_MISS);
-          meteors.flying.splice(meteors.flying.indexOf(x), 1);
-          meteors.landed.push({ m: x.m, step: now });
-        } else { x.prev = p; x.prevStep = now; }
-      }
-      // Park meteors 1.5 s after they come down, so the range stays clear.
-      while (meteors.landed.length && now - meteors.landed[0].step > 90) {
-        const { m } = meteors.landed.shift();
-        if (meteors.flying.some((x) => x.m === m)) continue; // relaunched
-        park(m);
-      }
-    }
-    // Before every step: moving targets' velocities carry each cart to where
-    // pad_x has it a step later (exact, so the carts never drift).
-    function padVelocities() {
-      if (!range || !meteors.moving) return;
-      const t = steps() * DT;
-      for (const p of meteors.pads) {
-        const v = (MeteorRange.pad_x(p.lane, p.pad, t + DT, true) - MeteorRange.pad_x(p.lane, p.pad, t, true)) / DT;
-        world.bodySetVelocity(p.body, [v, 0, 0], [0, 0, 0]);
-      }
-    }
-    // A static facade block becomes dynamic at its launch velocity and spin.
-    function launchBlock(i, v, w) {
-      blocks.launched.add(i);
-      launch(blocks.list[i], blocks.layout[i].p, Array.from(v), Array.from(w));
-    }
-    // Blast the facade ahead of the player car (gauntlet.rs Gauntlet::blast).
-    function fireShell() {
-      if (range) return fireVolley();
-      if (!street || !lastChassis) return;
-      lastShell = steps();
-      const out = street.blast(lastChassis.p[0], lastChassis.p[2], lastChassis.v[2]);
-      for (let k = 0, o = 4; k < out[3]; k++, o += 7) launchBlock(out[o], out.subarray(o + 1, o + 4), out.subarray(o + 4, o + 7));
-      return { centre: [out[0], out[1], out[2]], blocks: out[3] };
-    }
-    // ---------------------------------------------------------------- meteor gauntlet (run.rs)
-    // Carry out the director's commands for this step: launch meteors (steered
-    // by their tags), blast the facades they are about to hit, park spent ones.
-    function runTick() {
-      if (!run || !lastChassis || !shellOn.checked) return;
-      const c = lastChassis;
-      const out = run.tick(steps() * DT, DT, Float32Array.from([...c.p, ...c.v]), GRAVITY_Y);
-      let o = 0;
-      for (let k = 0, n = out[o++]; k < n; k++, o += 8) {
-        const rock = rocks.list[out[o]];
-        launch(rock, Array.from(out.subarray(o + 1, o + 4)), Array.from(out.subarray(o + 4, o + 7)));
-        world.bodySetGuidedTags(rock.id, out[o + 7]);
-      }
-      for (let k = 0, n = out[o++]; k < n; k++) {
-        const blocksHit = out[o + 3];
-        o += 4;
-        for (let j = 0; j < blocksHit; j++, o += 7) launchBlock(out[o], out.subarray(o + 1, o + 4), out.subarray(o + 4, o + 7));
-      }
-      for (let k = 0, n = out[o++]; k < n; k++) park(rocks.list[out[o++]]);
-    }
-    // The page's per-step inputs, right before each step (the JS host's encodeStep).
-    function beforeStep() { padVelocities(); }
-    // Read back what the run watches (and the car, from the same state) and judge it.
-    async function judgeRun() {
-      const w = run.watched();
-      const slots = [chassisSlot(player)];
-      for (let k = 0; k < w.length; k += 2) slots.push(w[k] ? rocks.list[w[k + 1]].slot : blocks.list[w[k + 1]].slot);
-      const t = steps() * DT;
-      const f = await world.readBodies(slots);
-      const n = slots.length - 1;
-      const recs = new Float32Array(n * 8);
-      for (let i = 0; i < n; i++) {
-        const o = (i + 1) * 14;
-        recs.set([w[2 * i], w[2 * i + 1], f[o], f[o + 1], f[o + 2], f[o + 7], f[o + 8], f[o + 9]], i * 8);
-      }
-      const car = [f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]];
-      const events = run.judge(t, Float32Array.from(car), recs);
-      for (let k = 0; k < events.length; k += 6) {
-        callOut(events[k]);
-        runLog?.push({ t: Math.round(t * 100) / 100, event: events[k], meteor: events[k + 1] === 1, index: events[k + 2], at: [...events.subarray(k + 3, k + 6)].map((x) => Math.round(x * 10) / 10), car: [f[0], f[1], f[2]].map((x) => Math.round(x * 10) / 10) });
-      }
-      runHud(t, f[2]);
     }
     const gScore = document.getElementById('gScore'), hpEl = document.getElementById('hp'), progEl = document.getElementById('prog');
     const gInfo = document.getElementById('gInfo'), toastsEl = document.getElementById('toasts');
@@ -449,8 +329,9 @@
       while (toastsEl.childElementCount > 4) toastsEl.firstChild.remove();
     }
     let runCardKey = '';
-    function runHud(t, carZ) {
-      const st = JSON.parse(run.status(t, carZ));
+    function runHud() {
+      const st = runStatus;
+      if (!st) return;
       gScore.textContent = (st.state === 'finished' ? st.total : st.score).toLocaleString();
       hpEl.style.width = `${st.health}%`;
       progEl.style.width = `${Math.min(100, (100 * st.distance) / st.finish)}%`;
@@ -475,30 +356,12 @@
     }
     if (run) {
       document.getElementById('game').hidden = false;
-      runHud(0, -25);
+      runStatus = JSON.parse(new MeteorRun().status(0, -25));
+      runHud();
     }
     let guideBusy = false, guideStatsStep = -1;
     function pollGuide() {
-      if (range && !guideBusy && steps() - guideStatsStep >= 6) {
-        guideStatsStep = steps();
-        guideBusy = true;
-        trackMeteors().then(() => {
-          guideBusy = false;
-          const [a, b] = meteors.score;
-          guideStatsEl.innerHTML = `<b>On target</b> · steered lane (left, x &gt; 0): <b>${a[0]}/${a[1]}</b> · unsteered lane (right): <b>${b[0]}/${b[1]}</b>`
-            + (guideOn.checked ? '' : ' · steering off');
-        }).catch(fail);
-        return;
-      }
-      if (run && !guideBusy && lastChassis && steps() - guideStatsStep >= 4) {
-        guideStatsStep = steps();
-        guideBusy = true;
-        judgeRun().then(() => { guideBusy = false; }).catch(fail);
-      }
-      if ((street || run) && !chassisRest && steps() > 90 && lastChassis) {
-        chassisRest = lastChassis.p[1];
-        applyGuidance(false);
-      }
+      onEvents();
       if (!street || guideBusy || steps() - guideStatsStep < 30) return;
       guideStatsStep = steps();
       guideBusy = true;
@@ -811,7 +674,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       else if (e.code === 'KeyP') severPart();
       else if (e.code === 'KeyB') fireCannon();
       else if (e.code === 'KeyF') fireShell();
-      else if (e.code === 'KeyG' && run) { guideOn.checked = !guideOn.checked; applyGuidance(false); runHud(steps() * DT, lastChassis?.p[2] ?? -25); }
+      else if (e.code === 'KeyG' && run) { guideOn.checked = !guideOn.checked; applyGuidance(); runHud(); }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('blur', () => keys.clear());
@@ -857,26 +720,27 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         return;
       }
     }
-    let cannonNext = 0;
+    // The cannon (B): the scene's next 400 kg ball along the camera ray, at 45 m/s.
     function fireCannon() {
-      const dir = norm3(sub3(camTarget, camEye));
-      fireCannonAt([camEye[0] + dir[0] * 3, camEye[1] + dir[1] * 3, camEye[2] + dir[2] * 3], dir.map((d) => d * 45));
-    }
-    // Launch the next 400 kg cannonball from `p` at velocity `v` (also __cannon).
-    function fireCannonAt(p, v) {
       if (!cannon.length) return;
-      launch(cannon[cannonNext++ % cannon.length], p, v);
+      world.act({ action: 'cannon', aim: { eye: camEye, dir: norm3(sub3(camTarget, camEye)) } });
+    }
+    // The scene's fire key: the gauntlet's shell, the range's volley (the script's).
+    function fireShell() {
+      if (!street && !range) return;
+      world.act({ action: 'fire' });
+      onEvents();
     }
     function resetScene() {
       world.restoreState(initial);
-      street?.reset();
-      if (run) { run.reset(); toastsEl.replaceChildren(); runCardKey = ''; }
-      if (range) Object.assign(meteors, { next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] });
+      if (run) { toastsEl.replaceChildren(); runCardKey = ''; }
+      meteors.score = [[0, 0], [0, 0]];
       blocks.launched.clear();
       // Marker colours back to their spawn (the rest is the world's).
       for (const mk of meteors.markerList) setKind(mk.collider, MAT_MISS);
-      applyGuidance();
-      if (run) runHud(0, -25);
+      // The scripts start over (the street, the run, the range; directed debris re-armed).
+      world.act({ action: 'reset' });
+      onEvents();
       lastShell = 0;
       bolts = { broken: 0, lastForce: 0 };
       mounts.last = null;
@@ -1125,9 +989,11 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       // Steps only while a readback slot is free (never blocks): a step that cannot
       // be taken now is taken on a later frame.
       if (!frozen && world.canStep()) {
-        if (range && shellOn.checked && steps() - lastShell >= 120) fireVolley();
-        if (street && shellOn.checked && lastChassis && lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && steps() - lastShell >= 70) fireShell();
-        for (let k = 0; k < STEPS_PER_FRAME && world.canStep(); k++) { runTick(); beforeStep(); world.step(); }
+        // The scripts' volleys and shells due (the run's director runs before each step).
+        world.setAutofire(shellOn.checked);
+        world.beforeFrame(dt, -1);
+        for (let k = 0; k < STEPS_PER_FRAME && world.canStep(); k++) world.step();
+        world.afterFrame();
       }
       readChassis().catch(fail);
       updateHud();
@@ -1141,9 +1007,18 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // rendering (rAF is throttled in background tabs) and returns the player state.
     let manual = false;
     // n steps frame-locked, then the chassis read: what every hook below runs on.
-    const advance = async (n, each = beforeStep) => {
+    const advance = async (n, each = null) => {
+      // Frame-stepped runs fire only what they ask for (the scripts' cadence is the frame loop's).
+      world.setAutofire(false);
       await stepFrames(world, n, onFrame, each);
       await readChassis();
+    };
+    // Frame-locked runs: the scripts' reads taken (the chassis, touchdowns, the run's judge).
+    const settleScripts = async () => {
+      world.prepareFrame();
+      while (world.scriptPending()) await macrotask();
+      world.beforeFrame(0, -1);
+      onEvents();
     };
     window.__step = async (n = 1, input = null) => {
       manual = true;
@@ -1228,7 +1103,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       });
     };
     window.__vehicleState = () => lastState;
-    window.__cannon = (p, v) => fireCannonAt(p, v);
+    // A ball fired along `v` from 3 m short of `p` (the cannon fires from 3 m ahead of the
+    // eye at 45 m/s).
+    window.__cannon = (p, v) => { const d = norm3(v); world.act({ action: 'cannon', aim: { eye: p.map((x, k) => x - d[k] * 3), dir: d } }); };
     // Gauntlet A/B take: from a reset, drive down the street at `cruise` m/s holding
     // its lane, shelling every `every` steps, with directed debris on or off. Each
     // launched block's first touchdown (sampled every 6 steps) is measured from
@@ -1238,6 +1115,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (!street) throw new Error('not the gauntlet scene');
       guideOn.checked = guided; guideStrength.value = String(strength);
       manual = true;
+      world.setAutofire(false);
+      applyGuidance();
       resetScene();
       const slots = [chassisSlot(vehicles[0].h), ...blocks.list.map((b) => b.slot)];
       const landed = new Map(); // block -> distance from the car at touchdown
@@ -1257,15 +1136,15 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const steerIn = Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] + 2.5) + 2.5 * fw[0]));
         const e = cruise - speed;
         world.setVehicleInput(player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: steerIn, brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
-        if (lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && steps() - lastShell >= every) { fireShell(); shells++; }
-        await stepFrames(world, 6, onFrame, beforeStep);
+        if (lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && steps() - lastShell >= every) { await settleScripts(); fireShell(); shells++; }
+        await stepFrames(world, 6, onFrame);
       }
       manual = false;
       const g = await world.readGuidance();
       const { claims, ...states } = g;
       const d = [...landed.values()];
       const landings = [2, 4, 6, 8, 12, 20, Infinity].map((r, k, a) => d.filter((x) => x < r && x >= (a[k - 1] ?? 0)).length);
-      return { guided, strength, shells, landed: d.length, near: d.filter((x) => x < near).length, close: d.filter((x) => x < 2).length, landings, z: lastChassis.p[2], trace, states, claims: claims.slice(0, guideZoneCount) };
+      return { guided, strength, shells, landed: d.length, near: d.filter((x) => x < near).length, close: d.filter((x) => x < 2).length, landings, z: lastChassis.p[2], trace, states, claims: claims.slice(0, world.scriptState().zones) };
     };
     // Parts / wheels broken off under load over every buggy, and the latest break.
     window.__mounts = () => {
@@ -1282,13 +1161,16 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       meteors.moving = moving; document.getElementById('movingOn').checked = moving;
       meteors.routes = routes; document.getElementById('routesOn').checked = routes;
       manual = true;
+      world.setAutofire(false);
+      world.act({ action: 'targets', moving, routes });
+      applyGuidance();
       resetScene();
       meteors.log = [];
       let s = 0;
-      const each = () => { if (s % 120 === 0 && s < volleys * 120) fireVolley(); beforeStep(); s++; };
+      const each = () => { if (s % 120 === 0 && s < volleys * 120) fireShell(); s++; };
       while (s < volleys * 120 + 240) {
         await stepFrames(world, 6, onFrame, each);
-        await trackMeteors();
+        await settleScripts();
       }
       manual = false;
       return { guided, strength, moving, routes, steered: meteors.score[0], unsteered: meteors.score[1], log: meteors.log };
@@ -1300,20 +1182,22 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (!run) throw new Error('not the meteor gauntlet');
       guideOn.checked = guided; guideStrength.value = String(strength);
       manual = true;
+      applyGuidance();
       resetScene();
+      // The run's director meteors on its own; the take steers and reads its judge.
+      world.setAutofire(true);
       runLog = [];
       let st = null;
       for (let s = 0; s < total; s += 6) {
         await readChassis();
-        if (!chassisRest && s > 90) { chassisRest = lastChassis.p[1]; applyGuidance(false); }
         const fw = qrot(lastChassis.q, [0, 0, 1]);
         const speed = fw[0] * lastChassis.v[0] + fw[2] * lastChassis.v[2];
         const e = cruise - speed;
         world.setVehicleInput(player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] - lane) + 2.5 * fw[0])), brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
-        await judgeRun();
-        st = JSON.parse(run.status(steps() * DT, lastChassis.p[2]));
-        if (st.state === 'wrecked' || st.state === 'finished') break;
-        await stepFrames(world, Math.min(6, total - s), onFrame, () => { runTick(); beforeStep(); });
+        await settleScripts();
+        st = runStatus;
+        if (st && (st.state === 'wrecked' || st.state === 'finished')) break;
+        await stepFrames(world, Math.min(6, total - s), onFrame);
       }
       manual = false;
       const log = runLog;

@@ -90,6 +90,12 @@ impl WgpuSim {
         self.collider_count
     }
 
+    /// Changes on every collider write (add, replace, adopt): what a renderer's draw
+    /// groups were built from is stale when it does.
+    pub fn collider_epoch(&self) -> u64 {
+        self.collider_epoch
+    }
+
     pub fn params(&self) -> AvbdParams {
         self.params
     }

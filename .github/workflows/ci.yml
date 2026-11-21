@@ -191,6 +191,11 @@ jobs:
         env:
           RUBBLE_WEB_PARTS: site
         run: bash engine/scripts/build-web.sh
+      # The web layer against the world wasm's generated declarations and the shared data
+      # types generated from Rust (engine/docs/unified-bindings.md).
+      - name: Type check (web layer)
+        working-directory: engine/crates/engine-webgpu
+        run: npx --no-install tsc -p tsconfig.json
       - name: JS tests (WebGPU host, vehicle and fracture modules)
         run: node --test engine/crates/engine-webgpu/tests/*.test.mjs engine/crates/engine-webgpu/fracture/*.test.mjs
       - name: Upload the site
