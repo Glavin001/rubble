@@ -7,6 +7,9 @@
 //
 //   cargo run -p engine-webgpu --release --example explicit_wgsl_dump
 //   node --experimental-websocket explicit-wgsl-check.mjs
+// The fast setting's modules (bit-exact results off, the World's default):
+//   cargo run -p engine-webgpu --release --example explicit_wgsl_dump -- --fast
+//   EXPLICIT_WGSL_DIR=generated/explicit-wgsl-fast node --experimental-websocket explicit-wgsl-check.mjs
 //
 // Needs Chrome (CHROME env to override). Exits non-zero when a module fails.
 // Prints each module's compile time (shader module and async pipeline). With

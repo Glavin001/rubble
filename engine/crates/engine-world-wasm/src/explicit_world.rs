@@ -58,7 +58,7 @@ impl WebWorld {
         // past a windowed browser's GPU watchdog and the device is lost.
         let count = num(&spec, "count", 4.0) as usize;
         let fleet = vec![template.clone(); count.max(1)];
-        let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(town_coupling().capacity));
+        let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs_for(&fleet, Some(town_coupling().capacity), town_coupling().bit_exact);
         crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
         let town = res(crash_town(
             GpuContext::Shared { info, device, queue },

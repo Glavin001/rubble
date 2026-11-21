@@ -152,6 +152,11 @@ pub struct LabOptions {
     pub vehicle_sleep: bool,
     /// Its thresholds (the engine's defaults), kept while it is off.
     pub vehicle_sleep_cfg: VehicleSleep,
+    /// Bit-exact results (`ExplicitVehiclesDef::bit_exact`, an engine-wide setting): off
+    /// by default (`RUBBLE_BIT_EXACT=1` turns it on: the bit-for-bit harnesses); live
+    /// (`{ bitExact: bool }`, the page's box), JSON `bitExact`, the harness's
+    /// `--bit-exact 0|1`.
+    pub bit_exact: bool,
     /// The car's named parts (beam lists) for the per-part numbers.
     pub parts: Vec<(String, Vec<u32>)>,
     /// The derby's settings (the Derby scene).
@@ -193,6 +198,7 @@ impl Default for LabOptions {
             sleep: true,
             vehicle_sleep: false,
             vehicle_sleep_cfg: VehicleSleep::default(),
+            bit_exact: engine_webgpu::bit_exact_default(),
             parts: Vec::new(),
             derby: derby::DerbySpec::default(),
             others: Vec::new(),
@@ -379,6 +385,7 @@ impl LabOptions {
             sleep: v.get("sleep").and_then(Value::as_bool).unwrap_or(d.sleep),
             vehicle_sleep: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).0,
             vehicle_sleep_cfg: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).1,
+            bit_exact: v.get("bitExact").and_then(Value::as_bool).unwrap_or(d.bit_exact),
             parts,
             derby: derby::DerbySpec::from_json(v.get("derby").unwrap_or(&Value::Null), d.derby),
             others: v
@@ -1966,6 +1973,7 @@ impl Bench {
             "pieceLabels": self.opts.piece_labels,
             "debris": debris_json(self.debris.ttl),
             "vehicleSleep": vehicle_sleep_json(self.opts.vehicle_sleep, self.opts.vehicle_sleep_cfg),
+            "bitExact": self.opts.bit_exact,
             "retired": { "pieces": self.debris.pieces, "nodes": self.debris.nodes, "mass": self.debris.mass },
             "car": self.car.json(&self.model),
             "shots": self.shots.iter().map(Shot::json).collect::<Vec<_>>(),
@@ -2701,6 +2709,7 @@ impl Lab {
                 // (Room for vehicle sleep always: the setting is live. Off, every vehicle
                 // steps every step, bit for bit as without the room.)
                 sleep: Some(opts.vehicle_sleep_cfg),
+                bit_exact: opts.bit_exact,
                 ..ExplicitVehiclesDef::default()
             },
         )?;
@@ -3176,6 +3185,14 @@ impl Lab {
             self.bench.opts.vehicle_sleep = on;
             self.bench.opts.vehicle_sleep_cfg = cfg;
             return Ok(json!({ "vehicleSleep": vehicle_sleep_json(on, cfg) }));
+        }
+        // { bitExact: bool }: bit-exact results (LabOptions::bit_exact;
+        // World::set_explicit_bit_exact), from the next step and after a restart: the
+        // solver's pipelines are made again (compiled at their first use).
+        if let Some(on) = cmd.get("bitExact").and_then(Value::as_bool) {
+            world.set_explicit_bit_exact(on)?;
+            self.bench.opts.bit_exact = on;
+            return Ok(json!({ "bitExact": on }));
         }
         // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
         if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {

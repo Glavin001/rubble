@@ -148,6 +148,7 @@ fn scene() -> World {
             planes: 2048,
         },
         sleep: None,
+        bit_exact: true,
         ..ExplicitVehiclesDef::default()
     };
     w.add_explicit_vehicles(&[car], &def).unwrap();
