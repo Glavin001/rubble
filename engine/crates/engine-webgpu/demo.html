@@ -83,7 +83,9 @@
     import { runRingRegression } from './ring-regression.mjs';
     import { runGablesRegression } from './gables-regression.mjs';
     import { measurePhysicsBatches, assertBenchmarkWorkload } from './physics-benchmark.mjs?v=3';
+    import * as PERF from './perf-meter.mjs';
     import { installJointControls } from './joint-interaction.mjs';
+    import { createRigidLayer } from './layers.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
@@ -405,166 +407,6 @@
       return o;
     }
 
-    const RENDER = `
-struct Body {
-  position: vec3f, invMass: f32,
-  orientation: vec4f,
-  invInertia: vec3f, flags: u32,
-  linearVel: vec3f, sleepTimer: f32,
-  angularVel: vec3f, generation: u32,
-  initialPos: vec3f, initialPad: f32,
-  initialRot: vec4f,
-};
-struct Collider {
-  body: u32, shape: u32, material: u32, generation: u32,
-  localPos: vec3f, density: f32,
-  localRot: vec4f,
-  params: vec4f,
-};
-struct Frame { viewProj: mat4x4<f32>, mode: u32, projectile: u32 };
-struct Eye { pos: vec3f, _pad: f32 };
-@group(0) @binding(0) var<storage, read> bodies: array<Body>;
-@group(0) @binding(1) var<uniform> frame: Frame;
-@group(0) @binding(2) var<storage, read> cols: array<Collider>;
-@group(0) @binding(3) var<uniform> eye: Eye;
-
-fn quatRotate(q: vec4f, v: vec3f) -> vec3f {
-  let u = q.xyz;
-  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
-}
-
-struct VsOut {
-  @builtin(position) clip: vec4f,
-  @location(0) normal: vec3f,
-  @location(1) color: vec3f,
-  @location(2) world: vec3f,
-  @location(3) center: vec3f,
-  @location(4) radius: f32,
-  // Capsule: world-space half segment (axis · half length); zero for spheres.
-  @location(5) axis: vec3f,
-};
-
-@vertex fn vs(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> VsOut {
-  let b = bodies[inst + 1u];
-  let col = cols[inst + 1u];
-  var half = col.params.xyz;
-  var radius = 0.0;
-  var axis = vec3f(0.0);
-  if (col.shape == 0u) {
-    // Bounds cube of half-extent r; fragment ray-hits the sphere so corners do not stick out.
-    half = vec3f(col.params.x);
-    radius = col.params.x;
-  } else if (col.shape == 1u) {
-    // Capsule along local Y (radius, half length): bounds box, ray-hit in the fragment.
-    half = vec3f(col.params.x, col.params.y + col.params.x, col.params.x);
-    radius = col.params.x;
-    axis = quatRotate(b.orientation, vec3f(0.0, col.params.y, 0.0));
-  }
-  let world = b.position + quatRotate(b.orientation, corner * (half / 0.5));
-  var o: VsOut;
-  o.clip = frame.viewProj * vec4f(world, 1.0);
-  o.normal = quatRotate(b.orientation, normal);
-  o.world = world;
-  o.center = b.position;
-  o.radius = radius;
-  o.axis = axis;
-  // 0 position tint, 1 awake/sleep, 2 speed. The ball stays gray: the projectile when
-  // the scene names one (frame.projectile), else every sphere.
-  let isBall = col.shape == 0u && (frame.projectile == 0xffffffffu || col.body == frame.projectile);
-  if (isBall) {
-    o.color = vec3f(0.75, 0.78, 0.82);
-  } else if (frame.mode == 1u) {
-    let sleeping = (b.flags & 4u) != 0u;
-    o.color = select(vec3f(0.95, 0.58, 0.16), vec3f(0.28, 0.48, 0.82), sleeping);
-  } else if (frame.mode == 2u) {
-    let t = clamp(length(b.linearVel) / 3.0, 0.0, 1.0);
-    o.color = mix(vec3f(0.22, 0.32, 0.48), vec3f(0.95, 0.22, 0.16), t);
-  } else {
-    let t = fract(b.position.y * 0.08 + b.position.x * 0.05);
-    o.color = vec3f(0.72, 0.38 + 0.35 * t, 0.22);
-  }
-  return o;
-}
-
-@fragment fn fs(i: VsOut) -> @location(0) vec4f {
-  var n = normalize(i.normal);
-  if (i.radius > 0.0 && dot(i.axis, i.axis) > 0.0) {
-    // Ray vs capsule (segment center ± axis, radius).
-    let rd = normalize(i.world - eye.pos);
-    let pa = i.center - i.axis;
-    let ba = 2.0 * i.axis;
-    let oa = eye.pos - pa;
-    let baba = dot(ba, ba);
-    let bard = dot(ba, rd);
-    let baoa = dot(ba, oa);
-    let rdoa = dot(rd, oa);
-    let oaoa = dot(oa, oa);
-    let qa = baba - bard * bard;
-    let qb = baba * rdoa - baoa * bard;
-    let qc = baba * oaoa - baoa * baoa - i.radius * i.radius * baba;
-    var tHit = -1.0;
-    let h = qb * qb - qa * qc;
-    if (h >= 0.0 && qa > 1e-8) {
-      let t = (-qb - sqrt(h)) / qa;
-      let y = baoa + t * bard;
-      if (y > 0.0 && y < baba) {
-        tHit = t;
-      }
-    }
-    if (tHit < 0.0) {
-      // End caps: the nearer sphere.
-      let ca = eye.pos - pa;
-      let cb = eye.pos - (pa + ba);
-      let ba0 = dot(rd, ca);
-      let ha = ba0 * ba0 - (dot(ca, ca) - i.radius * i.radius);
-      let bb0 = dot(rd, cb);
-      let hb = bb0 * bb0 - (dot(cb, cb) - i.radius * i.radius);
-      if (ha >= 0.0) { tHit = -ba0 - sqrt(ha); }
-      if (hb >= 0.0) {
-        let tb = -bb0 - sqrt(hb);
-        if (tHit < 0.0 || (tb > 0.0 && tb < tHit)) { tHit = tb; }
-      }
-    }
-    if (tHit < 0.0) { discard; }
-    let p = eye.pos + rd * tHit;
-    let k = clamp(dot(p - pa, ba) / baba, 0.0, 1.0);
-    n = normalize(p - (pa + ba * k));
-  } else if (i.radius > 0.0) {
-    let rd = normalize(i.world - eye.pos);
-    let oc = eye.pos - i.center;
-    let b = dot(oc, rd);
-    let c = dot(oc, oc) - i.radius * i.radius;
-    let h = b * b - c;
-    if (h < 0.0) { discard; }
-    var tHit = -b - sqrt(h);
-    if (tHit < 0.0) { tHit = -b + sqrt(h); }
-    if (tHit < 0.0) { discard; }
-    n = normalize((eye.pos + rd * tHit) - i.center);
-  }
-  let light = normalize(vec3f(0.35, 0.85, 0.4));
-  let ndl = max(dot(n, light), 0.0);
-  return vec4f(i.color * (0.28 + 0.72 * ndl), 1.0);
-}
-
-@vertex fn vsGround(@location(0) corner: vec3f) -> VsOut {
-  var o: VsOut;
-  o.clip = frame.viewProj * vec4f(corner, 1.0);
-  o.normal = vec3f(0.0, 1.0, 0.0);
-  // Keep bodies live in this entry point so auto-layout still binds slot 0.
-  o.color = vec3f(0.22, 0.24, 0.28) + bodies[0].position * 0.0;
-  o.world = corner;
-  o.center = corner;
-  o.radius = 0.0;
-  return o;
-}
-
-@fragment fn fsGround(i: VsOut) -> @location(0) vec4f {
-  let n = normalize(i.normal);
-  let light = normalize(vec3f(0.35, 0.85, 0.4));
-  let ndl = max(dot(n, light), 0.0);
-  return vec4f(i.color * (0.28 + 0.72 * ndl), 1.0);
-}
-`;
 
     const context = canvas.getContext('webgpu');
     const format = navigator.gpu.getPreferredCanvasFormat();
@@ -595,125 +437,35 @@ struct VsOut {
 
     // Read outside the throughput window: bucket distribution determines how
     // many cooperative lanes execute each body's primal solve.
-    async function readColorBuckets() {
-      const counts = Array.from(await world.readColorCounts()).slice(0, cfg.cap.maxColors);
-      const total = counts.reduce((sum, count) => sum + count, 0);
-      if (total !== last.awake) throw new Error(`Color buckets cover ${total} bodies, but awake count is ${last.awake}; refusing invalid benchmark coverage.`);
-      return counts;
-    }
-
-    // Fair three-avbd protocol (blind lead-in + median of 10-step batches). Runs only
-    // after the user has watched the impact, then restores for continued viewing.
-    // Each step goes through World (its readback included, as every page's).
+    // Benchmark coverage, the fair protocol, the phase profile and the live step cost:
+    // perf-meter.mjs (shared with the playground shell; tests/demo_profiling.test.mjs).
+    const readColorBuckets = () => PERF.readColorBuckets({ world, maxColors: cfg.cap.maxColors, awake: last.awake });
     let timingSamples;
     async function benchWall() {
-      for (let i = 0; i < lead; i++) {
-        await stepOne();
-        if (i % 10 === 9) {
-          await drainAll();
-          statusEl.textContent = `timing lead-in ${i + 1}/${lead} · contacts ${last.contact}`;
-        }
-      }
-      await drainAll();
-      const workloadStart = { ...last, colorBuckets: await readColorBuckets() };
       const sleepOn = sleepTime < SLEEP_OFF_TIME;
-      const validateWorkload = stage => assertBenchmarkWorkload({
-        scene, totalBodies: bodyCount, iterations: solver.iterations, dt, counters: last, stage, allowSleep: sleepOn,
+      timingSamples = await PERF.benchWall({
+        lead, stepOne, drain: drainAll, counters: () => last, buckets: readColorBuckets,
+        validate: (stage) => assertBenchmarkWorkload({ scene, totalBodies: bodyCount, iterations: solver.iterations, dt, counters: last, stage, allowSleep: sleepOn }),
+        measure: measurePhysicsBatches,
+        progress: (i) => { statusEl.textContent = `timing lead-in ${i}/${lead} · contacts ${last.contact}`; },
+        meta: {
+          totalBodies: bodyCount, dynamicBodies: bodyCount - 1, iterations: solver.iterations, sleep: sleepOn, ...Q.modes, dt,
+          adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+          userAgent: navigator.userAgent,
+        },
       });
-      validateWorkload('after lead-in');
-      timingSamples = await measurePhysicsBatches({ step: stepOne, drain: drainAll });
-      Object.assign(timingSamples, {
-        measuredAt: new Date().toISOString(),
-        leadSteps: lead,
-        totalBodies: bodyCount,
-        dynamicBodies: bodyCount - 1,
-        iterations: solver.iterations,
-        sleep: sleepOn,
-        host: 'World (engine-world-wasm)',
-        ...Q.modes,
-        dt,
-        adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
-        userAgent: navigator.userAgent,
-      });
-      await drainAll();
-      validateWorkload('after timed window');
-      timingSamples.workload = { start: workloadStart, end: { ...last, colorBuckets: await readColorBuckets() } };
       return timingSamples.wallMs;
     }
-
     let phaseSamples;
-    // GPU split of the step: World times each phase of its plan in its own pass
-    // (gpuTiming: phases) for 10 steps, each waited for. Per step, a phase that
-    // repeats (each iteration's primal and dual) is summed.
-    function summarizePhases(samples) {
-      const median = values => values.slice().sort((a, b) => a - b)[values.length >> 1];
-      const names = [...new Set(samples.flatMap((s) => Object.keys(s.phasesMs)))];
-      const phasesMs = Object.fromEntries(names.map((name) => [name, median(samples.map((s) => s.phasesMs[name] ?? 0))]));
-      const totals = Object.fromEntries(['gpuPhasesMs', 'gpuSpanMs', 'completionMs'].map((k) => [k, median(samples.map((s) => s[k]))]));
-      return { phasesMs, ...totals };
-    }
-    function phaseSample(t, completionMs) {
-      const phasesMs = {};
-      for (const [name, ms] of t.segments) phasesMs[name] = (phasesMs[name] ?? 0) + ms;
-      return { step: t.step, phasesMs, gpuPhasesMs: t.totalMs, gpuSpanMs: t.spanMs, completionMs };
-    }
     async function profilePhases() {
-      phaseSamples = undefined;
-      if (!wantTimestamps) return '';
-      world.setGpuTiming('phases');
-      const samples = [];
-      try {
-        for (let i = 0; i < 10; i++) {
-          await drainAll();
-          frameTimes = [];
-          const t0 = performance.now();
-          await stepOne();
-          await drainAll();
-          const t = frameTimes.find((x) => x.segments.length > 1);
-          // A step that dispatched nothing (World skips the GPU step once nothing is awake
-          // or written) has no phases: every phase reads zero.
-          if (!t) samples.push({ step: null, phasesMs: {}, gpuPhasesMs: 0, gpuSpanMs: 0, completionMs: performance.now() - t0, skipped: true });
-          else samples.push(phaseSample(t, performance.now() - t0));
-        }
-      } finally {
-        world.setGpuTiming(liveTiming);
-      }
-      const summary = summarizePhases(samples);
-      phaseSamples = {
-        protocol: 'world-phase-timestamps-v1',
-        detail: 'plan phases',
-        caveat: 'One pass per plan phase and a wait per step perturb execution. These are not the batched throughput window. Phase medians need not sum to the median total.',
-        measuredAt: new Date().toISOString(), ...summary, samples,
-      };
-      return Object.entries(summary.phasesMs).map(([name, value]) => `${name} ${value.toFixed(2)}`).join(' · ')
-        + ` · profiled GPU span ${summary.gpuSpanMs.toFixed(2)} / completion ${summary.completionMs.toFixed(2)} ms`;
+      const { summary, report } = await PERF.profilePhases({
+        world, stepOne, drain: drainAll, liveTiming, wantTimestamps,
+        frameTimes: () => frameTimes, clearFrameTimes: () => { frameTimes = []; },
+      });
+      phaseSamples = report;
+      return summary;
     }
-
-    // Live HUD step cost. Playback steps once per rAF, so completion-to-completion
-    // intervals are pinned to the display refresh, not the engine. With
-    // 'timestamp-query' World times each live step's pass (GPU time, render
-    // excluded). Otherwise (Safari/iOS) busy time stands in: frame arrival
-    // minus the later of submit and the previous arrival. Arrivals are seen at
-    // polls (once per frame), so the estimate reads high and is labelled as one.
-    function liveStepSample({ gpuMs, submittedAt, completedAt, previousCompletedAt }) {
-      if (gpuMs > 0) return { ms: gpuMs, source: 'gpu' };
-      return { ms: completedAt - Math.max(submittedAt ?? completedAt, previousCompletedAt ?? 0), source: 'estimate' };
-    }
-    // Median over a rate window; GPU samples win, so an occasional untimed step
-    // cannot mix estimate latency into a GPU-timed readout.
-    function summarizeStepCost(samples) {
-      const gpu = samples.filter(sample => sample.source === 'gpu');
-      const used = (gpu.length ? gpu : samples).map(sample => sample.ms).filter(ms => ms > 0).sort((a, b) => a - b);
-      if (!used.length) return { stepMs: 0, maxTps: 0, source: 'none' };
-      const stepMs = used[used.length >> 1];
-      return { stepMs, maxTps: 1000 / stepMs, source: gpu.length ? 'gpu' : 'estimate' };
-    }
-    function stepCostLabels({ stepMs, maxTps, source }) {
-      if (source === 'gpu') return { step: `${stepMs.toFixed(1)} ms/step GPU`, maxTps: maxTps.toFixed(0), maxTpsSub: 'GPU-timed' };
-      if (source === 'estimate') return { step: `≈${stepMs.toFixed(1)} ms/step est.`, maxTps: `≈${maxTps.toFixed(0)}`, maxTpsSub: 'estimate' };
-      return { step: '', maxTps: '—', maxTpsSub: '' };
-    }
-    // End of the step-cost helpers (tests/demo_profiling.test.mjs slices to here).
+    const { liveStepSample } = PERF;
 
     let settle = { ke: 0, maxV: 0, maxY: 0, minY: 0, sleeping: 0, sampleStep: 0 };
     async function sampleSettle() {
@@ -739,42 +491,15 @@ struct VsOut {
       return settle;
     }
 
-    const cube = [];
-    const axes = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
-    for (const [u, v, w] of axes) for (const sign of [-1, 1]) {
-      const n = [0, 0, 0]; n[w] = sign;
-      const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => {
-        const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = sign * 0.5; return p;
-      });
-      // Negative faces reverse (u, v) order. The same walk is clockwise from
-      // outside, and cullMode 'back' would drop those faces.
-      const wind = sign > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]];
-      for (const tri of wind) for (const idx of tri) cube.push(...corners[idx], ...n);
-    }
-    const ground = [];
-    const G = cfg.ground;
-    const gy = cfg.groundY ?? 0.5;
-    for (const [x, z] of [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]]) ground.push(x, gy, z);
-    const boxVbo = device.createBuffer({ size: cube.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    const groundVbo = device.createBuffer({ size: ground.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(boxVbo, 0, new Float32Array(cube));
-    device.queue.writeBuffer(groundVbo, 0, new Float32Array(ground));
-    const frameBuf = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const frameScratch = new ArrayBuffer(80);
-    const frameF = new Float32Array(frameScratch);
-    const frameU = new Uint32Array(frameScratch);
-    const eyeBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const eyeScratch = new Float32Array(4);
     let colorMode = 1;
-    function writeCamera(aspect) {
+    // The view the rigid layer draws (rubble's slang/render/rigid_bodies.slang).
+    function cameraView(aspect) {
       const cam = cameraEye();
-      const view = mul(perspective(Math.PI / 5, aspect, 0.2, cfg.far), lookAt(cam, target, [0, 1, 0]));
-      frameF.set(view);
-      frameU[16] = colorMode;
-      frameU[17] = projectileSlot;
-      device.queue.writeBuffer(frameBuf, 0, frameScratch);
-      eyeScratch[0] = cam[0]; eyeScratch[1] = cam[1]; eyeScratch[2] = cam[2]; eyeScratch[3] = 0;
-      device.queue.writeBuffer(eyeBuf, 0, eyeScratch);
+      return {
+        viewProj: mul(perspective(Math.PI / 5, aspect, 0.2, cfg.far), lookAt(cam, target, [0, 1, 0])),
+        eye: cam, look: { colors: colorMode }, projectile: projectileSlot,
+        ground: { half: cfg.ground, y: cfg.groundY ?? 0.5 }, count: drawCount,
+      };
     }
     const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
     function showLegend() {
@@ -784,10 +509,12 @@ struct VsOut {
     // Reset: restart the scene from its first step without reloading the page.
     const resetBtn = document.getElementById('resetBtn');
     let resetting = false;
-    let measuring = false;
+    let measuringFlag = false;
+    // While a benchmark or profile owns the queue, live rate samples are ignored.
+    const setMeasuring = (v) => { measuringFlag = v; rates.measuring = v; };
     let manual = false;
     async function resetScene() {
-      if (resetting || measuring) return;
+      if (resetting || measuringFlag) return;
       resetting = true;
       resetBtn.disabled = true;
       try {
@@ -811,50 +538,7 @@ struct VsOut {
       showLegend();
     });
     statusEl.textContent = 'render shader…';
-    const boxMod = device.createShaderModule({ label: 'render-boxes', code: RENDER });
-    const groundMod = device.createShaderModule({ label: 'render-ground', code: RENDER });
-    for (const mod of [boxMod, groundMod]) {
-      if (!mod.getCompilationInfo) continue;
-      const cinfo = await mod.getCompilationInfo();
-      const err = cinfo.messages.find((m) => m.type === 'error');
-      if (err) throw new Error(`render: ${err.message}`);
-    }
-    statusEl.textContent = 'render pipeline…';
-    device.pushErrorScope('validation');
-    const boxPipe = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: {
-        module: boxMod, entryPoint: 'vs',
-        buffers: [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }],
-      },
-      fragment: { module: boxMod, entryPoint: 'fs', targets: [{ format }] },
-      primitive: { cullMode: 'back' },
-      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    });
-    const groundPipe = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: groundMod, entryPoint: 'vsGround', buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }] },
-      fragment: { module: groundMod, entryPoint: 'fsGround', targets: [{ format }] },
-      primitive: { cullMode: 'none' },
-      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    });
-    const renderErr = await device.popErrorScope();
-    if (renderErr) throw new Error(`render pipeline: ${renderErr.message}`);
-    // The world's buffers, bound in place; a buffer can be replaced when it grows,
-    // so rebind when one is a new object.
-    let boxBind = null, groundBind = null, bound = [];
-    function rebind() {
-      const bufs = [world.bodyBuffer(), world.colliderBuffer()];
-      if (bufs.every((b, i) => b === bound[i])) return;
-      bound = bufs;
-      boxBind = device.createBindGroup({ layout: boxPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: bufs[0] } },
-        { binding: 1, resource: { buffer: frameBuf } },
-        { binding: 2, resource: { buffer: bufs[1] } },
-        { binding: 3, resource: { buffer: eyeBuf } },
-      ] });
-      groundBind = device.createBindGroup({ layout: groundPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bufs[0] } }, { binding: 1, resource: { buffer: frameBuf } }] });
-    }
+    const rigid = await createRigidLayer(device, format, { status: (m) => { statusEl.textContent = m; } });
     let depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
 
     function drawWorld() {
@@ -862,20 +546,30 @@ struct VsOut {
         depth.destroy();
         depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
-      rebind();
       const aspect = canvas.width / Math.max(1, canvas.height);
-      writeCamera(aspect);
       const enc = device.createCommandEncoder();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
-      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
-      rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, drawCount);
+      rigid.draw(rp, world, cameraView(aspect));
       rp.end();
       device.queue.submit([enc.finish()]);
     }
     drawWorld();
+    // Render cost alone (renderer comparisons, three.html): `n` draws of the current
+    // state, each waited for on the GPU; ms per draw.
+    window.__renderBench = async (n = 60) => {
+      const ts = [];
+      for (let i = 0; i < n; i++) {
+        const t = performance.now();
+        drawWorld();
+        await device.queue.onSubmittedWorkDone();
+        ts.push(performance.now() - t);
+      }
+      ts.sort((a, b) => a - b);
+      return { p50: ts[n >> 1], p90: ts[Math.floor(n * 0.9)], min: ts[0] };
+    };
 
     const tpsVal = document.getElementById('tpsVal');
     const fpsVal = document.getElementById('fpsVal');
@@ -888,59 +582,30 @@ struct VsOut {
     let wallMs = 0;
     let phases = '';
     let benchStarted = false;
-    // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (observed,
-    // so display-bound). Max TPS = 1000 / measured physics step cost (see
-    // liveStepSample); Max FPS = 1000 / CPU time per rAF callback.
-    let rateWindowStart = performance.now();
-    let rateSteps = 0;
-    let rateFrames = 0;
-    let rateFrameMsSum = 0;
-    let rateStepCosts = [];
-    function resetRates() {
-      rateWindowStart = performance.now();
-      rateSteps = 0;
-      rateFrames = 0;
-      rateFrameMsSum = 0;
-      rateStepCosts = [];
-    }
-    function addStepCost(sample) {
-      if (!measuring) rateStepCosts.push(sample);
-    }
-    // benchWall pauses live steps and saturates the queue: no live rate means anything.
-    function showMeasuring() {
-      for (const el of [tpsVal, maxTpsVal, fpsVal, maxFpsVal]) el.textContent = '—';
-      stepMsVal.textContent = 'paused';
-      maxTpsSub.textContent = 'measuring…';
-      frameMsVal.textContent = '';
-      window.__RATES__ = { measuring: true };
-    }
-    function bumpRates(didStep, frameMs) {
-      rateFrames++;
-      rateFrameMsSum += frameMs;
-      if (didStep) rateSteps++;
-      const elapsed = performance.now() - rateWindowStart;
-      if (elapsed < 1000) return;
-      const sec = elapsed / 1000;
-      const tps = rateSteps / sec;
-      const fps = rateFrames / sec;
-      const frameMsAvg = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
-      const maxFps = frameMsAvg > 1e-6 ? 1000 / frameMsAvg : 0;
-      const cost = summarizeStepCost(rateStepCosts);
-      const labels = stepCostLabels(cost);
-      tpsVal.textContent = tps.toFixed(0);
-      fpsVal.textContent = fps.toFixed(0);
-      maxTpsVal.textContent = labels.maxTps;
-      maxTpsSub.textContent = labels.maxTpsSub;
-      maxFpsVal.textContent = maxFps > 0 ? maxFps.toFixed(0) : '—';
-      stepMsVal.textContent = labels.step;
-      frameMsVal.textContent = frameMsAvg > 0 ? `${frameMsAvg.toFixed(1)} ms/frame` : '';
-      window.__RATES__ = {
-        tps, fps, maxTps: cost.maxTps, maxFps,
-        stepMs: cost.stepMs, stepSource: cost.source, frameMs: frameMsAvg,
-      };
-      resetRates();
-    }
-    // End of the live rate window (tests/demo_profiling.test.mjs slices to here).
+    // The live rates (perf-meter.mjs `createRateMeter`): TPS observed, Max TPS from the
+    // step's own cost, FPS, Max FPS from CPU time per frame.
+    const rates = PERF.createRateMeter((r) => {
+      if (r.measuring) {
+        for (const el of [tpsVal, maxTpsVal, fpsVal, maxFpsVal]) el.textContent = '—';
+        stepMsVal.textContent = 'paused';
+        maxTpsSub.textContent = 'measuring…';
+        frameMsVal.textContent = '';
+        window.__RATES__ = { measuring: true };
+        return;
+      }
+      tpsVal.textContent = r.tps.toFixed(0);
+      fpsVal.textContent = r.fps.toFixed(0);
+      maxTpsVal.textContent = r.labels.maxTps;
+      maxTpsSub.textContent = r.labels.maxTpsSub;
+      maxFpsVal.textContent = r.maxFps > 0 ? r.maxFps.toFixed(0) : '—';
+      stepMsVal.textContent = r.labels.step;
+      frameMsVal.textContent = r.frameMs > 0 ? `${r.frameMs.toFixed(1)} ms/frame` : '';
+      window.__RATES__ = { tps: r.tps, fps: r.fps, maxTps: r.maxTps, maxFps: r.maxFps, stepMs: r.stepMs, stepSource: r.stepSource, frameMs: r.frameMs };
+    });
+    const resetRates = () => rates.reset();
+    const addStepCost = (sample) => rates.addStepCost(sample);
+    const showMeasuring = () => rates.showMeasuring();
+    const bumpRates = (didStep, frameMs) => rates.frame(didStep ? 1 : 0, frameMs);
     // ?stopAt=N freezes live playback at step N (still rendering) so runs can be
     // compared at the same step, e.g. sleep=on vs sleep=off screenshots.
     const stopAt = Q.stopAt;
@@ -959,7 +624,7 @@ struct VsOut {
     // ('off', or the live 'step' timestamps): the throughput the profile's GPU span is
     // compared against. Pauses the live loop meanwhile.
     window.__wallNow = async (n = 60, timing = 'off') => {
-      measuring = true;
+      setMeasuring(true);
       try {
         world.setGpuTiming(timing);
         await drainAll();
@@ -982,13 +647,13 @@ struct VsOut {
         const steps = Math.max(1, simStep() - s0);
         const wallMs = (performance.now() - t0) / steps;
         return { wallMs, steps, awake: last.awake, stepCpuMs: stepCpu / steps, pollCpuMs: pollCpu / steps, slotWaitMs: slotWait / steps };
-      } finally { world.setGpuTiming(liveTiming); measuring = false; }
+      } finally { world.setGpuTiming(liveTiming); setMeasuring(false); }
     };
     // The per-phase GPU split of 10 steps now (pauses the live loop meanwhile).
     window.__profileNow = async () => {
-      measuring = true;
+      setMeasuring(true);
       try { await drainAll(); const summary = await profilePhases(); return { summary, phasesMs: phaseSamples?.phasesMs }; }
-      finally { measuring = false; }
+      finally { setMeasuring(false); }
     };
 
     function statusLine(timingLabel, settleLabel = '') {
@@ -999,7 +664,7 @@ struct VsOut {
     async function frame(now) {
       if (!running) return;
       // Benchmark windows and automation step the world themselves.
-      if (measuring || manual) { requestAnimationFrame(frame); return; }
+      if (measuringFlag || manual) { requestAnimationFrame(frame); return; }
       try {
         const frozen = stopAt > 0 && simStep() >= stopAt;
         if (frozen) {
@@ -1038,7 +703,7 @@ struct VsOut {
         // After measuring, restore so playback continues from the start again.
         if (benchmarkEnabled && !benchStarted && simStep() >= lead) {
           benchStarted = true;
-          measuring = true;
+          setMeasuring(true);
           showMeasuring();
           await drainAll();
           lastCompletion = 0;
@@ -1065,13 +730,13 @@ struct VsOut {
             const ok = !cfg.settled || (pre.ke < dyn * 0.05 && pre.maxV < 0.5 && pre.maxY > initialMaxY * 0.7);
             statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases}${cfg.settled ? ` · settle KE ${pre.ke.toFixed(1)} sleep ${pre.sleeping}/${dyn} h ${pre.maxY.toFixed(2)}/${initialMaxY.toFixed(2)} ${ok ? 'STABLE' : 'UNSTABLE'}` : ''} · replaying…`;
           } finally {
-            measuring = false;
+            setMeasuring(false);
             lastCompletion = 0;
             resetRates();
           }
         }
         requestAnimationFrame(frame);
-      } catch (e) { running = false; measuring = false; fail(e); }
+      } catch (e) { running = false; setMeasuring(false); fail(e); }
     }
 
     // Automation: n steps, frame-locked, then the counters (tools/page-bench.mjs).

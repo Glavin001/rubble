@@ -80,7 +80,7 @@ pub fn heights() -> Vec<f32> {
 
 /// `Math.hypot` as browsers compute it: scaled by the largest magnitude, the squares
 /// summed with compensation.
-fn js_hypot(v: &[f64]) -> f64 {
+pub(crate) fn js_hypot(v: &[f64]) -> f64 {
     let max = v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     if max == 0.0 {
         return 0.0;

@@ -5,7 +5,9 @@
 // renderer. This file lays out the columns, paces the steps and prints the numbers.
 //   ?scene=balcony|pillar|speed_ladder|equal_momentum  &approaches=a,b,...  &speed=0.25
 import {createLab,labDevice} from './lab-world.mjs';
-import {createRenderer} from './render.mjs';
+// three.js draws the lab (render-three.mjs); ?renderer=slang: the Slang draw shader it
+// replaces (render.mjs), kept for A/B measurements.
+const {createRenderer}=await import(new URLSearchParams(location.search).get('renderer')==='slang'?'./render.mjs':'./render-three.mjs');
 import {compareCatalog,comparePack,compareDef} from './wasm.mjs';
 
 const $=id=>document.getElementById(id);

@@ -478,6 +478,12 @@ impl Orbit {
     pub fn orbit_from(&mut self, ex: f64, ey: f64, ez: f64, tx: f64, ty: f64, tz: f64) {
         self.0.orbit_shot([ex, ey, ez], [tx, ty, tz])
     }
+    /// The camera `viewProj` describes, for renderers with their own camera (three.js):
+    /// `[eye.xyz, forward.xyz, fovY (radians), near, far]`.
+    pub fn camera(&self, aspect: f64) -> Vec<f64> {
+        let (e, f) = (self.0.eye(aspect), self.0.forward(aspect));
+        vec![e[0], e[1], e[2], f[0], f[1], f[2], engine_fracture::view::FOV_Y, engine_fracture::view::NEAR, self.0.far()]
+    }
     /// Column-major view-projection for the draw shader.
     #[wasm_bindgen(js_name = viewProj)]
     pub fn view_proj(&self, aspect: f64) -> Vec<f32> {

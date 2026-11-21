@@ -23,28 +23,7 @@ impl WebWorld {
     pub fn set_guidance_zones(&mut self, zones: JsValue) -> Result<(), JsValue> {
         let v: serde_json::Value = serde_wasm_bindgen::from_value(zones).map_err(err)?;
         let zones: Vec<ZoneDesc> = serde_json::from_value(v).map_err(|e| err(format!("ZoneDesc: {e}")))?;
-        let mut out = Vec::with_capacity(zones.len());
-        for (k, z) in zones.into_iter().enumerate() {
-            let anchor = match z.anchor_body {
-                Some(i) => ZoneAnchor::Body(
-                    self.world.body_at(i).ok_or_else(|| err(format!("zone {k}: no body in slot {i}")))?,
-                ),
-                None => ZoneAnchor::World(z.position),
-            };
-            out.push(GuidanceZone {
-                anchor,
-                anchor_relative: z.anchor_relative,
-                yaw: z.yaw,
-                offset: z.offset,
-                shape: z.shape,
-                weight: z.weight,
-                quota: z.quota,
-                active: z.active,
-                tags: z.tags,
-                motion: z.motion,
-            });
-        }
-        res(self.world.set_guidance_zones(&out))
+        res(self.world.set_guidance_zone_descs(&zones))
     }
 
     #[wasm_bindgen(js_name = resetGuidanceClaims)]

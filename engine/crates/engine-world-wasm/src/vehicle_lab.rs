@@ -108,7 +108,7 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
     ))?;
     crate::creation_check(&world).await?;
     Ok(js_sys::Array::of2(
-        &JsValue::from(WebWorld { world }),
+        &JsValue::from(WebWorld::of(world)),
         &JsValue::from(WebVehicleLab { lab }),
     ))
 }
