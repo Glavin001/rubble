@@ -90,8 +90,7 @@ fn main() {
         return;
     }
     let mut e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).expect("rubble");
-    let (iterations, substeps) = p.engine_policy();
-    e.set_policy(iterations, substeps);
+    e.apply_profile(p);
     let t = std::time::Instant::now();
     let mut w = GpuWorld::with_resident_engine(&gpu, &scene, e).expect("world");
     w.redo_fractured_frames = false;
@@ -103,7 +102,7 @@ fn main() {
     let lo = all.iter().fold([f64::INFINITY; 3], |a, c| [a[0].min(c.center[0]), a[1].min(c.center[1]), a[2].min(c.center[2])]);
     let hi = all.iter().fold([f64::NEG_INFINITY; 3], |a, c| [a[0].max(c.center[0]), a[1].max(c.center[1]), a[2].max(c.center[2])]);
     let target = [lo[0], 0.5 * (lo[1] + hi[1]), lo[2] + 0.4 * (hi[2] - lo[2])];
-    let shot = ImpactorDesc { name: "ball".into(), shape: ImpactorShape::Sphere { radius: 0.35 }, mass: 1400.0, position: [target[0] - 6.0, target[1], target[2]], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [60.0, 0.0, 0.0], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None };
+    let shot = ImpactorDesc { name: "ball".into(), shape: ImpactorShape::Sphere { radius: 0.35 }, mass: 1400.0, position: [target[0] - 6.0, target[1], target[2]], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [60.0, 0.0, 0.0], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None, ccd: true };
     // `STRESS_SHOT=px,py,pz,vx,vy,vz,mass,radius` (the stress frame, +Z up): another shot,
     // e.g. one the browser's stress mode fired (its stats' `lastShot`).
     let shot = match std::env::var("STRESS_SHOT") {
@@ -177,7 +176,7 @@ fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f
     let shots: usize = std::env::var("STRESS_SHOTS").ok().map_or(0, |v| v.parse().expect("STRESS_SHOTS"));
     let shot_at = |k: usize| {
         let c = all[(k * 7919 + 13) % all.len()].center;
-        ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius }, mass, position: [c[0] - 6.0, c[1], c[2].max(lo[2] + radius)], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [speed, 0.0, 0.0], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None }
+        ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius }, mass, position: [c[0] - 6.0, c[1], c[2].max(lo[2] + radius)], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [speed, 0.0, 0.0], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None, ccd: true }
     };
     // `STRESS_THRESHOLD_RUNS=wait,wait`: which runs, in order (default: one of each).
     let runs = std::env::var("STRESS_THRESHOLD_RUNS").unwrap_or_else(|_| "wait,queue".into());

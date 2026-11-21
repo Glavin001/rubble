@@ -249,6 +249,8 @@ impl Sim {
             crush_used: 0.0,
             crush_depth: 0.0,
             driven: false,
+            // A shot: a projectile.
+            ccd: true,
         });
         if self.engine == Engine::Standalone && self.world.impactors.len() - self.scene_impactors > MAX_SHOTS {
             self.world.impactors.remove(self.scene_impactors);

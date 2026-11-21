@@ -79,6 +79,12 @@ pub struct BodyDesc {
     pub angular_velocity: [f64; 3],
     pub chunks: Vec<ChunkDesc>,
     pub bonds: Vec<BondDesc>,
+    /// A fast mover that must never pass through geometry between steps: in an
+    /// engine-coupled world its bodies are the engine's continuous-collision bodies
+    /// (rubble's `BODY_CCD`), and every piece it breaks into stays one. Off by default:
+    /// CCD costs a time-of-impact cast per candidate pair each step.
+    #[serde(default)]
+    pub ccd: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +230,10 @@ pub struct ImpactorDesc {
     pub material: String,
     #[serde(default)]
     pub crush: Option<CrushDesc>,
+    /// A fast mover that must never pass through geometry between steps (`BodyDesc::ccd`).
+    /// On by default: impactors are projectiles.
+    #[serde(default = "default_true")]
+    pub ccd: bool,
 }
 
 /// Horizontal ground plane `z = height`.

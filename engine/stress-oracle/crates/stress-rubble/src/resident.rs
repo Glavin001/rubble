@@ -166,6 +166,16 @@ impl ResidentEngine for RubbleEngine {
     fn spawn_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
         Some((self.sim.body_buffer(), self.sim.collider_buffer(), self.sim.capacity().max_bodies))
     }
+    fn host_reads(&self) -> u64 {
+        self.resident_reads
+    }
+    fn ccd_flag(&self) -> u32 {
+        if self.toi_ccd {
+            engine_schema::BODY_CCD
+        } else {
+            0
+        }
+    }
 
     fn frame_record(&self, key: BodyKey) -> Option<(u32, [f32; 3], [f32; 4])> {
         self.bodies.get(&key).map(|e| (e.id, [e.com.x as f32, e.com.y as f32, e.com.z as f32], [e.principal.x as f32, e.principal.y as f32, e.principal.z as f32, e.principal.w as f32]))
@@ -218,9 +228,9 @@ impl ResidentEngine for RubbleEngine {
                     principal: stress_ref::math::Quat { w: a.principal[3], x: a.principal[0], y: a.principal[1], z: a.principal[2] },
                     inv_mass: state.inv_mass,
                     inv_inertia: state.inv_inertia,
-                    ccd: false,
+                    ccd: a.ccd,
                     // Only CCD bodies' substep bound reads it.
-                    thin: 0.0,
+                    thin: a.thin,
                     poses: None,
                 },
             );

@@ -154,6 +154,7 @@ fn lob(scene: &Scene, l: &Lob, speed: f64, momentum: f64, max_mass: f64, materia
         angular_velocity: [0.0; 3],
         material: material.into(),
         crush: None,
+        ccd: true,
     }
 }
 
@@ -294,6 +295,7 @@ fn live(walls: usize, houses: usize, wall: [usize; 3], gravity: bool, size: f64,
                 angular_velocity: [0.0; 3],
                 material: "steel".into(),
                 crush: None,
+                ccd: true,
             }
         };
         let g = Vec3::from_array(s.gravity);

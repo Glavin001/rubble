@@ -411,25 +411,28 @@ bool record_live_0(uint slot_0, KernelContext_0 thread* kernelContext_3)
     (&kernelContext_4)->manifolds_0 = manifolds_3;
     threadgroup array<uint, int(1024)> g_scan_3;
     (&kernelContext_4)->g_scan_0 = &g_scan_3;
-    uint _S40 = id_2.x;
-    bool _S41;
-    if(_S40 >= (params_4->record_count_0))
+    uint i_1 = id_2.x;
+    for(;;)
     {
-        _S41 = true;
-    }
-    else
-    {
-        bool _S42 = record_live_0(_S40, &kernelContext_4);
-        _S41 = !_S42;
-    }
-    if(_S41)
-    {
-        return;
-    }
-    uint4 _S43 = uint4((*((&kernelContext_4)->records_0+_S40)).ids_0) ;
-    if((_S43.w) != 0U)
-    {
-        uint _S44 = atomic_fetch_add_explicit((&kernelContext_4)->counts_0+_S43.x, 1U, memory_order_relaxed);
+        if(i_1 < ((&kernelContext_4)->params_1->record_count_0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        bool _S40 = record_live_0(i_1, &kernelContext_4);
+        if(!_S40)
+        {
+            i_1 = i_1 + 4194240U;
+            continue;
+        }
+        uint4 _S41 = uint4((*((&kernelContext_4)->records_0+i_1)).ids_0) ;
+        if((_S41.w) != 0U)
+        {
+            uint _S42 = atomic_fetch_add_explicit((&kernelContext_4)->counts_0+_S41.x, 1U, memory_order_relaxed);
+        }
+        i_1 = i_1 + 4194240U;
     }
     return;
 }
@@ -483,14 +486,14 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
     threadgroup array<uint, int(1024)> g_scan_4;
     (&kernelContext_6)->g_scan_0 = &g_scan_4;
     uint tid_1 = thread_0.x;
-    uint _S45 = group_0.x;
-    uint k_0 = _S45 * 1024U + tid_1;
-    bool _S46 = k_0 < (params_5->chunk_count_0);
+    uint _S43 = group_0.x;
+    uint k_0 = _S43 * 1024U + tid_1;
+    bool _S44 = k_0 < (params_5->chunk_count_0);
     uint v_2;
-    if(_S46)
+    if(_S44)
     {
-        uint _S47 = atomic_load_explicit((&kernelContext_6)->counts_0+k_0, memory_order_relaxed);
-        v_2 = _S47;
+        uint _S45 = atomic_load_explicit((&kernelContext_6)->counts_0+k_0, memory_order_relaxed);
+        v_2 = _S45;
     }
     else
     {
@@ -498,13 +501,13 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
     }
     (*(&kernelContext_6)->g_scan_0)[tid_1] = v_2;
     group_scan_0(tid_1, &kernelContext_6);
-    if(_S46)
+    if(_S44)
     {
         *((&kernelContext_6)->sort_0+k_0) = (*(&kernelContext_6)->g_scan_0)[tid_1] - v_2;
     }
     if(tid_1 == 1023U)
     {
-        *((&kernelContext_6)->scan_blocks_0+_S45) = (*(&kernelContext_6)->g_scan_0)[int(1023)];
+        *((&kernelContext_6)->scan_blocks_0+_S43) = (*(&kernelContext_6)->g_scan_0)[int(1023)];
     }
     return;
 }
@@ -528,12 +531,12 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
     threadgroup array<uint, int(1024)> g_scan_5;
     (&kernelContext_7)->g_scan_0 = &g_scan_5;
     uint tid_2 = thread_1.x;
-    uint _S48 = (params_6->chunk_count_0 + 1023U) / 1024U;
+    uint _S46 = (params_6->chunk_count_0 + 1023U) / 1024U;
     uint base_1 = 0U;
     uint carry_0 = 0U;
     for(;;)
     {
-        if(base_1 < _S48)
+        if(base_1 < _S46)
         {
         }
         else
@@ -541,9 +544,9 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
             break;
         }
         uint b_1 = base_1 + tid_2;
-        bool _S49 = b_1 < _S48;
+        bool _S47 = b_1 < _S46;
         uint v_3;
-        if(_S49)
+        if(_S47)
         {
             v_3 = *((&kernelContext_7)->scan_blocks_0+b_1);
         }
@@ -553,7 +556,7 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
         }
         (*(&kernelContext_7)->g_scan_0)[tid_2] = v_3;
         group_scan_0(tid_2, &kernelContext_7);
-        if(_S49)
+        if(_S47)
         {
             *((&kernelContext_7)->scan_blocks_0+b_1) = carry_0 + (*(&kernelContext_7)->g_scan_0)[tid_2] - v_3;
         }
@@ -590,8 +593,8 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
     uint k_1 = id_3.x;
     if(k_1 < (params_7->chunk_count_0))
     {
-        uint device* _S50 = (&kernelContext_8)->sort_0+k_1;
-        *_S50 = *_S50 + *((&kernelContext_8)->scan_blocks_0+k_1 / 1024U);
+        uint device* _S48 = (&kernelContext_8)->sort_0+k_1;
+        *_S48 = *_S48 + *((&kernelContext_8)->scan_blocks_0+k_1 / 1024U);
     }
     return;
 }
@@ -614,37 +617,41 @@ void group_scan_0(uint tid_0, KernelContext_0 thread* kernelContext_5)
     (&kernelContext_9)->manifolds_0 = manifolds_7;
     threadgroup array<uint, int(1024)> g_scan_7;
     (&kernelContext_9)->g_scan_0 = &g_scan_7;
-    uint _S51 = id_4.x;
-    bool _S52;
-    if(_S51 >= (params_8->record_count_0))
+    uint _S49 = params_8->chunk_count_0;
+    uint i_2 = id_4.x;
+    for(;;)
     {
-        _S52 = true;
+        if(i_2 < ((&kernelContext_9)->params_1->record_count_0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        bool _S50 = record_live_0(i_2, &kernelContext_9);
+        if(!_S50)
+        {
+            i_2 = i_2 + 4194240U;
+            continue;
+        }
+        uint4 _S51 = uint4((*((&kernelContext_9)->records_0+i_2)).ids_0) ;
+        if((_S51.w) == 0U)
+        {
+            i_2 = i_2 + 4194240U;
+            continue;
+        }
+        uint _S52 = _S51.x;
+        uint at_0 = atomic_fetch_add_explicit((&kernelContext_9)->counts_0+(_S49 + _S52), 1U, memory_order_relaxed);
+        *((&kernelContext_9)->sort_0+(2U * _S49 + 1U + *((&kernelContext_9)->sort_0+_S52) + at_0)) = i_2;
+        i_2 = i_2 + 4194240U;
     }
-    else
-    {
-        bool _S53 = record_live_0(_S51, &kernelContext_9);
-        _S52 = !_S53;
-    }
-    if(_S52)
-    {
-        return;
-    }
-    uint4 _S54 = uint4((*((&kernelContext_9)->records_0+_S51)).ids_0) ;
-    if((_S54.w) == 0U)
-    {
-        return;
-    }
-    uint n_1 = (&kernelContext_9)->params_1->chunk_count_0;
-    uint _S55 = _S54.x;
-    uint at_0 = atomic_fetch_add_explicit((&kernelContext_9)->counts_0+((&kernelContext_9)->params_1->chunk_count_0 + _S55), 1U, memory_order_relaxed);
-    *((&kernelContext_9)->sort_0+(2U * n_1 + 1U + *((&kernelContext_9)->sort_0+_S55) + at_0)) = _S51;
     return;
 }
 
 bool record_before_0(uint a_1, uint b_2, KernelContext_0 thread* kernelContext_10)
 {
-    uint4 _S56 = uint4((kernelContext_10->records_0+a_1)->key_0) ;
-    uint4 _S57 = uint4((kernelContext_10->records_0+b_2)->key_0) ;
+    uint4 _S53 = uint4((kernelContext_10->records_0+a_1)->key_0) ;
+    uint4 _S54 = uint4((kernelContext_10->records_0+b_2)->key_0) ;
     uint q_1 = 0U;
     for(;;)
     {
@@ -655,11 +662,11 @@ bool record_before_0(uint a_1, uint b_2, KernelContext_0 thread* kernelContext_1
         {
             break;
         }
-        uint _S58 = q_1;
-        uint _S59 = q_1;
-        if((_S56[q_1]) != (_S57[q_1]))
+        uint _S55 = q_1;
+        uint _S56 = q_1;
+        if((_S53[q_1]) != (_S54[q_1]))
         {
-            return (_S56[_S58]) < (_S57[_S59]);
+            return (_S53[_S55]) < (_S54[_S56]);
         }
         q_1 = q_1 + 1U;
     }
@@ -687,65 +694,65 @@ bool record_before_0(uint a_1, uint b_2, KernelContext_0 thread* kernelContext_1
     threadgroup array<uint, int(1024)> g_scan_8;
     (&kernelContext_11)->g_scan_0 = &g_scan_8;
     uint k_2 = id_5.x;
-    uint n_2 = params_9->chunk_count_0;
+    uint n_1 = params_9->chunk_count_0;
     if(k_2 >= (params_9->chunk_count_0))
     {
         return;
     }
-    uint device* _S60 = (&kernelContext_11)->sort_0+k_2;
-    uint begin_0 = *_S60;
-    uint _S61 = *((&kernelContext_11)->sort_0+(k_2 + 1U));
-    uint _S62 = 2U * n_2 + 1U;
-    uint a_2 = *_S60 + 1U;
+    uint device* _S57 = (&kernelContext_11)->sort_0+k_2;
+    uint begin_0 = *_S57;
+    uint _S58 = *((&kernelContext_11)->sort_0+(k_2 + 1U));
+    uint _S59 = 2U * n_1 + 1U;
+    uint a_2 = *_S57 + 1U;
     for(;;)
     {
-        if(a_2 < _S61)
+        if(a_2 < _S58)
         {
         }
         else
         {
             break;
         }
-        uint v_4 = *((&kernelContext_11)->sort_0+(_S62 + a_2));
+        uint v_4 = *((&kernelContext_11)->sort_0+(_S59 + a_2));
         b_3 = a_2;
         for(;;)
         {
-            bool _S63;
+            bool _S60;
             if(b_3 > begin_0)
             {
-                bool _S64 = record_before_0(v_4, *((&kernelContext_11)->sort_0+(_S62 + b_3 - 1U)), &kernelContext_11);
-                _S63 = _S64;
+                bool _S61 = record_before_0(v_4, *((&kernelContext_11)->sort_0+(_S59 + b_3 - 1U)), &kernelContext_11);
+                _S60 = _S61;
             }
             else
             {
-                _S63 = false;
+                _S60 = false;
             }
-            if(_S63)
+            if(_S60)
             {
             }
             else
             {
                 break;
             }
-            uint _S65 = _S62 + b_3;
-            *((&kernelContext_11)->sort_0+_S65) = *((&kernelContext_11)->sort_0+(_S65 - 1U));
+            uint _S62 = _S59 + b_3;
+            *((&kernelContext_11)->sort_0+_S62) = *((&kernelContext_11)->sort_0+(_S62 - 1U));
             b_3 = b_3 - 1U;
         }
-        *((&kernelContext_11)->sort_0+(_S62 + b_3)) = v_4;
+        *((&kernelContext_11)->sort_0+(_S59 + b_3)) = v_4;
         a_2 = a_2 + 1U;
     }
     a_2 = begin_0;
     b_3 = 0U;
     for(;;)
     {
-        if(a_2 < _S61)
+        if(a_2 < _S58)
         {
         }
         else
         {
             break;
         }
-        Record_natural_0 r_1 = *((&kernelContext_11)->records_0+*((&kernelContext_11)->sort_0+(_S62 + a_2)));
+        Record_natural_0 r_1 = *((&kernelContext_11)->records_0+*((&kernelContext_11)->sort_0+(_S59 + a_2)));
         uint q_2 = 0U;
         for(;;)
         {
@@ -771,38 +778,38 @@ bool record_before_0(uint a_1, uint b_2, KernelContext_0 thread* kernelContext_1
             a_2 = a_2 + 1U;
             continue;
         }
-        uint _S66 = begin_0 + m_0;
-        Record_natural_0 device* _S67 = (&kernelContext_11)->manifolds_0+_S66;
-        float4 _S68 = float4((*_S67).point_0) ;
-        float4 _S69 = float4((*_S67).impulse_0) ;
-        float4 _S70 = float4((*_S67).other_0) ;
-        uint4 _S71 = uint4((*_S67).key_0) ;
+        uint _S63 = begin_0 + m_0;
+        Record_natural_0 device* _S64 = (&kernelContext_11)->manifolds_0+_S63;
+        float4 _S65 = float4((*_S64).point_0) ;
+        float4 _S66 = float4((*_S64).impulse_0) ;
+        float4 _S67 = float4((*_S64).other_0) ;
+        uint4 _S68 = uint4((*_S64).key_0) ;
         thread Record_0 acc_0;
-        (&acc_0)->ids_0 = uint4((*_S67).ids_0) ;
-        (&acc_0)->point_0 = _S68;
-        (&acc_0)->impulse_0 = _S69;
-        (&acc_0)->other_0 = _S70;
-        (&acc_0)->key_0 = _S71;
+        (&acc_0)->ids_0 = uint4((*_S64).ids_0) ;
+        (&acc_0)->point_0 = _S65;
+        (&acc_0)->impulse_0 = _S66;
+        (&acc_0)->other_0 = _S67;
+        (&acc_0)->key_0 = _S68;
         float w0_0 = (&acc_0)->point_0.w;
-        float4 _S72 = float4(r_1.point_0) ;
-        float w_0 = _S72.w;
+        float4 _S69 = float4(r_1.point_0) ;
+        float w_0 = _S69.w;
         float total_0 = w0_0 + w_0;
         if(total_0 > 0.0f)
         {
-            (&acc_0)->point_0.xyz = ((&acc_0)->point_0.xyz * float3(w0_0)  + _S72.xyz * float3(w_0) ) / float3(total_0) ;
+            (&acc_0)->point_0.xyz = ((&acc_0)->point_0.xyz * float3(w0_0)  + _S69.xyz * float3(w_0) ) / float3(total_0) ;
             (&acc_0)->impulse_0.w = ((&acc_0)->impulse_0.w * w0_0 + (float4(r_1.impulse_0) ).w * w_0) / total_0;
         }
         (&acc_0)->impulse_0.xyz = (&acc_0)->impulse_0.xyz + (float4(r_1.impulse_0) ).xyz;
         (&acc_0)->point_0.w = total_0;
-        Record_natural_0 device* _S73 = (&kernelContext_11)->manifolds_0+_S66;
-        _S73->ids_0 = packed_uint4(acc_0.ids_0) ;
-        _S73->point_0 = packed_float4(acc_0.point_0) ;
-        _S73->impulse_0 = packed_float4(acc_0.impulse_0) ;
-        _S73->other_0 = packed_float4(acc_0.other_0) ;
-        _S73->key_0 = packed_uint4(acc_0.key_0) ;
+        Record_natural_0 device* _S70 = (&kernelContext_11)->manifolds_0+_S63;
+        _S70->ids_0 = packed_uint4(acc_0.ids_0) ;
+        _S70->point_0 = packed_float4(acc_0.point_0) ;
+        _S70->impulse_0 = packed_float4(acc_0.impulse_0) ;
+        _S70->other_0 = packed_float4(acc_0.other_0) ;
+        _S70->key_0 = packed_uint4(acc_0.key_0) ;
         a_2 = a_2 + 1U;
     }
-    *((&kernelContext_11)->sort_0+(n_2 + 1U + k_2)) = b_3;
+    *((&kernelContext_11)->sort_0+(n_1 + 1U + k_2)) = b_3;
     return;
 }
 

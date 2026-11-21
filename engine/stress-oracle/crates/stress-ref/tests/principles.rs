@@ -82,6 +82,7 @@ fn small_impact() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.ground = Some(GroundDesc { height: 0.0, friction: 0.6, material: "concrete".into() });
     s.sim.duration = 0.02;
@@ -110,6 +111,7 @@ fn free_impact(fracture: bool) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.015;
     s.sim.frame_dt = 1e-3;

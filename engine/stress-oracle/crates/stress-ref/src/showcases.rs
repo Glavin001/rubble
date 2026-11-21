@@ -111,6 +111,7 @@ pub fn car_into_wall(ductile: bool, name: &str) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: Some(CrushDesc { max_force: 400e3, energy: 20e3 }),
+        ccd: true,
     });
     s.sim.duration = 0.15;
     s.sim.frame_dt = 1e-3;
@@ -360,6 +361,7 @@ pub fn masonry_house(event: HouseEvent, name: &str) -> Scene {
                 angular_velocity: [0.0; 3],
                 material: "steel".into(),
                 crush: Some(CrushDesc { max_force: 400e3, energy: 20e3 }),
+                ccd: true,
             });
             s.sim.duration = 0.3;
         }

@@ -33,6 +33,7 @@ pub fn wall_row(n: usize, speed: f64, gap: f64, seconds: f64) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.methods = Methods::established();
     s.sim.methods.true_step = true;

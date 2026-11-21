@@ -512,6 +512,19 @@ impl GpuWorld {
         Ok(())
     }
 
+    /// A resident engine body's flags (its `BodyState::flags`, `BODY_CCD` among them), as
+    /// the engine has it now (a diagnostic read).
+    pub fn engine_body_flags(&self, key: stress_ref::engine::BodyKey) -> Option<u32> {
+        let e = self.resident_engine.as_ref()?.borrow();
+        let (body, _) = e.body_words(key)?;
+        Some(body[2][3].to_bits())
+    }
+
+    /// The resident engine's reads made for the host (`ResidentEngine::host_reads`).
+    pub fn resident_reads(&self) -> u64 {
+        self.resident_engine.as_ref().map_or(0, |e| e.borrow().host_reads())
+    }
+
     /// Whether the world is coupled to an engine.
     pub fn coupled(&self) -> bool {
         self.shell.engine_name().is_some()

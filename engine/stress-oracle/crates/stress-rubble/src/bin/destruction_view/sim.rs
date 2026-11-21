@@ -216,6 +216,8 @@ impl Sim {
             crush_used: 0.0,
             crush_depth: 0.0,
             driven: false,
+            // A shot: a projectile.
+            ccd: true,
         };
         self.world.add_impactor(gpu, imp)?;
         Ok(())

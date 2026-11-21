@@ -13,7 +13,7 @@ use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
 use stress_ref::math::Vec3;
-use stress_rubble::scenes::{realtime, wall_ram_late};
+use stress_rubble::scenes::{later, realtime, wall_ram_late};
 use stress_rubble::RubbleEngine;
 
 struct Outcome {
@@ -32,11 +32,15 @@ struct Outcome {
 
 fn run(gpu: &Gpu) -> Outcome {
     let p = Profile::Threshold;
-    let mut scene = realtime(wall_ram_late(), 0.25);
+    // A frame later than `wall_ram_late`'s: with the ram a CCD body (the profile's
+    // continuous collision) the engine meets the wall within the frame its sweep reaches
+    // it, `wall_ram_late`'s second, and the frame before that is the set-up's, which
+    // predicts nothing (it is not resident). The strike in the third frame is predicted at
+    // the end of the second.
+    let mut scene = later(realtime(wall_ram_late(), 0.25), 1);
     p.apply_scene(&mut scene);
     let mut e = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).expect("rubble engine");
-    let (iterations, substeps) = p.engine_policy();
-    e.set_policy(iterations, substeps);
+    e.apply_profile(p);
     let mut w = GpuWorld::with_resident_engine(gpu, &scene, e).expect("resident world");
     w.redo_fractured_frames = false;
     w.apply_profile(p);
