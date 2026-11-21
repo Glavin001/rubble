@@ -3731,3 +3731,125 @@ tools/scenario-matrix/run.sh perf=536870912                                     
 EXTRA="--wide 0" FRAMES=10 AB_ROUNDS=3 AB_WARM_MS=150 tools/explicit-2khz/fast-check.sh perf=402653184 cars1   # (c) the frame kernel
 git checkout HEAD -- slang/kernels
 ```
+
+### 8.46 What the native toolchain adds to every kernel: wgpu's runtime checks, 5 to 12 % of every row (2026-11-21)
+
+Numbered after the sections on the open branches (#138 §8.42, #139 §8.43, #140 §8.44,
+#141 §8.45). Native M3 Max, main's kernels (96904a44), every GPU run under
+`with-gpu-lock.py`.
+
+**A correction to §8.40 first.** §8.40 ends by saying the gap to the gpu-floor
+experiment "is in the schedule and the layout", the review's §6.2 to §6.4. Two of those
+were already measured on production, on branches the review does not cite:
+
+- the experiment's layout as a Slang kernel (#139, §8.43): bit for bit with today's
+  frame kernel and the CPU, and slower (2.37 ms against 1.33 natively, 2.04 against
+  1.58 in Chrome);
+- two bodies in lockstep across workgroups (#138, §8.42): not safe in WebGPU, which
+  promises neither forward progress across workgroups nor a device-scope fence.
+
+So the same layout is fast as hand-written Metal and slow through Slang, WGSL and naga.
+This section measures what that path itself adds.
+
+**What wgpu adds to a kernel on Metal** (`wgpu-hal` 30, `naga::back::msl`):
+
+| check | what is emitted | where |
+|---|---|---|
+| bounds checks | every index of an array or a buffer clamped to the last element (a buffer's length read from a sizes uniform) | every load and store |
+| forced loop bound | a two-word counter a loop, compared and decremented every turn | every loop, nested ones too |
+| integer-division guard | a divisor of zero replaced | every `/` and `%` on integers |
+| workgroup memory zeroed | one lane zeroes it at a workgroup's start | already off on the wide and split paths (§8.8, `contact-groups-design.md` §4); still on for the frame kernel, where the dispatch alone is 0.47 ms (§8.42) |
+
+The engine's kernels cap their own loops (`explicit_loop_cap.slang`) and index within
+their own counts, so the first three change no result. They had been timed once, for
+compile time on a T4 (`kernel-compile-time.md`: no change); never for run time.
+
+**The measurement.** Every explicit module now goes through one helper
+(`engine_webgpu::explicit_shader_module`) that can compile it without a mask of the
+checks (1 bounds, 2 loop bound, 4 integer division; `RUBBLE_SHADER_CHECKS_OFF`, or
+`set_explicit_shader_checks_off`; 0, every check, by default). `vehicle_lab --ab-switch
+checks=MASK` builds a second GPU object with the mask, restores both from one snapshot,
+runs them in turn and compares every state word, so the scenario matrix times it as it
+does a perf flag. Control (`checks=0`, checked against checked, two objects): bit for
+bit, pile8 +0.8 %, headon +1.0 %.
+
+ms a frame, on against off within one process (3 rounds of 10 frames each way):
+
+| row | checked | all three out | delta | bounds out alone | loop bound out alone |
+|---|---|---|---|---|---|
+| drive | 3.87 | 3.46 | −10.6 % | −10.3 % | −5.9 % |
+| tumble | 3.71 | 3.35 | −9.7 % | −9.3 % | −1.5 % |
+| wall | 4.12 | 3.81 | −7.7 % | −8.0 % | −3.2 % |
+| pile2 | 8.72 | 7.89 | −9.5 % | −3.5 % | −4.2 % |
+| pile8 | 15.45 | 14.03 | −9.2 % | −3.5 % | −6.4 % |
+| pile32 | 37.96 | 34.15 | −10.1 % | −5.2 % | −9.1 % |
+| headon | 13.15 | 12.08 | −8.1 % | −4.0 % | −3.1 % |
+| side | 9.74 | 9.09 | −6.7 % | −3.6 % | −2.5 % |
+| bricks | 3.96 | 3.57 | −9.8 % | −4.4 % | −4.1 % |
+| rocks | 4.34 | 3.82 | −12.1 % | −5.8 % | −1.9 % |
+| barrier | 7.61 | 7.05 | −7.3 % | −4.0 % | −3.2 % |
+| truss | 1.78 | 1.69 | −5.3 % | −4.4 % | −9.6 % |
+
+Every row bit for bit in all three runs; the matrix's verdict is PASS for each. The two
+parts roughly add. The integer-division guard was not timed alone.
+
+**The rest of the path costs little.** `engine-metal` compiles the same Slang straight
+to Metal, with no WGSL, no naga and none of the checks. `explicit_bench` (the plan's
+default schedule, the frame kernel; a procedural sedan of 367 nodes and 2,170 beams,
+parked; a frame submitted and waited for, median of 120):
+
+| | one car, wall ms | 16 cars, wall ms |
+|---|---|---|
+| wgpu, checked (today) | 1.44 | 1.21 |
+| wgpu, the three checks out | 1.29 | 1.20 |
+| Metal direct | 0.95 to 1.15 (GPU time 0.86) | 0.85 to 0.92 (GPU time 0.71) |
+
+What is left between wgpu without the checks and Metal direct on this path is about
+the frame kernel's workgroup zeroing (0.47 ms a dispatch, one dispatch a frame) and the
+two hosts' own submission. So Slang through WGSL and naga does not produce slower code
+than Slang straight to Metal: the injected checks and the zeroing are the difference.
+(This benchmark's wgpu column is wall time only: the default device has no timestamp
+queries.)
+
+**Proofs, with all three checks out.**
+- `fast-check.sh checks=7`: all 20 fixtures bit for bit (1, 2, 4, 8 and 32 cars).
+- The scenario matrix: 12 rows bit for bit, PASS (the table).
+- The suites that hold the GPU to the CPU reference and the paths to each other
+  (`RUBBLE_SHADER_CHECKS_OFF=7 perf-verify.sh default`): all 11 pass (the loop-cap
+  census 5, explicit_beams_bitwise 12, explicit_contact_gpu 13, explicit_pair_reuse_gpu
+  2, explicit_beam_order_gpu 3, debris_retire_gpu 1, showcase_car_gpu 6, vv_grid_gpu 2,
+  explicit_vehicles 11, vehicle_lab_reset 3, vehicle_lab_piece_windows 1).
+- Not run: `engine-metal` parity (that host has no injected checks to remove), the 40 s
+  whole runs, and any kernel outside the explicit vehicles (the rigid solver's modules
+  are created in `gpu.rs` and still carry every check).
+- Chrome: nothing changes there. A page cannot turn Tint's own checks off, so this is a
+  native gain only (native hosts, and what the matrix and every native figure in this
+  doc measure).
+
+**A harness bug found on the way.** The first run failed one fixture (one car, t 20).
+The control failed the same way: the second GPU object had not been given that
+fixture's retired nodes. Fixed in the lab's A/B (`fixture_host`); the kernel A/B
+(`--ab-switch kernel`) has the same gap on a replayed fixture with retired nodes and is
+not changed here.
+
+**What this does and does not explain.** It is 5 to 12 % of every native row, on every
+kernel, with no kernel changed. It is not the 2 to 4 times between production and the
+experiment: #139's layout was 1.8 times slower than today's frame kernel with the
+checks in both. Whether the checks weigh more on that layout (its hot loops index
+workgroup arrays every turn) was not measured: #139's kernel is not on this branch.
+
+**Default.** Unchanged: every check on. Recommendation: leave the three checks out on
+native hosts by default, with the checked build kept as the debugging mode
+(`RUBBLE_SHADER_CHECKS_OFF=0`), because an index out of range is then a wrong read and
+not a clamped one. That is the owner's decision.
+
+**To run again** (from `engine/`):
+```sh
+tools/scenario-matrix/run.sh checks=7                  # all three out, every row
+tools/scenario-matrix/run.sh checks=1                  # bounds checks alone (2: loop bound, 4: division)
+tools/scenario-matrix/run.sh checks=0                  # control: checked against checked
+tools/explicit-2khz/fast-check.sh checks=7             # every fixture
+RUBBLE_SHADER_CHECKS_OFF=7 tools/explicit-2khz/perf-verify.sh default
+RUBBLE_BENCH_CARS=1,16 cargo run --profile fast -p engine-metal --example explicit_bench
+```
+The first run with a new mask compiles every pipeline again (4 to 6 minutes).

@@ -1414,6 +1414,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // a change checked on a saved moment in seconds, not after driving up to it.
     let save_dir = arg("--save-fixtures").map(std::path::PathBuf::from);
     let from_fixture = arg("--from-fixture");
+    // (A replayed fixture's host state a car, its piece labels and retired nodes: what a
+    // second GPU object needs beside the snapshot's bytes, `--ab-switch checks=`.)
+    let mut fixture_host: Vec<(Vec<u8>, Vec<bool>)> = Vec::new();
     if let Some(file) = &from_fixture {
         let bytes = std::fs::read(file)?;
         let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
@@ -1437,6 +1440,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             if !labels.is_empty() {
                 x.set_piece_labels(v, labels);
             }
+            fixture_host.push((labels.to_vec(), retired));
         }
         let snap = x.snapshot_from_bytes(&bytes[at..]);
         x.restore(&snap);
@@ -2402,11 +2406,24 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 }
                 let (wb, _) = other.as_mut().expect("lab B");
                 let y = wb.explicit_vehicles_mut().expect("vehicles B");
-                if retired.iter().any(|&r| r) {
-                    y.set_retired(0, &retired).map_err(anyhow::Error::msg)?;
+                if fixture_host.is_empty() {
+                    if retired.iter().any(|&r| r) {
+                        y.set_retired(0, &retired).map_err(anyhow::Error::msg)?;
+                    }
+                    let zeros = vec![0u8; n_nodes];
+                    y.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
+                } else {
+                    // (A replayed fixture: each car's own, as the fixture's restore gave A.)
+                    for (v, (labels, retired)) in fixture_host.iter().enumerate() {
+                        if retired.iter().any(|&r| r) {
+                            let _ = y.set_retired(v, retired);
+                        }
+                        if !labels.is_empty() {
+                            y.set_piece_labels(v, labels);
+                        }
+                    }
+                    y.set_sleep_config(options(&script).vehicle_sleep_cfg);
                 }
-                let zeros = vec![0u8; n_nodes];
-                y.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
                 let snap_b = y.snapshot_from_bytes(&bytes);
                 let run = |g: &mut engine_webgpu::ExplicitBeamsGpu, s: &engine_webgpu::GpuSnapshot| -> Vec<f64> {
                     // One untimed frame first (a lazily created pipeline compiles there).
