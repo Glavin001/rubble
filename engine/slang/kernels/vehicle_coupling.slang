@@ -185,8 +185,10 @@ uint prec(uint v, uint i) { return vrec(v) + 1u + gP.B * BODY_RECS + gP.S * SHAP
 
 // The vehicle's node box and fastest speed (0..6), then with piece labels each piece's
 // node box (7 + 6 g: min x, y, z keys, max x, y, z keys; one variable: Metal's slots).
-static const uint PIECES = 8u;
-static const uint PIECE_BOX_RECS = 13u;
+// 16 groups: the pair list's piece labels use 0..7, a host may group a vehicle's nodes for
+// the coupling alone into up to 16 (ExplicitBeamsGpu::set_coupling_groups).
+static const uint PIECES = 16u;
+static const uint PIECE_BOX_RECS = 25u;
 groupshared Atomic<uint> gsBox[7u + 6u * PIECES];
 groupshared Atomic<uint> gsCount;
 static const uint LIST_CAP = 1024u;
@@ -218,7 +220,9 @@ bool cplAccept(uint c, float3 lo, float3 hi);
 
 // --- A window per piece (lossless) ---
 // With piece labels (the host's, engine_softbody::explicit_debris; written by
-// ExplicitBeamsGpu::set_piece_labels: 4 bits a node at labelBase) cpl_bounds also takes
+// ExplicitBeamsGpu::set_piece_labels, or its groups by set_coupling_groups: 4 bits a node
+// at labelBase; any grouping is sound, a group's box is taken from its nodes each window)
+// cpl_bounds also takes
 // each piece's node box, and cpl_plan keeps a collider only if its swept sphere meets some
 // piece's box grown by the vehicle's reach (its fastest node's travel over the window and
 // the margin), not just the whole vehicle's: a piece fallen far from the car no longer
@@ -230,7 +234,7 @@ uint pieceLabelOf(uint gi)
     uint4 w = gMisc[gP.labelBase + (gi >> 5u)];
     uint k = (gi >> 3u) & 3u;
     uint x = k == 0u ? w.x : (k == 1u ? w.y : (k == 2u ? w.z : w.w));
-    return (x >> ((gi & 7u) * 4u)) & 7u;
+    return (x >> ((gi & 7u) * 4u)) & 15u;
 }
 void pieceBoxAdd(uint gi, float3 x)
 {
@@ -248,7 +252,7 @@ bool pieceAccept(uint v, uint c, float reach)
 {
     if (gP.labelBase == 0u) return true;
     uint at = gP.pieceBoxBase + v * PIECE_BOX_RECS;
-    if (gMisc[at + 12u].x == 0u) return true;
+    if (gMisc[at + 24u].x == 0u) return true;
     for (uint g = 0u; g < PIECES; g++)
     {
         uint w = 6u * g;
@@ -322,8 +326,8 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
     if (lane < 7u && !keep) gWork[wBounds(v) + lane].store(gsBox[lane].load());
-    // Each piece's box (a window per piece in cpl_plan; pieceAccept): 12 records.
-    if (gP.labelBase != 0u && lane < 12u && !keep)
+    // Each piece's box (a window per piece in cpl_plan; pieceAccept): 24 records.
+    if (gP.labelBase != 0u && lane < 24u && !keep)
     {
         uint b = 7u + 4u * lane;
         gMisc[gP.pieceBoxBase + v * PIECE_BOX_RECS + lane] =
@@ -422,9 +426,12 @@ uint candAppend(uint v, uint c)
     return at;
 }
 
+// A candidate is listed only when it can reach one of the vehicle's group boxes
+// (pieceAccept, as cpl_plan keeps it): the same proxies, and a vehicle whose parts lie far
+// apart lists the colliders near them, not every one in the box between them.
 void candTry(uint v, uint c, float3 lo, float3 hi)
 {
-    if (c < gP.colliders && cplAccept(c, lo, hi)) candAppend(v, c);
+    if (c < gP.colliders && cplAccept(c, lo, hi) && pieceAccept(v, c, sweptReach(v))) candAppend(v, c);
 }
 
 int3 cellOf(float3 p, float cs) { return int3(floor(p / cs)); }

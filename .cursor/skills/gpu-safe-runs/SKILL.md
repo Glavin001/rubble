@@ -14,12 +14,27 @@ On macOS, Metal cannot abort a kernel that is already running. A runaway loop ke
 - **The census test enforces this:** `cargo test -p engine-webgpu --test explicit_loop_cap` fails on any uncapped loop. Run it after kernel edits.
 - **Distrust indices read from GPU state** (headers, counts). Validate them in the kernel, and on the CPU before submit where it's cheap (NaN, capacities, header sanity).
 
+## Where to run: CUDA on Modal
+Modal's target is CUDA (`engine-cuda`): nvcc compiles the kernels locally (free), Modal
+only runs the binary. No lock, no queue, any number of agents at once, and a runaway
+kernel cannot wedge the Mac (`engine/tools/modal/README.md`).
+- CUDA tests, examples, benches:
+  `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`.
+  `--fanout` runs each test binary in a container of its own, `--fanout-tests` each
+  test, all at once; one summary and exit code. The build is local Docker (free).
+- Vulkan on Modal (wgpu crates, the World, `run.sh --modal`) is opt-in and never after
+  a kernel edit: NVIDIA compiles each new kernel version on Modal's hosts (over 28
+  minutes for one explicit-beams pipeline).
+- The scenario matrix on CUDA: `run.sh --cuda SWITCH` (Modal, no lock).
+- The scenario matrix on Metal (`run.sh SWITCH`), Metal, headless Chrome / WebGPU pages and
+  wgpu work run on the Mac's GPU, following the rules below.
+
 ## Launching runs
 1. **CPU reference first.**
 2. **Then a tiny GPU run:** a few steps, with a deliberately low budget.
 3. **Then the real run.**
 
-Rules for every run:
+Rules for every run on the Mac:
 - **One GPU job on the machine at a time.** Native binaries take `~/.rubble/gpu.lock` via `hold_gpu_lock()` (override the path with `RUBBLE_GPU_LOCK`; `RUBBLE_GPU_LOCK=0` turns it off).
 - **Wrap everything else,** including headless Chrome and GPU cargo tests:
   ```bash

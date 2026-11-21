@@ -111,6 +111,7 @@ impl LazyKernel {
 pub struct Prewarm {
     done: Arc<std::sync::atomic::AtomicUsize>,
     failed: Arc<std::sync::atomic::AtomicUsize>,
+    errors: Arc<std::sync::Mutex<Vec<String>>>,
     total: usize,
 }
 
@@ -120,24 +121,77 @@ pub struct Prewarm {
 /// prewarm always finishes: a failure is reported, never a progress that stops short
 /// (a host waiting for `done == total` waited forever). The kernel is built again,
 /// and its error raised, by the first step that needs it.
+///
+/// Every failed attempt is written to stderr and kept in `errors` with all the
+/// platform said (wgpu's error text, which on Metal is the whole `NSError`), the
+/// kernel's WGSL size, how long the attempt ran and how many other kernels this
+/// prewarm was compiling at that moment: a compiler that gives up says little else.
 #[cfg(not(target_arch = "wasm32"))]
 fn prewarm_one(
+    name: &str,
+    wgsl_bytes: usize,
     build: impl Fn(),
-    done: &std::sync::atomic::AtomicUsize,
-    failed: &std::sync::atomic::AtomicUsize,
+    counts: &PrewarmCounts,
 ) {
     use std::sync::atomic::Ordering;
-    let try_once = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(&build)).is_ok();
-    if !(try_once() || try_once()) {
-        failed.fetch_add(1, Ordering::Release);
+    const ATTEMPTS: u32 = 2;
+    let mut built = false;
+    for attempt in 1..=ATTEMPTS {
+        let others = counts.compiling.fetch_add(1, Ordering::AcqRel);
+        let start = std::time::Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&build));
+        counts.compiling.fetch_sub(1, Ordering::AcqRel);
+        match result {
+            Ok(()) => {
+                built = true;
+                break;
+            }
+            Err(payload) => {
+                let text = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("(a panic without a message)");
+                let message = format!(
+                    "prewarm: kernel '{name}' ({wgsl_bytes} bytes of WGSL) failed to compile \
+                     after {:.1} s, attempt {attempt} of {ATTEMPTS}, with {others} other \
+                     kernel(s) compiling: {}",
+                    start.elapsed().as_secs_f64(),
+                    text.trim()
+                );
+                eprintln!("{message}");
+                counts.errors.lock().unwrap_or_else(|e| e.into_inner()).push(message);
+            }
+        }
     }
-    done.fetch_add(1, Ordering::Release);
+    if !built {
+        counts.failed.fetch_add(1, Ordering::Release);
+    }
+    counts.done.fetch_add(1, Ordering::Release);
+}
+
+/// What a prewarm's threads share: its progress and what failed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct PrewarmCounts {
+    done: Arc<std::sync::atomic::AtomicUsize>,
+    failed: Arc<std::sync::atomic::AtomicUsize>,
+    errors: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Kernels being compiled right now.
+    compiling: std::sync::atomic::AtomicUsize,
 }
 
 impl Prewarm {
     /// Kernels this prewarm could not build (after a retry); they count as done.
     pub fn failed(&self) -> usize {
         self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Every failed build attempt so far, in order (a kernel that built on its retry
+    /// is here once and not in [`Self::failed`]): the kernel, the platform's whole
+    /// error text and the conditions of the attempt.
+    pub fn errors(&self) -> Vec<String> {
+        self.errors.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Kernels compiled so far, and how many this prewarm compiles in all.
@@ -568,14 +622,7 @@ pub struct WgpuSim {
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
 pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
-    let ccd = bodies
-        .iter()
-        .any(|b| b.flags & (BODY_CCD | engine_schema::BODY_CCD_FAST) != 0);
-    let kin = bodies.iter().any(|b| {
-        b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32)
-            == BodyFlags::Kinematic as u32
-    });
-    (ccd, kin)
+    engine_exec::rigid_host::body_motion_flags(bodies)
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -1480,15 +1527,10 @@ impl WgpuSim {
             self.capacity.max_colliders
         );
         if count > 0 {
-            self.has_convex |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::ConvexHull as u32);
-            self.has_height_field |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::HeightField as u32);
-            self.has_filters |= colliders
-                .iter()
-                .any(engine_schema::convex::CollisionFilter::is_set);
+            let f = engine_exec::rigid_host::ColliderFlags::of(colliders);
+            self.has_convex |= f.convex;
+            self.has_height_field |= f.height_field;
+            self.has_filters |= f.filters;
             self.manifolds_valid = false;
             self.queue.write_buffer(
                 &self.bufs[2],
@@ -1498,15 +1540,7 @@ impl WgpuSim {
             self.host_cols.extend_from_slice(colliders);
             self.hier_geometry = None;
             self.collider_count += count;
-            for col in colliders {
-                if let Some(r) = engine_schema::collider_reach(col) {
-                    let b = col.body as usize;
-                    if self.body_reach.len() <= b {
-                        self.body_reach.resize(b + 1, 0.0);
-                    }
-                    self.body_reach[b] = self.body_reach[b].max(r);
-                }
-            }
+            engine_exec::rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         }
         start..self.collider_count
     }
@@ -1567,15 +1601,8 @@ impl WgpuSim {
         // from now on. Every upload of a field includes its header. (A record
         // that only looks like one costs two idle dispatches per step.)
         if !self.has_soil {
-            use engine_schema::heightfield::*;
-            let sides = HEIGHT_FIELD_MIN_SAMPLES..=HEIGHT_FIELD_MAX_SAMPLES;
             self.has_soil = dirty.iter().any(|r| {
-                records[r.start as usize..r.end as usize].iter().any(|h| {
-                    h[0] == HEIGHT_FIELD_MAGIC
-                        && h[3] & HEIGHT_FIELD_SOIL != 0
-                        && sides.contains(&h[1])
-                        && sides.contains(&h[2])
-                })
+                engine_exec::rigid_host::records_have_soil(&records[r.start as usize..r.end as usize])
             });
         }
         for r in dirty {
@@ -1629,30 +1656,17 @@ impl WgpuSim {
             "adopted colliders exceed capacity"
         );
         if count > 0 {
-            self.has_convex |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::ConvexHull as u32);
-            self.has_height_field |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::HeightField as u32);
-            self.has_filters |= colliders
-                .iter()
-                .any(engine_schema::convex::CollisionFilter::is_set);
+            let f = engine_exec::rigid_host::ColliderFlags::of(colliders);
+            self.has_convex |= f.convex;
+            self.has_height_field |= f.height_field;
+            self.has_filters |= f.filters;
             self.manifolds_valid = false;
             self.host_cols.extend_from_slice(colliders);
             self.hier_geometry = None;
             self.collider_count += count;
             // The resting table's per-collider words are laid out by the collider count.
             self.mark_rest_stale();
-            for col in colliders {
-                if let Some(r) = engine_schema::collider_reach(col) {
-                    let b = col.body as usize;
-                    if self.body_reach.len() <= b {
-                        self.body_reach.resize(b + 1, 0.0);
-                    }
-                    self.body_reach[b] = self.body_reach[b].max(r);
-                }
-            }
+            engine_exec::rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         }
         (body_start..self.body_count, col_start..self.collider_count)
     }
@@ -1849,13 +1863,10 @@ impl WgpuSim {
                 self.body_reach[b] = self.body_reach[b].max(r);
             }
         }
-        self.has_convex = cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
-        self.has_height_field = cols
-            .iter()
-            .any(|c| c.shape == ShapeType::HeightField as u32);
-        self.has_filters = cols
-            .iter()
-            .any(engine_schema::convex::CollisionFilter::is_set);
+        let f = engine_exec::rigid_host::ColliderFlags::of(&cols);
+        self.has_convex = f.convex;
+        self.has_height_field = f.height_field;
+        self.has_filters = f.filters;
         self.host_cols = cols;
         self.hier_geometry = None;
         self.grid_cache = None;
@@ -1919,27 +1930,11 @@ impl WgpuSim {
         rot: glam::Quat,
         density: f32,
     ) -> u32 {
-        let cooked = engine_schema::convex::cook_body(hulls, density);
-        let (p, q) = cooked.body_pose(pos, rot);
-        let body = self.add_body(BodyState::dynamic(p, q, cooked.mass, cooked.inertia));
-        let colliders: Vec<Collider> = cooked
-            .children
-            .iter()
-            .map(|child| Collider {
-                body,
-                shape: ShapeType::ConvexHull as u32,
-                material: 0,
-                generation: 0,
-                local_pos: child.local_pos.to_array(),
-                density,
-                local_rot: [0.0, 0.0, 0.0, 1.0],
-                params: engine_schema::convex::convex_collider_params(
-                    arena.insert(&child.hull).expect("hull arena capacity"),
-                    1.0,
-                    child.hull.bounding_radius(),
-                ),
-            })
-            .collect();
+        let (state, mut colliders) = engine_exec::rigid_host::convex_body(arena, hulls, pos, rot, density, 0);
+        let body = self.add_body(state);
+        for c in &mut colliders {
+            c.body = body;
+        }
         self.add_colliders(&colliders);
         self.sync_hulls(arena);
         body
@@ -1956,22 +1951,8 @@ impl WgpuSim {
         material: u32,
     ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
         let base = arena.insert_height_field(field)?;
-        let mut support = BodyState::static_plane_support();
-        support.position = pos.to_array();
-        support.orientation = rot.to_array();
-        support.initial_pos = support.position;
-        support.initial_rot = support.orientation;
-        let body = self.add_body(support);
-        let collider = self.add_collider(Collider {
-            body,
-            shape: ShapeType::HeightField as u32,
-            material,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: 0.0,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: engine_schema::heightfield::height_field_collider_params(base, field),
-        });
+        let body = self.add_body(engine_exec::rigid_host::height_field_support(pos, rot));
+        let collider = self.add_collider(engine_exec::rigid_host::height_field_collider(body, base, field, material));
         self.sync_hulls(arena);
         Ok((body, collider))
     }
@@ -2035,20 +2016,16 @@ impl WgpuSim {
     }
 
     fn joint_offset(id: u32) -> u64 {
-        u64::from(id) * std::mem::size_of::<Joint>() as u64
+        engine_exec::rigid_host::joint_offset(id)
     }
 
     /// Write a raw GPU joint, reusing a released slot when one is free.
     pub fn add_joint(&mut self, joint: Joint) -> u32 {
-        let id = match self.free_joints.pop() {
-            Some(id) => id,
-            None => {
-                let id = self.joint_count;
-                assert!(id < self.capacity.max_joints, "joint capacity exceeded");
-                self.joint_count += 1;
-                id
-            }
-        };
+        let id = engine_exec::rigid_host::alloc_joint_slot(
+            &mut self.joint_count,
+            &mut self.free_joints,
+            self.capacity.max_joints,
+        );
         self.queue.write_buffer(
             &self.bufs[5],
             Self::joint_offset(id),
@@ -2077,22 +2054,7 @@ impl WgpuSim {
     }
 
     pub fn add_joint_desc(&mut self, desc: &JointDesc) -> u32 {
-        let mut j = desc.to_gpu();
-        if desc.torque_arm <= 0.0 {
-            let reach = |id: u32| {
-                let dynamic = self
-                    .host_bodies
-                    .get(id as usize)
-                    .is_some_and(|b| b.inv_mass > 0.0);
-                if dynamic {
-                    self.body_reach.get(id as usize).copied().unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            };
-            j.torque_arm =
-                engine_schema::default_torque_arm(reach(desc.body_a), reach(desc.body_b));
-        }
+        let j = self.joint_from_desc(desc);
         self.add_joint(j)
     }
 
@@ -2213,25 +2175,15 @@ impl WgpuSim {
     pub fn validate_contact_coloring(&self) -> Result<(), String> {
         let bodies = self.download_bodies();
         let colors: Vec<u32> = self.read_buffer_range(12, 0, self.body_count as usize);
-        let active = |id: usize| bodies[id].is_dynamic() && !bodies[id].is_sleeping();
-        for id in 0..bodies.len() {
-            if active(id) && colors[id] >= self.capacity.max_colors {
-                return Err(format!("body {id} has unfinished/out-of-range colour {}; assigning unfinished bodies to colour zero introduces concurrent constraint writes", colors[id]));
-            }
-        }
         let manifolds: Vec<Manifold> =
             self.read_buffer_range(25, 0, self.last_counters.manifold_count as usize);
-        for (id, m) in manifolds.iter().enumerate() {
-            if m.contact_count == 0 {
-                continue;
-            }
-            let a = self.host_cols[m.collider_a as usize].body as usize;
-            let b = self.host_cols[m.collider_b as usize].body as usize;
-            if active(a) && active(b) && colors[a] == colors[b] {
-                return Err(format!("manifold {id}: active bodies {a} and {b} share colour {} and would race in the primal solver", colors[a]));
-            }
-        }
-        Ok(())
+        rigid_plan::validate_contact_coloring(
+            &bodies,
+            &colors,
+            &manifolds,
+            &self.host_cols,
+            self.capacity.max_colors,
+        )
     }
 
     /// Run the motion-lock passes each step (World turns them on while any
@@ -3850,18 +3802,6 @@ impl WgpuSim {
         }
     }
 
-    /// The hierarchical grid's (base cell, levels) for the mirror as it is
-    /// (`engine_schema::convex::hierarchical_grid_with`'s values), from the kept geometry.
-    fn hier_grid(&mut self) -> (f32, u32) {
-        let geometry = self
-            .hier_geometry
-            .get_or_insert_with(|| engine_schema::convex::HierGridGeometry::new(&self.host_cols));
-        match geometry {
-            Some(g) => g.grid(&self.host_cols, &self.host_bodies, self.movable_radius),
-            None => (1.0, 2),
-        }
-    }
-
     fn refresh_cell(&mut self) {
         let mut hier = self.grid_levels_mode.unwrap_or(self.has_convex);
         // The hierarchical cache also holds the automatic grid's choice for a box scene
@@ -3873,30 +3813,27 @@ impl WgpuSim {
             }
             (_, Some(c)) if !hier => c,
             _ => {
-                let mut r = if hier {
-                    self.hier_grid()
-                } else {
-                    rigid_plan::grid_cell_with(
-                        &self.host_cols,
-                        &self.host_bodies,
-                        false,
-                        self.movable_radius,
-                    )
-                };
-                // Automatic grid: more dynamics wider than a uniform cell than its large
-                // list holds (the fracture lab's cuboid suburb) take the hierarchical
-                // grid, which finds every pair at any size, instead of failing the step.
-                if !hier
-                    && auto
-                    && rigid_plan::uniform_large_dynamics_overflow(
-                        &self.host_cols,
-                        &self.host_bodies,
-                        r.0,
-                    )
-                {
-                    hier = true;
-                    r = self.hier_grid();
-                }
+                // The automatic grid takes the hierarchical one for a box scene the
+                // uniform grid's large list cannot hold (the fracture lab's cuboid suburb).
+                // The hierarchical grid's values come from its kept geometry, not from
+                // sizing every collider again each step.
+                let (cols, bodies, radius) = (&self.host_cols, &self.host_bodies, self.movable_radius);
+                let geometry = &mut self.hier_geometry;
+                let (cell, levels, h) = engine_exec::rigid_host::choose_grid_with(
+                    cols,
+                    bodies,
+                    self.grid_levels_mode,
+                    self.has_convex,
+                    radius,
+                    &mut || {
+                        match geometry.get_or_insert_with(|| engine_schema::convex::HierGridGeometry::new(cols)) {
+                            Some(g) => g.grid(cols, bodies, radius),
+                            None => (1.0, 2),
+                        }
+                    },
+                );
+                hier = h;
+                let r = (cell, levels);
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
                 } else {
@@ -3963,6 +3900,7 @@ impl WgpuSim {
         let todo = Arc::new(self.unbuilt(groups));
         let done = Arc::new(AtomicUsize::new(0));
         let failed = Arc::new(AtomicUsize::new(0));
+        let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
         let total = todo.len();
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3972,14 +3910,19 @@ impl WgpuSim {
                 .map_or(2, |n| (n.get() / 2).clamp(1, 4))
                 .min(total);
             let next = Arc::new(AtomicUsize::new(0));
+            let counts = Arc::new(PrewarmCounts {
+                done: done.clone(),
+                failed: failed.clone(),
+                errors: errors.clone(),
+                compiling: AtomicUsize::new(0),
+            });
             for _ in 0..threads {
-                let (todo, done, next) = (todo.clone(), done.clone(), next.clone());
+                let (todo, next, counts) = (todo.clone(), next.clone(), counts.clone());
                 let device = self.device.clone();
-                let failed = failed.clone();
                 std::thread::spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some((name, kernel)) = todo.get(i) else { break };
-                    prewarm_one(|| { kernel.build(&device, name); }, &done, &failed);
+                    prewarm_one(name, kernel.wgsl.len(), || { kernel.build(&device, name); }, &counts);
                 });
             }
         }
@@ -3988,7 +3931,7 @@ impl WgpuSim {
             kernel.build(&self.device, name);
             done.fetch_add(1, Ordering::Release);
         }
-        Prewarm { done, failed, total }
+        Prewarm { done, failed, errors, total }
     }
 
     /// The kernels of `groups` not built yet, slowest first (the largest WGSL), so
@@ -4789,23 +4732,7 @@ impl SoftBackend for WgpuSim {
     }
 
     fn joint_from_desc(&self, desc: &JointDesc) -> Joint {
-        let mut j = desc.to_gpu();
-        if desc.torque_arm <= 0.0 {
-            let reach = |id: u32| {
-                let dynamic = self
-                    .host_bodies
-                    .get(id as usize)
-                    .is_some_and(|b| b.inv_mass > 0.0);
-                if dynamic {
-                    self.body_reach.get(id as usize).copied().unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            };
-            j.torque_arm =
-                engine_schema::default_torque_arm(reach(desc.body_a), reach(desc.body_b));
-        }
-        j
+        engine_exec::rigid_host::joint_from_desc(desc, &self.host_bodies, &self.body_reach)
     }
 }
 
@@ -4943,22 +4870,27 @@ fn same_sizes(a: &[Collider], b: &[Collider]) -> bool {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod prewarm_tests {
-    use super::prewarm_one;
+    use super::{prewarm_one, PrewarmCounts};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn a_build_that_panics_counts_as_done_and_failed() {
-        let (done, failed, tries) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
-        prewarm_one(|| { tries.fetch_add(1, Ordering::SeqCst); panic!("Compilation failed"); }, &done, &failed);
-        assert_eq!(done.load(Ordering::SeqCst), 1, "a failed build still finishes");
-        assert_eq!(failed.load(Ordering::SeqCst), 1, "and is reported");
+        let (counts, tries) = (PrewarmCounts::default(), AtomicUsize::new(0));
+        prewarm_one("k", 7, || { tries.fetch_add(1, Ordering::SeqCst); panic!("Compilation failed"); }, &counts);
+        assert_eq!(counts.done.load(Ordering::SeqCst), 1, "a failed build still finishes");
+        assert_eq!(counts.failed.load(Ordering::SeqCst), 1, "and is reported");
         assert_eq!(tries.load(Ordering::SeqCst), 2, "after one retry");
+        let errors = counts.errors.lock().unwrap();
+        assert_eq!(errors.len(), 2, "each attempt's error is kept");
+        assert!(errors[0].contains("kernel 'k' (7 bytes of WGSL)") && errors[0].contains("attempt 1 of 2"));
+        assert!(errors[1].ends_with("Compilation failed"), "with the platform's text: {}", errors[1]);
     }
 
     #[test]
     fn a_transient_failure_is_retried() {
-        let (done, failed, tries) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
-        prewarm_one(|| { if tries.fetch_add(1, Ordering::SeqCst) == 0 { panic!("transient"); } }, &done, &failed);
-        assert_eq!((done.load(Ordering::SeqCst), failed.load(Ordering::SeqCst)), (1, 0));
+        let (counts, tries) = (PrewarmCounts::default(), AtomicUsize::new(0));
+        prewarm_one("k", 7, || { if tries.fetch_add(1, Ordering::SeqCst) == 0 { panic!("transient {}", 1); } }, &counts);
+        assert_eq!((counts.done.load(Ordering::SeqCst), counts.failed.load(Ordering::SeqCst)), (1, 0));
+        assert_eq!(counts.errors.lock().unwrap().len(), 1, "the failed attempt is still reported");
     }
 }

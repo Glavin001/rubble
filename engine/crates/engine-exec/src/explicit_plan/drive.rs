@@ -29,6 +29,9 @@
 //!    16 state (load, slip ratio, slip angle °, contact 0/1)
 //!    17..19 outputs: centre, axle, up (xyz, 0)
 //!    20 the axle's spawn direction in the vehicle frame (forward, up, left, 0)
+//! 20 + 23·W + 8·w  (W the region's wheels, [`TYRE_PRE_RECS`]) wheel w's tyre values
+//!    between its two parts (the kernel's drvTyrePre, drvTyrePost; perf flag
+//!    `PERF_TYRE_AHEAD`), zero between steps
 //! ```
 //! Node indices are vehicle-local.
 
@@ -38,9 +41,12 @@ use glam::Vec3;
 /// Records per vehicle before its wheels, and per wheel.
 pub const VEHICLE_RECS: u32 = 20;
 pub const WHEEL_RECS: u32 = 23;
+/// Records per wheel after a vehicle's wheels: a wheel's tyre values between the
+/// kernel's two parts of the tyre (drvTyrePre, drvTyrePost; zero between steps).
+pub const TYRE_PRE_RECS: u32 = 8;
 
 /// Where the drive records live in gMisc.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DriveLayout {
     /// gMisc record of the header.
     pub header: u32,
@@ -52,7 +58,7 @@ pub struct DriveLayout {
 impl DriveLayout {
     /// The stride for vehicles of at most `wheels` wheels.
     pub fn stride_for(wheels: usize) -> u32 {
-        VEHICLE_RECS + WHEEL_RECS * wheels as u32
+        VEHICLE_RECS + (WHEEL_RECS + TYRE_PRE_RECS) * wheels as u32
     }
 
     pub fn vehicle(&self, v: usize) -> u32 {

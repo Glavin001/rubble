@@ -278,8 +278,16 @@ Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
 - **(Fact) The solver keeps a JBeam rest length at 0.1 m or more (`MIN_REST`):** a shorter beam cannot yield in compression and breaks on its strength. Hardware beams are 0.12 m or longer.
 - **(Measurement) A per-step observer finds the trigger:** `examples/hinge_breaks` (CPU reference, `CpuLab::step_observed`) names the beam past its strength, its force and stretch, and the panel's state at that step. One mountain run is one sample: compare seeds.
 
+## 17. Dark patches and dots in a crushed car's paint (2026-11-16)
+
+- **(Measurement) They are back faces, not z-fighting, tears or shadows.** On a heavily wrecked sedan (230 of 4,251 beams broken) the paint showed black blocks with jagged triangle edges and regular dots. The same state drawn several ways (`vehicle-lab-speckle.mjs`): the tear field is 0 there, the car's shader samples no shadow map, and every dark pixel is a back-facing paint triangle. A panel is a closed solid whose inner face sits millimetres behind its skin and follows other nodes; a crush pushes it out through the skin, and the shader drew a paint back face as a dark "inside".
+- **(Decision) A closed solid has no inside to see while it is whole.** Every ray meets a front face first, so a paint back face in view is the solid turned through itself: not drawn, and the skin behind it shows. Round a tear (tear field over 0.05) the cavity is open and stays dark. Sheet-built cars (the authored sedan, imported mods) keep their dark insides.
+- **(Fact) The renderer learns "closed solids" from the model, not the page:** the generator writes `_SURFACE` only on solid parts; `beamng-mod.mjs` `closedSolids()` reads it and sets `visual.closedPanels`.
+- **(Process) A picture someone saw depends on the files they ran.** The page's default run rests on its roof, lightly damaged, and shows nothing; the wreck came from a local `__mods/sedan_new` whose body JBeam was two days older than the generator's. Check the mod folder a checkout links to before trying to reproduce.
+
 ## Changelog
 
+- 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).
 - 2026-11-14: section 16, hinges that snap instead of bending.
 - 2026-11-13: section 14: the GPU kernels carry the centred damping's objective form; on by default for CPU and GPU.
 - 2026-11-13: section 15, jello against the ETK (modes in band, kerb not), collisions inside one car.

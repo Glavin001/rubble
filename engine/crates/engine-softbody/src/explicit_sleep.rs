@@ -32,7 +32,7 @@
 use glam::Vec3;
 
 /// The sleep setting (engine-wide: one per fleet or World).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VehicleSleep {
     /// m/s: a node faster than this along any axis at any step keeps its vehicle awake.
     pub speed: f32,

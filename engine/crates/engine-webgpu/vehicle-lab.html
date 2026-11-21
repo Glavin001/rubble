@@ -44,14 +44,29 @@
     #caption span { color: #c3cbd9; font-size: 13.5px; }
     #cross { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; display: none; border: 2px solid rgba(255, 209, 102, 0.95); border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
     #cross::after { content: ''; position: absolute; left: 9px; top: 9px; width: 4px; height: 4px; background: rgba(255, 209, 102, 0.95); border-radius: 50%; }
-    body.shoot canvas#c { cursor: crosshair; }
-    body.shoot #cross { display: block; }
+    body.shoot canvas#c, body.mountain canvas#c { cursor: crosshair; }
+    body.shoot #cross, body.mountain #cross { display: block; }
     body.clean #controls, body.clean #about, body.clean #status, body.clean #cross { display: none; }
     body.clean #caption { display: block; }
     body.clean #hud { width: 21rem; }
     body.clean #right { width: 22rem; }
     .mode { display: none; }
-    body.shoot .mode.shoot, body.compactor .mode.compactor, body.mountain .mode.mountain, body.drive .mode.drive, body.crash .mode.crash { display: block; }
+    body.shoot .mode.shoot, body.compactor .mode.compactor, body.mountain .mode.mountain, body.drive .mode.drive, body.crash .mode.crash, body.derby .mode.derby { display: block; }
+    /* The derby's round: cars left, the player's damage, the clock; knock-outs; the result. */
+    /* The derby's clean layout (and its recordings) is the game's view: no lab readouts. */
+    body.clean.derby #hud, body.clean.derby #right { display: none; }
+    #derbyHud { left: 50%; transform: translateX(-50%); top: 10px; display: none; gap: 18px; align-items: center; font-size: 15px; font-weight: 650; z-index: 3; white-space: nowrap; }
+    body.derby #derbyHud { display: flex; }
+    #derbyHud .big { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    #derbyHud .bar { width: 110px; height: 10px; background: #263046; border-radius: 5px; overflow: hidden; display: inline-block; vertical-align: middle; }
+    #derbyHud .bar i { display: block; height: 100%; background: linear-gradient(90deg, #ffd166, #ff6b4a); }
+    #derbyFeed { position: fixed; right: 14px; bottom: 60px; display: none; flex-direction: column; gap: 4px; align-items: flex-end; pointer-events: none; z-index: 3; }
+    body.derby #derbyFeed { display: flex; }
+    #derbyFeed div { background: rgba(12, 15, 22, 0.85); border-radius: 6px; padding: 3px 10px; font-weight: 600; }
+    #derbyOver { left: 50%; top: 38%; transform: translate(-50%, -50%); display: none; text-align: center; padding: 18px 28px; z-index: 4; }
+    #derbyOver b { display: block; font-size: 30px; font-weight: 850; margin-bottom: 6px; }
+    #derbyOver button { margin-top: 10px; font-size: 16px; padding: 8px 18px; background: #e8613a; border-color: #ff8a62; }
+    @media (max-width: 760px) { #derbyHud { top: 52px; font-size: 12px; gap: 10px; } #derbyHud .big { font-size: 16px; } #derbyHud .bar { width: 60px; } }
     .note { color: #8d96aa; font-size: 11.5px; }
     .tog { position: fixed; top: 10px; z-index: 6; padding: 6px 12px; font-weight: 650; background: rgba(12, 15, 22, 0.92); }
     #togHud { left: 14px; } #togRight { right: 14px; }
@@ -81,7 +96,9 @@
       <div class="row">
         <label class="muted" for="car">Car</label><select id="car" data-opt="build"></select>
         <label class="muted" for="res" title="The authored sedan's model detail: how many nodes and beams its body has (low is the fastest; high the finest crumpling). The generated sedan has one version. Rebuilds the simulation in place.">Detail</label><select id="res" data-opt="build"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
+        <label class="muted" for="visual" title="The generated sedan's drawn mesh (car detail): full, or a lighter render of the same design (its body meshed coarser, about half the vertices and skin entries, bound to the same nodes; the physics is the same car). Auto: full, unless this device's memory or GPU limits cannot hold it (then the lighter one, and the status line says why). Rebuilds the lab in place.">Car detail</label><select id="visual" data-opt="build"><option value="auto">auto</option><option value="full">full</option><option value="lite">lighter</option></select>
         <label class="muted" for="cam">Camera</label><select id="cam" data-opt="live"></select>
+        <span id="followRow"><label class="muted" for="follow" title="Which car the camera follows (V cycles). The readouts are the first car's. Applies as it runs.">follows</label><select id="follow" data-opt="live"><option value="0">car 1</option></select></span>
       </div>
       <div class="row">
         <span class="muted">Time</span>
@@ -89,19 +106,6 @@
         <button id="pause">Pause</button><button id="step">Step</button><button id="restart">Restart <kbd>R</kbd></button>
       </div>
       <div class="row"><label class="muted" for="script">Scenario</label><select id="script" data-opt="restart"></select></div>
-      <div class="mode shoot">
-        <h2>Launcher</h2>
-        <div class="row"><select id="shape" data-opt="live"><option value="box">cuboid</option><option value="sphere" selected>sphere</option><option value="cylinder">cylinder</option></select>
-          <span id="dimBox"><input type="number" id="bx" data-opt="live" value="0.3" step="0.05" min="0.02" max="4" />×<input type="number" id="by" data-opt="live" value="0.2" step="0.05" min="0.02" max="4" />×<input type="number" id="bz" data-opt="live" value="0.4" step="0.05" min="0.02" max="4" /> m</span>
-          <span id="dimR">r <input type="number" id="radius" data-opt="live" value="0.1" step="0.01" min="0.02" max="1.5" /> m</span>
-          <span id="dimL">length <input type="number" id="length" data-opt="live" value="0.5" step="0.05" min="0.02" max="4" /> m</span></div>
-        <div class="row"><select id="material" data-opt="live"></select><span class="muted">or mass</span><input type="number" id="mass" data-opt="live" placeholder="kg" min="0.01" step="1" /></div>
-        <div class="row"><span class="muted">speed</span><input type="range" id="speed" data-opt="live" min="1" max="100" value="20" /><b id="speedOut"></b></div>
-        <div class="row"><span class="muted">spin</span><input type="number" id="spin" data-opt="live" value="0" step="5" min="0" max="600" /> rad/s <span class="muted">burst</span><input type="number" id="burst" data-opt="live" value="1" min="1" max="32" />
-          <select id="cylAxis" data-opt="live"><option value="flight">end on</option><option value="cross">side on</option></select></div>
-        <div class="row"><button id="fire">Fire <kbd>F</kbd></button><button id="clearShots">Clear shots</button><span class="muted">or click the scene: the shot goes to what is under the pointer</span></div>
-        <div class="note" id="aimOut"></div>
-      </div>
       <div class="mode compactor">
         <h2>Compactor</h2>
         <div class="row"><select id="axis" data-opt="live"><option value="top">top plate, down</option><option value="sides">side plates</option><option value="ends">front and rear plates</option></select>
@@ -112,6 +116,7 @@
       </div>
       <div class="mode mountain">
         <h2>Infinite mountain</h2>
+        <div class="row"><label class="muted" for="terrain">terrain</label><select id="terrain" data-opt="restart" title="Rolling: a smooth gully down the mountainside, rounded humps and boulders and no shelf, so the cars keep falling and bouncing. Ledges: the first mountain, with shelves, drops and cliffs (the scene of the lab's measurements). Restarts in place."><option value="rolling">rolling gully</option><option value="ledges">ledges and cliffs</option></select></div>
         <div class="row"><span class="muted">seed</span><input type="number" id="seed" data-opt="restart" value="1" min="0" step="1" /><label><input type="checkbox" id="rockslide" data-opt="restart" /> rockslide when at rest</label></div>
         <div class="row"><span class="muted">steepness</span><input type="range" id="steepness" data-opt="restart" min="35" max="55" step="1" value="50" /><b id="steepnessOut"></b></div>
         <div class="row"><span class="muted">roughness</span><input type="range" id="roughness" data-opt="restart" min="0" max="1" step="0.05" value="0.6" /><b id="roughnessOut"></b></div>
@@ -119,11 +124,33 @@
           <span class="muted">loose rocks per chunk</span><input type="number" id="loose" data-opt="restart" value="0" min="0" max="16" /></div>
         <div class="row"><span class="muted">start</span><input type="number" id="start" data-opt="restart" value="0" min="0" max="100000" step="1000" style="width:5.5rem" /> m down the fall line <span class="note">(far from the origin: a precision check)</span></div>
       </div>
+      <div class="mode shoot mountain">
+        <h2>Launcher</h2>
+        <div class="row"><select id="shape" data-opt="live"><option value="box">cuboid</option><option value="sphere" selected>sphere</option><option value="cylinder">cylinder</option></select>
+          <span id="dimBox"><input type="number" id="bx" data-opt="live" value="0.3" step="0.05" min="0.02" max="4" />×<input type="number" id="by" data-opt="live" value="0.2" step="0.05" min="0.02" max="4" />×<input type="number" id="bz" data-opt="live" value="0.4" step="0.05" min="0.02" max="4" /> m</span>
+          <span id="dimR">r <input type="number" id="radius" data-opt="live" value="0.1" step="0.01" min="0.02" max="1.5" /> m</span>
+          <span id="dimL">length <input type="number" id="length" data-opt="live" value="0.5" step="0.05" min="0.02" max="4" /> m</span></div>
+        <div class="row"><select id="material" data-opt="live"></select><span class="muted">or mass</span><input type="number" id="mass" data-opt="live" placeholder="kg" min="0.01" step="1" /></div>
+        <div class="row"><span class="muted">speed</span><input type="range" id="speed" data-opt="live" min="1" max="100" value="20" /><b id="speedOut"></b></div>
+        <div class="row"><span class="muted">spin</span><input type="number" id="spin" data-opt="live" value="0" step="5" min="0" max="600" /> rad/s <span class="muted">burst</span><input type="number" id="burst" data-opt="live" value="1" min="1" max="32" />
+          <select id="cylAxis" data-opt="live"><option value="flight">end on</option><option value="cross">side on</option></select></div>
+        <div class="row"><button id="fire">Fire <kbd>F</kbd></button><button id="clearShots">Clear shots</button><span class="muted">or click the scene: the shot goes to what is under the pointer (on the mountain too: knock a stuck car loose)</span></div>
+        <div class="note" id="aimOut"></div>
+      </div>
       <div class="mode drive">
         <h2>Obstacles, ahead of the car</h2>
         <div class="row"><button data-ob="wall">Wall</button><button data-ob="pole">Pole</button><button data-ob="kerb">Kerb</button><button data-ob="ramp">Ramp</button><button data-ob="bricks">Brick stack</button></div>
         <div class="row"><span class="muted">distance</span><input type="number" id="ahead" data-opt="live" value="15" min="2" max="200" step="1" /> m <button id="clearObs">Clear</button></div>
         <div class="row"><span class="muted">start speed</span><input type="range" id="startKmh" data-opt="restart" min="0" max="200" step="5" value="0" /><b id="startKmhOut"></b></div>
+      </div>
+      <div class="mode derby">
+        <h2>Demolition derby</h2>
+        <div class="row"><label class="muted" for="derbyCars" title="Cars in the arena (yours and the AI's). Rebuilds the arena in place.">cars</label><select id="derbyCars" data-opt="build"><option>4</option><option>6</option><option>8</option><option>12</option><option>16</option><option>32</option></select>
+          <label title="Car 1 is yours (WASD or arrows, space handbrake). Off: every car is the AI's, and you watch. Applies as it runs."><input type="checkbox" id="derbyPlayer" data-opt="live" checked /> you drive car 1</label>
+          <label title="Ramps, two brick walls that break apart, tyre stacks, barrels, crates and concrete blocks. Restarts the round."><input type="checkbox" id="derbyObstacles" data-opt="restart" checked /> obstacles</label></div>
+        <div class="row"><span class="muted">AI aggression</span><input type="range" id="aggression" data-opt="live" min="0" max="1" step="0.05" value="0.6" /><b id="aggressionOut"></b></div>
+        <div class="row"><span class="muted">AI seed</span><input type="number" id="derbySeed" data-opt="restart" value="1" min="0" step="1" /><button id="derbyNew">New round <kbd>R</kbd></button></div>
+        <div class="note">Last car moving wins. A car is out on its roof or side for 3 s, with two wheels torn off, thrown out of the arena, or not moving 2 m in 12 s; at 3 minutes the least damaged car still in wins.</div>
       </div>
       <div class="mode crash">
         <h2>Crash test</h2>
@@ -136,15 +163,50 @@
       </div>
       <h2>Options</h2>
       <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
+        <label title="Copies of the car in the run. On the mountain they leave the lip together, side by side and stacked, closing on the first car, so they crash into each other on the way down; on the flat arena the others stand in a row to one side. The numbers shown are the first car's. Rebuilds the lab in place (no reload).">cars <input type="number" id="cars" data-opt="build" value="1" min="1" max="32" step="1" /></label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
         <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label>
         <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label>
         <label title="With the torn pieces labelled, the rigid bodies in the car's window are those near some piece, not everything between the car and a piece far away (the same contacts). Applies as it runs."><input type="checkbox" id="pieceWindows" data-opt="live" checked /> a coupling window per piece</label>
-        <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" checked /> self-collision across the GPU</label></div>
+        <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" checked /> self-collision across the GPU</label>
+        <label title="Cars touching each other are stepped each in its own GPU thread group, with their contact tests across the whole GPU, instead of every touching group on one thread group (the same results bit for bit). Applies as it runs."><input type="checkbox" id="groupSplit" data-opt="live" checked /> touching cars across the GPU</label>
+        <label title="Self-collision's hit forces: each hit's four node beam forces are summed once on idle GPU threads instead of three times in a row (the same results bit for bit). Applies as it runs."><input type="checkbox" id="hitCache" data-opt="live" checked /> hit forces summed once</label>
+        <label title="Self-collision's hits applied with each hit's four nodes on GPU threads of their own (the adds, the nodes' accelerations and the residual pass's shares), instead of one thread a hit doing its four nodes in a row (the same results bit for bit). Needs hit forces summed once. Applies as it runs."><input type="checkbox" id="hitRoles" data-opt="live" checked /> hits a node a thread</label>
+        <label title="With the fleet-wide passes and the reused pair list: the tested triangles' geometry of each step is computed one GPU thread per triangle across the GPU, beside the beams, instead of on the pair list's one thread group (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wideGeo" data-opt="live" checked /> triangle geometry beside the beams</label>
+        <label title="The car's physics as fleet-wide passes: one GPU thread per node, beam and candidate pair across every car, a few passes every 2 kHz step, instead of one thread group per car (the same results bit for bit). Used on frames without car-to-car contact or surface contact (with vehicle sleep: for one car). Applies as it runs."><input type="checkbox" id="wide" data-opt="live" checked /> fleet-wide passes</label>
+        <label title="With the fleet-wide passes: self-collision from the reused pair list instead of a grid walk every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wideList" data-opt="live" checked /> with the reused pair list</label>
+        <label title="With both: the rigid coupling's and the raycast wheels' part of each step runs on spare GPU threads of the pair list's and the hits' passes instead of a pass of its own (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wideFused" data-opt="live" checked /> coupling and wheels in those passes</label>
+        <label title="Car-to-car contact in groups of more than four cars: each candidate point's travel and car are kept beside it when it is gathered, so the triangle tests read them in a stream (the same results bit for bit). Applies as it runs."><input type="checkbox" id="vvStream" data-opt="live" checked /> contact candidates streamed</label>
+        <label title="Car-to-car contact in groups of more than four cars: each car's candidate points are sorted into a grid and a triangle tests only the points in the cells its box covers, instead of every point (the same results bit for bit). Applies as it runs."><input type="checkbox" id="vvBigGrid" data-opt="live" checked /> contact candidates in a grid</label>
+        <label title="A car touching others keeps its own self-collision pair list from one step to the next, as a car on its own does, instead of searching again every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="memberList" data-opt="live" checked /> touching cars keep their pair lists</label>
+        <label title="Car-to-car contact: each hit point's summed beam force is kept for the step's contact pass instead of being summed again at every use (the same results bit for bit). Applies as it runs."><input type="checkbox" id="vvBeamSum" data-opt="live" checked /> contact hits' beam sums kept</label>
+        <label title="Car-to-car contact: each car's contact state (its partners, candidates, hits and counters) is kept per car instead of per group of touching cars (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetState" data-opt="live" checked /> contact state per car</label>
+        <label title="Car-to-car contact, with the state per car: finding the candidates and testing them runs across the whole fleet at once instead of once per group of touching cars (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetFront" data-opt="live" checked /> contact tests across the fleet</label>
+        <label title="Car-to-car contact, with the tests across the fleet: a group of more than eight touching cars takes the same path as a smaller one instead of a pass of its own on one GPU core (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetAny" data-opt="live" checked /> any number of touching cars across the fleet</label>
+        <label title="Car-to-car contact, with the tests across the fleet: each tested triangle's wait before its next test is updated on a GPU thread of its own instead of on one core per group of touching cars (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetPost" data-opt="live" checked /> contact throttles across the fleet</label>
+        <label title="Car-to-car contact, with any number of touching cars and the throttles across the fleet: the hits are applied level by level as GPU threads across the whole fleet instead of one GPU core per group of touching cars (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetLevels" data-opt="live" /> contact levels across the fleet</label>
+        <label title="Car-to-car contact, with any number of touching cars: a group's hits of one level run on its GPU core's lanes side by side whatever car owns them, and each hit's contact geometry is worked out once for its three correction passes instead of three times (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetHitLat" data-opt="live" checked /> contact hits worked out once</label>
+        <label title="Car-to-car contact, with the hits worked out once: each hit's contact geometry, its force and its correction passes' values are worked out once a step before its group's levels, and each level only adds them up; a level's last correction pass runs beside the next level's hits (the same results bit for bit). Applies as it runs."><input type="checkbox" id="levelsOnce" data-opt="live" checked /> contact levels' hits worked out ahead</label>
+        <label title="Car-to-car contact, with the tests across the fleet: two of each step's short GPU passes are folded into the passes beside them (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetFuse" data-opt="live" checked /> fewer contact passes</label>
+        <label title="Car-to-car contact, with the tests across the fleet: the list of triangle and point pairs to test is kept from one step to the next and built again only when the cars have moved further than its margin, instead of being searched for every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetKeep" data-opt="live" /> contact candidates kept between steps</label>
+        <label title="Each car's next-step coupling and wheels (rays, anti-roll bars) on a GPU core of their own, beside its self-collision list's work instead of on the same core (the same results bit for bit). Applies as it runs."><input type="checkbox" id="aheadApart" data-opt="live" checked /> wheels apart from the list</label>
+        <label title="With the wheels apart from the list: each tyre's work that does not need its hub's forces runs there too, and only the rest after the self-collision hits (the same results bit for bit). Applies as it runs."><input type="checkbox" id="tyreAhead" data-opt="live" checked /> tyres mostly ahead</label>
+        <label title="Self-collision's hits (up to 48 a step) applied from the GPU core's own fast memory: each hit's nodes and sums loaded once, worked on there, written back once (the same results bit for bit). Needs hits a node a thread. Applies as it runs."><input type="checkbox" id="hitsLocal" data-opt="live" checked /> hits in core memory</label>
+        <label title="With the tyres mostly ahead: each tyre's last part loads what it reads (its records, its hubs' masses and beam forces) while the self-collision hits are applied, and after them reads only its hubs' contact sums (the same results bit for bit). Applies as it runs."><input type="checkbox" id="tyreEarly" data-opt="live" /> tyres loaded early</label>
+        <label title="With the wheels apart from the list: the next step's coupling and the wheels each on a GPU core of their own instead of sharing one (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wheelsApart" data-opt="live" checked /> coupling and wheels apart</label>
+        <label title="Cars touching each other: each car's self-collision hits (up to 48 a step) applied from the GPU core's own fast memory, as for a lone car (the same results bit for bit). Applies as it runs."><input type="checkbox" id="selfHitsLocal" data-opt="live" /> touching cars' hits in core memory</label>
+        <label title="Cars touching each other: the next step's wheel rays and anti-roll bars on a GPU core of their own while the cars' hits are applied, instead of at the start of each car's step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="splitWheelsAhead" data-opt="live" /> touching cars' wheels ahead</label>
+        <label title="The raycast wheels' rays and anti-roll bars run beside the step before's beam phase and their tyres beside the rigid coupling's first phase, instead of three phases of their own (the same results bit for bit; measured no faster so far). Applies as it runs."><input type="checkbox" id="driveAhead" data-opt="live" /> wheels beside other phases</label></div>
+      <div class="row"><label title="A car that stays still is put to sleep: it is not simulated until something wakes it (another car's contact group with an awake car, a moving rigid body near it, a drive input, a grab), and it then continues exactly from its state at sleep. Not lossless against a run that never sleeps: the motion under the thresholds is not simulated while asleep. Still means: no node faster than the speed along an axis at any step, and no node farther than the reach from where its still stretch began, for the dwell (2 kHz steps; 1000 = 0.5 s). Cars touching each other sleep together. Applies as it runs."><input type="checkbox" id="vehicleSleep" data-opt="live" /> vehicle sleep</label>
+        when below <input type="number" id="sleepSpeed" data-opt="live" value="0.25" min="0" max="10" step="0.05" /> m/s and within <input type="number" id="sleepReach" data-opt="live" value="0.1" min="0" max="100" step="0.05" /> mm for <input type="number" id="sleepDwell" data-opt="live" value="1000" min="1" max="1000000" step="100" /> steps</div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
         <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
-      <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic keeps the physics in real time first: it lowers the picture's resolution while steps are being refused because the GPU is busy, then draws every other step (30 pictures a second, each of the current state), and brings both back when steps are no longer refused. Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
+      <div class="row"><label title="Physics first: the World's steps and the drawing share the GPU, so a picture drawn while the GPU is behind delays the next step. On: a picture is never queued behind another one still on the GPU or in a frame whose step was refused; while steps are being refused the drawing gives way a level at a time (every display frame, then 60 pictures a second, then 30, down to the floor below, then a lower resolution when the render scale is automatic), each picture of the latest state, and it comes back a level at a time when steps are no longer refused. Off: every display frame is drawn. The physics is the same either way. Applies as it runs."><input type="checkbox" id="drawYield" data-opt="live" checked /> drawing gives way to physics</label>
+        <span class="muted" title="The quality floor: the fewest pictures a second the drawing gives way to (the picture is never older than this while it gives way). Applies as it runs.">at least</span><select id="drawFloor" data-opt="live"><option value="60">60</option><option value="30" selected>30</option><option value="20">20</option><option value="15">15</option></select><span class="muted">pictures a second</span>
+        <span class="muted" id="drawLevel"></span></div>
+      <div class="row"><span class="muted" title="World steps the page keeps on the GPU ahead of their readbacks. A step is taken only while fewer than this many are still on their way back; a step not taken is simulated time lost (the run shows slower). The browser lands a readback a while after the GPU has finished the step, so with 2 the GPU sits idle waiting for the page (measured: the derby's four cars in contact took 41 to 45 steps a second with 2 and 49 to 57 with 3); more keeps it busy, and the lab's readings (measurements, the camera, the derby's AI) arrive that many steps later. Pacing only: the steps taken are the same steps. Applies as it runs.">Steps in flight</span><select id="inFlight" data-opt="live"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+      <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic: all of them, lowered to 75 % and then 50 % only while the drawing gives way to physics at its floor (above). Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
       <div class="row"><button id="perfCopy" title="Copies a text report to the clipboard: this device and display, the page's options, and a row a second for the last three minutes (display frames, steps taken and refused, frames drawn, the page's CPU time in stepping and drawing, GPU time a step when GPU timing is on). Run for a while first, then press it and paste it where the run is being looked at.">Copy perf report</button></div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
@@ -160,7 +222,7 @@
       <div class="row" id="cutaway"></div>
     </div>
     <div class="grid" id="stats"></div>
-    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · drag to orbit, wheel to zoom (any camera) · <kbd>T</kbd> slow motion · <kbd>P</kbd> pause · <kbd>.</kbd> step · <kbd>C</kbd> camera · <kbd>R</kbd> restart</div>
+    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · drag to orbit, wheel to zoom (any camera) · <kbd>T</kbd> slow motion · <kbd>P</kbd> pause · <kbd>.</kbd> step · <kbd>C</kbd> camera · <kbd>V</kbd> next car to follow · <kbd>R</kbd> restart</div>
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
@@ -173,6 +235,9 @@
     <h2>Parts</h2><table id="parts"></table>
     <h2>Events</h2><div id="log"></div>
   </div>
+  <div id="derbyHud" class="panel" aria-live="polite"></div>
+  <div id="derbyFeed"></div>
+  <div id="derbyOver" class="panel" role="status"><b id="derbyResult"></b><span id="derbyResultSub" class="muted"></span><br /><button id="derbyAgain">New round</button></div>
   <div id="slowTag" class="panel"></div>
   <div id="perf" class="panel"></div>
   <div id="busy" class="panel"></div>
@@ -239,10 +304,11 @@
     //            or another World definition), with progress shown; parsed cars are kept.
     // Only ?record=1 (the frame-locked recorder's harness, vehicle-lab-record.mjs) has no
     // control: it is not an option of the lab.
-    import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
+    import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer, DrawPacer, setStepsInFlight } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
@@ -254,14 +320,18 @@
     const fail = (e) => { errEl.textContent = errorText(e); window.__failed = String(e?.message ?? e); console.error(e); };
     const warn = (e) => { errEl.textContent = String(e?.message ?? e); setTimeout(() => { if (!window.__failed) errEl.textContent = ''; }, 5000); };
     if (!navigator.gpu) { fail('WebGPU is not available in this browser'); throw new Error('no WebGPU'); }
+    // Every buffer and texture's label and size, for a GPU error's words (gpu-errors.mjs).
+    trackGpuAllocations();
     const progress = (text) => { busyEl.textContent = text; busyEl.style.display = text ? 'block' : 'none'; statusEl.textContent = text || statusEl.textContent; };
 
     // ---------------------------------------------------------------- options: controls ↔ URL
-    const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test' };
+    const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test', derby: 'Derby' };
+    // The derby's camera per mode (Derby: the chase camera on the player's car).
+    const modeCam = (k) => (k === 'mountain' ? 'overhead' : k === 'drive' || k === 'derby' ? 'chase' : 'orbit');
     const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks'];
     $('script').add(new Option('none (free play)', ''));
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
-    const CAMS = { orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
+    const CAMS = { overhead: 'Overhead chase', orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
     for (const [k, v] of Object.entries(CAMS)) $('cam').add(new Option(v, k));
     // The cars: the generated sedan (__mods/sedan_new, which build-web.sh makes by running
     // the generator: missing only where the page is served without that build), the
@@ -280,6 +350,8 @@
     const put = (id, v) => { const c = $(id); if (!c || v == null) return; if (c.type === 'checkbox') c.checked = v === true || v === '1' || v === 'true'; else c.value = v; };
     const defaults = Object.fromEntries(controls.map((c) => [c.id, get(c.id)]));
     let mode = 'shoot';
+    // The followed car from the URL, kept until the build lists the cars.
+    let followWant = qs.get('follow');
     // The URL first; then what the URL leaves open: the car (the generated sedan when it
     // is there) and surface contact (on for generated cars).
     for (const c of controls) if (qs.has(c.id)) put(c.id, qs.get(c.id));
@@ -290,7 +362,11 @@
     // generated car, except on the mountain: there node contact keeps the steps in real
     // time (with it on the mountain ran at half real time, measured 2026-11-15), and the
     // self-collision passes across the GPU run only on frames without it. A control.
-    const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain';
+    // The kernels' lossless schedule switches (explicit_plan::PERF_*).
+    const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0) | (get('fleetAny') ? 16384 : 0) | (get('fleetPost') ? 65536 : 0) | (get('fleetLevels') ? 524288 : 0) | (get('fleetHitLat') ? 8388608 : 0) | (get('levelsOnce') ? 4 : 0) | (get('fleetFuse') ? 16777216 : 0) | (get('fleetKeep') ? 32768 : 0) | (get('aheadApart') ? 131072 : 0) | (get('tyreAhead') ? 262144 : 0) | (get('hitsLocal') ? 1048576 : 0) | (get('tyreEarly') ? 2097152 : 0) | (get('wheelsApart') ? 4194304 : 0) | (get('selfHitsLocal') ? 33554432 : 0) | (get('splitWheelsAhead') ? 67108864 : 0);
+    // (The derby too: its walls and ramps are the cars' own static shapes, and the
+    // fleet-wide passes keep many cars in real time without it.)
+    const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby';
     if (!surfaceChosen) put('surface', surfaceDefault());
     function syncUrl() {
       const q = new URLSearchParams();
@@ -300,29 +376,37 @@
       history.replaceState(null, '', `${location.pathname}?${q}`);
     }
     const outs = { speed: (v) => `${v} m/s`, pspeed: (v) => `${v.toFixed(2)} m/s`, steepness: (v) => `${v}°`, roughness: (v) => v.toFixed(2), launch: (v) => `${(3.6 * v).toFixed(0)} km/h`,
+      aggression: (v) => `${(100 * v).toFixed(0)} %`,
       startKmh: (v) => `${v} km/h`, kmh: (v) => `${v} km/h`, overlap: (v) => `${(100 * v).toFixed(0)} %`, offset: (v) => `${v.toFixed(2)} m`, angle: (v) => `${v}°` };
     const showOuts = () => { for (const [k, f] of Object.entries(outs)) $(`${k}Out`).textContent = f(get(k)); };
     const shapeUi = () => {
       // The model detail is the authored sedan's; the generated sedan and the mods have one version.
       $('res').disabled = get('car') !== 'sedan';
+      $('visual').disabled = get('car') === 'sedan';
       const s = get('shape'); $('dimBox').style.display = s === 'box' ? '' : 'none'; $('dimR').style.display = s === 'box' ? 'none' : ''; $('dimL').style.display = $('cylAxis').style.display = s === 'cylinder' ? '' : 'none';
       const k = get('crashKind'); $('rowOverlap').style.display = k === 'offset' ? '' : 'none'; $('rowOffset').style.display = k === 'pole' || k === 'sidepole' ? '' : 'none'; $('rowAngle').style.display = k === 'wall' || k === 'offset' ? '' : 'none';
       document.body.classList.toggle('clean', get('clean') || RECORD);
     };
+    // The scene the simulation was last built for (null: none yet).
+    let builtScene = null;
     function setMode(m) {
       for (const k of Object.keys(MODES)) document.body.classList.toggle(k, k === m);
       mode = m;
       for (const b of $('modes').children) b.classList.toggle('on', b.dataset.mode === m);
-      // Returns whether the simulation must be rebuilt (surface contact is a build option).
-      if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); return true; }
-      return false;
+      // Returns whether the simulation must be rebuilt (surface contact is a build option,
+      // and the derby's arena is a build of its own).
+      let rebuild = builtScene !== null && (m === 'derby') !== (builtScene === 'derby');
+      if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); rebuild = true; }
+      return rebuild;
     }
     for (const [k, v] of Object.entries(MODES)) {
       const b = document.createElement('button'); b.textContent = v; b.dataset.mode = k;
-      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'orbit' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
+      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', modeCam(k)); if (k === 'derby') put('follow', '0'); syncUrl(); if (rebuild && W) build(); else restart(); };
       $('modes').append(b);
     }
-    if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'orbit' : mode === 'drive' ? 'chase' : 'orbit');
+    // (?cars=N with the derby: its cars control, so `vehicle-lab.html?mode=derby&cars=8` links.)
+    if (qs.get('mode') === 'derby' && qs.has('cars') && !qs.has('derbyCars')) put('derbyCars', qs.get('cars'));
+    if (!qs.has('cam')) put('cam', modeCam(mode));
     setMode(mode); showOuts(); shapeUi();
     let restartTimer = null;
     for (const c of controls) {
@@ -333,13 +417,19 @@
         if (c.id === 'script') { await loadScript(); restart(); return; }
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
-        else if (c.id === 'cam') cam.init = false;
+        else if (c.id === 'cam' || c.id === 'follow') cam.init = false;
+        else if (c.id === 'derbyPlayer' || c.id === 'aggression') { cmd({ derby: derbySpec() }); if (c.id === 'derbyPlayer') { lastDrive = ''; canvas.focus(); } }
         else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
-        else if (c.id === 'renderScale') { autoScale = 1; autoQuiet = 0; configure(); }
+        else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
+        else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront' || c.id === 'fleetAny' || c.id === 'fleetPost' || c.id === 'fleetLevels' || c.id === 'fleetHitLat' || c.id === 'levelsOnce' || c.id === 'fleetFuse' || c.id === 'fleetKeep' || c.id === 'aheadApart' || c.id === 'tyreAhead' || c.id === 'hitsLocal' || c.id === 'tyreEarly' || c.id === 'wheelsApart' || c.id === 'selfHitsLocal' || c.id === 'splitWheelsAhead') cmd({ perfFlags: perfFlags() });
+        else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
+        else if (c.id === 'renderScale' || c.id === 'drawYield' || c.id === 'drawFloor') { drawPacerSync(); configure(); }
+        else if (c.id === 'inFlight') setStepsInFlight(Number(get('inFlight')) || 3);
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
+        else if (['vehicleSleep', 'sleepSpeed', 'sleepReach', 'sleepDwell'].includes(c.id)) cmd({ vehicleSleep: sleepSpec() });
         else if (['beams', 'nodes', 'beamColor'].includes(c.id)) structureOpts();
       };
       c.addEventListener(c.type === 'range' ? 'input' : 'change', on);
@@ -368,13 +458,44 @@
     statusEl.textContent = 'loading…';
     const tLoad = performance.now();
     await loadWasm();
-    const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];
+    const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42], [0.7, 0.45, 0.02], [0.03, 0.3, 0.1], [0.55, 0.55, 0.57], [0.25, 0.03, 0.35], [0.02, 0.35, 0.4], [0.05, 0.05, 0.06]];
     const carCache = new Map();
     const waived = new Set();
+    // The drawn mesh of a generated car (the "Car detail" control): 'full' or 'lite'
+    // (beamng-mod.mjs modModelNames: the same design meshed coarser, bound to the same
+    // nodes; the physics files are the same). Auto picks full unless this device cannot
+    // hold it: its footprint (modFootprint) over the memory the browser reports or the
+    // GPU's buffer limits; or a phone or tablet's WebKit (iOS: every browser there),
+    // which reports no memory and closes a tab, or refuses its GPU buffers
+    // (GPUOutOfMemoryError), well before the full car's ~1.5 GB with its GPU memory
+    // (engine/docs/measurements/lab-load-memory.md); or the full car's build ran out
+    // of GPU memory here before (`outOfMemory`). `{ detail, why }`.
+    const outOfMemory = new Set();
+    const appleMobile = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    // Cars on a device the auto detail found short of memory (the status line says so).
+    const SMALL_DEVICE_CARS = 1;
+    let smallDevice = '';
+    async function detailOf(kind) {
+      const m = MODS[kind], want = get('visual');
+      const full = await modModelSizes(m.base, 'full');
+      if (!full.hasLite) return { detail: 'full', why: '' };
+      if (want === 'full' || want === 'lite') return { detail: want, why: '' };
+      if (outOfMemory.has(kind)) return { detail: 'lite', why: `the full ${m.name} ran out of GPU memory on this device` };
+      const adapter = await navigator.gpu.requestAdapter().catch(() => null);
+      const check = footprintCheck(modFootprint(full), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+      if (!check.fits) return { detail: 'lite', why: check.message };
+      if (!navigator.deviceMemory && appleMobile()) return { detail: 'lite', why: 'this phone or tablet does not say how much memory a tab may use, and iOS closes the tab or refuses its GPU memory before the full car fits' };
+      return { detail: 'full', why: '' };
+    }
     async function carOf(kind) {
       // The authored sedan has three model details (its node and beam counts): each is its own car.
-      const key = kind === 'sedan' ? `sedan:${get('res')}` : kind;
+      // A generated car's two drawn meshes are two entries (the physics files are the same).
+      const chosen = kind === 'sedan' ? null : await detailOf(kind);
+      smallDevice = chosen?.why ?? '';
+      const key = kind === 'sedan' ? `sedan:${get('res')}` : `${kind}:${chosen.detail}`;
       if (carCache.has(key)) return carCache.get(key);
+      // The other drawn mesh of this car, if it was loaded, is dropped (a phone cannot keep both).
+      for (const k of [...carCache.keys()]) if (k.startsWith(`${kind}:`)) carCache.delete(k);
       const t = performance.now();
       let entry;
       if (kind === 'sedan') {
@@ -387,20 +508,28 @@
         // Before downloading it: whether it fits this device (its estimated footprint
         // against navigator.deviceMemory, where given, and the GPU's limits). A car
         // that does not is refused with the numbers (fail(), the banner) and a button
-        // to load it anyway, never loaded smaller.
+        // to load it anyway. (Its drawn mesh is the one detailOf chose: auto picks the
+        // lighter one only where the full one does not fit; the physics is the same.)
         if (!waived.has(kind)) {
           progress(`checking that the ${m.name} fits this device…`);
           const adapter = await navigator.gpu.requestAdapter().catch(() => null);
-          const check = footprintCheck(modFootprint(await modModelSizes(m.base)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+          const check = footprintCheck(modFootprint(await modModelSizes(m.base, chosen.detail)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
           if (!check.fits) throw Object.assign(new Error(check.message), { footprint: kind });
         }
         progress(`downloading the ${m.name}…`);
-        const mod = await loadMod(m.base, { pc: m.pc });
+        const mod = await loadMod(m.base, { pc: m.pc, detail: chosen.detail });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
         // The model files (a generated car's glb and rskin, ~140 MB) are dropped once a
         // visual is built and fetched again (the HTTP cache) for another paint.
-        const make = async (paint) => { await modModels(mod); try { return modVisual(mod, { native: true, raycast: true, paint }); } finally { releaseModels(mod); } };
-        entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes };
+        // Each visual is built in a worker of its own (modVisualApart): the wasm heap
+        // the build grows (~530 MB for the generated sedan) goes with the worker.
+        const make = async (paint) => {
+          await modModels(mod);
+          try { return await modVisualApart(mod, { native: true, raycast: true, paint }); }
+          catch (e) { console.warn('the visual\'s worker failed; building it on the page', e); await modModels(mod); return modVisual(mod, { native: true, raycast: true, paint }); }
+          finally { releaseModels(mod); }
+        };
+        entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes, detail: mod.detail };
       }
       entry.loadMs = performance.now() - t;
       carCache.set(key, entry);
@@ -412,29 +541,31 @@
     const context = canvas.getContext('webgpu');
     const format = navigator.gpu.getPreferredCanvasFormat();
     const DEPTH = 'depth32float', SAMPLES = 4;
-    // Render scale: a fixed share of the display's pixels, or automatic (0.5 to 1 in
-    // steps of 1/8). Automatic: a second in which more than two steps were refused (the
-    // GPU behind) lowers it a step; five seconds in a row with none raises it a step.
-    let autoScale = 1, autoQuiet = 0, autoDrawEvery = 1, drawTick = 0;
-    const renderScale = () => { const v = $('renderScale')?.value ?? 'auto'; return v === 'auto' ? autoScale : Number(v); };
-    function renderAuto(refused) {
-      if (($('renderScale')?.value ?? 'auto') !== 'auto') { autoDrawEvery = 1; return; }
-      const was = autoScale;
-      // Past the lowest resolution the picture is drawn for every other step (30 a second
-      // of the current state) while steps are still refused; it comes back first.
-      if (refused > 2) { if (autoScale > 0.5) autoScale = Math.max(0.5, autoScale - 0.125); else autoDrawEvery = 2; autoQuiet = 0; }
-      else if (refused === 0) { if (++autoQuiet >= 5) { if (autoDrawEvery > 1) autoDrawEvery = 1; else autoScale = Math.min(1, autoScale + 0.125); autoQuiet = 0; } }
-      else autoQuiet = 0;
-      if (autoScale !== was) configure();
-    }
-    let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0;
-    const scene = () => (mode === 'mountain' ? 'mountain' : 'flat');
-    const mountainSpec = () => ({ seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
+    // Physics first (rubble::DrawPacer, draw_pacer.rs: the policy is Rust's): which
+    // display frames are drawn while the World steps, and the automatic render scale.
+    // The page tells it each frame's steps taken and refused and whether the last
+    // picture is still on the GPU; the controls "drawing gives way to physics", its
+    // floor and the render scale set it, as it runs. Made with the first build (wasm).
+    let drawPacer = null, drawBusy = false, drawScale = 1;
+    const drawPacerSync = () => {
+      if (!drawPacer) return;
+      drawPacer.setGivesWay(get('drawYield'));
+      drawPacer.setFloorFps(Number(get('drawFloor')) || 30);
+      drawPacer.setAutoScale((get('renderScale') ?? 'auto') === 'auto');
+    };
+    const renderScale = () => { const v = $('renderScale')?.value ?? 'auto'; return v === 'auto' ? (drawPacer ? drawPacer.scale() : 1) : Number(v); };
+    let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0, buildGen = 0;
+    const scene = () => (mode === 'mountain' ? 'mountain' : mode === 'derby' ? 'derby' : 'flat');
+    // The derby's settings (rubble::vehicle_lab::derby::DerbySpec).
+    const derbySpec = () => ({ obstacles: get('derbyObstacles'), player: get('derbyPlayer'), aggression: get('aggression'), seed: get('derbySeed') ?? 1 });
+    const mountainSpec = () => ({ terrain: get('terrain'), seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
       // The drawing's resolution: the display's pixels times the render scale (the
-      // renderScale control; "auto" lowers it while the World's steps are being refused,
-      // physics first, and raises it again when they are not: renderAuto below).
-      const dpr = Math.min(devicePixelRatio || 1, 2) * renderScale();
+      // renderScale control; "auto": the draw pacer's scale, lowered only while the
+      // drawing gives way to physics at its floor, raised again when steps are no longer
+      // refused).
+      drawScale = renderScale();
+      const dpr = Math.min(devicePixelRatio || 1, 2) * drawScale;
       canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
       canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
       if (W) context.configure({ device: W.device, format, alphaMode: 'opaque' });
@@ -447,45 +578,78 @@
       // The loading card: each kernel's compile as Rust reports it (load-progress.mjs).
       const loading = createLoading({ title: 'Loading the vehicle lab' });
       loading.stage('Building the car');
+      let buildingCar = null;
       try {
-        const car = await carOf(get('car'));
-        const n = get('parked') ? 2 : 1;
+        const car = buildingCar = await carOf(get('car'));
+        // A device the auto detail found short of memory runs SMALL_DEVICE_CARS (the status says so).
+        // (The derby: its own cars control, up to 32 cars; no parked car.)
+        const derby = mode === 'derby';
+        const asked = derby ? Math.min(32, Math.max(2, Number(get('derbyCars')) || 4)) : Math.min(8, Math.max(1, Math.round(get('cars') || 1)));
+        const nCars = smallDevice ? Math.min(derby ? 2 : SMALL_DEVICE_CARS, asked) : asked, n = nCars + (get('parked') && !derby ? 1 : 0);
         // The second car's paint: built when first asked for (kept, like the first).
-        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[1])); }
+        while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), debris: debrisSpec(), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
         };
         progress(`compiling the ${car.name}'s kernels and building the lab…`);
         const old = W; W = null;
+        // The previous World and renderers go first: a phone cannot hold two.
+        try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const { world, lab, materials } = await createVehicleLab(spec, loading.progress);
         loading.stage('Building the renderers');
-        try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const device = world.device();
         device.lost.then((i) => { if (W?.device === device) lost(i.message); });
-        device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+        // An error after the build: its kind, the browser's text (WebKit's out-of-memory
+        // error can have none), what was created last, the device's buffer limits.
+        // (Errors of a device a later build replaced are not this one's.)
+        const gen = ++buildGen;
+        device.addEventListener('uncapturederror', (e) => { if (gen !== buildGen) return; fail(gpuErrorText(e.error, device)); if (e.error?.constructor?.name === 'GPUOutOfMemoryError') outOfMemoryRetry(car); });
         // The ground slab (the World's first collider) is left to the renderer's ground.
-        const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
-        const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
-        cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
-        if (car.mod) {
-          progress('decoding the textures…');
-          car.textures ??= await Promise.all([modTextures(car.mod, vis0.textures), modTextures(car.mod, vis0.dataTextures)]);
-          if (car.textures[0].length) cars.setTextures(car.textures[0], 1024);
-          if (car.textures[1].length) cars.setDataTextures(car.textures[1], 1024);
-        }
+        const { env, cars } = await gpuPhase(device, `building the ${car.name}'s renderers`, async () => {
+          const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
+          const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
+          cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
+          if (car.mod) {
+            progress('decoding the textures…');
+            car.textures ??= await Promise.all([modTextures(car.mod, vis0.textures), modTextures(car.mod, vis0.dataTextures)]);
+            if (car.textures[0].length) cars.setTextures(car.textures[0], 1024);
+            if (car.textures[1].length) cars.setDataTextures(car.textures[1], 1024);
+          }
+          return { env, cars };
+        }).catch((e) => { try { world.free(); lab.free(); } catch {} throw e; });
         const spans = world.explicitSpans();
-        const [nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize] = lab.readPlan();
+        const [nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize] = lab.readPlan();
         const w = { world, lab, device, env, cars, car, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
-          plan: { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize }, depthTex: null, msaaTex: null,
-          pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) };
+          plan: { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize }, depthTex: null, msaaTex: null,
+          pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize + fSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })),
+          // The camera's own readback of the car it follows, every drawn frame (its nodes
+          // and origin record: tens of kB), apart from the measurements, which are taken
+          // less often and skipped while the GPU is busy (a camera on them stopped, then
+          // jumped to catch up).
+          camPool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) };
+        // The cars the camera can follow.
+        const nv = lab.vehicleCount(), was = followWant ?? get('follow');
+        followWant = null;
+        $('follow').textContent = '';
+        for (let k = 0; k < nv; k++) $('follow').add(new Option(k === 0 ? (derby ? 'car 1 (yours; readouts)' : 'car 1 (readouts)') : get('parked') && !derby && k === nv - 1 ? `car ${k + 1} (parked)` : `car ${k + 1}`, String(k)));
+        put('follow', Number(was) >= 0 && Number(was) < nv ? String(Number(was)) : '0');
+        $('followRow').style.display = nv > 1 ? '' : 'none';
         w.pacer = new FramePacer(w.RATE, 0);
+        // The derby's readback every drawn frame: every car's origin and wheel records
+        // (a few kB), for the AI and the round (Rust).
+        const dp = lab.derbyPlan(world);
+        w.derbyPlan = dp.length === 4 ? dp : null;
+        w.derbyPool = w.derbyPlan ? Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: dp[1] + dp[3], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) : [];
         w.wire = structureView(device, world);
-        for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i));
+        await gpuPhase(device, `uploading ${n === 1 ? 'the car' : `${n} cars`} to the GPU (${car.detail === 'lite' ? 'the lighter' : 'the full'} mesh)`, () => { for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i)); })
+          .catch((e) => { try { w.cars.destroy(); w.env?.destroy?.(); world.free(); lab.free(); } catch {} throw e; });
+        // (Cars with one level of detail each: their skin does not follow the eye.)
+        w.singleLevel = cars.stats().every((c) => c.levels.length === 1);
         // Cutaway (drawing only): material groups left out of the car's triangles.
         $('cutaway').textContent = '';
         for (const [id, name] of (vis0.materials || []).entries()) {
@@ -497,28 +661,49 @@
         if (!$('material').options.length) for (const [name, density] of materials) $('material').add(new Option(`${name} (${density} kg/m³)`, name));
         if (qs.has('material')) put('material', qs.get('material'));
         W = w;
+        drawPacer ??= new DrawPacer();
+        drawPacer.reset(); drawBusy = false; drawPacerSync();
+        setStepsInFlight(Number(get('inFlight')) || 3);
+        cmd({ perfFlags: perfFlags() });
+        cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         W.spec = spec;
+        builtScene = spec.scene;
         configure();
         structureOpts();
-        gpuSeg.clear(); gpuTotal = [];
+        gpuSeg.clear(); gpuTotal = []; gpuRun = [];
         window.__world = world; window.__lab = lab;
         await restart(true);
         lastBuildMs = performance.now() - t0;
         firstLoadMs ??= performance.now() - tLoad;
-        statusEl.textContent = `built in ${(lastBuildMs / 1000).toFixed(1)} s (first load ${(firstLoadMs / 1000).toFixed(1)} s${car.bytes ? `; the car's model ${(car.bytes / 1e6).toFixed(0)} MB, parsed once` : ''})`;
+        statusEl.textContent = `built in ${(lastBuildMs / 1000).toFixed(1)} s (first load ${(firstLoadMs / 1000).toFixed(1)} s${car.bytes ? `; the car's model ${(car.bytes / 1e6).toFixed(0)} MB, parsed once` : ''})`
+          + (car.detail === 'lite' ? `; car detail: lighter${smallDevice ? ` (auto: ${smallDevice})` : ''}` : '')
+          + (nCars < asked ? `; ${nCars} car${nCars > 1 ? 's' : ''} on this device (its memory), not ${asked}` : '');
+        window.__carDetail = car.detail ?? null;
         progress('');
         window.__loadTimes = loading.done();
         window.__ready = true;
       } catch (e) {
-        progress(''); if (loading.active()) loading.fail({ detail: e.footprint ? e.message : errorText(e) });
+        progress(''); if (loading.active()) loading.fail({ detail: e.footprint || e.name === 'GpuError' ? e.message : errorText(e) });
+        // The full mesh ran out of GPU memory (auto detail): the lighter one, once.
+        if ((e.outOfMemory || /out ?of ?memory/i.test(String(e?.message))) && outOfMemoryRetry(buildingCar)) return;
         if (e.footprint) {
           // Too big for this device: the reason, and the choice to load it anyway.
           errEl.textContent = `Not loaded: ${e.message} `; window.__failed = e.message;
           const b = document.createElement('button'); b.textContent = 'Load it anyway';
           b.onclick = () => { waived.add(e.footprint); errEl.textContent = ''; window.__failed = null; build(); };
           errEl.append(b);
-        } else fail(e);
+        } else fail(e?.name === 'GpuError' ? e.message : e);
       } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
+    }
+    // The full drawn mesh ran out of GPU memory and the detail is auto: rebuild with the
+    // lighter one (once per car), saying why. Whether it did.
+    function outOfMemoryRetry(car) {
+      if (!car?.kind || car.kind === 'sedan' || car.detail !== 'full' || get('visual') !== 'auto' || outOfMemory.has(car.kind)) return false;
+      outOfMemory.add(car.kind);
+      carCache.delete(`${car.kind}:full`);
+      buildGen++;
+      setTimeout(() => { window.__failed = null; warn(`The full ${MODS[car.kind]?.name ?? 'car'} ran out of GPU memory here: rebuilding with the lighter car detail.`); build(); });
+      return true;
     }
     // The GPU device was lost (a driver reset, the GPU process restarted, memory): the
     // simulation is gone with it. Say so, and offer the rebuild (the parsed car is kept).
@@ -561,7 +746,12 @@
     };
     function addCar(w, i) {
       const v = w.car.visuals[i % w.car.visuals.length].visual, cut = i === 0 && w.hidden.size > 0;
-      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord() });
+      // A generated car's paints are one model: the cars share the skin's bind buffer
+      // (showcase-car-render.mjs bindsLike; the same bytes, one copy on the GPU). Not a
+      // cutaway's car (another mesh).
+      const like = w.car.mod && !cut ? w.carIds.find((id, k) => id != null && k !== i && !(k === 0 && w.hidden.size > 0)) : undefined;
+      w.skinGen = (w.skinGen ?? 0) + 1;
+      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord(), bindsLike: like ?? null });
     }
 
     // ---------------------------------------------------------------- restart (in place)
@@ -569,11 +759,12 @@
     // The stop on an unstable simulation (stability-stop.mjs; Rust judges, read-only):
     // a new one per restart, since a restart moves the car. Modes where rigid bodies
     // put energy into the car that the check does not read (shots, the compactor's
-    // plates, a crash sled, the rockslide's boulders) keep only its non-finite check.
+    // plates, a crash sled, the mountain's shots and rockslide boulders) keep only its
+    // non-finite check.
     function watch() {
       document.getElementById('stopped')?.remove();
       W.stop = createStabilityStop(W.world.explicitHealth() ?? null, { params: { mode, script: script?.name ?? null, spec: { ...W.spec, vehicle: undefined, parts: undefined } } });
-      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || (mode === 'mountain' && get('rockslide')));
+      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || mode === 'mountain' || mode === 'derby');
     }
     async function restart(first = false) {
       if (!W) return;
@@ -581,20 +772,25 @@
       const k = get('crashKind');
       const spec = { scene: scene(), mountain: mountainSpec(),
         crash: mode === 'crash' ? { kind: k, kmh: get('kmh'), overlap: get('overlap'), offset: get('offset'), angle: get('angle') } : null,
-        start: mode === 'drive' && get('startKmh') > 0 && !script ? { kmh: get('startKmh') } : null };
+        start: mode === 'drive' && get('startKmh') > 0 && !script ? { kmh: get('startKmh') } : null,
+        ...(mode === 'derby' ? { derby: derbySpec() } : {}) };
       try {
         W.lab.restart(W.world, spec);
         if (script) W.lab.setScript(script);
       } catch (e) { warn(errorText(e)); return; }
       watch();
+      W.skinGen = (W.skinGen ?? 0) + 1;
       simSteps = 0; pageAt = 0; lastDrive = ''; paused = false; $('pause').classList.remove('on'); cam.init = false; window.__done = false;
       pose = { c: scene() === 'mountain' ? [0, 1, 3] : [0, 0.6, 0], v: [0, 0, 0], h: [0, 0, 1], speed: 0 };
       if (RECORD) orbit.auto = 0.35;
       $('ppause').textContent = 'Pause';
       for (const p of W.pool) p.stale = p.busy;
+      for (const p of W.camPool) p.stale = p.busy;
+      for (const p of W.derbyPool) p.stale = p.busy;
+      derbyShown = null; $('derbyFeed').textContent = '';
       restartMs = performance.now() - t0; restartAt = t0; if (!first) restarts++;
       const name = W.car.name;
-      $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'mountain' ? `mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
+      $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'derby' ? `demolition derby, ${W.lab.vehicleCount()} cars${get('derbyObstacles') ? ', obstacles' : ''}` : scene() === 'mountain' ? `${get('terrain') === 'ledges' ? 'ledged ' : ''}mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
       $('capTitle').textContent = script?.title || `Vehicle Lab · ${MODES[mode]}${mode === 'crash' ? `: ${$('crashKind').selectedOptions[0].text}, ${get('kmh')} km/h` : ''}`;
       $('capSub').textContent = `${name}, 2 kHz node–beam, in one GPU World${get('surface') ? ' · surface contact on' : ''}`;
       // The first reading, before any step: the aim, the plates and the camera need the car.
@@ -610,11 +806,13 @@
       const slot = w.pool.find((p) => !p.busy);
       if (!slot) { readsSkipped++; return null; }
       slot.busy = true; slot.stale = false; readsTaken++;
-      const { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize } = w.plan;
+      const { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize } = w.plan;
       enc.copyBufferToBuffer(w.world.explicitNodesBuffer(), nOff, slot.buf, 0, nSize);
       enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), oOff, slot.buf, nSize, oSize);
       enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), cOff, slot.buf, nSize + oSize, cSize);
       if (wantBeams) enc.copyBufferToBuffer(w.world.explicitBeamsBuffer(), bOff, slot.buf, nSize + oSize + cSize, bSize);
+      // (With the beams, the other cars' nodes: the mountain keeps ground under their parts.)
+      if (wantBeams && fSize) enc.copyBufferToBuffer(w.world.explicitNodesBuffer(), fOff, slot.buf, nSize + oSize + cSize + bSize, fSize);
       // The state copied is this moment's: the reading carries its time (it arrives later).
       const taken = w.lab.time();
       return async () => {
@@ -625,13 +823,16 @@
           if (W === w && !slot.stale) {
             const a = slot.buf.getMappedRange();
             w.lab.ingest(new Uint32Array(a, 0, nSize / 4), new Uint32Array(a, nSize, oSize / 4), new Uint32Array(a, nSize + oSize, cSize / 4),
-              wantBeams ? new Uint32Array(a, nSize + oSize + cSize, bSize / 4) : undefined, taken);
+              wantBeams ? new Uint32Array(a, nSize + oSize + cSize, bSize / 4) : undefined, taken,
+              wantBeams && fSize ? new Uint32Array(a, nSize + oSize + cSize + bSize, fSize / 4) : undefined);
           }
         } catch (e) { fail(e); } finally { slot.buf.unmap(); slot.busy = false; }
       };
     }
 
     // ---------------------------------------------------------------- commands
+    // Vehicle sleep and its thresholds (the engine's defaults: 0.25 m/s, 0.1 mm, 1000 steps).
+    const sleepSpec = () => ({ on: get('vehicleSleep'), speed: get('sleepSpeed') ?? 0.25, reachMm: get('sleepReach') ?? 0.1, dwell: get('sleepDwell') ?? 1000 });
     const debrisSpec = () => ({ on: get('debris'), seconds: get('debrisTtl') ?? 5, maxKg: get('debrisKg') ?? 10, maxNodes: get('debrisNodes') ?? 40 });
     const cmd = (c) => { if (!W) return null; try { return W.lab.command(W.world, c); } catch (e) { warn(errorText(e)); return null; } };
     const shotSpec = () => ({ shape: get('shape'), size: [get('bx'), get('by'), get('bz')], radius: get('radius'), length: get('length'), material: get('material'),
@@ -675,6 +876,12 @@
     const setSlow = (s) => { put('slow', s); syncUrl(); };
     $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
     $('step').onclick = () => { paused = true; $('pause').classList.add('on'); stepOnce = true; };
+    // (The recorder's Chrome A/B, vehicle-lab-record.mjs --ab: the World held while it runs;
+    // `at`: held by the loop itself before the first step at or past World time `at`, so
+    // that two runs are held at the same step.)
+    let holdAt = null;
+    window.__hold = (on, at = null) => { holdAt = at; paused = on; $('pause').classList.toggle('on', on); };
+    window.__held = () => paused;
 
     // ---------------------------------------------------------------- input
     const keys = new Set();
@@ -688,7 +895,8 @@
       if (e.code === 'KeyT') setSlow(slow() === 1 ? 0.25 : slow() === 0.25 ? 0.0625 : 1);
       if (e.code === 'KeyP') $('pause').click();
       if (e.code === 'Period') $('step').click();
-      if (e.code === 'KeyF' && mode === 'shoot') $('fire').click();
+      if (e.code === 'KeyF' && (mode === 'shoot' || mode === 'mountain')) $('fire').click();
+      if (e.code === 'KeyV' && $('follow').options.length > 1) { put('follow', String((Number(get('follow')) + 1) % $('follow').options.length)); cam.init = false; syncUrl(); }
       if (e.code === 'KeyC') { const ks = Object.keys(CAMS); put('cam', ks[(ks.indexOf(get('cam')) + 1) % ks.length]); cam.init = false; syncUrl(); }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
@@ -697,6 +905,8 @@
     let lastDrive = '';
     function applyDrive() {
       if (script || mode === 'mountain' || mode === 'crash') return;
+      // (The derby with no player: every car is the AI's.)
+      if (mode === 'derby' && !get('derbyPlayer')) return;
       const d = { forward: (key('KeyW', 'ArrowUp') ? 1 : 0) - (key('KeyS', 'ArrowDown') ? 1 : 0), steer: (key('KeyD', 'ArrowRight') ? 1 : 0) - (key('KeyA', 'ArrowLeft') ? 1 : 0), brake: 0, handbrake: key('Space') ? 1 : 0 };
       const k = JSON.stringify(d);
       if (k !== lastDrive) { lastDrive = k; cmd({ drive: d }); }
@@ -740,8 +950,46 @@
     // the frame's lead along its velocity.
     let pose = { c: [0, 0.6, 0], v: [0, 0, 0], h: [0, 0, 1], speed: 0 };
     function readPose() {
-      const p = W.lab.pose();
-      if (p[11] > 0 && p.every(Number.isFinite)) pose = { c: [p[0], p[1], p[2]], v: [p[3], p[4], p[5]], h: [p[6], p[7], p[8]], speed: p[9], t: p[10] };
+      // The followed car from the camera's own readback (Lab::follow_pose); before its
+      // first reading, the first car from the measurements.
+      let p = W.lab.followPose();
+      if (!(p[11] > 0 && Number(p[12]) === Number(get('follow')))) p = Number(get('follow')) === 0 ? W.lab.pose() : null;
+      if (p && p[11] > 0 && p.slice(0, 12).every(Number.isFinite)) pose = { c: [p[0], p[1], p[2]], v: [p[3], p[4], p[5]], h: [p[6], p[7], p[8]], speed: p[9], t: p[10] };
+    }
+    // The camera's readback of the followed car (w.camPool), encoded with a frame.
+    function camReadback(w, enc) {
+      const k = Number(get('follow'));
+      const plan = w.lab.followPlan(k);
+      const slot = w.camPool.find((p) => !p.busy);
+      if (!slot || plan.length < 3 || plan[1] + 16 > slot.buf.size) return null;
+      slot.busy = true; slot.stale = false;
+      enc.copyBufferToBuffer(w.world.explicitNodesBuffer(), plan[0], slot.buf, 0, plan[1]);
+      enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), plan[2], slot.buf, plan[1], 16);
+      const taken = w.lab.time(), len = plan[1];
+      return async () => {
+        try { await slot.buf.mapAsync(GPUMapMode.READ); } catch { slot.busy = false; return; }
+        try {
+          if (W === w && !slot.stale && Number(get('follow')) === k) {
+            const a = slot.buf.getMappedRange();
+            w.lab.ingestFollow(k, new Uint32Array(a, 0, len / 4), new Uint32Array(a, len, 4), taken);
+          }
+        } catch (e) { console.warn(e); } finally { slot.buf.unmap(); slot.busy = false; }
+      };
+    }
+    // The derby's readback (w.derbyPool): every car's origin and wheel records, handed to
+    // the lab (Rust) for the AI and the round.
+    function derbyReadback(w, enc) {
+      const p = w.derbyPlan, slot = p && w.derbyPool.find((s) => !s.busy);
+      if (!slot) return null;
+      slot.busy = true; slot.stale = false;
+      enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), p[0], slot.buf, 0, p[1]);
+      enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), p[2], slot.buf, p[1], p[3]);
+      return async () => {
+        try { await slot.buf.mapAsync(GPUMapMode.READ); } catch { slot.busy = false; return; }
+        try {
+          if (W === w && !slot.stale) { const a = slot.buf.getMappedRange(); w.lab.ingestDerby(w.world, new Uint32Array(a, 0, p[1] / 4), new Uint32Array(a, p[1], p[3] / 4)); }
+        } catch (e) { console.warn(e); } finally { slot.buf.unmap(); slot.busy = false; }
+      };
     }
     const cam = { eye: [6, 3, -7], at: [0, 0.6, 0], init: false, target: [0, 0.6, 0] };
     const orbit = { yaw: 0.9, pitch: 0.3, dist: 8.5, auto: RECORD ? 0.35 : 0 };
@@ -750,8 +998,8 @@
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointerdown', (e) => { canvas.focus(); drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: 0, button: e.button }; try { canvas.setPointerCapture(e.pointerId); } catch {} });
     canvas.addEventListener('pointerup', (e) => {
-      // A click without a drag in Shoot: fire along the ray through the pixel.
-      if (drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8 && drag.button === 0 && mode === 'shoot') {
+      // A click without a drag in Shoot or on the mountain: fire along the ray through the pixel.
+      if (drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8 && drag.button === 0 && (mode === 'shoot' || mode === 'mountain')) {
         const r = canvas.getBoundingClientRect();
         const nx = ((e.clientX - r.left) / r.width) * 2 - 1, ny = 1 - ((e.clientY - r.top) / r.height) * 2;
         const inv = lastInv;
@@ -780,10 +1028,18 @@
       else camZoom = Math.max(0.2, Math.min(8, camZoom * k));
     }, { passive: false });
     let lastInv = new Float32Array(16);
+    // How far the eye may stand from the car (m): Bench::clear_view, eased out.
+    let camFree = Infinity;
+    // The camera's reading age (simulated s) each drawn frame: __state().camAge.
+    const camAges = [];
     function updateCamera(lead, wallDt) {
       // The reading is of an earlier step: carried forward by its age in simulated time
       // (and the frame's lead), so the camera moves with the car drawn, not behind it.
-      const age = Math.max(0, Math.min(0.25, (W.lab.time() - (pose.t ?? W.lab.time())))) + lead;
+      // (With the camera's own readback every frame the reading is a frame or two old;
+      // the bound only matters if readings stop, as when the GPU is lost.)
+      const rawAge = W.lab.time() - (pose.t ?? W.lab.time());
+      camAges.push(rawAge); if (camAges.length > 600) camAges.shift();
+      const age = Math.max(0, Math.min(0.5, rawAge)) + lead;
       const c = add3(pose.c, mul3(pose.v, age));
       // The target follows the car with no lag at any speed: it is moved by the car's own
       // movement since the last frame first, and only what is left (a new reading's
@@ -801,6 +1057,17 @@
       const camMode = get('cam');
       switch (camMode) {
         case 'chase': eye = add3(t, mul3(add3(mul3(chaseHead, -7.5), [0, 2.2, 0]), camZoom)); at = add3(t, mul3(chaseHead, 4)); break;
+        // Above the car, looking down at it. On the mountain the frame is the fall line's
+        // (fixed: a tumbling car does not swing it): 9 m over the slope, 10 m up it,
+        // looking a little down the slope; on the flat arena behind the car's travel.
+        case 'overhead': {
+          if (scene() === 'mountain') {
+            const th = get('steepness') * Math.PI / 180;
+            const n = [0, Math.cos(th), Math.sin(th)], up = [0, Math.sin(th), -Math.cos(th)];
+            eye = add3(t, mul3(add3(mul3(n, 9), mul3(up, 10)), camZoom)); at = add3(t, mul3(up, -3));
+          } else { eye = add3(t, mul3(add3(mul3(chaseHead, -7), [0, 9, 0]), camZoom)); at = add3(t, mul3(chaseHead, 2)); }
+          break;
+        }
         // Down the mountain: beside and above the car, looking down the fall line.
         case 'tumble': eye = add3(t, mul3([9, 5.5, -11], camZoom)); at = add3(t, [0, -0.5, 2]); break;
         case 'side': eye = add3(t, mul3([9, 1.6, 0], camZoom)); break;
@@ -812,12 +1079,20 @@
         }
       }
       if (scene() !== 'mountain') eye[1] = Math.max(eye[1], 0.3);
-      if (!cam.init) { cam.eye = eye; cam.at = at; cam.init = true; return; }
+      if (!cam.init) { cam.eye = eye; cam.at = at; cam.init = true; camFree = Infinity; }
       // Orbit: the eye and the point looked at are one rigid pair on the target (the
       // drag sets the angle directly), so the view's direction never changes by itself.
       // The other cameras ease their own offsets, on top of the car's movement.
-      if (camMode === 'orbit') { cam.eye = eye; cam.at = at; return; }
-      cam.eye = mix3(add3(cam.eye, moved), eye, 1 - Math.exp(-wallDt / 0.35)); cam.at = mix3(add3(cam.at, moved), at, 1 - Math.exp(-wallDt / 0.1));
+      else if (camMode === 'orbit') { cam.eye = eye; cam.at = at; }
+      else { cam.eye = mix3(add3(cam.eye, moved), eye, 1 - Math.exp(-wallDt / 0.35)); cam.at = mix3(add3(cam.at, moved), at, 1 - Math.exp(-wallDt / 0.1)); }
+      // Nothing drawn between the camera and the car: the lab (Rust) casts the view ray
+      // from the car to the eye against the mountain's rock and the arena's ground, and
+      // the eye comes in in front of what it meets. It comes in at once (the car is
+      // never hidden) and goes back out eased, so a rock passing by does not jerk it.
+      const off = sub3(cam.eye, t), dist = Math.hypot(...off);
+      const free = W.lab.clearView(t[0], t[1], t[2], cam.eye[0], cam.eye[1], cam.eye[2]);
+      camFree = free < camFree ? free : camFree + (free - camFree) * (1 - Math.exp(-wallDt / 0.5));
+      if (dist > 1e-6 && camFree < dist) cam.eye = add3(t, mul3(off, camFree / dist));
     }
 
     // ---------------------------------------------------------------- the script's page events
@@ -857,8 +1132,23 @@
       // report has the car's skinning and the shadow map (before the picture) and the
       // picture itself, a drawn frame.
       const dq = drawTimer(device);
-      if (dq) enc.beginComputePass({ label: 'draw-start', timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 0 } }).end();
-      cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead });
+      const stamp = (k) => (dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } } : {});
+      // The cars' skin and the shadow map only when what they show changed: a World step
+      // since the last, another lead, a restart or a car added (skinGen), or (the shadow)
+      // another light focus. A level-of-detail pick follows the eye: cars with more than
+      // one level are skinned every drawn frame. The same picture, without the work.
+      const skinKey = `${world.stepCount()}|${lead}|${w.skinGen}`, focusKey = `${cam.target[0]}|${M ? cam.target[1] : 0}|${cam.target[2]}`;
+      const skinSame = skinKey === w.skinKey && w.singleLevel && !forceSkin;
+      const shadowSame = skinSame && focusKey === w.focusKey;
+      w.skinKey = skinKey; w.focusKey = focusKey;
+      if (skinSame) { if (dq) enc.beginComputePass(stamp(0)).end(); }
+      else {
+        // (The debris effects' time step: the simulated time since the cars were last
+        // skinned, which spans the steps of frames not drawn.)
+        const at = world.stepCount(), since = simDt > 0 && w.skinAt != null && at > w.skinAt ? (at - w.skinAt) / w.RATE : simDt;
+        w.skinAt = at;
+        cars.update(enc, { dt: since, floorY: M ? -1e5 : 0, lead, ...stamp(0) });
+      }
       const wire = (get('beams') || get('nodes')) ? w.wire : null;
       if (wire) {
         const f = new Float32Array(60);
@@ -866,18 +1156,47 @@
         device.queue.writeBuffer(wire.frameBuf, 0, f);
         wire.r.gather(enc, lead);
       }
-      env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }));
+      if (shadowSame) { if (dq) enc.beginComputePass(stamp(1)).end(); }
+      else env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }), { ...stamp(1), perfSkip: drawSkip });
       const tex = context.getCurrentTexture().createView();
       const pass = enc.beginRenderPass({
         colorAttachments: [{ view: w.msaaTex.createView(), resolveTarget: tex, loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 1] }],
         depthStencilAttachment: { view: w.depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
-        ...(dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 1, endOfPassWriteIndex: 2 } } : {}),
+        ...stamp(2),
       });
-      env.draw(pass, world);
+      env.draw(pass, world, { perfSkip: drawSkip });
       if (get('body')) cars.draw(pass, { viewProj: vp, eye: cam.eye, light: env.sun, height: canvas.height });
       wire?.r.drawOpaque(pass);
       env.drawGhosts(pass, world);
       pass.end();
+      const camFinish = camReadback(w, enc);
+      const { finish, derbyFinish } = reads(w, enc, read, simDt);
+      if (dq) { enc.resolveQuerySet(dq.set, 0, 6, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 48); }
+      device.queue.submit([enc.finish()]);
+      // The picture is on the GPU until its work is done: no other is queued behind it
+      // (DrawPacer's busy).
+      drawBusy = true;
+      device.queue.onSubmittedWorkDone().then(() => { if (W === w) drawBusy = false; }, () => { drawBusy = false; });
+      if (dq) {
+        dq.busy = true;
+        dq.read.mapAsync(GPUMapMode.READ).then(() => {
+          const t = new BigUint64Array(dq.read.getMappedRange().slice(0));
+          dq.read.unmap(); dq.busy = false;
+          const ms = [0, 1, 2].map((k) => Number(t[2 * k + 1] - t[2 * k]) / 1e6);
+          if (ms.every((x) => x >= 0 && x < 1000)) { drawGpu.skin.push(ms[0]); drawGpu.shadow.push(ms[1]); drawGpu.picture.push(ms[2]); if (drawGpu.skin.length > 120) { drawGpu.skin.shift(); drawGpu.shadow.shift(); drawGpu.picture.shift(); } }
+        }).catch(() => { dq.busy = false; });
+      }
+      // (The recorder waits for both; the live page lets the camera's land when it does.)
+      const cf = camFinish ? camFinish() : null;
+      const df = derbyFinish ? derbyFinish() : null;
+      return Promise.all([finish ? finish() : null, RECORD ? cf : null, RECORD ? df : null]);
+    }
+    // What a frame's steps left, read back for the lab (Rust), encoded into `enc` (a drawn
+    // frame's or, for a frame not drawn, one of its own): the measurements (when `read`:
+    // a step was taken; every step or 15 a second, the Measurements control) and the
+    // derby's AI and round. Returns their finishers (the live page lets the derby's land
+    // when it does; a finisher handed back here is called by the caller).
+    function reads(w, enc, read, simDt) {
       let finish = null;
       const every = RECORD ? 1 : get('monitor') === 'auto' ? (w.lab.busy() ? 1 : 4) : Number(get('monitor'));
       if (read && every > 0 && (simSteps % every === 0 || simDt === 0)) {
@@ -886,30 +1205,23 @@
         finish = readback(w, enc, wantBeams);
         if (finish && wantBeams) lastBeamRead = now;
       }
-      if (dq) { enc.resolveQuerySet(dq.set, 0, 3, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 24); }
-      device.queue.submit([enc.finish()]);
-      if (dq) {
-        dq.busy = true;
-        dq.read.mapAsync(GPUMapMode.READ).then(() => {
-          const t = new BigUint64Array(dq.read.getMappedRange().slice(0));
-          dq.read.unmap(); dq.busy = false;
-          const before = Number(t[1] - t[0]) / 1e6, picture = Number(t[2] - t[1]) / 1e6;
-          if (before >= 0 && picture >= 0 && before < 1000 && picture < 1000) { drawGpu.before.push(before); drawGpu.picture.push(picture); if (drawGpu.before.length > 120) { drawGpu.before.shift(); drawGpu.picture.shift(); } }
-        }).catch(() => { dq.busy = false; });
-      }
-      return finish ? finish() : Promise.resolve();
+      const derbyFinish = derbyReadback(w, enc);
+      return { finish, derbyFinish };
     }
     // The draw timer's queries and buffers, one set a device; null without timestamp
     // queries or while the last reading is still out (that frame is not timed).
-    const drawGpu = { before: [], picture: [] };
+    const drawGpu = { skin: [], shadow: [], picture: [] };
+    // Profiling (window.__drawSkip): parts of the drawing left out, to measure them;
+    // drawHold: the frame loop stands still (window.__drawCost draws alone).
+    let drawSkip = null, drawHold = false, forceSkin = false;
     let drawQ = null;
     function drawTimer(device) {
       if (!device.features.has('timestamp-query')) return null;
       if (!drawQ || drawQ.device !== device) {
-        drawQ = { device, busy: false, set: device.createQuerySet({ type: 'timestamp', count: 3 }),
-          resolve: device.createBuffer({ size: 24, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
-          read: device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) };
-        drawGpu.before.length = 0; drawGpu.picture.length = 0;
+        drawQ = { device, busy: false, set: device.createQuerySet({ type: 'timestamp', count: 6 }),
+          resolve: device.createBuffer({ size: 48, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+          read: device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) };
+        drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0;
       }
       return drawQ.busy ? null : drawQ;
     }
@@ -937,9 +1249,8 @@
         const d = [...r.dts].sort((x, y) => x - y), n = r.frames, f1 = (x) => +x.toFixed(2);
         perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
           dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
-          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.before.length ? [f1(median(drawGpu.before)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
-        perfLog[perfLog.length - 1].scale = +renderScale().toFixed(3) + (autoDrawEvery > 1 ? '@1/' + autoDrawEvery : '');
-        renderAuto(r.refused);
+          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.skin.length ? [f1(median(drawGpu.skin)), f1(median(drawGpu.shadow)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
+        perfLog[perfLog.length - 1].scale = +drawScale.toFixed(3) + (drawPacer?.levelFps() ? '@' + drawPacer.levelFps() + '/s' : '');
         if (perfLog.length > 180) perfLog.shift();
         perfSec = perfNew(now);
       }
@@ -947,6 +1258,7 @@
     const pct = (q) => { const a = [...stepHist].sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : 0; };
     let fps = 0, frames = 0, fpsAt = performance.now(), simAt = performance.now(), simCount = 0, simRate = 0;
     const gpuSeg = new Map(); let gpuTotal = [];
+    let gpuRun = [];
     const median = (a) => a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0;
     function gpuSplit() {
       let veh = 0, rigid = 0;
@@ -960,6 +1272,9 @@
         const per = new Map();
         for (const [n, ms] of t.segments) per.set(n, (per.get(n) || 0) + ms);
         for (const [n, ms] of per) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
+        // The whole run, a row a step: (lab time, the step's GPU ms, the vehicles' part).
+        let veh = 0; for (const [n, ms] of per) if (n.startsWith('cpl_') || n.startsWith('explicit')) veh += ms;
+        if (gpuRun.length < 60000) gpuRun.push([W?.lab.time() ?? 0, t.totalMs, veh]);
       }
     };
     const nf = (x, d = 0) => Number(x).toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
@@ -986,6 +1301,13 @@
     // frames: median, 95th percentile, worst), the World's step rate against real time,
     // how many frames took 0, 1 or 2+ World steps (uneven counts are judder), steps the
     // GPU was not ready for, and a trace of the frame times (16.7 ms and 33.3 ms marked).
+    // The drawing's level as the pacer has it (physics first): nothing while every frame
+    // is drawn at full scale.
+    const drawLevelText = () => {
+      if (!drawPacer || !get('drawYield') || drawPacer.level() === 0) return '';
+      const fps = drawPacer.levelFps(), sc = drawScale;
+      return ` (giving way: ${fps ? `≤ ${fps}/s` : 'every frame'}${sc < 1 ? `, ${Math.round(100 * sc)} %` : ''})`;
+    };
     function perfBar(rt) {
       const el = $('perf');
       if (RECORD) { el.style.display = 'none'; return; }
@@ -1001,6 +1323,7 @@
         + ` · World <b${cls(!paused && rt < 0.9)}>${paused ? 'paused' : `${simRate.toFixed(0)}/s, ${Math.min(100, 100 * rt).toFixed(0)} % real time`}</b>`
         + ` · steps a frame 0: ${(100 * c0 / n).toFixed(0)} %, 1: ${(100 * c1 / n).toFixed(0)} %, 2+: ${(100 * c2 / n).toFixed(0)} %`
         + ` · <span${cls(refused > 0.02 * owedAll)}>GPU not ready ${owedAll ? (100 * refused / owedAll).toFixed(1) : '0.0'} %</span>`
+        + ` · drawn ${perfLog.length ? perfLog[perfLog.length - 1].drawn : '–'}/s${drawLevelText()}`
         + (W.timing !== 'off' && gpuTotal.length ? ` · GPU ${g.total.toFixed(2)} ms/step` : '');
       const x = cv.getContext('2d'), w = cv.width, h = cv.height, top = 50;
       x.clearRect(0, 0, w, h);
@@ -1010,9 +1333,42 @@
       stepHist.forEach((ms, i) => { const px = w * i / 600, py = h - h * Math.min(top, ms) / top; if (i) x.lineTo(px, py); else x.moveTo(px, py); });
       x.stroke();
     }
+    // The derby's round on screen (every number from the lab's DerbyGame::json): cars
+    // left, the player's damage, the clock, the knock-outs as they happen, the result.
+    let derbyShown = null;
+    const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+    function derbyHud() {
+      const g = mode === 'derby' ? W.lab.derby() : null;
+      window.__derbyState = g;
+      if (!g) { $('derbyOver').style.display = 'none'; return; }
+      const me = g.player != null ? g.cars[g.player] : null;
+      const shown = g.player != null ? me : null;
+      $('derbyHud').innerHTML = `<span><span class="big">${g.left}</span> / ${g.cars.length} cars left</span>`
+        + (shown ? `<span>${shown.out ? `<span class="bad">OUT: ${esc(shown.out)}</span>` : `damage <span class="bar"><i style="width:${(100 * shown.damage).toFixed(0)}%"></i></span> ${(100 * shown.damage).toFixed(0)} %`}</span><span>${nf(Math.abs(shown.kmh))} km/h</span>` : '<span class="muted">spectating</span>')
+        + `<span class="big">${clock(g.t)}</span><span class="muted">of ${clock(g.limit)}</span>`;
+      // New events (knock-outs, the result) for the feed, newest at the bottom.
+      const feed = $('derbyFeed');
+      const key = g.events.map((e) => e.t + e.text).join('|');
+      if (key !== derbyShown) {
+        derbyShown = key;
+        feed.innerHTML = g.events.slice(0, 6).reverse().map((e) => `<div>${clock(e.t)} · ${esc(e.text)}</div>`).join('');
+      }
+      const over = $('derbyOver');
+      over.style.display = g.over ? 'block' : 'none';
+      if (g.over) {
+        const w = g.winner;
+        $('derbyResult').textContent = w == null ? 'No winner' : w === g.player ? 'You win!' : `Car ${w + 1} wins`;
+        const place = me ? 1 + g.cars.filter((c, k) => k !== g.player && (!c.out || (me.out && c.outAt > me.outAt))).length : null;
+        $('derbyResultSub').textContent = `after ${clock(g.t)}` + (me && w !== g.player ? ` · you came ${place} of ${g.cars.length}${me.out ? ` (${me.out})` : ''}` : '');
+      }
+    }
+    $('derbyAgain').onclick = () => { restart(); canvas.focus(); };
+    $('derbyNew').onclick = () => { restart(); canvas.focus(); };
+    window.__derby = () => W?.lab.derby();
     let lastStats = null;
     function hud() {
       if (!W) return;
+      derbyHud();
       const s = W.lab.stats(); lastStats = s;
       const c = s.car, p = c.penetration, g = gpuSplit(), RATE = W.RATE;
       const rt = simRate / RATE / (slow() || 1);
@@ -1044,7 +1400,7 @@
       ]);
       $('shots').innerHTML = s.shots.length ? '<tr><th>shot</th><th>kg</th><th>impact m/s</th><th>p given N·s</th><th>of own</th><th>peak kN</th><th>result</th></tr>'
         + s.shots.slice(-8).reverse().map((h) => `<tr><td>${h.id} ${esc(h.what.replace(/ m$/, ''))}</td><td>${nf(h.mass, 1)}</td><td>${h.impactSpeed == null ? '–' : nf(h.impactSpeed, 1)}</td><td>${nf(h.momentum)}</td><td>${nf(100 * h.momentumAlong / Math.max(1e-6, h.momentumOwn))} %</td><td>${nf(h.peakForce / 1000, 1)}</td><td>${h.outcome}</td></tr>`).join('') : '<tr><td class="muted">none fired</td></tr>';
-      $('shotsBox').style.display = mode === 'shoot' || s.shots.length ? '' : 'none';
+      $('shotsBox').style.display = mode === 'shoot' || mode === 'mountain' || s.shots.length ? '' : 'none';
       if (mode === 'compactor' || s.plates.length) {
         $('plates').innerHTML = s.plates.length ? '<tr><th>plate</th><th>travel m</th><th>force kN</th><th>peak kN</th><th>work kJ</th><th>node in plate</th></tr>'
           + s.plates.map((q, i) => `<tr><td style="color:${COLORS[i % 2]}">${q.name} (${q.state})</td><td>${nf(q.travel, 3)} / ${nf(q.stroke, 2)}</td><td>${nf(q.force / 1000, 1)}</td><td>${nf(q.forcePeak / 1000, 1)}</td><td>${nf(q.work / 1000, 2)}</td><td>${nf(1000 * q.nodeDepth)} mm</td></tr>`).join('') : '<tr><td class="muted">no plates: Start</td></tr>';
@@ -1063,6 +1419,7 @@
         : `<tr><td class="muted">${W.car.visuals[0].visual.unitNames?.length ? 'no part damaged' : 'this car names no parts'}</td></tr>`;
       $('log').innerHTML = s.events.slice(-30).reverse().map((e) => `<div>${e.t.toFixed(2)} s · ${esc(e.text)}</div>`).join('') || '<span class="muted">nothing yet</span>';
       perfBar(rt);
+      $('drawLevel').textContent = drawLevelText();
       const tag = $('slowTag');
       tag.style.display = paused || slow() < 1 ? 'block' : 'none';
       tag.textContent = paused ? 'PAUSED' : `SLOW MOTION ×${slow() === 0.25 ? '¼' : '1⁄16'}`;
@@ -1104,12 +1461,35 @@
         worldRate: W ? Math.round(W.RATE) : null, gpuTiming: W?.timing ?? null,
         state: window.__state?.(), gpu: W && W.timing !== 'off' ? window.__gpu() : 'GPU timing is off: set "GPU timing" to "rigid · vehicle" (rebuilds) for GPU ms a step',
         load: window.__loadTimes ?? null, failed: window.__failed ?? null,
-        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale, GPU ms a drawn frame [skinning and shadow map / the picture] (median; needs GPU timing on)',
+        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale, GPU ms a drawn frame [skinning / shadow map / the picture] (median; needs GPU timing on)',
       };
       const rows = perfLog.map((r) => [r.page, r.sim, r.fps, r.steps, r.refused, r.drawn, r.undrawn, r.idle, r.dt.join('/'), r.cpuStep.join('/'), r.cpuPoll.join('/'), r.cpuDraw.join('/'), r.gpu ?? '-', r.bodies, r.readsSkipped, r.hidden, r.scale, r.gpuDraw ? r.gpuDraw.join('/') : '-'].join('\t'));
       return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
     }
     window.__perfReport = perfReport;
+    // The per-second rows (perfLog) as objects; window.__drawOff = true: nothing drawn
+    // (a measurement: the World alone, engine/tools/vehicle-lab/physics-first.js).
+    window.__perfLog = () => perfLog.map((r) => { const { dts, ...o } = r; return o; });
+    // The drawing's cost, measured (engine/tools/vehicle-lab/draw-cost.js): parts left
+    // out (the car renderer's setPerfSkip names; boxes, spheres: the scene's), the
+    // medians of the last drawn frames' GPU ms, what is drawn (a car's levels), and the
+    // wall time of `n` draws alone, each waited for (pause the World first).
+    window.__drawSkip = (names) => { if (W) W.skinGen++; drawSkip = names?.length ? new Set(names) : null; W.cars.setPerfSkip(['reflect', ...(names ?? [])]); drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0; };
+    window.__recut = () => { W.skinGen++; W.cars.recut(); };
+    window.__drawGpu = () => ({ n: drawGpu.skin.length, skin: median(drawGpu.skin), shadow: median(drawGpu.shadow), picture: median(drawGpu.picture) });
+    window.__drawStats = () => ({ canvas: [canvas.width, canvas.height], colliders: W.world.colliderCount(), bodies: W.world.bodyCount(), cars: W.cars.stats() });
+    window.__drawCost = async (n = 30, batch = 1) => {
+      const w = W;
+      // (Every draw skinned and shadowed, as a drawn frame of a stepping World: the
+      // parts' costs, not the skip of unchanged state.)
+      drawHold = true; forceSkin = true;
+      try {
+        await w.device.queue.onSubmittedWorkDone();
+        const t0 = performance.now();
+        for (let i = 0; i < n; i += batch) { for (let k = 0; k < batch; k++) draw(0, 0, 0, false); await w.device.queue.onSubmittedWorkDone(); }
+        return (performance.now() - t0) / (Math.ceil(n / batch) * batch);
+      } finally { drawHold = false; forceSkin = false; }
+    };
     $('perfCopy').onclick = async () => {
       const b = $('perfCopy'), text = await perfReport();
       let ok = false;
@@ -1118,8 +1498,16 @@
       b.textContent = ok ? 'Copied' : 'Copy failed: see console'; if (!ok) console.log(text);
       setTimeout(() => { b.textContent = 'Copy perf report'; }, 1500);
     };
+    // The run's GPU time a World step since the last build or restart (GPU timing on):
+    // median, p95 and worst of the whole step and of the vehicles' part (needs "rigid ·
+    // vehicle" timing), for steps at lab time `from` (s) or later, and the steps refused.
+    window.__gpuRun = (from = 0) => {
+      const rows = gpuRun.filter((r) => r[0] >= from);
+      const stat = (k) => { const a = rows.map((r) => r[k]).sort((x, y) => x - y); if (!a.length) return null; const q = (p) => a[Math.round((a.length - 1) * p)]; const w = rows.reduce((m, r) => (r[k] > m[k] ? r : m), rows[0]); return { median: q(0.5), p95: q(0.95), p99: q(0.99), worst: w[k], worstAt: w[0] }; };
+      return { steps: rows.length, total: stat(1), vehicle: stat(2), refused: perfLog.reduce((a, r) => a + r.refused, 0), taken: perfLog.reduce((a, r) => a + r.steps, 0) };
+    };
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
-    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
+    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, camAge: camAges.length ? { p50: [...camAges].sort((a, b) => a - b)[camAges.length >> 1], max: Math.max(...camAges) } : null, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
 
     // ---------------------------------------------------------------- loops
     const before = () => { runPageEvents(W.lab.time()); applyDrive(); W.lab.beforeStep(W.world); };
@@ -1154,12 +1542,12 @@
       };
       hud();
     } else {
-      let lastNow = null, hudAt = 0, refusedAt = -1e9;
+      let lastNow = null, hudAt = 0;
       function frame(now) {
         requestAnimationFrame(frame);
         const w = W;
         // Stopped (an unstable state): no more steps or frames until a restart.
-        if (!w || window.__failed || w.stop?.stopped) { lastNow = null; return; }
+        if (!w || window.__failed || w.stop?.stopped || drawHold) { lastNow = null; return; }
         w.stop?.check(w.lab.time());
         frames++;
         if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
@@ -1174,6 +1562,11 @@
           let refused = 0;
           const t0 = performance.now();
           for (let k = 0; k < owed; k++) {
+            if (holdAt !== null && w.lab.time() >= holdAt - 1e-9) { window.__hold(true); break; }
+            // (A readback that landed since the last frame is taken back first: until it
+            // is polled it counts as in flight, and the step would be refused for a
+            // reading already here.)
+            if (!w.world.canStep()) pollFrame(w.world, onFrame);
             if (!w.world.canStep()) { refused = owed - k; break; }
             before();
             w.world.step();
@@ -1192,15 +1585,21 @@
           const t2 = performance.now();
           pollFrame(w.world, onFrame);
           const t3 = performance.now();
-          // A display faster than the World (120 Hz: a step every other frame) draws
-          // frames between steps. While the GPU is the limit (a step refused in the
-          // last 3 s) those in-between frames are not drawn: they would take the time
-          // the next step needs (measured: 16 steps/s instead of 60). The frames that
-          // owe a step are drawn as on a 60 Hz display.
-          if (refused > 0) refusedAt = now;
-          let drew = !(owed === 0 && scale > 0 && now - refusedAt < 3000);
-          if (drew && autoDrawEvery > 1 && scale > 0 && (++drawTick % autoDrawEvery) !== 0) drew = false;
+          // Physics first (DrawPacer, the module above): whether this frame is drawn.
+          // A display faster than the World (120 Hz: a step every other frame) draws the
+          // frames between steps only while the GPU has room for them; a picture is never
+          // queued behind one still on the GPU or in a frame whose step was refused.
+          let drew = drawPacer.frame(now / 1000, taken, refused, scale > 0, drawBusy);
+          if (window.__drawOff) drew = false;
+          if (drawScale !== renderScale()) configure();
           if (drew) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          // A frame not drawn still reads back what its steps left (the lab's
+          // measurements and the derby's AI): the lab's inputs do not follow the drawing.
+          else if (taken > 0) {
+            const enc = w.device.createCommandEncoder(), r = reads(w, enc, true, taken / w.RATE);
+            w.device.queue.submit([enc.finish()]);
+            r.finish?.(); r.derbyFinish?.();
+          }
           perfTick(now, dt * 1000, taken, refused, owed, drew, t1 - t0, t3 - t2, drew ? performance.now() - t3 : 0);
           if (now - hudAt > 250) { hud(); hudAt = now; if (lastStats?.scriptDone) window.__done = true; }
         } catch (e) { fail(e); }

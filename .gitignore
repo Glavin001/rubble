@@ -40,3 +40,4 @@ engine/ffi-dist/
 
 # Local outputs (renders, snapshots, frames)
 /out/
+engine/out/

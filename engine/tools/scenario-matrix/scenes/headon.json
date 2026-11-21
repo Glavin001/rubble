@@ -1,0 +1,2 @@
+{ "scene": "flat", "cars": 2, "others": [{ "x": 0, "z": 20, "angle": 180, "kmh": 50 }],
+  "restart": { "start": { "kmh": 50 } }, "events": [] }

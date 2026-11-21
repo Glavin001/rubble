@@ -44,9 +44,12 @@ test-kernels = []
 
 [dev-dependencies]
 engine-webgpu = { path = ".", features = ["test-kernels"] }
+# The shared scene builders and gate, without the Metal world (Linux builds).
+engine-scenes = { path = "../engine-scenes", default-features = false }
 
 [build-dependencies]
 engine-slang-build.workspace = true
+engine-exec.workspace = true
 anyhow.workspace = true
 
 [[bin]]

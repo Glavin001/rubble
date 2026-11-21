@@ -123,3 +123,70 @@ fn a_column_of_six_split_is_bit_for_bit() {
     assert!(grouped > 10, "the cars met in a contact group ({grouped} frames)");
     assert!(largest > 4, "a group past four members formed (largest {largest})");
 }
+
+/// A member's self-collision pair list kept over the frame's steps
+/// (`explicit_plan::PERF_MEMBER_LIST`): each frame from one saved state on the split path
+/// with the switch off (the member's grid sorted and walked every step) then on, every
+/// state word the same; and the list in use: with the switch on the members build lists
+/// and reuse them, with it off a frame whose vehicles are all members builds none. With
+/// self-collision split (`self_split`: the vehicles' own module) and without.
+fn member_list_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, self_split: bool) -> Option<[u64; 2]> {
+    use engine_exec::explicit_plan::PERF_MEMBER_LIST;
+    let (_, device, queue) = default_device().ok()?;
+    let nv = fleet.len() as u32;
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    gpu.set_vehicle_contact(true);
+    gpu.set_wide(false);
+    gpu.set_group_split(true);
+    gpu.set_self_split(self_split);
+    let flags = gpu.perf_flags();
+    let (mut built, mut reused, mut all_members) = (0u64, 0u64, 0u32);
+    for f in 0..frames {
+        gpu.take_pair_reuse_stats();
+        gpu.wait();
+        let snap = gpu.snapshot();
+        gpu.set_perf_flags(flags & !PERF_MEMBER_LIST);
+        gpu.frame(steps);
+        gpu.wait();
+        let off = gpu.state_words();
+        let sizes = gpu.contact_group_sizes();
+        let members: u32 = sizes.iter().sum();
+        let off_stats = gpu.take_pair_reuse_stats();
+        gpu.wait();
+        gpu.restore(&snap);
+        gpu.set_perf_flags(flags | PERF_MEMBER_LIST);
+        gpu.frame(steps);
+        gpu.wait();
+        let on = gpu.state_words();
+        if let Some(d) = first_diff(&off, &on) {
+            panic!("{label}: frame {f} (groups {sizes:?}): the members' kept pair list differs from their walk at {d}");
+        }
+        let on_stats = gpu.take_pair_reuse_stats();
+        if members == nv {
+            all_members += 1;
+            assert_eq!(off_stats[0], 0, "{label}: frame {f}: a member built a list with the switch off");
+            built += on_stats[0];
+            reused += on_stats[1];
+        }
+    }
+    gpu.set_perf_flags(flags);
+    eprintln!(
+        "{label} (self split {self_split}): {frames} frames bit for bit; in the {all_members} frames with every vehicle a member: lists built {built}, steps reused {reused} of {}",
+        u64::from(all_members) * u64::from(steps) * u64::from(nv)
+    );
+    Some([built, reused])
+}
+
+#[test]
+fn members_keep_their_pair_list_bit_for_bit() {
+    let text = generated();
+    for self_split in [false, true] {
+        let a = sedan(&text, Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
+        let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+        let probe = sedan(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
+        let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+        let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
+        let Some([built, reused]) = member_list_matches("two sedans head-on", vec![a, b], 40, 17, self_split) else { return };
+        assert!(built > 0 && reused > 0, "the members kept a pair list (built {built}, reused {reused})");
+    }
+}

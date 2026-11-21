@@ -17,7 +17,27 @@
 # by its inputs so a hit is the same bytes. On Vercel it is node_modules/.cache/rubble-build:
 # Vercel's static builder keeps every **/node_modules/** between builds (and a branch's
 # first build starts from production's cache).
+#
+# RUBBLE_WEB_PARTS="<part> ..." builds only those parts (default: all four, in this
+# order, which is what Vercel and local builds do). CI builds kernels, world and stress
+# in three parallel jobs, merges their engine-webgpu/generated/ folders and then builds
+# the site part (.github/workflows/ci.yml): the same commands, the same site.
+#   kernels  WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)
+#   world    vehicle-designer wasm, world wasm and the world wasm's Asyncify build
+#   stress   fracture scene wasm, stress-solver wasm and its Asyncify build
+#   site     scene snapshots, the generated sedan, scene packs, the assembled site
+#            (needs the other three parts' outputs in engine-webgpu/generated/)
 set -euo pipefail
+
+PARTS=" ${RUBBLE_WEB_PARTS:-kernels world stress site} "
+for web_part in $PARTS; do
+  case "$web_part" in
+    kernels | world | stress | site) ;;
+    *) echo "RUBBLE_WEB_PARTS: unknown part '$web_part' (kernels, world, stress, site)" >&2; exit 1 ;;
+  esac
+done
+# part NAME: whether this run builds that part.
+part() { [[ "$PARTS" == *" $1 "* ]]; }
 
 WASM_PACK_VERSION=0.14.0
 # Binaryen's wasm-opt makes the stress solver's Asyncify build (browsers without JSPI).
@@ -38,6 +58,12 @@ step() {
   STEP_NAME="$1"
   STEP_START=$SECONDS
   if [[ -n "$1" ]]; then echo "==> $1"; fi
+}
+# The summary a build ends with.
+step_times() {
+  step ""
+  echo "==> Step times (total ${SECONDS}s)"
+  printf '%s\n' "${STEP_TIMES[@]}"
 }
 
 CACHE="${RUBBLE_BUILD_CACHE:-}"
@@ -102,10 +128,13 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 # slangc: Slang → SPIR-V for wgsl_export (and the build scripts of the WebGPU crates).
-. "$ENGINE/scripts/slangc.sh"
+# The site part compiles neither kernels nor wasm.
+if part kernels || part world || part stress; then
+  . "$ENGINE/scripts/slangc.sh"
+fi
 
 # wasm-pack: the vehicle and fracture wasm modules.
-if ! command -v wasm-pack >/dev/null 2>&1; then
+if { part kernels || part world || part stress; } && ! command -v wasm-pack >/dev/null 2>&1; then
   case "$os-$arch" in
     Linux-x86_64) target="x86_64-unknown-linux-musl" ;;
     Linux-aarch64) target="aarch64-unknown-linux-musl" ;;
@@ -131,21 +160,32 @@ for glb in "$WEB"/fracture/assets/*.glb; do
   fi
 done
 
-step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
-# Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
-cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
-step "Fracture scene wasm (the unit tests; the page loads it inside the world wasm)"
-wasm-pack build crates/engine-fracture-wasm --release --target web \
-  --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
-step "World wasm (engine-world-wasm: the pages' physics host, the fracture lab's scenes, Broadside)"
-# the vehicle generator (engine-vehiclegen) for the vehicle designer page
-wasm-pack build crates/engine-vehiclegen-wasm --release --target web \
-  --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
-CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
-  --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
-step "Stress-solver wasm (the Fracture lab's blast_parity, load path and local impact modes)"
-CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
-  --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
+if part kernels; then
+  step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
+  # Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
+  cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
+fi
+if part stress; then
+  step "Fracture scene wasm (the unit tests; the page loads it inside the world wasm)"
+  wasm-pack build crates/engine-fracture-wasm --release --target web \
+    --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
+fi
+if part world; then
+  step "World wasm (engine-world-wasm: the pages' physics host, the fracture lab's scenes, Broadside)"
+  # the vehicle generator (engine-vehiclegen) for the vehicle designer page
+  wasm-pack build crates/engine-vehiclegen-wasm --release --target web \
+    --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
+  CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
+    --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
+fi
+if part stress; then
+  step "Stress-solver wasm (the Fracture lab's blast_parity, load path and local impact modes)"
+  CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
+    --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
+fi
+STRESS_WASM="$ENGINE/crates/engine-webgpu/generated/stress-web/stress_web_bg.wasm"
+WORLD_WASM="$ENGINE/crates/engine-webgpu/generated/world-wasm/engine_world_wasm_bg.wasm"
+if part world || part stress; then
 step "Stress-solver and world wasm, Asyncify builds (browsers without JSPI: Safari)"
 # The solver waits on GPU maps through the import rubble-gpu-wait.yield_to_browser
 # (engine-gpu-wait). Chrome suspends the stack there with JSPI; elsewhere this build's
@@ -167,7 +207,6 @@ if [[ ! -x "$WASM_OPT" ]]; then
   curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/version_$BINARYEN_VERSION/binaryen-version_$BINARYEN_VERSION-$binaryen_target.tar.gz" \
     | tar -xz -C "$TOOLS"
 fi
-STRESS_WASM="$ENGINE/crates/engine-webgpu/generated/stress-web/stress_web_bg.wasm"
 # The features rustc's wasm32 target emits, all in Safari 15+ (nothing newer may appear).
 ASYNCIFY_ARGS=(--enable-bulk-memory --enable-sign-ext --enable-mutable-globals
   --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types --asyncify
@@ -176,20 +215,39 @@ asyncify() {
   mkdir -p "$STRESS_ASYNCIFY"
   "$WASM_OPT" "$STRESS_WASM" "${ASYNCIFY_ARGS[@]}" -o "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm"
 }
-STRESS_ASYNCIFY="$(mktemp -d)/asyncify"
-cached asyncify "$( (cat "$STRESS_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
-  "$STRESS_ASYNCIFY" asyncify
-cp "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm" "${STRESS_WASM%.wasm}.asyncify.wasm"
+if part stress; then
+  STRESS_ASYNCIFY="$(mktemp -d)/asyncify"
+  cached asyncify "$( (cat "$STRESS_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
+    "$STRESS_ASYNCIFY" asyncify
+  cp "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm" "${STRESS_WASM%.wasm}.asyncify.wasm"
+fi
 # Broadside's world wasm waits on the GPU the same way: its Asyncify build too.
-WORLD_WASM="$ENGINE/crates/engine-webgpu/generated/world-wasm/engine_world_wasm_bg.wasm"
 world_asyncify() {
   mkdir -p "$WORLD_ASYNCIFY"
   "$WASM_OPT" "$WORLD_WASM" "${ASYNCIFY_ARGS[@]}" -o "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm"
 }
-WORLD_ASYNCIFY="$(mktemp -d)/asyncify"
-cached world-asyncify "$( (cat "$WORLD_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
-  "$WORLD_ASYNCIFY" world_asyncify
-cp "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm" "${WORLD_WASM%.wasm}.asyncify.wasm"
+if part world; then
+  WORLD_ASYNCIFY="$(mktemp -d)/asyncify"
+  cached world-asyncify "$( (cat "$WORLD_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
+    "$WORLD_ASYNCIFY" world_asyncify
+  cp "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm" "${WORLD_WASM%.wasm}.asyncify.wasm"
+fi
+fi # part world || part stress
+
+if ! part site; then
+  step_times
+  exit 0
+fi
+# The site takes engine-webgpu/generated/ as it is: the other parts' outputs must be
+# there (built above, or by the runs that built those parts).
+for f in wgsl/manifest.json vehicle_wasm fracture-wasm vehiclegen-wasm \
+  "${WORLD_WASM#"$WEB/generated/"}" world-wasm/engine_world_wasm_bg.asyncify.wasm \
+  "${STRESS_WASM#"$WEB/generated/"}" stress-web/stress_web_bg.asyncify.wasm; do
+  if [[ ! -e "$WEB/generated/$f" ]]; then
+    echo "error: generated/$f is missing: build the part that makes it (RUBBLE_WEB_PARTS)" >&2
+    exit 1
+  fi
+done
 step "Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
@@ -273,6 +331,4 @@ done
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"
 
 if [[ -n "$CACHE" ]]; then echo "==> Build cache: $(du -sh "$CACHE" | cut -f1)"; fi
-step ""
-echo "==> Step times (total ${SECONDS}s)"
-printf '%s\n' "${STEP_TIMES[@]}"
+step_times

@@ -12,168 +12,19 @@ use wasm_bindgen::prelude::*;
 
 /// A vehicle's pose from its wheels (the last `readDrive`): centre, forward, up and
 /// forward speed.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Pose {
-    pub p: Vec3,
-    pub fwd: Vec3,
-    pub up: Vec3,
-    pub speed: f32,
-}
+pub(super) use engine_softbody::drive_ai::Pose;
 
 /// Per vehicle its last read pose (`None`: no raycast wheels, or not read yet).
 pub(super) type Poses = Rc<RefCell<Vec<Option<Pose>>>>;
 
-/// A self-driving car (the soft solver's traffic AI, softbody.html, in Rust): it
-/// steers toward a target, a random point in the arena (wander) or the nearest
-/// other car (chase); a stuck car reverses out; cruising cars brake for cars ahead.
-#[derive(Clone, Debug)]
-pub(super) struct AiCar {
-    chase: bool,
-    cruise: bool,
-    target: Option<[f32; 2]>,
-    t: f32,
-    slow: f32,
-    reverse: f32,
-    kmh: f32,
-    seed: u32,
-}
-
-/// `n` cars' AI: `mode` 'derby' (two in three wander, one chases), 'cruise' or 'off'.
-pub(super) fn ai_cars(n: usize, mode: &str) -> Vec<AiCar> {
-    if mode == "off" || mode == "0" {
-        return Vec::new();
-    }
-    let cruise = mode == "cruise";
-    (0..n)
-        .map(|i| AiCar {
-            chase: !cruise && i % 3 == 2,
-            cruise,
-            target: None,
-            t: 0.0,
-            slow: 0.0,
-            reverse: 0.0,
-            kmh: 35.0 + ((i * 17) % 45) as f32,
-            seed: (i as u32).wrapping_mul(7919).wrapping_add(13),
-        })
-        .collect()
-}
-
-fn rand(c: &mut AiCar) -> f32 {
-    c.seed = c.seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
-    (c.seed >> 8) as f32 / 16_777_216.0
-}
-
-/// One AI car's input from the poses (`k` itself).
-fn ai_input(c: &mut AiCar, k: usize, poses: &[Option<Pose>], dt: f32) -> DriveInput {
-    let none = DriveInput::default();
-    let Some(me) = poses[k] else { return none };
-    let right = me.fwd.cross(me.up);
-    let speed = me.speed.abs();
-    c.t += dt;
-    if me.up.y < 0.3 {
-        return none; // on its side or roof
-    }
-    if c.chase {
-        let mut best: Option<(f32, Pose)> = None;
-        for (j, o) in poses.iter().enumerate() {
-            if let (true, Some(o)) = (j != k, o) {
-                let d = Vec3::new(o.p.x - me.p.x, 0.0, o.p.z - me.p.z).length();
-                if best.is_none_or(|b| d < b.0) {
-                    best = Some((d, *o));
-                }
-            }
-        }
-        if let Some((_, o)) = best {
-            let v = o.fwd * o.speed;
-            c.target = Some([o.p.x + v.x * 0.4, o.p.z + v.z * 0.4]);
-        }
-    } else if c
-        .target
-        .is_none_or(|t| c.t > 9.0 || Vec3::new(t[0] - me.p.x, 0.0, t[1] - me.p.z).length() < 8.0)
-    {
-        let x = (rand(c) - 0.5) * 120.0;
-        let z = (rand(c) - 0.5) * 120.0;
-        c.target = Some([x, z]);
-        c.t = 0.0;
-    }
-    let t = c.target.unwrap_or([me.p.x, me.p.z]);
-    let d = Vec3::new(t[0] - me.p.x, 0.0, t[1] - me.p.z);
-    let ang = d.dot(right).atan2(d.dot(me.fwd));
-    let mut steer = (ang * 1.6).clamp(-1.0, 1.0);
-    let mut want = c.kmh / 3.6 * if ang.abs() > 1.2 { 0.45 } else { 1.0 };
-    if c.cruise {
-        for (j, o) in poses.iter().enumerate() {
-            let (true, Some(o)) = (j != k, o) else {
-                continue;
-            };
-            let dd = o.p - me.p;
-            let ahead = dd.x * me.fwd.x + dd.z * me.fwd.z;
-            let side = dd.x * right.x + dd.z * right.z;
-            if ahead > 0.0 && ahead < 14.0 && side.abs() < ahead * 0.58 {
-                want = want.min(((ahead - 6.0) * 0.6).max(0.0));
-                let sg = if side > 0.0 {
-                    1.0
-                } else if side < 0.0 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                steer = (steer - sg * 0.6).clamp(-1.0, 1.0);
-            }
-        }
-    }
-    let mut input = DriveInput {
-        forward: if speed < want { 0.85 } else { 0.0 },
-        steer,
-        brake: if speed > want * 1.3 { 0.4 } else { 0.0 },
-        handbrake: 0.0,
-    };
-    // Stuck against something: reverse out with the wheel turned the other way.
-    c.slow = if speed < 0.8 { c.slow + dt } else { 0.0 };
-    if c.slow > 1.6 && c.reverse <= 0.0 {
-        c.reverse = 1.4;
-        c.slow = 0.0;
-    }
-    if c.reverse > 0.0 {
-        c.reverse -= dt;
-        input = DriveInput {
-            forward: -0.8,
-            steer: -steer,
-            brake: 0.0,
-            handbrake: 0.0,
-        };
-    }
-    input
-}
+/// The traffic AI lives in `engine_softbody::drive_ai` (shared with the vehicle lab's
+/// derby), unchanged.
+pub(super) use engine_softbody::drive_ai::{ai_cars, ai_input, AiCar};
 
 /// A vehicle's pose from its wheels: centre, forward (the fixed wheels' mean
 /// heading, else every wheel's), up, and the wheels as drawn.
 pub(super) fn pose_json(d: &Drive) -> serde_json::Value {
-    let n = d.wheels.len().max(1) as f32;
-    let centre = d.wheels.iter().map(|w| w.centre).sum::<Vec3>() / n;
-    let up = d
-        .wheels
-        .iter()
-        .map(|w| w.up)
-        .sum::<Vec3>()
-        .normalize_or_zero();
-    let heading = |w: &engine_softbody::explicit_drive::WheelState| w.axle.cross(w.up);
-    let fixed: Vec3 = d
-        .wheels
-        .iter()
-        .zip(&d.config.wheels)
-        .filter(|(_, c)| c.max_steer == 0.0)
-        .map(|(w, _)| heading(w))
-        .sum();
-    let fwd = if fixed.length_squared() > 1e-8 {
-        fixed.normalize()
-    } else {
-        d.wheels
-            .iter()
-            .map(heading)
-            .sum::<Vec3>()
-            .normalize_or_zero()
-    };
+    let (centre, fwd, up) = engine_softbody::drive_ai::wheel_frame(d, None);
     let wheels: Vec<serde_json::Value> = d
         .wheels
         .iter()

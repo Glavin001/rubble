@@ -9,17 +9,55 @@
 //! point at its start, f64), so their local coordinates stay small however far down the
 //! mountain the chunk lies.
 //!
-//! Every shape is static: slabs (the ground itself, 3 m thick oriented boxes along a
-//! piecewise-linear profile with ledges, drops and cliffs), canyon walls that keep the
-//! car on the mountain, and rocks standing on the slabs: spikes (convex hulls from a
-//! small palette), boulders (spheres) and blocks (boxes).
+//! Every shape is static. Two terrains ([`Terrain`]):
+//!
+//! - **Ledges** (the first mountain, kept for the measurements made on it): slabs (3 m
+//!   thick oriented boxes along a piecewise-linear profile with shelves, drops and
+//!   cliffs), canyon walls, and rocks standing on the slabs: spikes (convex hulls from a
+//!   small palette), boulders (spheres) and blocks (boxes). A car sliding onto a shelf
+//!   stops there.
+//! - **Rolling** (the page's default): a gully down a mountainside with no shelf or cliff.
+//!   The fall line swells smoothly (a sum of three seeded waves along the normal, its
+//!   local slope never more than a few degrees off the mean and never under 38° on the
+//!   default 50°), the floor is a flat bed between two banks rising 18° to the walls, and
+//!   the rocks are rounded: wide low humps (big buried spheres) that throw a car up and
+//!   sideways, boulders, and a few crags on the banks. A car keeps falling and bouncing.
 
 use glam::{DVec3, Quat, Vec3};
+
+/// The mountain's ground: see the module's doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Terrain {
+    /// Shelves, drops and cliffs (the first mountain; the measurements' scene).
+    #[default]
+    Ledges,
+    /// A smooth gully with rounded rocks and no shelf: the car keeps falling.
+    Rolling,
+}
+
+impl Terrain {
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "ledges" => Some(Self::Ledges),
+            "rolling" => Some(Self::Rolling),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ledges => "ledges",
+            Self::Rolling => "rolling",
+        }
+    }
+}
 
 /// The mountain's parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MountainSpec {
     pub seed: u64,
+    /// The ground's kind. The default stays [`Terrain::Ledges`] so that the offline tools
+    /// and the measurements keep their scene; the lab page asks for rolling.
+    pub terrain: Terrain,
     /// The fall line's mean slope (degrees from horizontal), 35–50.
     pub steepness: f32,
     /// 0–1: how many rocks, ledges and cliffs.
@@ -47,6 +85,7 @@ impl Default for MountainSpec {
     fn default() -> Self {
         Self {
             seed: 1,
+            terrain: Terrain::Ledges,
             // Past the rock's kinetic friction angle (atan 0.75 = 37°) and at its static one
             // (atan 1.2 = 50°): a sliding car keeps sliding.
             steepness: 50.0,
@@ -99,6 +138,24 @@ pub struct MountainChunk {
 /// Spike hulls in the palette.
 pub const PALETTE: usize = 12;
 const SLAB: f32 = 3.0;
+/// The canyon walls' drawn rock: its top over the chunk's line (m).
+pub const WALL_DRAWN_TOP: f32 = 13.0;
+/// The canyon walls' full height over the chunk's line (m): above the drawn rock each
+/// wall goes on, undrawn, to here. There is no ceiling: a car or a part thrown up comes
+/// back down between the walls. To clear a wall a body would have to leave the slope at
+/// `sqrt(2 g cos θ (WALL_TOP − h))` along its normal: on the steepest slope (60°) from
+/// 5 m over the line, 70 m/s (250 km/h).
+pub const WALL_TOP: f32 = 500.0;
+/// An undrawn collider's tag (a density no rock has: the scene renderer draws nothing
+/// of density 0.5–1.5).
+pub const UNDRAWN_TAG: f32 = 1.0;
+/// Rolling: the flat bed's share of the width, the banks' rise to the walls (degrees), a
+/// profile segment's length (m) and the lowest local slope the swell may make (degrees:
+/// over the rock's kinetic friction angle, 37°, so a sliding car keeps sliding).
+const BED: f32 = 0.5;
+const BANK_DEG: f32 = 18.0;
+const SEGMENT: f32 = 4.0;
+const MIN_SLOPE_DEG: f64 = 38.0;
 
 fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -239,6 +296,47 @@ impl MountainSpec {
         }
     }
 
+    /// Rolling: the largest local slope change the swell makes (radians).
+    fn swell_slope(&self) -> f64 {
+        let want = 4.0 + 10.0 * f64::from(self.roughness);
+        let room = (f64::from(self.steepness) - MIN_SLOPE_DEG).max(2.0);
+        want.min(room).to_radians()
+    }
+
+    /// Rolling: the ground's offset (m) along the fall line's upward normal at arc `s`
+    /// from the lip: three seeded waves (71, 29 and 13 m) whose slopes add to at most
+    /// [`Self::swell_slope`], faded in over the first 30 m so the run leaves the lip the
+    /// same way. A function of the arc alone, so chunks join.
+    fn swell(&self, s: f64) -> f64 {
+        use std::f64::consts::TAU;
+        let dmax = self.swell_slope();
+        let mut r = Rng::new(self.seed, -2000, 11);
+        let mut d = 0.0;
+        for (lambda, w) in [(71.0, 0.5), (29.0, 0.3), (13.0, 0.2)] {
+            let phase = f64::from(r.next()) * TAU;
+            d += w * dmax * lambda / TAU * (TAU * s / lambda + phase).sin();
+        }
+        let f = (s / 30.0).clamp(0.0, 1.0);
+        d * f * f * (3.0 - 2.0 * f)
+    }
+
+    /// Rolling: the chunk's ground profile, points (z, y) relative to its origin (the
+    /// fall line's point at its start), every [`SEGMENT`] m of arc.
+    fn profile_rolling(&self, k: i64) -> Vec<[f32; 2]> {
+        let l = f64::from(self.chunk);
+        let n = (l / f64::from(SEGMENT)).round().max(3.0) as usize;
+        let t = self.theta();
+        let up = DVec3::new(0.0, t.cos(), t.sin());
+        let o = self.line(k as f64 * l);
+        (0..=n)
+            .map(|j| {
+                let s = (k as f64 + j as f64 / n as f64) * l;
+                let p = self.line(s) - o + up * self.swell(s);
+                [p.z as f32, p.y as f32]
+            })
+            .collect()
+    }
+
     /// Chunk `k`: the plateau for −1, the slope for k ≥ 0, nothing below −1.
     pub fn chunk(&self, k: i64) -> MountainChunk {
         let l = self.chunk;
@@ -256,6 +354,31 @@ impl MountainSpec {
                     tag: 2400.0,
                     loose: false,
                 });
+                // Undrawn walls round it to WALL_TOP, as the canyon's: at its sides (on
+                // over the lip, where the slope's walls lean away above it) and at its back,
+                // so a part thrown back up the mountain does not leave it either.
+                let tall = 0.5 * (WALL_TOP + SLAB);
+                let reach = WALL_TOP;
+                for side in [-1.0f32, 1.0] {
+                    shapes.push(MountainShape {
+                        geom: RockGeom::Box {
+                            half: Vec3::new(1.5, tall, 0.5 * (41.0 + reach)),
+                        },
+                        pos: Vec3::new(side * (0.5 * w + 1.5), tall - SLAB, 0.5 * (reach - 41.0)),
+                        rot: Quat::IDENTITY,
+                        tag: UNDRAWN_TAG,
+                        loose: false,
+                    });
+                }
+                shapes.push(MountainShape {
+                    geom: RockGeom::Box {
+                        half: Vec3::new(0.5 * w + 3.0, tall, 1.5),
+                    },
+                    pos: Vec3::new(0.0, tall - SLAB, -41.5),
+                    rot: Quat::IDENTITY,
+                    tag: UNDRAWN_TAG,
+                    loose: false,
+                });
             }
             return MountainChunk {
                 index: k,
@@ -264,6 +387,13 @@ impl MountainSpec {
             };
         }
         let origin = self.line(k as f64 * f64::from(l));
+        if self.terrain == Terrain::Rolling {
+            return MountainChunk {
+                index: k,
+                origin,
+                shapes: self.rolling_shapes(k),
+            };
+        }
         let prof = self.profile(k);
         // Each profile segment: a slab under it, its upward normal and its rotation.
         let mut segs: Vec<([f32; 2], [f32; 2], Quat, Vec3, f32)> = Vec::new();
@@ -289,23 +419,10 @@ impl MountainSpec {
             });
             segs.push((a, b, rot, normal, len));
         }
-        // The canyon walls, along the chunk's own line.
-        let t = self.theta() as f32;
-        let rot = Quat::from_rotation_x(t);
-        let mid = Vec3::new(0.0, -0.5 * l * t.sin(), 0.5 * l * t.cos());
-        for side in [-1.0f32, 1.0] {
-            shapes.push(MountainShape {
-                geom: RockGeom::Box {
-                    half: Vec3::new(1.5, 9.0, 0.5 * l + 0.5),
-                },
-                pos: mid
-                    + Vec3::new(side * (0.5 * w + 1.5), 0.0, 0.0)
-                    + rot * Vec3::new(0.0, 4.0, 0.0),
-                rot,
-                tag: 2400.0,
-                loose: false,
-            });
-        }
+        // The canyon walls, along the chunk's own line, WALL_TOP m tall, so that nothing
+        // thrown up in a crash leaves the canyon: a part over a wall had no ground and
+        // fell without end (past 1,000 km/h within a run).
+        self.walls(&mut shapes);
         // Rocks on the slabs.
         let mut r = Rng::new(self.seed, k, 2);
         let total: f32 = segs.iter().map(|s| s.4).sum();
@@ -382,6 +499,237 @@ impl MountainSpec {
             shapes,
         }
     }
+
+    /// The canyon's walls along chunk `k`'s own line (both terrains): the drawn rock to
+    /// [`WALL_DRAWN_TOP`] over the line, then an undrawn slab on it to [`WALL_TOP`]. No
+    /// ceiling: until 2026-11-17 a lid closed the canyon 13 m over the line, and a car
+    /// that bounced that high met an invisible ceiling that stopped its tumbling in
+    /// mid-air.
+    fn walls(&self, shapes: &mut Vec<MountainShape>) {
+        let (l, w) = (self.chunk, self.width);
+        let t = self.theta() as f32;
+        let rot = Quat::from_rotation_x(t);
+        let mid = Vec3::new(0.0, -0.5 * l * t.sin(), 0.5 * l * t.cos());
+        let half_len = 0.5 * l + 0.5;
+        // (The drawn rock: 18 m along the normal, from 5 m under the line.)
+        let drawn = 9.0;
+        let up = 0.5 * (WALL_TOP - WALL_DRAWN_TOP);
+        for side in [-1.0f32, 1.0] {
+            let x = Vec3::new(side * (0.5 * w + 1.5), 0.0, 0.0);
+            shapes.push(MountainShape {
+                geom: RockGeom::Box {
+                    half: Vec3::new(1.5, drawn, half_len),
+                },
+                pos: mid + x + rot * Vec3::new(0.0, WALL_DRAWN_TOP - drawn, 0.0),
+                rot,
+                tag: 2400.0,
+                loose: false,
+            });
+            shapes.push(MountainShape {
+                geom: RockGeom::Box {
+                    half: Vec3::new(1.5, up, half_len),
+                },
+                pos: mid + x + rot * Vec3::new(0.0, WALL_DRAWN_TOP + up, 0.0),
+                rot,
+                tag: UNDRAWN_TAG,
+                loose: false,
+            });
+        }
+    }
+
+    /// Rolling: chunk `k`'s shapes (k ≥ 0), in its frame. Per profile segment a bed slab
+    /// and two bank slabs hinged on its edges; the walls; then humps, boulders,
+    /// crags on the banks and loose rocks, from the chunk's own stream.
+    fn rolling_shapes(&self, k: i64) -> Vec<MountainShape> {
+        let w = self.width;
+        let prof = self.profile_rolling(k);
+        let bed = BED * w;
+        let beta = BANK_DEG.to_radians();
+        // A bank reaches into the wall, so nothing falls between them.
+        let bank = (0.5 * w - 0.5 * bed) / beta.cos() + 1.0;
+        let mut shapes = Vec::new();
+        // (a, b, rot, normal, len) per segment.
+        let mut segs: Vec<([f32; 2], [f32; 2], Quat, Vec3, f32)> = Vec::new();
+        for p in prof.windows(2) {
+            let (a, b) = (p[0], p[1]);
+            let d = Vec3::new(0.0, b[1] - a[1], b[0] - a[0]);
+            let len = d.length();
+            let rot = Quat::from_rotation_x((-d.y).atan2(d.z));
+            let normal = rot * Vec3::Y;
+            let mid = Vec3::new(0.0, 0.5 * (a[1] + b[1]), 0.5 * (a[0] + b[0]));
+            // The bed, reaching under the banks. Its overlap with the next segment is
+            // short: a joint's lip is the overlap times the change of slope.
+            shapes.push(MountainShape {
+                geom: RockGeom::Box {
+                    half: Vec3::new(0.5 * bed + 0.5, 0.5 * SLAB, 0.5 * len + 0.1),
+                },
+                pos: mid - normal * (0.5 * SLAB),
+                rot,
+                tag: 2400.0,
+                loose: false,
+            });
+            for side in [-1.0f32, 1.0] {
+                let tilt = rot * Quat::from_rotation_z(side * beta);
+                let hinge = mid + rot * Vec3::new(side * 0.5 * bed, 0.0, 0.0);
+                shapes.push(MountainShape {
+                    geom: RockGeom::Box {
+                        half: Vec3::new(0.5 * bank + 0.25, 0.5 * SLAB, 0.5 * len + 0.3),
+                    },
+                    pos: hinge + tilt * Vec3::new(side * (0.5 * bank - 0.25), -0.5 * SLAB, 0.0),
+                    rot: tilt,
+                    tag: 2400.0,
+                    loose: false,
+                });
+            }
+            segs.push((a, b, rot, normal, len));
+        }
+        self.walls(&mut shapes);
+        let total: f32 = segs.iter().map(|s| s.4).sum();
+        let mut r = Rng::new(self.seed, k, 3);
+        // A point on the ground: `at` m along the chunk's profile, `x` across (on a bank
+        // it rises with the bank). Its height over the bed and the segment's frame.
+        let ground = |at: f32, x: f32| -> (Vec3, Quat, Vec3) {
+            let mut at = at;
+            let mut seg = &segs[0];
+            for s in &segs {
+                seg = s;
+                if at <= s.4 {
+                    break;
+                }
+                at -= s.4;
+            }
+            let (a, b, rot, normal, len) = *seg;
+            let f = (at / len).clamp(0.0, 1.0);
+            let rise = (x.abs() - 0.5 * bed).max(0.0) * beta.tan();
+            let on =
+                Vec3::new(x, a[1] + f * (b[1] - a[1]), a[0] + f * (b[0] - a[0])) + normal * rise;
+            (on, rot, normal)
+        };
+        let rough = self.roughness;
+        // The landing zone under the lip stays clear, so every run starts the same way.
+        let clear = |on: Vec3| k == 0 && on.z < 12.0;
+        // Humps: wide, low swells of rock (a buried sphere). Their faces are at most 25°
+        // off the ground, so a car meets a ramp, not a step, and leaves it up and aside.
+        for _ in 0..(1.0 + 3.0 * rough).round() as usize {
+            let (at, x) = (r.next() * total, r.range(-0.5 * bed, 0.5 * bed));
+            let radius = r.range(5.0, 12.0);
+            let h = (radius * r.range(0.04, 0.09)).min(1.1);
+            let (on, _, normal) = ground(at, x);
+            if clear(on) {
+                continue;
+            }
+            shapes.push(MountainShape {
+                geom: RockGeom::Sphere { radius },
+                pos: on + normal * (h - radius),
+                rot: Quat::IDENTITY,
+                tag: 2400.0,
+                loose: false,
+            });
+        }
+        // Boulders, part buried, anywhere across.
+        for _ in 0..(1.0 + 5.0 * rough).round() as usize {
+            let (at, x) = (r.next() * total, r.range(-0.5 * w + 2.0, 0.5 * w - 2.0));
+            let radius = r.range(0.35, 1.1);
+            let sink = r.range(-0.1, 0.4);
+            let (on, _, normal) = ground(at, x);
+            if clear(on) {
+                continue;
+            }
+            shapes.push(MountainShape {
+                geom: RockGeom::Sphere { radius },
+                pos: on - normal * (sink * radius),
+                rot: Quat::IDENTITY,
+                tag: 2300.0,
+                loose: false,
+            });
+        }
+        // Crags on the banks: they turn a car running up a bank back into the gully.
+        for _ in 0..(2.0 * rough).round() as usize {
+            let side = if r.next() < 0.5 { -1.0 } else { 1.0 };
+            let at = r.next() * total;
+            let x = side * r.range(0.5 * bed + 2.0, 0.5 * w - 1.5);
+            let p = (r.next() * PALETTE as f32) as usize % PALETTE;
+            let turn = Quat::from_rotation_y(r.range(0.0, std::f32::consts::TAU));
+            let (on, rot, _) = ground(at, x);
+            if clear(on) {
+                continue;
+            }
+            shapes.push(MountainShape {
+                geom: RockGeom::Spike { palette: p },
+                pos: on,
+                rot: rot * Quat::from_rotation_z(side * beta) * turn,
+                tag: 2300.0,
+                loose: false,
+            });
+        }
+        for _ in 0..self.loose {
+            let (at, x) = (r.next() * total, r.range(-0.5 * bed, 0.5 * bed));
+            let h = Vec3::new(r.range(0.15, 0.3), r.range(0.12, 0.25), r.range(0.15, 0.3));
+            let turn = Quat::from_rotation_y(r.range(0.0, std::f32::consts::TAU));
+            let (on, rot, normal) = ground(at, x);
+            if clear(on) {
+                continue;
+            }
+            shapes.push(MountainShape {
+                geom: RockGeom::Box { half: h },
+                pos: on + normal * (h.y + 0.05),
+                rot: rot * turn,
+                tag: 2300.0,
+                loose: true,
+            });
+        }
+        shapes
+    }
+
+    /// Where a ray (`o` world, `d` unit) first meets chunk `c`'s drawn shapes (boxes and
+    /// spheres; a crag is skipped, the ground behind it is met), and where it leaves the
+    /// last undrawn shape it crosses (a wall's undrawn part: a shot from a camera beyond a
+    /// wall starts inside the canyon).
+    pub fn ray(&self, c: &MountainChunk, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
+        let (mut hit, mut lid) = (None::<f32>, None::<f32>);
+        for s in &c.shapes {
+            if s.loose {
+                continue;
+            }
+            let rel = (o - c.origin).as_vec3() - s.pos;
+            let span = match &s.geom {
+                RockGeom::Box { half } => {
+                    let inv = s.rot.inverse();
+                    let (p, v) = (inv * rel, inv * d);
+                    let (mut t0, mut t1) = (f32::NEG_INFINITY, f32::INFINITY);
+                    let mut miss = false;
+                    for i in 0..3 {
+                        if v[i].abs() < 1e-9 {
+                            if p[i].abs() > half[i] {
+                                miss = true;
+                            }
+                            continue;
+                        }
+                        let (a, b) = ((-half[i] - p[i]) / v[i], (half[i] - p[i]) / v[i]);
+                        t0 = t0.max(a.min(b));
+                        t1 = t1.min(a.max(b));
+                    }
+                    (!miss && t0 <= t1).then_some((t0, t1))
+                }
+                RockGeom::Sphere { radius } => {
+                    let b = rel.dot(d);
+                    let q = b * b - (rel.length_squared() - radius * radius);
+                    (q >= 0.0).then(|| (-b - q.sqrt(), -b + q.sqrt()))
+                }
+                RockGeom::Spike { .. } => None,
+            };
+            let Some((t0, t1)) = span else { continue };
+            if t1 <= 0.0 {
+                continue;
+            }
+            if s.tag == UNDRAWN_TAG {
+                lid = Some(lid.map_or(t1, |x: f32| x.max(t1)));
+            } else if t0 > 0.0 {
+                hit = Some(hit.map_or(t0, |x: f32| x.min(t0)));
+            }
+        }
+        (hit, lid)
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +742,115 @@ mod tests {
         assert_eq!(m.chunk(7), m.chunk(7));
         assert_ne!(m.chunk(7).shapes, m.chunk(8).shapes);
         assert_ne!(m.chunk(7), MountainSpec { seed: 2, ..m }.chunk(7));
+        let r = MountainSpec {
+            terrain: Terrain::Rolling,
+            ..m
+        };
+        assert_eq!(r.chunk(7), r.chunk(7));
+        assert_ne!(r.chunk(7).shapes, r.chunk(8).shapes);
+    }
+
+    /// Rolling: no shelf. Every profile segment slopes within the swell's bound of the
+    /// mean (and never under 35° at the defaults), only goes down the mountain, and a
+    /// chunk's end is the next chunk's start.
+    #[test]
+    fn the_rolling_ground_has_no_shelf_and_chunks_join() {
+        for seed in 0..8 {
+            for rough in [0.0, 0.5, 1.0] {
+                for steep in [35.0, 50.0, 60.0] {
+                    let m = MountainSpec {
+                        seed,
+                        terrain: Terrain::Rolling,
+                        roughness: rough,
+                        steepness: steep,
+                        ..Default::default()
+                    };
+                    let bound = m.swell_slope().to_degrees() + 1.0;
+                    let mut lowest = f64::INFINITY;
+                    for k in 0..200 {
+                        let p = m.profile_rolling(k);
+                        let o = m.line(k as f64 * f64::from(m.chunk));
+                        let o1 = m.line((k + 1) as f64 * f64::from(m.chunk));
+                        let next = m.profile_rolling(k + 1)[0];
+                        let last = p[p.len() - 1];
+                        let end = (o.z + f64::from(last[0]), o.y + f64::from(last[1]));
+                        let start = (o1.z + f64::from(next[0]), o1.y + f64::from(next[1]));
+                        assert!(
+                            (end.0 - start.0).abs() < 2e-3 && (end.1 - start.1).abs() < 2e-3,
+                            "seed {seed} chunk {k}: {end:?} vs {start:?}"
+                        );
+                        for w in p.windows(2) {
+                            let a = f64::from(w[0][1] - w[1][1])
+                                .atan2(f64::from(w[1][0] - w[0][0]))
+                                .to_degrees();
+                            assert!(w[1][0] > w[0][0] && w[1][1] < w[0][1]);
+                            assert!((a - f64::from(steep)).abs() <= bound, "seed {seed} rough {rough} {steep}° chunk {k}: a segment at {a:.1}°");
+                            lowest = lowest.min(a);
+                        }
+                    }
+                    if steep == 50.0 {
+                        assert!(lowest >= 37.0, "seed {seed} rough {rough}: {lowest:.1}°");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_canyon_has_no_ceiling_and_its_walls_rise_to_wall_top() {
+        // The plateau: undrawn walls at its sides (and on above the lip) and its back.
+        let m = MountainSpec::default();
+        let c = m.chunk(-1);
+        for (o, d) in [
+            (DVec3::new(0.0, 2.0, -20.0), Vec3::X),
+            (DVec3::new(0.0, 300.0, -20.0), Vec3::NEG_X),
+            (DVec3::new(0.0, 60.0, 30.0), Vec3::X),
+            (DVec3::new(0.0, 5.0, -20.0), Vec3::NEG_Z),
+        ] {
+            let (_, undrawn) = m.ray(&c, o, d);
+            assert!(undrawn.is_some(), "no plateau wall from {o} along {d}");
+        }
+        assert_eq!(m.ray(&c, DVec3::new(0.0, 400.0, -20.0), Vec3::NEG_Y).1, None, "a ceiling over the plateau");
+        for terrain in [Terrain::Rolling, Terrain::Ledges] {
+            let m = MountainSpec {
+                terrain,
+                ..Default::default()
+            };
+            let c = m.chunk(3);
+            let t = m.theta();
+            let up = DVec3::new(0.0, t.cos(), t.sin());
+            let axis = m.line(3.5 * f64::from(m.chunk));
+            // Straight down the normal from far over the canyon's axis: the ground, and
+            // nothing undrawn on the way (no lid).
+            let (hit, undrawn) = m.ray(&c, axis + up * 400.0, (-up).as_vec3());
+            let hit = hit.expect("the ground");
+            assert!(hit > 397.0 && hit < 403.0, "{terrain:?}: {hit}");
+            assert_eq!(undrawn, None, "{terrain:?}: a ceiling over the canyon");
+            // Across the canyon at any height up to the walls' top: a wall on each side,
+            // drawn up to WALL_DRAWN_TOP and undrawn above it.
+            for h in [9.0, 12.0, 14.0, 100.0, f64::from(WALL_TOP) - 1.0] {
+                for side in [-1.0f32, 1.0] {
+                    let (hit, undrawn) = m.ray(&c, axis + up * h, Vec3::new(side, 0.0, 0.0));
+                    if h < f64::from(WALL_DRAWN_TOP) {
+                        let at =
+                            hit.unwrap_or_else(|| panic!("{terrain:?}: no drawn wall {h} m up"));
+                        assert!(
+                            (at - 0.5 * m.width).abs() < 0.5,
+                            "{terrain:?}: {at} m, {h} m up"
+                        );
+                    } else {
+                        assert_eq!(hit, None, "{terrain:?}: drawn rock {h} m up");
+                        // (Where the ray leaves the wall: its far face.)
+                        let out =
+                            undrawn.unwrap_or_else(|| panic!("{terrain:?}: no wall {h} m up"));
+                        assert!(
+                            (out - (0.5 * m.width + 3.0)).abs() < 0.5,
+                            "{terrain:?}: {out} m, {h} m up"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -402,6 +859,7 @@ mod tests {
             for rough in [0.0, 0.5, 1.0] {
                 let m = MountainSpec {
                     seed,
+                    terrain: Terrain::Ledges,
                     roughness: rough,
                     ..Default::default()
                 };
@@ -431,7 +889,13 @@ mod tests {
         let c = m.chunk(400);
         assert!(c.origin.length() > 9000.0);
         for s in &c.shapes {
-            assert!(s.pos.length() < 80.0, "{:?}", s.pos);
+            // (A wall's undrawn part stands halfway up the walls' height.)
+            let reach = if s.tag == UNDRAWN_TAG {
+                0.5 * WALL_TOP + 40.0
+            } else {
+                80.0
+            };
+            assert!(s.pos.length() < reach, "{:?}", s.pos);
         }
         assert_eq!(m.chunk_of(c.origin + DVec3::new(0.0, -1.0, 1.0)), 400);
     }

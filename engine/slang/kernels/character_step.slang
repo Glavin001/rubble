@@ -197,9 +197,12 @@ static const uint MOTION_NONE = 0u;
 static const uint MOTION_DURING = 1u;
 static const uint MOTION_AFTER = 2u;
 
-void castCandidates(uint lane, bool live, float3 S, float3 disp, float r, float hh, float skin, uint motion, bool blockingOnly,
-    bool upFacingOnly)
+void castCandidates(uint lane, bool live, float3 S, float3 disp, bool vertical, float r, float hh, float skin, uint motion,
+    bool blockingOnly, bool upFacingOnly)
 {
+    // `vertical`: disp is along CHAR_UP and no obstacle motion is taken from it, so
+    // its length is |disp.y| exactly (as when each cast was compiled for its own
+    // constant direction), not the rounded sqrt of a square.
     // The ground probe (which moves nothing) counts only surfaces that face
     // up: a riser beside the capsule is not ground and must not hide the floor
     // below. Casts that move the character stop at whatever they hit first.
@@ -214,7 +217,7 @@ void castCandidates(uint lane, bool live, float3 S, float3 disp, float r, float 
         if (blockingOnly && (info & PI_BLOCKS) == 0u) continue;
         float3 rel = disp - (motion == MOTION_DURING ? candMove(k).xyz : float3(0, 0, 0));
         float3 start = S - (motion == MOTION_AFTER ? candMove(k).xyz : float3(0, 0, 0));
-        float L = length(rel);
+        float L = vertical ? abs(rel.y) : length(rel);
         if (L < 1e-6) continue;
         float t;
         float3 nrm;
@@ -245,6 +248,29 @@ float3 castSurfaceNormal(uint ci, float r, float hh, float3 S, float3 dir, float
     float3 p = shapeSupport(capsuleShape(r, hh), hit, float4(0, 0, 0, 1), -n);
     return surfaceNormal(ci, p, n, CHAR_UP, 0.01);
 }
+
+// The winning candidate k of a cast, cast again straight down from `start` (at
+// most maxDist): the hit distance and the surface normal under it. False when the
+// cast misses.
+bool castDownSurface(uint k, float3 start, float maxDist, float r, float hh, out float t, out float3 surf)
+{
+    t = 0.0;
+    surf = CHAR_UP;
+    float3 nrm;
+    Collider cap = capsuleShape(r, hh);
+    if (!shapeCastCollider(cap, start, float4(0, 0, 0, 1), -CHAR_UP, maxDist, candId(k), t, nrm)) return false;
+    surf = castSurfaceNormal(candId(k), r, hh, start, -CHAR_UP, t, nrm);
+    return true;
+}
+
+// char_move's casts, in order.
+static const uint CAST_VERIFY = 0u;
+static const uint CAST_STEP_UP = 1u;
+static const uint CAST_STEP_ACROSS = 2u;
+static const uint CAST_STEP_DOWN = 3u;
+static const uint CAST_STICK = 4u;
+static const uint CAST_GROUND = 5u;
+static const uint CAST_PHASES = 6u;
 
 // ---------------------------------------------------------------------------
 // char_move: one workgroup per character
@@ -379,93 +405,180 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float3 X = gsShare[0].xyz;
     uint blocking = asuint(gsShare[0].w);
     uint outFlags = jump ? CO_JUMPED : 0u;
-    // 5. Verify along X: geometry the planes missed (edges, thin pieces).
-    castCandidates(lane, live, P, X, r, hh, skin, MOTION_DURING, true, false);
-    rayReduce(lane);
-    float castF = gsRayT[0];
-    GROUP_SYNC(); // every lane has read the result before the next cast writes
-    if (castF < 1.0)
-    {
-        X *= castF;
-        outFlags |= CO_CAST_CUT;
-    }
-    // 6. Step up: on the ground, blocked horizontally by something steep. The
-    // casts always run (masked per lane): WGSL requires every barrier in
+    // 5-8. Six capsule casts against the candidates, one after another, each
+    // followed for its winner by a cast straight down and the surface under the
+    // hit (castDownSurface, lane 0). They run from one call site, a loop over the
+    // six: Metal inlines every call into the entry point, and six written-out
+    // casts were six copies of the whole cast code, which a slow compiler host
+    // could not build in time (engine/docs/measurements/kernel-compile-time.md,
+    // 2026-11-16). Same casts, same arguments, same order.
+    // The casts always run (masked per lane): WGSL requires every barrier in
     // uniform control flow, and record values read from storage are not.
     float3 Dh = float3(D.x, 0.0, D.z);
-    float3 Xh = float3(X.x, 0.0, X.z);
-    bool tryStep = live && wasGround && !jump && mv.x > 0.0 && length(Dh) > 1e-4 &&
-        length(Xh) < 0.9 * length(Dh);
+    float3 Xh = float3(0, 0, 0);
+    float castF = 1e30;
+    bool tryStep = false;
     float stepped = 0.0;
-    // Up (ceiling), across, then down onto the step.
-    castCandidates(lane, tryStep, P, CHAR_UP * mv.x, r, hh, skin, MOTION_NONE, true, false);
-    rayReduce(lane);
-    float up = mv.x * min(gsRayT[0], 1.0);
-    GROUP_SYNC();
-    float3 P1 = P + CHAR_UP * up;
-    castCandidates(lane, tryStep, P1, Dh, r, hh, skin, MOTION_NONE, true, false);
-    rayReduce(lane);
-    float across = min(gsRayT[0], 1.0);
-    GROUP_SYNC();
-    float3 P2 = P1 + Dh * across;
-    castCandidates(lane, tryStep, P2, -CHAR_UP * (up + skin), r, hh, skin, MOTION_NONE, true, false);
-    rayReduce(lane);
-    float downF = gsRayT[0];
-    uint downK = gsRayC[0];
-    GROUP_SYNC();
-    if (tryStep)
-    {
-        float3 P3 = P2 - CHAR_UP * ((up + skin) * min(downF, 1.0));
-        bool landed = downF < 1.0;
-        bool walkable = false;
-        if (landed && downK != NO_INDEX)
-        {
-            float t; float3 nrm;
-            Collider cap = capsuleShape(r, hh);
-            if (shapeCastCollider(cap, P2, float4(0, 0, 0, 1), -CHAR_UP, up + 2.0 * skin, candId(downK), t, nrm))
-                walkable = castSurfaceNormal(candId(downK), r, hh, P2, -CHAR_UP, t, nrm).y >= cosSlope;
-        }
-        float3 Xs = P3 - P;
-        if (landed && walkable && length(float3(Xs.x, 0.0, Xs.z)) > length(Xh) + 1e-4 && Xs.y > 1e-4)
-        {
-            X = Xs;
-            stepped = Xs.y;
-            outFlags |= CO_STEPPED_UP;
-        }
-    }
-    // 7. Stick to the floor: walking off a step or down a slope keeps contact.
-    bool tryStick = live && wasGround && !jump && mv.y > 0.0 && X.y <= 1e-4;
-    float3 S = P + X;
-    castCandidates(lane, tryStick, S, -CHAR_UP * (mv.y + skin), r, hh, skin, MOTION_AFTER, true, false);
-    rayReduce(lane);
-    float stickF = gsRayT[0];
-    uint stickK = gsRayC[0];
-    GROUP_SYNC();
-    if (lane == 0u)
-    {
-        gsShare[1] = float4(0, 0, 0, 0);
-        if (tryStick && stickF < 1.0 && stickK != NO_INDEX)
-        {
-            float t; float3 nrm;
-            Collider cap = capsuleShape(r, hh);
-            if (shapeCastCollider(cap, S - candMove(stickK).xyz, float4(0, 0, 0, 1), -CHAR_UP, mv.y + 2.0 * skin, candId(stickK), t, nrm) &&
-                castSurfaceNormal(candId(stickK), r, hh, S - candMove(stickK).xyz, -CHAR_UP, t, nrm).y >= cosSlope)
-                gsShare[1] = float4(-CHAR_UP * ((mv.y + skin) * stickF), 1.0);
-        }
-    }
-    GROUP_SYNC();
-    if (gsShare[1].w > 0.5)
-    {
-        X += gsShare[1].xyz;
-        outFlags |= CO_STUCK_TO_FLOOR;
-    }
-    // 8. Ground probe at the new pose (obstacles where the step leaves them).
-    float3 Pn = P + X;
+    float up = 0.0;
+    float across = 0.0;
+    float3 P1 = P;
+    float3 P2 = P;
+    bool tryStick = false;
+    float3 S = P;
+    float3 Pn = P;
     float probe = skin + 0.03;
-    castCandidates(lane, live, Pn, -CHAR_UP * probe, r, hh, 0.0, MOTION_AFTER, false, true);
-    rayReduce(lane);
-    float gF = gsRayT[0];
-    uint gK = gsRayC[0];
+    uint gK = NO_INDEX;
+    // Lane 0's castDownSurface of the last cast (the ground probe).
+    bool gHit = false;
+    float gT = 0.0;
+    float3 gSurf = CHAR_UP;
+    for (uint ph = 0u; ph < CAST_PHASES; ph++)
+    {
+        // CAST_VERIFY: along X, geometry the planes missed (edges, thin pieces).
+        bool on = live;
+        float3 from = P;
+        float3 disp = X;
+        float castSkin = skin;
+        uint motion = MOTION_DURING;
+        bool blockingOnly = true;
+        bool upFacingOnly = false;
+        bool vertical = ph == CAST_STEP_UP || ph == CAST_STEP_DOWN || ph == CAST_STICK || ph == CAST_GROUND;
+        if (ph == CAST_STEP_UP)
+        {
+            // Step up: on the ground, blocked horizontally by something steep.
+            // Up (ceiling), across, then down onto the step.
+            on = tryStep;
+            disp = CHAR_UP * mv.x;
+            motion = MOTION_NONE;
+        }
+        else if (ph == CAST_STEP_ACROSS)
+        {
+            on = tryStep;
+            from = P1;
+            disp = Dh;
+            motion = MOTION_NONE;
+        }
+        else if (ph == CAST_STEP_DOWN)
+        {
+            on = tryStep;
+            from = P2;
+            disp = -CHAR_UP * (up + skin);
+            motion = MOTION_NONE;
+        }
+        else if (ph == CAST_STICK)
+        {
+            // Stick to the floor: walking off a step or down a slope keeps contact.
+            on = tryStick;
+            from = S;
+            disp = -CHAR_UP * (mv.y + skin);
+            motion = MOTION_AFTER;
+        }
+        else if (ph == CAST_GROUND)
+        {
+            // Ground probe at the new pose (obstacles where the step leaves them).
+            from = Pn;
+            disp = -CHAR_UP * probe;
+            castSkin = 0.0;
+            motion = MOTION_AFTER;
+            blockingOnly = false;
+            upFacingOnly = true;
+        }
+        castCandidates(lane, on, from, disp, vertical, r, hh, castSkin, motion, blockingOnly, upFacingOnly);
+        rayReduce(lane);
+        float f = gsRayT[0];
+        uint fk = gsRayC[0];
+        GROUP_SYNC(); // every lane has read the result before the next cast writes
+        // The winner's surface (lane 0): is the step's landing walkable, is the
+        // floor to stick to walkable, what is the ground.
+        if (lane == 0u)
+        {
+            bool want = false;
+            float3 start = from;
+            float maxDist = 0.0;
+            if (ph == CAST_STEP_DOWN)
+            {
+                want = tryStep && f < 1.0;
+                maxDist = up + 2.0 * skin;
+            }
+            else if (ph == CAST_STICK)
+            {
+                want = tryStick && f < 1.0;
+                maxDist = mv.y + 2.0 * skin;
+            }
+            else if (ph == CAST_GROUND)
+            {
+                want = live && f <= 1.0;
+                maxDist = probe + skin;
+            }
+            want = want && fk != NO_INDEX;
+            // Obstacles where the step leaves them (the step-up casts leave them at x⁻).
+            if (want && ph != CAST_STEP_DOWN) start = from - candMove(fk).xyz;
+            float t = 0.0;
+            float3 surf = CHAR_UP;
+            bool hit = want && castDownSurface(fk, start, maxDist, r, hh, t, surf);
+            bool walkable = hit && surf.y >= cosSlope;
+            gsShare[1] = float4(0, 0, 0, 0);
+            if (ph == CAST_STEP_DOWN && walkable) gsShare[1] = float4(0, 0, 0, 1.0);
+            if (ph == CAST_STICK && walkable) gsShare[1] = float4(-CHAR_UP * ((mv.y + skin) * f), 1.0);
+            gHit = hit;
+            gT = t;
+            gSurf = surf;
+        }
+        GROUP_SYNC();
+        float4 shared = gsShare[1];
+        if (ph == CAST_VERIFY)
+        {
+            castF = f;
+            if (castF < 1.0)
+            {
+                X *= castF;
+                outFlags |= CO_CAST_CUT;
+            }
+            Xh = float3(X.x, 0.0, X.z);
+            tryStep = live && wasGround && !jump && mv.x > 0.0 && length(Dh) > 1e-4 &&
+                length(Xh) < 0.9 * length(Dh);
+        }
+        else if (ph == CAST_STEP_UP)
+        {
+            up = mv.x * min(f, 1.0);
+            P1 = P + CHAR_UP * up;
+        }
+        else if (ph == CAST_STEP_ACROSS)
+        {
+            across = min(f, 1.0);
+            P2 = P1 + Dh * across;
+        }
+        else if (ph == CAST_STEP_DOWN)
+        {
+            if (tryStep)
+            {
+                // The stepped move, up + across + down, summed as displacements (P3 − P
+                // with P added and taken away again loses the low bits of each).
+                float3 Xs = Dh * across + CHAR_UP * (up - (up + skin) * min(f, 1.0));
+                bool landed = f < 1.0;
+                bool walkable = shared.w > 0.5;
+                if (landed && walkable && length(float3(Xs.x, 0.0, Xs.z)) > length(Xh) + 1e-4 && Xs.y > 1e-4)
+                {
+                    X = Xs;
+                    stepped = Xs.y;
+                    outFlags |= CO_STEPPED_UP;
+                }
+            }
+            tryStick = live && wasGround && !jump && mv.y > 0.0 && X.y <= 1e-4;
+            S = P + X;
+        }
+        else if (ph == CAST_STICK)
+        {
+            if (shared.w > 0.5)
+            {
+                X += shared.xyz;
+                outFlags |= CO_STUCK_TO_FLOOR;
+            }
+            Pn = P + X;
+        }
+        else
+            gK = fk;
+    }
     if (!live || lane != 0u) return;
 
     uint newState = GS_IN_AIR;
@@ -473,22 +586,15 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint gBody = NO_INDEX;
     uint gCol = NO_INDEX;
     float3 gPoint = Pn - CHAR_UP * (hh + r);
-    if (gF <= 1.0 && gK != NO_INDEX)
+    if (gHit)
     {
-        float t; float3 nrm;
-        Collider cap = capsuleShape(r, hh);
-        if (shapeCastCollider(cap, Pn - candMove(gK).xyz, float4(0, 0, 0, 1), -CHAR_UP, probe + skin, candId(gK), t, nrm))
-        {
-            // Walkability from the face under the contact, not an edge's
-            // tilted contact normal (stairs: no steep-ground flicker).
-            float3 contactN = nrm;
-            nrm = castSurfaceNormal(candId(gK), r, hh, Pn - candMove(gK).xyz, -CHAR_UP, t, nrm);
-            gN = nrm;
-            gCol = candId(gK);
-            gBody = gColliders[gCol].body;
-            newState = nrm.y >= cosSlope ? GS_ON_GROUND : GS_ON_STEEP;
-            gPoint = Pn - CHAR_UP * (hh + r + max(t, 0.0));
-        }
+        // Walkability from the face under the contact, not an edge's
+        // tilted contact normal (stairs: no steep-ground flicker).
+        gN = gSurf;
+        gCol = candId(gK);
+        gBody = gColliders[gCol].body;
+        newState = gSurf.y >= cosSlope ? GS_ON_GROUND : GS_ON_STEEP;
+        gPoint = Pn - CHAR_UP * (hh + r + max(gT, 0.0));
     }
     // Overlapping planes from the ground's side count as ground too (a body
     // resting exactly at the skin, or pressed into it).
