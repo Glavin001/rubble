@@ -615,14 +615,7 @@ pub struct WgpuSim {
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
 pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
-    let ccd = bodies
-        .iter()
-        .any(|b| b.flags & (BODY_CCD | engine_schema::BODY_CCD_FAST) != 0);
-    let kin = bodies.iter().any(|b| {
-        b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32)
-            == BodyFlags::Kinematic as u32
-    });
-    (ccd, kin)
+    engine_exec::rigid_host::body_motion_flags(bodies)
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -1525,15 +1518,10 @@ impl WgpuSim {
             self.capacity.max_colliders
         );
         if count > 0 {
-            self.has_convex |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::ConvexHull as u32);
-            self.has_height_field |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::HeightField as u32);
-            self.has_filters |= colliders
-                .iter()
-                .any(engine_schema::convex::CollisionFilter::is_set);
+            let f = engine_exec::rigid_host::ColliderFlags::of(colliders);
+            self.has_convex |= f.convex;
+            self.has_height_field |= f.height_field;
+            self.has_filters |= f.filters;
             self.manifolds_valid = false;
             self.queue.write_buffer(
                 &self.bufs[2],
@@ -1542,15 +1530,7 @@ impl WgpuSim {
             );
             self.host_cols.extend_from_slice(colliders);
             self.collider_count += count;
-            for col in colliders {
-                if let Some(r) = engine_schema::collider_reach(col) {
-                    let b = col.body as usize;
-                    if self.body_reach.len() <= b {
-                        self.body_reach.resize(b + 1, 0.0);
-                    }
-                    self.body_reach[b] = self.body_reach[b].max(r);
-                }
-            }
+            engine_exec::rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         }
         start..self.collider_count
     }
@@ -1673,29 +1653,16 @@ impl WgpuSim {
             "adopted colliders exceed capacity"
         );
         if count > 0 {
-            self.has_convex |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::ConvexHull as u32);
-            self.has_height_field |= colliders
-                .iter()
-                .any(|c| c.shape == ShapeType::HeightField as u32);
-            self.has_filters |= colliders
-                .iter()
-                .any(engine_schema::convex::CollisionFilter::is_set);
+            let f = engine_exec::rigid_host::ColliderFlags::of(colliders);
+            self.has_convex |= f.convex;
+            self.has_height_field |= f.height_field;
+            self.has_filters |= f.filters;
             self.manifolds_valid = false;
             self.host_cols.extend_from_slice(colliders);
             self.collider_count += count;
             // The resting table's per-collider words are laid out by the collider count.
             self.mark_rest_stale();
-            for col in colliders {
-                if let Some(r) = engine_schema::collider_reach(col) {
-                    let b = col.body as usize;
-                    if self.body_reach.len() <= b {
-                        self.body_reach.resize(b + 1, 0.0);
-                    }
-                    self.body_reach[b] = self.body_reach[b].max(r);
-                }
-            }
+            engine_exec::rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         }
         (body_start..self.body_count, col_start..self.collider_count)
     }
@@ -1889,13 +1856,10 @@ impl WgpuSim {
                 self.body_reach[b] = self.body_reach[b].max(r);
             }
         }
-        self.has_convex = cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
-        self.has_height_field = cols
-            .iter()
-            .any(|c| c.shape == ShapeType::HeightField as u32);
-        self.has_filters = cols
-            .iter()
-            .any(engine_schema::convex::CollisionFilter::is_set);
+        let f = engine_exec::rigid_host::ColliderFlags::of(&cols);
+        self.has_convex = f.convex;
+        self.has_height_field = f.height_field;
+        self.has_filters = f.filters;
         self.host_cols = cols;
         self.grid_cache = None;
         self.uniform_cell = None;
@@ -2071,20 +2035,16 @@ impl WgpuSim {
     }
 
     fn joint_offset(id: u32) -> u64 {
-        u64::from(id) * std::mem::size_of::<Joint>() as u64
+        engine_exec::rigid_host::joint_offset(id)
     }
 
     /// Write a raw GPU joint, reusing a released slot when one is free.
     pub fn add_joint(&mut self, joint: Joint) -> u32 {
-        let id = match self.free_joints.pop() {
-            Some(id) => id,
-            None => {
-                let id = self.joint_count;
-                assert!(id < self.capacity.max_joints, "joint capacity exceeded");
-                self.joint_count += 1;
-                id
-            }
-        };
+        let id = engine_exec::rigid_host::alloc_joint_slot(
+            &mut self.joint_count,
+            &mut self.free_joints,
+            self.capacity.max_joints,
+        );
         self.queue.write_buffer(
             &self.bufs[5],
             Self::joint_offset(id),
@@ -2113,22 +2073,7 @@ impl WgpuSim {
     }
 
     pub fn add_joint_desc(&mut self, desc: &JointDesc) -> u32 {
-        let mut j = desc.to_gpu();
-        if desc.torque_arm <= 0.0 {
-            let reach = |id: u32| {
-                let dynamic = self
-                    .host_bodies
-                    .get(id as usize)
-                    .is_some_and(|b| b.inv_mass > 0.0);
-                if dynamic {
-                    self.body_reach.get(id as usize).copied().unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            };
-            j.torque_arm =
-                engine_schema::default_torque_arm(reach(desc.body_a), reach(desc.body_b));
-        }
+        let j = self.joint_from_desc(desc);
         self.add_joint(j)
     }
 
@@ -3878,31 +3823,17 @@ impl WgpuSim {
             }
             (_, Some(c)) if !hier => c,
             _ => {
-                let mut r = rigid_plan::grid_cell_with(
+                // The automatic grid takes the hierarchical one for a box scene the
+                // uniform grid's large list cannot hold (the fracture lab's cuboid suburb).
+                let (cell, levels, h) = engine_exec::rigid_host::choose_grid(
                     &self.host_cols,
                     &self.host_bodies,
-                    hier,
+                    self.grid_levels_mode,
+                    self.has_convex,
                     self.movable_radius,
                 );
-                // Automatic grid: more dynamics wider than a uniform cell than its large
-                // list holds (the fracture lab's cuboid suburb) take the hierarchical
-                // grid, which finds every pair at any size, instead of failing the step.
-                if !hier
-                    && auto
-                    && rigid_plan::uniform_large_dynamics_overflow(
-                        &self.host_cols,
-                        &self.host_bodies,
-                        r.0,
-                    )
-                {
-                    hier = true;
-                    r = rigid_plan::grid_cell_with(
-                        &self.host_cols,
-                        &self.host_bodies,
-                        true,
-                        self.movable_radius,
-                    );
-                }
+                hier = h;
+                let r = (cell, levels);
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
                 } else {
@@ -4801,23 +4732,7 @@ impl SoftBackend for WgpuSim {
     }
 
     fn joint_from_desc(&self, desc: &JointDesc) -> Joint {
-        let mut j = desc.to_gpu();
-        if desc.torque_arm <= 0.0 {
-            let reach = |id: u32| {
-                let dynamic = self
-                    .host_bodies
-                    .get(id as usize)
-                    .is_some_and(|b| b.inv_mass > 0.0);
-                if dynamic {
-                    self.body_reach.get(id as usize).copied().unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            };
-            j.torque_arm =
-                engine_schema::default_torque_arm(reach(desc.body_a), reach(desc.body_b));
-        }
-        j
+        engine_exec::rigid_host::joint_from_desc(desc, &self.host_bodies, &self.body_reach)
     }
 }
 

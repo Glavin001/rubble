@@ -23,6 +23,7 @@
 //! Build hosts without nvcc embed no device code; [`CudaSim::available`] is then false.
 
 use cudarc::driver::{result, sys, DriverError};
+use engine_exec::rigid_host;
 use engine_exec::rigid_plan::{
     self, Cmd, StepInputs, StepModes, BIND_COUNT, COUNTER_UPLOAD, PASS_ALIGN,
 };
@@ -99,6 +100,12 @@ pub struct CudaSim {
     /// CCD / kinematic bodies uploaded (the motion passes of the step graph).
     motion: rigid_plan::MotionInputs,
     host_cols: Vec<Collider>,
+    /// What the colliders turn on (`rigid_host::ColliderFlags`).
+    col_flags: rigid_host::ColliderFlags,
+    /// Each body's reach, for joints' default torque arm.
+    body_reach: Vec<f32>,
+    joint_count: u32,
+    free_joints: Vec<u32>,
     grid_levels: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
@@ -291,6 +298,10 @@ impl CudaSim {
             host_bodies: Vec::new(),
             motion: rigid_plan::MotionInputs::default(),
             host_cols: Vec::new(),
+            col_flags: Default::default(),
+            body_reach: Vec::new(),
+            joint_count: 0,
+            free_joints: Vec::new(),
             grid_levels: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -387,8 +398,9 @@ impl CudaSim {
         )
         .expect("upload previous bodies");
         self.host_bodies.extend_from_slice(bodies);
-        self.motion.ccd |= bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0);
-        self.motion.kinematic |= bodies.iter().any(|b| b.flags & 3 == 2);
+        let (ccd, kinematic) = rigid_host::body_motion_flags(bodies);
+        self.motion.ccd |= ccd;
+        self.motion.kinematic |= kinematic;
         self.body_count += count;
         start..self.body_count
     }
@@ -401,13 +413,8 @@ impl CudaSim {
             count <= self.capacity.max_colliders - start,
             "collider upload exceeds capacity"
         );
-        assert!(
-            colliders
-                .iter()
-                .all(|c| c.shape != ShapeType::ConvexHull as u32),
-            "CudaSim: convex hulls are not wired yet"
-        );
-        // Heightfield pairs take the convex stages, which this backend lacks.
+        // Height fields need their records in the hull arena and the soil flags
+        // (WgpuSim::sync_hulls); not wired on CUDA yet.
         assert!(
             colliders
                 .iter()
@@ -421,8 +428,45 @@ impl CudaSim {
         )
         .expect("upload colliders");
         self.host_cols.extend_from_slice(colliders);
+        self.col_flags.add(colliders);
+        rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         self.collider_count += count;
         start..self.collider_count
+    }
+
+    /// The convex hull arena (binding 18, `HullArena::records`), whole. Its size is the
+    /// capacity's `max_hull_vertices` records (the kernels' constant banks hold the
+    /// buffer's address): a larger arena is an error, never a truncation.
+    pub fn set_hulls(&mut self, arena: &engine_schema::convex::HullArena) -> Result<(), ExecError> {
+        let bytes: &[u8] = bytemuck::cast_slice(arena.records());
+        if bytes.len() as u64 > self.sizes[18] {
+            return Err(ExecError::Backend(format!(
+                "CudaSim: hull arena of {} records exceeds the capacity's {} (WorldCapacity::max_hull_vertices)",
+                arena.records().len(),
+                self.sizes[18] / 16
+            )));
+        }
+        self.bind_ctx()?;
+        self.upload(18, 0, bytes)
+    }
+
+    /// Joint records (binding 5), in released slots first, else after the last
+    /// (`rigid_host::alloc_joint_slot`, as WgpuSim).
+    pub fn add_joints(&mut self, joints: &[Joint]) -> Result<Vec<u32>, ExecError> {
+        self.bind_ctx()?;
+        let mut ids = Vec::with_capacity(joints.len());
+        for j in joints {
+            let id = rigid_host::alloc_joint_slot(&mut self.joint_count, &mut self.free_joints, self.capacity.max_joints);
+            self.upload(5, rigid_host::joint_offset(id), bytemuck::bytes_of(j))?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// A joint from its description, its default torque arm from the bodies' reach.
+    pub fn add_joint_desc(&mut self, desc: &engine_schema::JointDesc) -> Result<u32, ExecError> {
+        let j = rigid_host::joint_from_desc(desc, &self.host_bodies, &self.body_reach);
+        Ok(self.add_joints(&[j])?[0])
     }
 
     fn reuse_on(&self) -> bool {
@@ -432,6 +476,9 @@ impl CudaSim {
     fn step_modes(&self) -> StepModes {
         StepModes {
             manifold_insert: self.modes.manifold_insert && self.reuse_on(),
+            // The persist list is written by narrowphase only; convex kernels emit
+            // contacts after it, so hull scenes take the full persistence scan (WgpuSim).
+            listed_persist: self.modes.listed_persist && !self.col_flags.convex && !self.col_flags.height_field,
             ..self.modes
         }
     }
@@ -446,10 +493,10 @@ impl CudaSim {
         StepInputs {
             body_count: self.body_count,
             collider_count: self.collider_count,
-            joint_count: 0,
-            joint_hash_slots: engine_schema::joint_hash_size(0),
-            has_convex: false,
-            has_height_field: false,
+            joint_count: self.joint_count,
+            joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
+            has_convex: self.col_flags.convex,
+            has_height_field: self.col_flags.height_field,
             // No event shapes on CUDA (the World API runs on wgpu).
             soil: false,
             reuse_contacts: record,
@@ -623,7 +670,13 @@ impl CudaSim {
             self.steps_done += 1;
             return Ok(());
         }
-        let (cell, levels) = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, false);
+        let (cell, levels, _) = rigid_host::choose_grid(
+            &self.host_cols,
+            &self.host_bodies,
+            None,
+            self.col_flags.convex,
+            0.0,
+        );
         self.params.grid_cell_size = cell;
         self.grid_levels = levels;
         let m = self.step_modes();
@@ -635,7 +688,7 @@ impl CudaSim {
             &rigid_plan::HostState {
                 contacts_parity: self.contacts_parity,
                 grid_levels: self.grid_levels,
-                has_filters: false,
+                has_filters: self.col_flags.filters,
                 record_hash: self.reuse_on(),
                 np_defer_limit: 0,
                 persist_list_limit: 0,
@@ -796,8 +849,9 @@ impl CudaSim {
         self.upload(0, u64::from(self.capacity.max_bodies + first) * stride, bytes)
             .expect("write previous bodies");
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
-        self.motion.ccd |= bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0);
-        self.motion.kinematic |= bodies.iter().any(|b| b.flags & 3 == 2);
+        let (ccd, kinematic) = rigid_host::body_motion_flags(bodies);
+        self.motion.ccd |= ccd;
+        self.motion.kinematic |= kinematic;
         // Not the skip of a step whose counters say nothing is awake.
         self.counted_steps = self.counted_steps.wrapping_sub(1);
     }
