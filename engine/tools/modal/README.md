@@ -92,6 +92,9 @@ engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_v
 | `--fanout` | One container per executable of the selection (each test binary), all at once (see Fan-out) |
 | `--fanout-tests` | One container per test, all at once |
 | `--matrix` | The scenario matrix, one container per row (`tools/scenario-matrix/run.sh` calls it) |
+| `--matrix-cuda` | The scenario matrix on CUDA, every row in one container with 1 core and 2 GiB (`run.sh --cuda`; see below) |
+| `--pack N` | Matrix: the rows in N containers, in turn within each (default one per row; 1 for `--matrix-cuda`) |
+| `--cpus N` / `--mem GIB` | The container's cores (fractional allowed) and memory: default 8 and 8 (the Vulkan driver compiles on the CPU); 1 and 2 for `--matrix-cuda` |
 | `--build-only` | Build and pack, no Modal call |
 | `--keep` | Keep `engine/target/gpu-run/<id>/` |
 
@@ -161,7 +164,8 @@ no states made. Kernel edits go to the CUDA route instead.
 ## The scenario matrix on CUDA
 
 `tools/scenario-matrix/run.sh --cuda SWITCH [ROW ...]` (from `engine/`) runs every row in
-a T4 container of its own (`gpu_run.sh --matrix-cuda`): engine-cuda's `explicit_replay`
+one T4 container, in turn (`gpu_run.sh --matrix-cuda`; `MODAL_OPTS="--pack N"` spreads them
+over N containers): engine-cuda's `explicit_replay`
 replays the row's portable fixture (`engine_exec::explicit_plan::portable`: every binding
 as the GPU held it, the layout, the planner's settings and the host's frame paths) with
 the switch on and off, and matrix.py prints the usual table and verdict. No World, scene
@@ -177,7 +181,31 @@ needs `ENGINE_CUDA_FMAD=0` for that: by default nvcc fuses multiply-adds per mod
 modules doing the same arithmetic can differ in the last bit. Measured 2026-11-19 (T4):
 `perf=0` every row bit for bit, deltas within 2.4 %; `groupsplit` (strict) every row bit for
 bit, the contact rows 3 to 20 times faster with it. A run: about 4 minutes of local build
-after a kernel edit, then 50 to 120 container-seconds (2 to 4 cents) for the 12 rows.
+after a kernel edit, then about half a minute on Modal and half a cent for the 12 rows.
+
+What one verdict costs (2026-11-21, T4, `perf=0` strict, all 12 rows; each row's on and off
+halves always run in the same container, so a verdict never reuses a stored control):
+
+| Containers, cores, memory | Billed | Cost | Wall on Modal |
+|---|---|---|---|
+| 12 (one per row), 8 cores, 8 GiB (the old default) | 53-63 s | $0.015-0.018 | 65-495 s (twelve GPUs to find) |
+| 12, 1 core, 2 GiB | 57 s | $0.0104 | 37 s |
+| 1, 8 cores, 8 GiB | 24 s | $0.0069 | 27 s |
+| **1, 1 core, 2 GiB (the default)** | **26 s** | **$0.0048** | **29 s** |
+| 1, 0.5 core, 2 GiB | 25 s | $0.0044 | 28 s |
+| L4: 1, 1 core, 2 GiB | 21 s | $0.0051 | 330 s (queued for an L4) |
+
+- Twelve containers bill twelve starts (about 2.5 s each) and wait for twelve GPUs; one
+  container bills one and waits for one. The rows' own work is about 21-25 s either way.
+- The container only launches GPU work: 1 core and 2 GiB time the same as 8 and 8, at 63 % of
+  the rate. Half a core saves another 8 %; one core is kept as the margin for host-heavy
+  rows.
+- One container also gave steadier numbers: no row needed its two extra runs, while the
+  per-row layout reran two rows, and its truss row read 2.18 ms against 1.26 ms on a
+  different container.
+- The T4 stays the default: the L4 costs the same per verdict (faster, at 1.32 times the
+  rate) and Modal often has none free. The L4 is for large scenes, where GPU time dominates.
+- At $0.0048 a verdict, $30 a month is about 6,000 matrix verdicts (200 a day).
 
 `PROFILE_SPLIT=1` adds each row's frame on CUDA (`explicit_replay --ab-profile`, both
 halves): wall and GPU time, the kernels' sum, the gaps between launches (GPU minus
@@ -441,7 +469,8 @@ Mac was not checked here.
 ## Cost and turnaround
 
 Modal bills per second while the container runs; `gpu_run.py` prints an estimate at
-the end. With the default 8 cores and 8 GiB: T4 ≈ $0.00029/s (≈ $0.017/min); 16 cores
+the end. With the default 8 cores and 8 GiB: T4 ≈ $0.00029/s (≈ $0.017/min); with 1 core and
+2 GiB (the CUDA matrix's default) ≈ $0.00018/s (≈ $0.011/min); 16 cores
 ≈ $0.024/min (GPU prices of 2026-10 from modal.com/pricing, plus CPU
 $0.0000131/core/s and memory $0.00000222/GiB/s). The 10-minute cap bounds a T4 run at
 about $0.17.

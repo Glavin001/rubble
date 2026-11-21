@@ -18,9 +18,10 @@
 #   kind (slower); PROFILE=fast|release (default fast); THRESHOLD=% and NOISE_MS=ms.
 #
 # Where it runs: the Mac's GPU, under the GPU lock (the default).
-#   tools/scenario-matrix/run.sh --cuda SWITCH [ROW ...]   every row in a T4 container of
-#       its own on Modal, on CUDA (engine-cuda's explicit_replay; device code built locally
-#       with nvcc, so a kernel edit costs a local build, ~4 min, and cents on Modal). It
+#   tools/scenario-matrix/run.sh --cuda SWITCH [ROW ...]   every row in one T4 container
+#       (1 core, 2 GiB) on Modal, on CUDA (engine-cuda's explicit_replay; device code built
+#       locally with nvcc, so a kernel edit costs a local build, ~4 min, then ~30 s and half
+#       a cent on Modal; MODAL_OPTS="--pack N" spreads the rows over N containers). It
 #       replays each row's portable fixture (out/scenario-matrix/portable/ROW.pfx: run
 #       `python3 tools/scenario-matrix/matrix.py --make-portable` under the GPU lock once
 #       after --make). Bit for bit holds within CUDA (ENGINE_CUDA_FMAD=0 for strict floats
