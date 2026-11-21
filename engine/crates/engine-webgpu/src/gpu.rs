@@ -121,17 +121,29 @@ impl LazyKernel {
 ///   value they read from it was written in the same dispatch before a barrier (a body's
 ///   lanes are live together, so a lane's partner in `primalReduceStep` has written the
 ///   slot it reads; `gsUniformLanes` is written by lane 0 before each read);
-/// - the bounds checks stay: without them the rigid scenes' end states differ from step
-///   20 on (a clamped index somewhere; not found). The division guards stay: unproven.
+/// - the bounds checks stay: without them the end states differ from step 20 on, through
+///   `narrowphase_fresh_copy_persistent` and `ccd_emit_copy_persistent` (the manifold
+///   code), and the other kernels gain nothing without them. The division guards stay:
+///   unproven.
 fn rigid_shader_checks_off(device: &wgpu::Device, name: &str) -> u32 {
     static ENV: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     if let Some(mask) = *ENV.get_or_init(|| std::env::var("RUBBLE_RIGID_SHADER_CHECKS_OFF").ok().and_then(|v| v.parse().ok())) {
         return mask;
     }
+    // The search for the kernel whose result depends on the bounds checks:
+    // `RUBBLE_RIGID_BOUNDS_OFF_NAMES=a,b` compiles those kernels alone without them
+    // (`RUBBLE_RIGID_KERNEL_NAMES=1` prints each kernel as it is built).
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        std::env::var("RUBBLE_RIGID_BOUNDS_OFF_NAMES").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_default()
+    });
+    if std::env::var_os("RUBBLE_RIGID_KERNEL_NAMES").is_some() {
+        eprintln!("rigid kernel: {name}");
+    }
     if cfg!(target_arch = "wasm32") {
         return 0;
     }
-    let mut off = 0;
+    let mut off = u32::from(names.iter().any(|n| n == name));
     if device.adapter_info().backend == wgpu::Backend::Metal {
         off |= 2;
     }

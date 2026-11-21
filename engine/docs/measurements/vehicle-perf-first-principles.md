@@ -3861,6 +3861,25 @@ fixtures bit for bit; the 11 suites of `perf-verify.sh default` with no variable
 pass; `engine-metal` `explicit_parity` 7, `vehicle_parity` 4, `explicit_drive_parity` 1
 pass.
 
+*Whole runs* (the mountain, 40 s, `--rockslide 0 --self-split 1 --timing step`; the
+vehicles' GPU ms a World step from t 0.5 s, median / p95; the fully checked build is
+`RUBBLE_SHADER_CHECKS_OFF=0 RUBBLE_RIGID_SHADER_CHECKS_OFF=0`, the default is this
+section's and §8.47's; the two in turn):
+
+| | fully checked | the default |
+|---|---|---|
+| 8 cars, 2 rounds | 17.30 / 21.66, 17.27 / 21.69 | **15.60 / 19.97, 15.79 / 20.06** (−9 % median, −8 % p95) |
+| 8 cars, the World's wall ms a step, median | 19.3, 20.1 | 17.4, 19.4 |
+| 1 car, 4 rounds | 4.22 / 4.57, 4.22 / 4.66, 4.22 / 4.68, 4.23 / 4.58 | **3.78 / 4.14, 3.77 / 4.12, 3.82 / 4.32, 3.81 / 4.31** (−10 % median) |
+| 1 car, the World's wall ms a step, median | 7.31, 7.16, 6.19, 5.73 | 6.72, 6.66, 5.36, 5.17 |
+
+One car's level moves between processes (§8.40): in five other runs of the default it
+was 3.74, 3.75, 4.14, 4.16 and 4.18, and in one other of the checked build 4.17. So over
+whole runs the default is 10 % faster in most processes and level in the rest; within
+one process (the matrix) it is faster in every row. A whole run's final state is not
+compared: native wgpu is not reproducible run to run (the fixtures and the matrix hold
+the bits).
+
 **To run again** (from `engine/`):
 ```sh
 tools/scenario-matrix/run.sh checks=7                  # all three out (the default) against checked, every row
@@ -3895,11 +3914,22 @@ checked build):
 | **the bounds checks (1)** | **differ in 10 of 11**, first at the checkpoint of step 20 (both brick rings), 30 (brick walls), 50 (pyramid, box pile, ragdoll pile), 75 (wall smash, 100k grid), 100 (chain mail), 200 (sphere pile); hinge chains the same |
 
 So unlike the explicit kernels (strict arithmetic, every word the same without the
-checks), a rigid kernel's result depends on the bounds checks. It is not a rounding of
-the whole build: the first ten steps are bit for bit and the scenes part at different
-steps. Which kernel and whether it is an index the clamp makes harmless or a rounding in
-a path first taken then is not found; until it is, the bounds checks stay on the World's
-kernels. What they would be worth is below.
+checks), a rigid result depends on the bounds checks. It is not a rounding of the whole
+build: the first ten steps are bit for bit and the scenes part at different steps.
+
+**Which kernels** (`RUBBLE_RIGID_BOUNDS_OFF_NAMES=a,b`: the bounds checks out of those
+kernels alone; `tools/rigid-gate/bounds-search.py`'s halving over the 79 kernels the 11 scenes build):
+two, **`narrowphase_fresh_copy_persistent`** (the 28k ring, from step 20) and
+**`ccd_emit_copy_persistent`** (the box pile, from step 150, after the ball). Both run
+the shapes' manifold code (`narrowphaseShapes`, `box_collide.slang`). With the checks
+out of the other 77 the 11 scenes are bit for bit, and the step is no faster (six paired
+rounds: the 110k ring +0.3 %, the 32k pile −0.7 %). So the bounds checks' 5 to 6 % of a
+rigid step is in those two kernels, the ones whose result depends on them, and nothing
+of it can be taken until that is resolved. Not determined: whether it is an index the
+clamp makes harmless or a rounding that the compiler chooses differently around the
+clamps (the kernels are not strict; `boxClipPoly` and `boxAddPt` guard their own counts,
+and the scenes stay bit for bit while their boxes are axis-aligned, which points at
+rounding; this code has a history on Metal, see the note above `closingPoints`).
 
 **Time** (ms a step; the level of the machine moved between rounds, so the deltas are
 each round's pair, and the later rounds are the steadier):
@@ -3949,10 +3979,11 @@ the variants, the first split path, the World's coupling; mask bit 8 of
 +1.7 %, no row moves. Nothing there on the default paths (the wide and split paths
 already skip it, §8.8). Not adopted; the bit stays as a measurement.
 
-**What is left of this lesson.** One thing: the bounds checks on the World's kernels, 5
-to 6 % of a rigid step on Metal (the 110k ring 16.5 → 15.6 ms), blocked on finding where
-a result depends on them. That is a search by kernel (the mask a module, the hash after
-each), then either a real index out of range to fix or a rounding to hold.
+**What is left of this lesson.** One thing: the bounds checks in the manifold code of
+the narrowphase and the CCD's emit, 5 to 6 % of a rigid step on Metal (the 110k ring 16.5
+→ 15.6 ms). If the dependence is an index, it is a bug to fix and the checks can go; if
+it is a rounding, the two builds are each valid and taking the checks out changes the
+rigid scenes' bits, which is the owner's decision (the rigid gate holds them to `main`).
 
 **To run again** (from `engine/`):
 ```sh
@@ -3960,4 +3991,5 @@ GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world --example
 RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world --example rigid_gate
 RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=time GATE_SLEEP=off GATE_SCENES="Brick Ring (110k),Box Pile (32k)" cargo run --profile fast -p engine-world --example rigid_gate
 tools/scenario-matrix/run.sh checks=15:7     # the explicit pipelines' zeroing (ON:OFF masks)
+RUBBLE_RIGID_BOUNDS_OFF_NAMES=narrowphase_fresh_copy_persistent GATE_MODE=hash GATE_SLEEP=off GATE_SCENES="Brick Ring (28k)" cargo run --profile fast -p engine-world --example rigid_gate   # differs from step 20
 ```
