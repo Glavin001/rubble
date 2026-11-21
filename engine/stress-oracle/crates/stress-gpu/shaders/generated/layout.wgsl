@@ -715,8 +715,8 @@ fn lay_bond_ranks_0( parent_6 : vec4<u32>,  c0_4 : u32,  b0_2 : u32,  b1_2 : u32
     device_group_barrier_0();
     if(tid_5 == u32(0))
     {
-        var r_2 : u32 = u32(0);
         var at_1 : u32 = u32(0);
+        var r_2 : u32 = u32(0);
         loop
         {
             if(r_2 < _S32)
@@ -727,17 +727,17 @@ fn lay_bond_ranks_0( parent_6 : vec4<u32>,  c0_4 : u32,  b0_2 : u32,  b1_2 : u32
                 break;
             }
             var _S34 : u32 = base_4 + child_by_island_0(parent_6, r_2);
-            var count_0 : u32 = plan_0[child_bonds_at_0(_S34)];
+            var next_2 : u32 = at_1 + plan_0[child_bonds_at_0(_S34)];
             var _S35 : u32 = b0_2 + at_1;
             plan_0[child_bonds_at_0(_S34)] = _S35;
             plan_0[child_bonds_at_0(_S34) + u32(1)] = _S35;
-            var at_2 : u32 = at_1 + count_0;
-            r_2 = r_2 + u32(1);
-            at_1 = at_2;
+            var _S36 : u32 = r_2 + u32(1);
+            at_1 = next_2;
+            r_2 = _S36;
         }
-        var _S36 : u32 = b0_2 + at_1;
-        g_cut_first_0 = _S36;
-        g_cut_next_0 = _S36;
+        var _S37 : u32 = b0_2 + at_1;
+        g_cut_first_0 = _S37;
+        g_cut_next_0 = _S37;
     }
     device_group_barrier_0();
     bond_ranks_0(parent_6, base_4, c0_4, b0_2, b1_2, tid_5, true);
@@ -757,23 +757,23 @@ fn lay_bonds_0( c0_5 : u32,  b0_3 : u32,  b1_3 : u32,  base_5 : u32,  tid_6 : u3
             break;
         }
         var ids_1 : vec4<u32> = (bitcast<vec4<u32>>((old_bonds_0[bond_word_0(b_3, u32(14))])));
-        var _S37 : u32 = ids_1.y;
-        var _S38 : u32 = base_5 + _S37 - c0_5;
-        var ka_1 : u32 = work_0[_S38];
-        var _S39 : u32 = ids_1.z;
-        var _S40 : u32 = base_5 + _S39 - c0_5;
+        var _S38 : u32 = ids_1.y;
+        var _S39 : u32 = base_5 + _S38 - c0_5;
+        var ka_1 : u32 = work_0[_S39];
+        var _S40 : u32 = ids_1.z;
+        var _S41 : u32 = base_5 + _S40 - c0_5;
         var nb_0 : u32;
         var new_ids_0 : vec4<u32>;
-        if(ka_1 == work_0[_S40])
+        if(ka_1 == work_0[_S41])
         {
-            var _S41 : vec4<u32> = vec4<u32>(ids_1.x, c0_5 + plan_0[new_chunk_at_0(_S38)], c0_5 + plan_0[new_chunk_at_0(_S40)], plan_0[child_island_at_0(base_5 + ka_1)]);
+            var _S42 : vec4<u32> = vec4<u32>(ids_1.x, c0_5 + plan_0[new_chunk_at_0(_S39)], c0_5 + plan_0[new_chunk_at_0(_S41)], plan_0[child_island_at_0(base_5 + ka_1)]);
             nb_0 = plan_0[bond_new_at_0(b_3)];
-            new_ids_0 = _S41;
+            new_ids_0 = _S42;
         }
         else
         {
             var nb_1 : u32 = plan_0[bond_new_at_0(b_3)];
-            var _S42 : vec4<u32> = vec4<u32>(ids_1.x, _S37, _S39, u32(4294967295));
+            var _S43 : vec4<u32> = vec4<u32>(ids_1.x, _S38, _S40, u32(4294967295));
             nb_0 = u32(0);
             loop
             {
@@ -787,12 +787,12 @@ fn lay_bonds_0( c0_5 : u32,  b0_3 : u32,  b1_3 : u32,  base_5 : u32,  tid_6 : u3
                 scratch_0[u32(3) * nb_1 + nb_0] = vec4<f32>(0.0f);
                 nb_0 = nb_0 + u32(1);
             }
-            var _S43 : u32 = u32(2) * nb_1;
-            var _S44 : vec4<f32> = vec4<f32>(0.0f);
-            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S43] = _S44;
-            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S43 + u32(1)] = _S44;
+            var _S44 : u32 = u32(2) * nb_1;
+            var _S45 : vec4<f32> = vec4<f32>(0.0f);
+            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S44] = _S45;
+            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S44 + u32(1)] = _S45;
             nb_0 = nb_1;
-            new_ids_0 = _S42;
+            new_ids_0 = _S43;
         }
         var w_7 : u32 = u32(0);
         loop
@@ -840,27 +840,27 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
     var add_0 : u32;
     var pad_0 : u32;
     var m_2 : u32;
-    var _S45 : bool;
+    var _S46 : bool;
     if(cut_first_0 < b1_4)
     {
         pad_0 = u32(2) * cut_first_0;
     }
     else
     {
-        var _S46 : u32 = old_index_0[c0_6];
+        var _S47 : u32 = old_index_0[c0_6];
         pad_0 = u32(4294967295);
-        m_2 = _S46;
+        m_2 = _S47;
         loop
         {
             if(m_2 < old_index_0[c1_1])
             {
-                _S45 = pad_0 == u32(4294967295);
+                _S46 = pad_0 == u32(4294967295);
             }
             else
             {
-                _S45 = false;
+                _S46 = false;
             }
-            if(_S45)
+            if(_S46)
             {
             }
             else
@@ -869,16 +869,16 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
             }
             var entry_0 : u32 = old_index_0[m_2];
             var bond_0 : u32 = (entry_0 >> (u32(1)));
-            var _S47 : bool;
+            var _S48 : bool;
             if(bond_0 < b0_4)
             {
-                _S47 = true;
+                _S48 = true;
             }
             else
             {
-                _S47 = bond_0 >= b1_4;
+                _S48 = bond_0 >= b1_4;
             }
-            if(_S47)
+            if(_S48)
             {
                 pad_0 = entry_0;
             }
@@ -895,14 +895,14 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
         {
             break;
         }
-        var _S48 : u32 = c0_6 + m_2;
-        plan_0[degree_at_0(base_6 + plan_0[new_chunk_at_0(base_6 + m_2)])] = old_index_0[_S48 + u32(1)] - old_index_0[_S48];
+        var _S49 : u32 = c0_6 + m_2;
+        plan_0[degree_at_0(base_6 + plan_0[new_chunk_at_0(base_6 + m_2)])] = old_index_0[_S49 + u32(1)] - old_index_0[_S49];
         m_2 = m_2 + u32(256);
     }
     device_group_barrier_0();
-    var _S49 : u32 = old_index_0[c0_6];
+    var _S50 : u32 = old_index_0[c0_6];
     var block_1 : u32 = u32(0);
-    var carry_0 : u32 = _S49;
+    var carry_0 : u32 = _S50;
     loop
     {
         if(block_1 < n_4)
@@ -913,8 +913,8 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
             break;
         }
         var i_4 : u32 = block_1 + tid_7;
-        var _S50 : bool = i_4 < n_4;
-        if(_S50)
+        var _S51 : bool = i_4 < n_4;
+        if(_S51)
         {
             v_0 = plan_0[degree_at_0(base_6 + i_4)];
         }
@@ -947,7 +947,7 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
             workgroupBarrier();
             step_0 = (step_0 << (u32(1)));
         }
-        if(_S50)
+        if(_S51)
         {
             index_0[c0_6 + i_4] = carry_0 + g_scan64_0[tid_7] - v_0;
         }
@@ -968,15 +968,15 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
         {
             break;
         }
-        var _S51 : u32 = index_0[c0_6 + plan_0[new_chunk_at_0(base_6 + m_2)]];
-        var _S52 : u32 = c0_6 + m_2;
-        var _S53 : u32 = _S52 + u32(1);
-        var _S54 : u32 = old_index_0[_S53] - old_index_0[_S52];
-        v_0 = old_index_0[_S52];
+        var _S52 : u32 = index_0[c0_6 + plan_0[new_chunk_at_0(base_6 + m_2)]];
+        var _S53 : u32 = c0_6 + m_2;
+        var _S54 : u32 = _S53 + u32(1);
+        var _S55 : u32 = old_index_0[_S54] - old_index_0[_S53];
+        v_0 = old_index_0[_S53];
         step_0 = u32(0);
         loop
         {
-            if(v_0 < old_index_0[_S53])
+            if(v_0 < old_index_0[_S54])
             {
             }
             else
@@ -987,13 +987,13 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
             var bond_1 : u32 = (entry_1 >> (u32(1)));
             if(bond_1 < b0_4)
             {
-                _S45 = true;
+                _S46 = true;
             }
             else
             {
-                _S45 = bond_1 >= b1_4;
+                _S46 = bond_1 >= b1_4;
             }
-            if(_S45)
+            if(_S46)
             {
                 v_0 = v_0 + u32(1);
                 continue;
@@ -1004,21 +1004,21 @@ fn lay_incidence_0( c0_6 : u32,  c1_1 : u32,  b0_4 : u32,  b1_4 : u32,  n_4 : u3
                 v_0 = v_0 + u32(1);
                 continue;
             }
-            index_0[_S51 + step_0] = u32(2) * nb_2 + ((entry_1 & (u32(1))));
+            index_0[_S52 + step_0] = u32(2) * nb_2 + ((entry_1 & (u32(1))));
             step_0 = step_0 + u32(1);
             v_0 = v_0 + u32(1);
         }
         add_0 = step_0;
         loop
         {
-            if(add_0 < _S54)
+            if(add_0 < _S55)
             {
             }
             else
             {
                 break;
             }
-            index_0[_S51 + add_0] = pad_0;
+            index_0[_S52 + add_0] = pad_0;
             add_0 = add_0 + u32(1);
         }
         m_2 = m_2 + u32(256);
@@ -1094,40 +1094,40 @@ fn float_bits_0( bits_0 : u32) -> f32
 
 fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 : u32)
 {
-    var _S55 : u32 = plan_0[child_island_at_0(slot_7)];
-    var _S56 : u32 = u32(8) * slot_7;
-    var head_0 : vec4<f32> = children_0[_S56];
-    var _S57 : u32 = (bitcast<u32>((head_0.y)));
-    var count_1 : u32 = (bitcast<u32>((head_0.z)));
+    var _S56 : u32 = plan_0[child_island_at_0(slot_7)];
+    var _S57 : u32 = u32(8) * slot_7;
+    var head_0 : vec4<f32> = children_0[_S57];
+    var _S58 : u32 = (bitcast<u32>((head_0.y)));
+    var count_0 : u32 = (bitcast<u32>((head_0.z)));
     var anchored_0 : bool = (bitcast<u32>((head_0.w))) != u32(0);
-    var com_0 : vec4<f32> = children_0[_S56 + u32(1)];
-    var i0_1 : vec3<f32> = children_0[_S56 + u32(2)].xyz;
-    var i1_1 : vec3<f32> = children_0[_S56 + u32(3)].xyz;
-    var i2_1 : vec3<f32> = children_0[_S56 + u32(4)].xyz;
-    var v_3 : vec3<f32> = children_0[_S56 + u32(5)].xyz;
-    var w_10 : vec3<f32> = children_0[_S56 + u32(6)].xyz;
-    var _S58 : vec3<f32> = vec3<f32>(0.0f);
+    var com_0 : vec4<f32> = children_0[_S57 + u32(1)];
+    var i0_1 : vec3<f32> = children_0[_S57 + u32(2)].xyz;
+    var i1_1 : vec3<f32> = children_0[_S57 + u32(3)].xyz;
+    var i2_1 : vec3<f32> = children_0[_S57 + u32(4)].xyz;
+    var v_3 : vec3<f32> = children_0[_S57 + u32(5)].xyz;
+    var w_10 : vec3<f32> = children_0[_S57 + u32(6)].xyz;
+    var _S59 : vec3<f32> = vec3<f32>(0.0f);
     var first_new_0 : u32 = u32(4294967295);
     var scaled_0 : bool = false;
     var j_2 : u32 = u32(0);
     var wmass_0 : f32 = 0.0f;
-    var wmoment_0 : vec3<f32> = _S58;
+    var wmoment_0 : vec3<f32> = _S59;
     var su_mass_0 : f32 = 0.0f;
-    var su_0 : vec3<f32> = _S58;
+    var su_0 : vec3<f32> = _S59;
     loop
     {
-        if(j_2 < count_1)
+        if(j_2 < count_0)
         {
         }
         else
         {
             break;
         }
-        var m_3 : u32 = work_0[total_2 + base_7 + _S57 + j_2];
-        var _S59 : u32 = min(first_new_0, plan_0[new_chunk_at_0(base_7 + m_3)]);
-        var _S60 : u32 = c0_8 + m_3;
-        var ctr_0 : vec4<f32> = old_chunks_0[chunk_word_0(_S60, u32(0))];
-        var mu_0 : f32 = old_chunks_0[chunk_word_0(_S60, u32(7))].x;
+        var m_3 : u32 = work_0[total_2 + base_7 + _S58 + j_2];
+        var _S60 : u32 = min(first_new_0, plan_0[new_chunk_at_0(base_7 + m_3)]);
+        var _S61 : u32 = c0_8 + m_3;
+        var ctr_0 : vec4<f32> = old_chunks_0[chunk_word_0(_S61, u32(0))];
+        var mu_0 : f32 = old_chunks_0[chunk_word_0(_S61, u32(7))].x;
         if(scaled_0)
         {
             scaled_0 = true;
@@ -1136,15 +1136,15 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
         {
             scaled_0 = mu_0 != 1.0f;
         }
-        var _S61 : f32 = ctr_0.w;
-        var wmass_1 : f32 = wmass_0 + _S61 * mu_0;
-        var _S62 : vec3<f32> = vec3<f32>(_S61);
-        var wmoment_1 : vec3<f32> = wmoment_0 + ctr_0.xyz * _S62 * vec3<f32>(mu_0);
-        var su_mass_1 : f32 = su_mass_0 + _S61;
-        var su_1 : vec3<f32> = su_0 + old_state_0[u32(4) * _S60].xyz * _S62;
-        var _S63 : u32 = j_2 + u32(1);
-        first_new_0 = _S59;
-        j_2 = _S63;
+        var _S62 : f32 = ctr_0.w;
+        var wmass_1 : f32 = wmass_0 + _S62 * mu_0;
+        var _S63 : vec3<f32> = vec3<f32>(_S62);
+        var wmoment_1 : vec3<f32> = wmoment_0 + ctr_0.xyz * _S63 * vec3<f32>(mu_0);
+        var su_mass_1 : f32 = su_mass_0 + _S62;
+        var su_1 : vec3<f32> = su_0 + old_state_0[u32(4) * _S61].xyz * _S63;
+        var _S64 : u32 = j_2 + u32(1);
+        first_new_0 = _S60;
+        j_2 = _S64;
         wmass_0 = wmass_1;
         wmoment_0 = wmoment_1;
         su_mass_0 = su_mass_1;
@@ -1165,27 +1165,27 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
     if(scaled_0)
     {
         j_2 = u32(0);
-        w0_0 = _S58;
-        w1_0 = _S58;
-        w2_0 = _S58;
+        w0_0 = _S59;
+        w1_0 = _S59;
+        w2_0 = _S59;
         loop
         {
-            if(j_2 < count_1)
+            if(j_2 < count_0)
             {
             }
             else
             {
                 break;
             }
-            var _S64 : u32 = c0_8 + work_0[total_2 + base_7 + _S57 + j_2];
-            var ctr_1 : vec4<f32> = old_chunks_0[chunk_word_0(_S64, u32(0))];
+            var _S65 : u32 = c0_8 + work_0[total_2 + base_7 + _S58 + j_2];
+            var ctr_1 : vec4<f32> = old_chunks_0[chunk_word_0(_S65, u32(0))];
             var rr_0 : vec3<f32> = ctr_1.xyz - wcom_0;
             var dd_0 : f32 = dot(rr_0, rr_0);
-            var _S65 : vec3<f32> = vec3<f32>(ctr_1.w);
-            var _S66 : vec3<f32> = vec3<f32>(old_chunks_0[chunk_word_0(_S64, u32(7))].x);
-            var w0_1 : vec3<f32> = w0_0 + (old_chunks_0[chunk_word_0(_S64, u32(1))].xyz + (vec3<f32>(dd_0, 0.0f, 0.0f) - vec3<f32>(rr_0.x) * rr_0) * _S65) * _S66;
-            var w1_1 : vec3<f32> = w1_0 + (old_chunks_0[chunk_word_0(_S64, u32(2))].xyz + (vec3<f32>(0.0f, dd_0, 0.0f) - vec3<f32>(rr_0.y) * rr_0) * _S65) * _S66;
-            var w2_1 : vec3<f32> = w2_0 + (old_chunks_0[chunk_word_0(_S64, u32(3))].xyz + (vec3<f32>(0.0f, 0.0f, dd_0) - vec3<f32>(rr_0.z) * rr_0) * _S65) * _S66;
+            var _S66 : vec3<f32> = vec3<f32>(ctr_1.w);
+            var _S67 : vec3<f32> = vec3<f32>(old_chunks_0[chunk_word_0(_S65, u32(7))].x);
+            var w0_1 : vec3<f32> = w0_0 + (old_chunks_0[chunk_word_0(_S65, u32(1))].xyz + (vec3<f32>(dd_0, 0.0f, 0.0f) - vec3<f32>(rr_0.x) * rr_0) * _S66) * _S67;
+            var w1_1 : vec3<f32> = w1_0 + (old_chunks_0[chunk_word_0(_S65, u32(2))].xyz + (vec3<f32>(0.0f, dd_0, 0.0f) - vec3<f32>(rr_0.y) * rr_0) * _S66) * _S67;
+            var w2_1 : vec3<f32> = w2_0 + (old_chunks_0[chunk_word_0(_S65, u32(3))].xyz + (vec3<f32>(0.0f, 0.0f, dd_0) - vec3<f32>(rr_0.z) * rr_0) * _S66) * _S67;
             j_2 = j_2 + u32(1);
             w0_0 = w0_1;
             w1_0 = w1_1;
@@ -1206,9 +1206,9 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
     var x1_0 : vec3<f32>;
     var x2_0 : vec3<f32>;
     inverse3_0(w0_0, w1_0, w2_0, &(x0_0), &(x1_0), &(x2_0));
-    var _S67 : u32 = u32(5) * p_2;
-    var q_5 : Quat_0 = quat_of_0(frames_0[_S67]);
-    var pos_0 : vec3<f32> = frames_0[_S67 + u32(4)].xyz;
+    var _S68 : u32 = u32(5) * p_2;
+    var q_5 : Quat_0 = quat_of_0(frames_0[_S68]);
+    var pos_0 : vec3<f32> = frames_0[_S68 + u32(4)].xyz;
     var pos_1 : vec3<f32>;
     if(!anchored_0)
     {
@@ -1218,8 +1218,8 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
     {
         pos_1 = pos_0;
     }
-    var _S68 : vec3<f32> = inverse_rotate_0(q_5, w_10);
-    var iw_0 : vec3<f32> = rotate_0(q_5, vec3<f32>(dot(i0_1, _S68), dot(i1_1, _S68), dot(i2_1, _S68)));
+    var _S69 : vec3<f32> = inverse_rotate_0(q_5, w_10);
+    var iw_0 : vec3<f32> = rotate_0(q_5, vec3<f32>(dot(i0_1, _S69), dot(i1_1, _S69), dot(i2_1, _S69)));
     if(anchored_0)
     {
         j_2 = u32(1);
@@ -1254,8 +1254,8 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
         rec_0[t_2] = vec4<f32>(0.0f);
         t_2 = t_2 + u32(1);
     }
-    var _S69 : u32 = c0_8 + first_new_0;
-    rec_0[i32(0)] = (bitcast<vec4<f32>>((vec4<u32>(_S69, _S69 + count_1, bfirst_0, bend_0))));
+    var _S70 : u32 = c0_8 + first_new_0;
+    rec_0[i32(0)] = (bitcast<vec4<f32>>((vec4<u32>(_S70, _S70 + count_0, bfirst_0, bend_0))));
     rec_0[i32(1)] = (bitcast<vec4<f32>>((vec4<u32>(flags_0, u32(0), u32(0), params_0.substeps_0))));
     rec_0[i32(2)] = com_0;
     rec_0[i32(3)] = vec4<f32>(i0_1, 0.0f);
@@ -1279,7 +1279,7 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
     rec_0[i32(14)] = vec4<f32>(pos_1, 0.0f);
     if(anchored_0)
     {
-        wmoment_0 = _S58;
+        wmoment_0 = _S59;
     }
     else
     {
@@ -1288,7 +1288,7 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
     rec_0[i32(16)] = vec4<f32>(wmoment_0, 0.0f);
     if(anchored_0)
     {
-        wmoment_0 = _S58;
+        wmoment_0 = _S59;
     }
     else
     {
@@ -1299,7 +1299,7 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
     rec_0[i32(21)] = vec4<f32>(0.0f, 0.0f, 0.0f, float_bits_0(u32(2139095040)));
     if(anchored_0)
     {
-        wmoment_0 = _S58;
+        wmoment_0 = _S59;
     }
     else
     {
@@ -1316,7 +1316,7 @@ fn lay_record_0( p_2 : u32,  c0_8 : u32,  base_7 : u32,  total_2 : u32,  slot_7 
         {
             break;
         }
-        islands_0[island_word_0(_S55, t_2)] = rec_0[t_2];
+        islands_0[island_word_0(_S56, t_2)] = rec_0[t_2];
         t_2 = t_2 + u32(1);
     }
     return;
@@ -1329,41 +1329,41 @@ fn lay_engine_0( slot_8 : u32)
     if((params_0.resident_0) != u32(0))
     {
         var sl_0 : vec4<u32> = spawn_slots_0[slot_8];
-        var _S70 : u32 = u32(2) * slot_8;
-        var pr_0 : vec4<f32> = spawn_extras_0[_S70 + u32(1)];
-        var at_3 : u32 = params_0.engine_base_0 + u32(3) * island_2;
-        var _S71 : u32 = sl_0.w;
+        var _S71 : u32 = u32(2) * slot_8;
+        var pr_0 : vec4<f32> = spawn_extras_0[_S71 + u32(1)];
+        var at_2 : u32 = params_0.engine_base_0 + u32(3) * island_2;
+        var _S72 : u32 = sl_0.w;
         var body_range_0 : vec3<f32>;
-        if(_S71 != u32(0))
+        if(_S72 != u32(0))
         {
-            var _S72 : u32 = sl_0.y;
-            body_range_0 = (bitcast<vec3<f32>>((vec3<u32>(sl_0.x, _S72, _S72 + sl_0.z))));
+            var _S73 : u32 = sl_0.y;
+            body_range_0 = (bitcast<vec3<f32>>((vec3<u32>(sl_0.x, _S73, _S73 + sl_0.z))));
         }
         else
         {
             body_range_0 = vec3<f32>(float_bits_0(u32(4294967295)), 0.0f, 0.0f);
         }
-        var _S73 : bool;
+        var _S74 : bool;
         if(anchored_1)
         {
-            _S73 = true;
+            _S74 = true;
         }
         else
         {
-            _S73 = _S71 == u32(0);
+            _S74 = _S72 == u32(0);
         }
-        if(_S73)
+        if(_S74)
         {
-            ctab_0[at_3] = vec4<f32>(float_bits_0(u32(4294967295)), body_range_0);
-            var _S74 : vec4<f32> = vec4<f32>(0.0f);
-            ctab_0[at_3 + u32(1)] = _S74;
-            ctab_0[at_3 + u32(2)] = _S74;
+            ctab_0[at_2] = vec4<f32>(float_bits_0(u32(4294967295)), body_range_0);
+            var _S75 : vec4<f32> = vec4<f32>(0.0f);
+            ctab_0[at_2 + u32(1)] = _S75;
+            ctab_0[at_2 + u32(2)] = _S75;
         }
         else
         {
-            ctab_0[at_3] = vec4<f32>((bitcast<f32>((sl_0.x))), body_range_0);
-            ctab_0[at_3 + u32(1)] = vec4<f32>(- pr_0.x, - pr_0.y, - pr_0.z, pr_0.w);
-            ctab_0[at_3 + u32(2)] = vec4<f32>(spawn_extras_0[_S70].xyz, 0.0f);
+            ctab_0[at_2] = vec4<f32>((bitcast<f32>((sl_0.x))), body_range_0);
+            ctab_0[at_2 + u32(1)] = vec4<f32>(- pr_0.x, - pr_0.y, - pr_0.z, pr_0.w);
+            ctab_0[at_2 + u32(2)] = vec4<f32>(spawn_extras_0[_S71].xyz, 0.0f);
         }
     }
     gate_0[params_0.gate_flag_base_0 + island_2] = vec4<f32>(0.0f);
@@ -1381,8 +1381,8 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     var c1_3 : u32;
     var b0_5 : u32;
     var b1_5 : u32;
-    var _S75 : bool = layout_start_0(p_3, tid_8, &(parent_7), &(c0_9), &(c1_3), &(b0_5), &(b1_5));
-    if(!_S75)
+    var _S76 : bool = layout_start_0(p_3, tid_8, &(parent_7), &(c0_9), &(c1_3), &(b0_5), &(b1_5));
+    if(!_S76)
     {
         return;
     }
@@ -1412,9 +1412,9 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         {
             break;
         }
-        var _S76 : u32 = base_8 + k_3;
-        lay_record_0(p_3, c0_9, base_8, total_3, _S76);
-        lay_engine_0(_S76);
+        var _S77 : u32 = base_8 + k_3;
+        lay_record_0(p_3, c0_9, base_8, total_3, _S77);
+        lay_engine_0(_S77);
         k_3 = k_3 + u32(256);
     }
     return;
@@ -1424,18 +1424,18 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
 @workgroup_size(256, 1, 1)
 fn layout_parent_positions(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invocation_id) thread_2 : vec3<u32>)
 {
-    var _S77 : u32 = thread_2.x;
+    var _S78 : u32 = thread_2.x;
     var parent_8 : vec4<u32>;
     var c0_10 : u32;
     var c1_4 : u32;
     var b0_6 : u32;
     var b1_6 : u32;
-    var _S78 : bool = layout_start_0(group_1.x, _S77, &(parent_8), &(c0_10), &(c1_4), &(b0_6), &(b1_6));
-    if(!_S78)
+    var _S79 : bool = layout_start_0(group_1.x, _S78, &(parent_8), &(c0_10), &(c1_4), &(b0_6), &(b1_6));
+    if(!_S79)
     {
         return;
     }
-    lay_positions_0(parent_8, c1_4 - c0_10, parent_8.y, control_0[u32(6)], _S77);
+    lay_positions_0(parent_8, c1_4 - c0_10, parent_8.y, control_0[u32(6)], _S78);
     return;
 }
 
@@ -1443,18 +1443,18 @@ fn layout_parent_positions(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(
 @workgroup_size(256, 1, 1)
 fn layout_parent_chunks(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invocation_id) thread_3 : vec3<u32>)
 {
-    var _S79 : u32 = thread_3.x;
+    var _S80 : u32 = thread_3.x;
     var parent_9 : vec4<u32>;
     var c0_11 : u32;
     var c1_5 : u32;
     var b0_7 : u32;
     var b1_7 : u32;
-    var _S80 : bool = layout_start_0(group_2.x, _S79, &(parent_9), &(c0_11), &(c1_5), &(b0_7), &(b1_7));
-    if(!_S80)
+    var _S81 : bool = layout_start_0(group_2.x, _S80, &(parent_9), &(c0_11), &(c1_5), &(b0_7), &(b1_7));
+    if(!_S81)
     {
         return;
     }
-    lay_chunks_0(c0_11, c1_5 - c0_11, parent_9.y, _S79);
+    lay_chunks_0(c0_11, c1_5 - c0_11, parent_9.y, _S80);
     return;
 }
 
@@ -1462,27 +1462,27 @@ fn layout_parent_chunks(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(loc
 @workgroup_size(256, 1, 1)
 fn layout_parent_ctab(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invocation_id) thread_4 : vec3<u32>)
 {
-    var _S81 : u32 = thread_4.x;
+    var _S82 : u32 = thread_4.x;
     var parent_10 : vec4<u32>;
     var c0_12 : u32;
     var c1_6 : u32;
     var b0_8 : u32;
     var b1_8 : u32;
-    var _S82 : bool = layout_start_0(group_3.x, _S81, &(parent_10), &(c0_12), &(c1_6), &(b0_8), &(b1_8));
-    var _S83 : bool;
-    if(!_S82)
+    var _S83 : bool = layout_start_0(group_3.x, _S82, &(parent_10), &(c0_12), &(c1_6), &(b0_8), &(b1_8));
+    var _S84 : bool;
+    if(!_S83)
     {
-        _S83 = true;
+        _S84 = true;
     }
     else
     {
-        _S83 = (params_0.resident_0) == u32(0);
+        _S84 = (params_0.resident_0) == u32(0);
     }
-    if(_S83)
+    if(_S84)
     {
         return;
     }
-    lay_ctab_chunks_0(c0_12, c1_6 - c0_12, parent_10.y, _S81);
+    lay_ctab_chunks_0(c0_12, c1_6 - c0_12, parent_10.y, _S82);
     return;
 }
 
@@ -1490,18 +1490,18 @@ fn layout_parent_ctab(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local
 @workgroup_size(256, 1, 1)
 fn layout_parent_bond_ranks(@builtin(workgroup_id) group_4 : vec3<u32>, @builtin(local_invocation_id) thread_5 : vec3<u32>)
 {
-    var _S84 : u32 = thread_5.x;
+    var _S85 : u32 = thread_5.x;
     var parent_11 : vec4<u32>;
     var c0_13 : u32;
     var c1_7 : u32;
     var b0_9 : u32;
     var b1_9 : u32;
-    var _S85 : bool = layout_start_0(group_4.x, _S84, &(parent_11), &(c0_13), &(c1_7), &(b0_9), &(b1_9));
-    if(!_S85)
+    var _S86 : bool = layout_start_0(group_4.x, _S85, &(parent_11), &(c0_13), &(c1_7), &(b0_9), &(b1_9));
+    if(!_S86)
     {
         return;
     }
-    lay_bond_ranks_0(parent_11, c0_13, b0_9, b1_9, parent_11.y, _S84);
+    lay_bond_ranks_0(parent_11, c0_13, b0_9, b1_9, parent_11.y, _S85);
     return;
 }
 
@@ -1509,18 +1509,18 @@ fn layout_parent_bond_ranks(@builtin(workgroup_id) group_4 : vec3<u32>, @builtin
 @workgroup_size(256, 1, 1)
 fn layout_parent_bonds(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_invocation_id) thread_6 : vec3<u32>)
 {
-    var _S86 : u32 = thread_6.x;
+    var _S87 : u32 = thread_6.x;
     var parent_12 : vec4<u32>;
     var c0_14 : u32;
     var c1_8 : u32;
     var b0_10 : u32;
     var b1_10 : u32;
-    var _S87 : bool = layout_start_0(group_5.x, _S86, &(parent_12), &(c0_14), &(c1_8), &(b0_10), &(b1_10));
-    if(!_S87)
+    var _S88 : bool = layout_start_0(group_5.x, _S87, &(parent_12), &(c0_14), &(c1_8), &(b0_10), &(b1_10));
+    if(!_S88)
     {
         return;
     }
-    lay_bonds_0(c0_14, b0_10, b1_10, parent_12.y, _S86);
+    lay_bonds_0(c0_14, b0_10, b1_10, parent_12.y, _S87);
     return;
 }
 
@@ -1528,18 +1528,18 @@ fn layout_parent_bonds(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(loca
 @workgroup_size(256, 1, 1)
 fn layout_parent_incidence(@builtin(workgroup_id) group_6 : vec3<u32>, @builtin(local_invocation_id) thread_7 : vec3<u32>)
 {
-    var _S88 : u32 = thread_7.x;
+    var _S89 : u32 = thread_7.x;
     var parent_13 : vec4<u32>;
     var c0_15 : u32;
     var c1_9 : u32;
     var b0_11 : u32;
     var b1_11 : u32;
-    var _S89 : bool = layout_start_0(group_6.x, _S88, &(parent_13), &(c0_15), &(c1_9), &(b0_11), &(b1_11));
-    if(!_S89)
+    var _S90 : bool = layout_start_0(group_6.x, _S89, &(parent_13), &(c0_15), &(c1_9), &(b0_11), &(b1_11));
+    if(!_S90)
     {
         return;
     }
-    lay_incidence_0(c0_15, c1_9, b0_11, b1_11, c1_9 - c0_15, parent_13.y, plan_0[child_bonds_at_0(parent_13.y + child_by_island_0(parent_13, parent_13.z - u32(1))) + u32(1)], _S88);
+    lay_incidence_0(c0_15, c1_9, b0_11, b1_11, c1_9 - c0_15, parent_13.y, plan_0[child_bonds_at_0(parent_13.y + child_by_island_0(parent_13, parent_13.z - u32(1))) + u32(1)], _S89);
     return;
 }
 
@@ -1547,19 +1547,19 @@ fn layout_parent_incidence(@builtin(workgroup_id) group_6 : vec3<u32>, @builtin(
 @workgroup_size(256, 1, 1)
 fn layout_parent_records(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invocation_id) thread_8 : vec3<u32>)
 {
-    var _S90 : u32 = group_7.x;
-    var _S91 : u32 = thread_8.x;
+    var _S91 : u32 = group_7.x;
+    var _S92 : u32 = thread_8.x;
     var parent_14 : vec4<u32>;
     var c0_16 : u32;
     var c1_10 : u32;
     var b0_12 : u32;
     var b1_12 : u32;
-    var _S92 : bool = layout_start_0(_S90, _S91, &(parent_14), &(c0_16), &(c1_10), &(b0_12), &(b1_12));
-    if(!_S92)
+    var _S93 : bool = layout_start_0(_S91, _S92, &(parent_14), &(c0_16), &(c1_10), &(b0_12), &(b1_12));
+    if(!_S93)
     {
         return;
     }
-    var k_4 : u32 = _S91;
+    var k_4 : u32 = _S92;
     loop
     {
         if(k_4 < (parent_14.z))
@@ -1569,7 +1569,7 @@ fn layout_parent_records(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(lo
         {
             break;
         }
-        lay_record_0(_S90, c0_16, parent_14.y, control_0[u32(6)], parent_14.y + k_4);
+        lay_record_0(_S91, c0_16, parent_14.y, control_0[u32(6)], parent_14.y + k_4);
         k_4 = k_4 + u32(256);
     }
     return;
@@ -1579,18 +1579,18 @@ fn layout_parent_records(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(lo
 @workgroup_size(256, 1, 1)
 fn layout_parent_engine(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(local_invocation_id) thread_9 : vec3<u32>)
 {
-    var _S93 : u32 = thread_9.x;
+    var _S94 : u32 = thread_9.x;
     var parent_15 : vec4<u32>;
     var c0_17 : u32;
     var c1_11 : u32;
     var b0_13 : u32;
     var b1_13 : u32;
-    var _S94 : bool = layout_start_0(group_8.x, _S93, &(parent_15), &(c0_17), &(c1_11), &(b0_13), &(b1_13));
-    if(!_S94)
+    var _S95 : bool = layout_start_0(group_8.x, _S94, &(parent_15), &(c0_17), &(c1_11), &(b0_13), &(b1_13));
+    if(!_S95)
     {
         return;
     }
-    var k_5 : u32 = _S93;
+    var k_5 : u32 = _S94;
     loop
     {
         if(k_5 < (parent_15.z))
@@ -1610,16 +1610,16 @@ fn layout_parent_engine(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(loc
 @workgroup_size(64, 1, 1)
 fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
-    var _S95 : bool;
+    var _S96 : bool;
     if(control_0[i32(0)] != u32(0))
     {
-        _S95 = true;
+        _S96 = true;
     }
     else
     {
-        _S95 = control_0[u32(1)] == u32(0);
+        _S96 = control_0[u32(1)] == u32(0);
     }
-    if(_S95)
+    if(_S96)
     {
         return;
     }
@@ -1649,13 +1649,13 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
     var e_1 : u32 = plan_0[order_at_0(i_5)];
     if(plan_0[order_at_0(i_5)] >= control_0[u32(2)])
     {
-        _S95 = true;
+        _S96 = true;
     }
     else
     {
-        _S95 = e_1 == i_5;
+        _S96 = e_1 == i_5;
     }
-    if(_S95)
+    if(_S96)
     {
         return;
     }
@@ -1673,13 +1673,13 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
         t_3 = t_3 + u32(1);
     }
     var r_4 : vec4<f32> = old_islands_0[island_word_0(e_1, u32(0))];
-    var _S96 : u32 = (bitcast<u32>((r_4.y)));
+    var _S97 : u32 = (bitcast<u32>((r_4.y)));
     var b0_14 : u32 = (bitcast<u32>((r_4.z)));
-    var _S97 : u32 = (bitcast<u32>((r_4.w)));
+    var _S98 : u32 = (bitcast<u32>((r_4.w)));
     var c_3 : u32 = (bitcast<u32>((r_4.x)));
     loop
     {
-        if(c_3 < _S96)
+        if(c_3 < _S97)
         {
         }
         else
@@ -1692,17 +1692,17 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
     var b_4 : u32 = b0_14;
     loop
     {
-        if(b_4 < _S97)
+        if(b_4 < _S98)
         {
         }
         else
         {
             break;
         }
-        var _S98 : u32 = bond_word_0(b_4, u32(14));
-        var ids_2 : vec4<f32> = bonds_0[_S98];
+        var _S99 : u32 = bond_word_0(b_4, u32(14));
+        var ids_2 : vec4<f32> = bonds_0[_S99];
         ids_2[i32(3)] = (bitcast<f32>((i_5)));
-        bonds_0[_S98] = ids_2;
+        bonds_0[_S99] = ids_2;
         b_4 = b_4 + u32(1);
     }
     if((params_0.resident_0) != u32(0))
@@ -1729,16 +1729,16 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn layout_copy(@builtin(global_invocation_id) id_2 : vec3<u32>)
 {
-    var _S99 : bool;
+    var _S100 : bool;
     if(control_0[i32(0)] != u32(0))
     {
-        _S99 = true;
+        _S100 = true;
     }
     else
     {
-        _S99 = control_0[u32(1)] == u32(0);
+        _S100 = control_0[u32(1)] == u32(0);
     }
-    if(_S99)
+    if(_S100)
     {
         return;
     }
@@ -1795,8 +1795,8 @@ fn layout_copy(@builtin(global_invocation_id) id_2 : vec3<u32>)
             {
                 break;
             }
-            var _S100 : u32 = island_word_0(i_6, t_4);
-            island_copy_0[_S100] = islands_0[_S100];
+            var _S101 : u32 = island_word_0(i_6, t_4);
+            island_copy_0[_S101] = islands_0[_S101];
             t_4 = t_4 + u32(1);
         }
     }
