@@ -166,6 +166,7 @@
         <label title="Copies of the car in the run. On the mountain they leave the lip together, side by side and stacked, closing on the first car, so they crash into each other on the way down; on the flat arena the others stand in a row to one side. The numbers shown are the first car's. Rebuilds the lab in place (no reload).">cars <input type="number" id="cars" data-opt="build" value="1" min="1" max="32" step="1" /></label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
+        <label title="The cars' raycast wheels also stand on rigid bodies (crates, bricks, blocks, ramps that are bodies) and push them back, the nearest surface under each wheel, as BeamNG's wheels meet whatever they touch. Off: the wheels see the ground and the arena's fixed shapes only (a car on debris hangs on its body). Applies as it runs."><input type="checkbox" id="wheelsHitBodies" data-opt="live" checked /> wheels on bodies</label>
         <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label>
         <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label>
         <label title="With the torn pieces labelled, the rigid bodies in the car's window are those near some piece, not everything between the car and a piece far away (the same contacts). Applies as it runs."><input type="checkbox" id="pieceWindows" data-opt="live" checked /> a coupling window per piece</label>
@@ -329,7 +330,7 @@
     const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test', derby: 'Derby' };
     // The derby's camera per mode (Derby: the chase camera on the player's car).
     const modeCam = (k) => (k === 'mountain' ? 'overhead' : k === 'drive' || k === 'derby' ? 'chase' : 'orbit');
-    const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks'];
+    const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks', 'drive-ramp-bricks'];
     $('script').add(new Option('none (free play)', ''));
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
     const CAMS = { overhead: 'Overhead chase', orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
@@ -422,6 +423,7 @@
         else if (c.id === 'derbyPlayer' || c.id === 'aggression') { cmd({ derby: derbySpec() }); if (c.id === 'derbyPlayer') { lastDrive = ''; canvas.focus(); } }
         else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
         else if (c.id === 'bitExact') cmd({ bitExact: get('bitExact') });
+        else if (c.id === 'wheelsHitBodies') cmd({ wheelsHitBodies: get('wheelsHitBodies') });
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
@@ -593,7 +595,7 @@
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), bitExact: get('bitExact'), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), wheelsHitBodies: get('wheelsHitBodies'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), bitExact: get('bitExact'), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),

@@ -45,6 +45,27 @@ pub struct ExplicitVehiclesDef {
     /// arithmetic: faster, last-bit differences between machines
     /// (`ExplicitBeamsGpu::set_bit_exact`). At run time: [`World::set_explicit_bit_exact`].
     pub bit_exact: bool,
+    /// Raycast wheels hit bodies (an engine-wide setting, on by default: a car drives on
+    /// crates, bricks and ramps that are World bodies, as BeamNG's wheels meet whatever
+    /// they stand on): the wheels' rays also meet the vehicle's rigid proxies, the
+    /// nearest surface wins, and the wheel force's reaction goes onto the body at the
+    /// contact point (`engine_softbody::explicit_drive::DriveConfig::see_bodies`). The
+    /// proxy plan then reaches the wheels' rays ([`wheel_reach`]). Off: every step bit
+    /// for bit as without it (the wheels see the ground and the static shapes only).
+    /// Live: [`World::set_explicit_wheels_hit_bodies`].
+    pub wheels_hit_bodies: bool,
+}
+
+/// The farthest any raycast wheel's ray reaches below its hub (m): its travel plus radius
+/// less the hardpoint's height. The proxy plan's margin is at least this while wheels hit
+/// bodies, so a body under a wheel is a proxy whenever the ray can reach it.
+pub fn wheel_reach(vehicles: &[ExplicitBeams]) -> f32 {
+    vehicles
+        .iter()
+        .filter_map(|v| v.drive.as_deref())
+        .flat_map(|d| d.config.wheels.iter())
+        .map(|w| (w.susp_max + w.radius - w.rest_len).max(0.0))
+        .fold(0.0, f32::max)
 }
 
 impl Default for ExplicitVehiclesDef {
@@ -61,6 +82,7 @@ impl Default for ExplicitVehiclesDef {
             vehicle_contact: true,
             sleep: Some(engine_softbody::explicit_sleep::VehicleSleep::default()),
             bit_exact: engine_webgpu::bit_exact_default(),
+            wheels_hit_bodies: true,
         }
     }
 }
@@ -235,6 +257,7 @@ impl ExplicitVehicles {
         let mut gpu = ExplicitBeamsGpu::with_settings(device, queue, vehicles, Some(def.capacity), def.sleep, def.bit_exact);
         gpu.set_vehicle_contact(def.vehicle_contact);
         gpu.set_coupling_on(true);
+        gpu.set_wheels_see_bodies(def.wheels_hit_bodies);
         let layout = gpu.coupling().expect("coupling room");
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
@@ -538,6 +561,16 @@ impl ExplicitVehicles {
         })
     }
 
+    /// The proxy plan's extra reach: the def's margin, and while wheels hit bodies at
+    /// least the wheels' rays' ([`wheel_reach`]).
+    fn plan_margin(&self) -> f32 {
+        if self.def.wheels_hit_bodies {
+            self.def.margin.max(wheel_reach(&self.sims))
+        } else {
+            self.def.margin
+        }
+    }
+
     fn write_params(&self, sim: &engine_webgpu::WgpuSim, steps: u32, ingest_rows: u32, rest: Option<engine_webgpu::RestView>) {
         let cap = self.layout.cap;
         let p = Params {
@@ -551,7 +584,7 @@ impl ExplicitVehicles {
             recs: self.layout.recs(),
             misc_base: self.layout.misc_base,
             window: (f64::from(steps) * STEP) as f32,
-            margin: self.def.margin,
+            margin: self.plan_margin(),
             key_base: KEY_BASE,
             impulse_base: engine_schema::IMPULSE_BASE,
             impulse_count: engine_schema::IMPULSE_COUNT,
@@ -894,6 +927,7 @@ impl World {
         let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
         anyhow::ensure!(vehicles.len() == x.sims.len(), "reset_explicit_vehicles: {} vehicles, {} were added", vehicles.len(), x.sims.len());
         x.gpu.reset_state(vehicles, Some(x.def.capacity), x.def.sleep).map_err(anyhow::Error::msg)?;
+        x.gpu.set_wheels_see_bodies(x.def.wheels_hit_bodies);
         x.sims = vehicles.to_vec();
         x.carry = 0.0;
         x.emit_pending = false;
@@ -986,6 +1020,20 @@ impl World {
     /// Whether the explicit vehicles' results are bit-exact (`None`: no explicit vehicles).
     pub fn explicit_bit_exact(&self) -> Option<bool> {
         self.explicit.as_ref().map(|x| x.gpu.bit_exact())
+    }
+
+    /// Raycast wheels hit bodies ([`ExplicitVehiclesDef::wheels_hit_bodies`]) on or off at
+    /// runtime, from the next step, with no rebuild.
+    pub fn set_explicit_wheels_hit_bodies(&mut self, on: bool) -> anyhow::Result<()> {
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        x.def.wheels_hit_bodies = on;
+        x.gpu.set_wheels_see_bodies(on);
+        Ok(())
+    }
+
+    /// Whether raycast wheels hit bodies (false without explicit vehicles).
+    pub fn explicit_wheels_hit_bodies(&self) -> bool {
+        self.explicit.as_ref().is_some_and(|x| x.def.wheels_hit_bodies)
     }
 
     /// Vehicle sleep's thresholds when it is on (`None`: off, or no explicit vehicles).

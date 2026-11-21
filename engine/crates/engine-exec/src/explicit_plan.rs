@@ -1042,7 +1042,7 @@ fn variant_tag(aero: bool, lanes: u32) -> &'static str {
 }
 
 /// The split group path's module `which` (member, group, tests, fleetfront, fleetplan,
-/// fleetpost, fleetlevels) at the frame variant with `aero` and `lanes`.
+/// fleetpost, fleetlevels, wheels) at the frame variant with `aero` and `lanes`.
 pub fn split_module_name(which: &str, aero: bool, lanes: u32) -> String {
     format!("explicit_beams_split_{which}{}", variant_tag(aero, lanes))
 }
@@ -1080,6 +1080,7 @@ pub fn wide_list_module_name(lanes: u32) -> &'static str {
 
 pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
 pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+pub const SPLIT_WHEELS_ENTRY: &str = "explicit_beams_split_wheels";
 pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
 pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
@@ -1098,7 +1099,7 @@ pub fn split_modules() -> Vec<SplitModule> {
         out.push(SplitModule { name, entry, defines });
     };
     for (tag, aero, lanes) in VARIANTS {
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
             // (The members' module without EB_VV_GROUPS: its frame step never reaches
             // contactGroup, so it binds the workgroup variables of the steps alone:
             // Metal allows 31 a kernel.)
@@ -1108,7 +1109,9 @@ pub fn split_modules() -> Vec<SplitModule> {
             }
             d.push(match which {
                 "member" => ("EB_SOLO_STEP", "1"),
-                "group" => GROUPS,
+                // Raycast wheels on each other (explicit_beams_split_wheels: the groups'
+                // module's defines, a small kernel).
+                "group" | "wheels" => GROUPS,
                 // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => ("EB_FLEET_FRONT", "1"),
@@ -1127,6 +1130,7 @@ pub fn split_modules() -> Vec<SplitModule> {
             let entry = match which {
                 "member" => SPLIT_MEMBER_ENTRY,
                 "group" => SPLIT_GROUP_ENTRY,
+                "wheels" => SPLIT_WHEELS_ENTRY,
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
                 "fleetpost" => "explicit_beams_fleet_post",
@@ -2510,15 +2514,20 @@ impl ExplicitUpload {
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
         let drive_wheels = vehicles.iter().filter_map(|v| v.drive.as_ref()).map(|d| d.config.wheels.len()).max();
         let drive = drive_wheels.map(|w| {
-            let layout = drive::DriveLayout {
+            let mut layout = drive::DriveLayout {
                 header: drive_rec as u32,
+                partner: 0,
                 base: misc.len() as u32,
                 stride: drive::DriveLayout::stride_for(w),
             };
             for v in vehicles {
                 misc.extend(drive::records(v.drive.as_deref(), layout.stride));
             }
-            misc[drive_rec] = layout.header_words();
+            // The wheels' partner records (wheels on other vehicles), zero.
+            layout.partner = misc.len() as u32;
+            misc.extend(std::iter::repeat_n([0u32; 4], (drive::PARTNER_RECS * w as u32) as usize * vehicles.len()));
+            let see = vehicles.iter().any(|v| v.drive.as_ref().is_some_and(|d| d.config.see_bodies));
+            misc[drive_rec] = layout.header_words(see);
             layout
         });
         // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):
@@ -3986,7 +3995,7 @@ mod tests {
         assert_eq!(names.len(), list.len(), "a split module twice");
         assert!(MODULES.iter().all(|m| !names.contains(m.name)));
         for (aero, lanes) in [(false, 256), (false, 512), (true, 256), (true, 512)] {
-            for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+            for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
                 assert!(names.contains(split_module_name(which, aero, lanes).as_str()));
             }
             for vv in [false, true] {

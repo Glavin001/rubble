@@ -5,7 +5,8 @@
 #
 #   tools/explicit-2khz/fast-check.sh --make [CARS ...]     (from engine/; once, and again
 #       after a change of the buffers' layout)  saves the fixtures: CARS cars (default
-#       1 2 4 8) driven to the moments below, into out/fixtures/cars<N>_t<T>.fx
+#       1 2 4 8) driven to the moments below, into out/fixtures/cars<N>_t<T>.fx (EXTRA:
+#       more vehicle_lab options for the run, e.g. EXTRA="--wheels-bodies 0")
 #   tools/explicit-2khz/fast-check.sh SWITCH [FIXTURE ...]
 #       SWITCH: a `vehicle_lab --ab-switch` value (perf=<mask>, groupsplit, wide, sleep,
 #       sleeplist, ...; vehicle sleep's own checks: sleep-check.sh).
@@ -57,7 +58,8 @@ if [ "$1" = "--make" ]; then
     # (AT="3,3.4,4.2,5" SECS=5.3: moments of one's own, e.g. the first collisions' fast
     # relative motion, into FIXTURES=<another directory>.)
     at="${AT:-$at}"; secs="${SECS:-$secs}"
-    lab "$n" --ab "$at" --ab-switch "perf=0" --ab-frames 1 --save-fixtures "$fixtures" --secs "$secs" 2>&1 | grep -E "fixture|^Error"
+    # shellcheck disable=SC2086
+    lab "$n" --ab "$at" --ab-switch "perf=0" --ab-frames 1 --save-fixtures "$fixtures" --secs "$secs" $EXTRA 2>&1 | grep -E "fixture|^Error"
   done
   exit 0
 fi

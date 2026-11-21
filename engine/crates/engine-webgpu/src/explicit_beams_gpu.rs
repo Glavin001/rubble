@@ -25,7 +25,7 @@ use crate::{
 };
 use engine_exec::explicit_plan::schedule::{
     self, Fine, GroupOp, Launch, Op, SelfDispatch, FLEET_ARGS_BYTES, SELF_ARGS_BYTES, SELF_AWAKE_ARGS,
-    SPLIT_ALL_ARGS, SPLIT_MEMBER_ARGS,
+    SPLIT_ALL_ARGS, SPLIT_GROUP_ARGS, SPLIT_MEMBER_ARGS,
 };
 use engine_exec::explicit_plan::{
     self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, Kernel, PlannerState, BIND_TABLE,
@@ -165,6 +165,25 @@ pub struct ExplicitBeamsGpu {
     sleep_inputs: Vec<Option<engine_softbody::explicit_drive::DriveInput>>,
     sleep_grab: Option<usize>,
     sleep_wake: std::sync::Mutex<Vec<usize>>,
+    /// Raycast wheels that see the rigid proxies ([`Self::set_wheels_see_bodies`]): per
+    /// vehicle its drive flags word without that bit (None: no wheels), and whether it is on.
+    drive_flags: Vec<Option<u32>>,
+    wheels_bodies: bool,
+    /// The perf flags as last asked for ([`Self::set_perf_flags`]); the planner holds them
+    /// less what wheels on bodies leave out.
+    perf_asked: u32,
+}
+
+/// A vehicle's drive flags word (`explicit_plan::drive` record 5 .y) without the
+/// see-bodies bit, and whether that bit is set.
+fn drive_flags_of(v: &ExplicitBeams) -> (Option<u32>, bool) {
+    match v.drive.as_deref() {
+        Some(d) if !d.config.wheels.is_empty() => {
+            let r = plan::drive::records(Some(d), plan::drive::DriveLayout::stride_for(d.config.wheels.len()));
+            (Some(r[5][1] & !plan::drive::FLAG_SEE_BODIES), d.config.see_bodies)
+        }
+        _ => (None, false),
+    }
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -555,6 +574,8 @@ pub fn group_split_default() -> bool {
 /// The split group path's entry points (`explicit_beams_split.slang`).
 pub const SPLIT_MEMBER_ENTRY: &str = plan::SPLIT_MEMBER_ENTRY;
 pub const SPLIT_GROUP_ENTRY: &str = plan::SPLIT_GROUP_ENTRY;
+/// The members' raycast wheels on each other (`explicit_beams_drive.slang` wheelsPartners).
+pub const SPLIT_WHEELS_ENTRY: &str = plan::SPLIT_WHEELS_ENTRY;
 pub const SPLIT_TESTS_ENTRY: &str = plan::SPLIT_TESTS_ENTRY;
 
 /// Whether the split path runs the small groups' triangle tests across workgroups
@@ -638,6 +659,8 @@ struct GroupSplit {
     /// the buffer it runs from; a spare at the other binding); the groups' module zeroes
     /// both (`bind_args`).
     fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 4]>,
+    /// The members' wheels on each other, created at first use.
+    wheels: std::sync::OnceLock<wgpu::ComputePipeline>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -734,6 +757,7 @@ impl GroupSplit {
             tests,
             bind,
             fleet: std::sync::OnceLock::new(),
+            wheels: std::sync::OnceLock::new(),
             args_layout,
             bind_args,
             bind_first,
@@ -752,6 +776,11 @@ impl GroupSplit {
                 split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "fleetlevels", FLEET_LEVELS_ENTRY),
             ]
         })
+    }
+
+    fn wheels(&self) -> &wgpu::ComputePipeline {
+        self.wheels
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "wheels", SPLIT_WHEELS_ENTRY))
     }
 
     fn member(&self) -> &wgpu::ComputePipeline {
@@ -1754,7 +1783,7 @@ impl ExplicitBeamsGpu {
         // rule; `RUBBLE_WIDE_SLEEP=0`: a workgroup or a step's dispatches, as before).
         planner.set_wide_sleep(std::env::var("RUBBLE_WIDE_SLEEP").as_deref() != Ok("0"));
         let one = vehicles.len() <= 1;
-        let gpu = Self {
+        let mut gpu = Self {
             device: device.clone(),
             queue: queue.clone(),
             frame: std::sync::OnceLock::new(),
@@ -1819,7 +1848,13 @@ impl ExplicitBeamsGpu {
             sleep_inputs: vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect(),
             sleep_grab: None,
             sleep_wake: Default::default(),
+            drive_flags: vehicles.iter().map(|v| drive_flags_of(v).0).collect(),
+            wheels_bodies: vehicles.iter().any(|v| drive_flags_of(v).1),
+            perf_asked: 0,
         };
+        // Wheels that see bodies leave out the schedules that run rays ahead.
+        let f = gpu.planner.perf_flags();
+        gpu.set_perf_flags(f);
         // One vehicle runs the plain frame (or, with surface contact, the split one)
         // from the first frame on.
         if one {
@@ -1896,6 +1931,10 @@ impl ExplicitBeamsGpu {
         self.labelled.iter_mut().for_each(|l| *l = false);
         self.planner.words[plan::W_RETIRE_BASE] = 0;
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
+        self.drive_flags = vehicles.iter().map(|v| drive_flags_of(v).0).collect();
+        self.wheels_bodies = vehicles.iter().any(|v| drive_flags_of(v).1);
+        let f = self.perf_asked;
+        self.set_perf_flags(f);
         self.sleep_grab = None;
         self.sleep_wake.lock().unwrap().clear();
         self.contact_errors.lock().unwrap().clear();
@@ -2837,8 +2876,41 @@ impl ExplicitBeamsGpu {
     /// The kernels' lossless schedule switches ([`plan::W_PERF_FLAGS`], `plan::PERF_*`
     /// bits; `RUBBLE_PERF_FLAGS` sets the start value): each the same results bit for
     /// bit on or off. Applies from the next frame.
+    /// While raycast wheels see bodies ([`Self::set_wheels_see_bodies`]) the schedules that
+    /// run the wheels' rays or tyres beside the coupling's step rather than after it
+    /// ([`schedule::WHEELS_AHEAD_FLAGS`], and the wide passes' fused aux work:
+    /// [`schedule::Switches::wide_fused_on`]) are left out (the
+    /// kernel fails a frame that takes them with the bit set); they come back with it off.
     pub fn set_perf_flags(&mut self, flags: u32) {
+        self.perf_asked = flags;
+        let flags = if self.wheels_bodies { flags & !schedule::WHEELS_AHEAD_FLAGS } else { flags };
         self.planner.set_perf_flags(flags);
+    }
+
+    /// Raycast wheels that also meet the rigid proxies and push back on them
+    /// (`engine_softbody::explicit_drive::DriveConfig::see_bodies`; the World's
+    /// `wheels_hit_bodies`) for every vehicle with wheels, from the next frame. Off, every
+    /// frame is the frame without it bit for bit.
+    pub fn set_wheels_see_bodies(&mut self, on: bool) {
+        let Some(d) = self.layout.drive else {
+            return;
+        };
+        self.wheels_bodies = on;
+        // The header's .x bit 2: the groups' wheels on each other (wheelsPartners).
+        let x: u32 = if on { 3 } else { 1 };
+        self.queue.write_buffer(&self.misc, u64::from(d.header) * 16, bytemuck::bytes_of(&x));
+        for (v, f) in self.drive_flags.iter().enumerate() {
+            let Some(f) = *f else { continue };
+            let w = if on { f | plan::drive::FLAG_SEE_BODIES } else { f };
+            let at = u64::from(d.vehicle(v) + 5) * 16 + 4;
+            self.queue.write_buffer(&self.misc, at, bytemuck::bytes_of(&w));
+        }
+        let f = self.perf_asked;
+        self.set_perf_flags(f);
+    }
+
+    pub fn wheels_see_bodies(&self) -> bool {
+        self.wheels_bodies
     }
 
     pub fn perf_flags(&self) -> u32 {
@@ -3807,6 +3879,7 @@ impl ExplicitBeamsGpu {
             wide_list: self.wide_list,
             wide_fused: self.wide_fused,
             vv_grid: self.vv_grid,
+            wheels_bodies: self.wheels_bodies,
         };
         plan::portable::Portable::new(t, note, self.layout.clone(), self.planner.settings(), switches, bindings)
     }
@@ -4372,6 +4445,7 @@ impl ExplicitBeamsGpu {
             self_split: self.self_split,
             wide_list: self.wide_list,
             wide_fused: self.wide_fused,
+            wheels_bodies: self.wheels_bodies,
             vv_grid: self.vv_grid,
             current: self.variant == KernelVariant::Current,
             ablate: self.variant == KernelVariant::Ablate,
@@ -4427,6 +4501,11 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(if tests { &g.tests } else { &g.group });
                 pass.set_bind_group(0, if tests { &g.bind } else { &g.bind_args }, &at(copy));
                 pass.dispatch_workgroups_indirect(args, off);
+            }
+            GroupOp::Wheels { copy } => {
+                pass.set_pipeline(g.wheels());
+                pass.set_bind_group(0, &g.bind, &at(copy));
+                pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the

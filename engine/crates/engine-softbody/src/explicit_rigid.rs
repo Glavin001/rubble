@@ -364,9 +364,9 @@ impl ProxySet {
                 }
             }
         }
-        for s in &mut self.shapes {
-            s.sum = [0; 6];
-        }
+        // (The step's sums start at zero: the last step's end_step cleared them, so a
+        // reaction added before this step's node pass, a raycast wheel's
+        // (explicit_drive.rs), is kept.)
     }
 
     /// The contact force on a node at world `x` (force `n.force` so far) from every proxy
@@ -442,6 +442,7 @@ impl ProxySet {
         for s in &mut self.shapes {
             let f = Vec3::new(unfixed(s.sum[0]), unfixed(s.sum[1]), unfixed(s.sum[2]));
             let m = Vec3::new(unfixed(s.sum[3]), unfixed(s.sum[4]), unfixed(s.sum[5]));
+            s.sum = [0; 6];
             s.impulse += f * h;
             s.moment += m * h;
             s.peak = s.peak.max(f.length());

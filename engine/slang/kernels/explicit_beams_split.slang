@@ -698,6 +698,28 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
 }
 #endif
 
+// Raycast wheels on each other (drive header bit 2; explicit_beams_drive.slang
+// wheelsPartners): a workgroup a group before each substep's members' dispatch (parameter
+// copy s: step s's rays after step s - 1's reactions) and after the frame's last pass (the
+// copy SPLIT_BEGIN: the last step's reactions only). contactGroup's calls at its step's
+// start and frame's end: the same function on the same state, so the same bits.
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_wheels(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint lane = lid.x;
+    uint4 G = gMisc[gP.vvGroups + gid.x];
+    uint k = splitUniform(lane, splitAwake(G));
+    if (k == 0u) return ebLoopCapFlush();
+    if (lane == 0u) driveBegin();
+    sync();
+    uint driveOn = gsUniformDrive;
+    sync();
+    bool end = gP.pad2 == SPLIT_BEGIN;
+    if ((driveOn & 2u) != 0u) wheelsPartners(G.x, k, lane, end ? gP.steps : gP.pad2, !end);
+    ebLoopCapFlush();
+}
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_group(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
