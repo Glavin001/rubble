@@ -1591,15 +1591,8 @@ impl WgpuSim {
         // from now on. Every upload of a field includes its header. (A record
         // that only looks like one costs two idle dispatches per step.)
         if !self.has_soil {
-            use engine_schema::heightfield::*;
-            let sides = HEIGHT_FIELD_MIN_SAMPLES..=HEIGHT_FIELD_MAX_SAMPLES;
             self.has_soil = dirty.iter().any(|r| {
-                records[r.start as usize..r.end as usize].iter().any(|h| {
-                    h[0] == HEIGHT_FIELD_MAGIC
-                        && h[3] & HEIGHT_FIELD_SOIL != 0
-                        && sides.contains(&h[1])
-                        && sides.contains(&h[2])
-                })
+                engine_exec::rigid_host::records_have_soil(&records[r.start as usize..r.end as usize])
             });
         }
         for r in dirty {
@@ -1919,27 +1912,11 @@ impl WgpuSim {
         rot: glam::Quat,
         density: f32,
     ) -> u32 {
-        let cooked = engine_schema::convex::cook_body(hulls, density);
-        let (p, q) = cooked.body_pose(pos, rot);
-        let body = self.add_body(BodyState::dynamic(p, q, cooked.mass, cooked.inertia));
-        let colliders: Vec<Collider> = cooked
-            .children
-            .iter()
-            .map(|child| Collider {
-                body,
-                shape: ShapeType::ConvexHull as u32,
-                material: 0,
-                generation: 0,
-                local_pos: child.local_pos.to_array(),
-                density,
-                local_rot: [0.0, 0.0, 0.0, 1.0],
-                params: engine_schema::convex::convex_collider_params(
-                    arena.insert(&child.hull).expect("hull arena capacity"),
-                    1.0,
-                    child.hull.bounding_radius(),
-                ),
-            })
-            .collect();
+        let (state, mut colliders) = engine_exec::rigid_host::convex_body(arena, hulls, pos, rot, density, 0);
+        let body = self.add_body(state);
+        for c in &mut colliders {
+            c.body = body;
+        }
         self.add_colliders(&colliders);
         self.sync_hulls(arena);
         body
@@ -1956,22 +1933,8 @@ impl WgpuSim {
         material: u32,
     ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
         let base = arena.insert_height_field(field)?;
-        let mut support = BodyState::static_plane_support();
-        support.position = pos.to_array();
-        support.orientation = rot.to_array();
-        support.initial_pos = support.position;
-        support.initial_rot = support.orientation;
-        let body = self.add_body(support);
-        let collider = self.add_collider(Collider {
-            body,
-            shape: ShapeType::HeightField as u32,
-            material,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: 0.0,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: engine_schema::heightfield::height_field_collider_params(base, field),
-        });
+        let body = self.add_body(engine_exec::rigid_host::height_field_support(pos, rot));
+        let collider = self.add_collider(engine_exec::rigid_host::height_field_collider(body, base, field, material));
         self.sync_hulls(arena);
         Ok((body, collider))
     }

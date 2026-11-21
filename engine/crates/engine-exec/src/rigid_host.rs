@@ -97,3 +97,79 @@ pub fn choose_grid(
     }
     (r.0, r.1, hier)
 }
+
+/// Hull-arena records that hold a height field with a soil (its header: magic, a side
+/// count in range on both axes, the soil bit): the soil passes are then planned.
+pub fn records_have_soil(records: &[[u32; 4]]) -> bool {
+    use engine_schema::heightfield::*;
+    let sides = HEIGHT_FIELD_MIN_SAMPLES..=HEIGHT_FIELD_MAX_SAMPLES;
+    records.iter().any(|h| {
+        h[0] == HEIGHT_FIELD_MAGIC
+            && h[3] & HEIGHT_FIELD_SOIL != 0
+            && sides.contains(&h[1])
+            && sides.contains(&h[2])
+    })
+}
+
+/// A height field's static support body at `pos`, `rot`.
+pub fn height_field_support(pos: glam::Vec3, rot: glam::Quat) -> BodyState {
+    let mut support = BodyState::static_plane_support();
+    support.position = pos.to_array();
+    support.orientation = rot.to_array();
+    support.initial_pos = support.position;
+    support.initial_rot = support.orientation;
+    support
+}
+
+/// The collider of a height field inserted at arena record `base`, on `body`.
+pub fn height_field_collider(
+    body: u32,
+    base: u32,
+    field: &engine_schema::heightfield::HeightField,
+    material: u32,
+) -> Collider {
+    Collider {
+        body,
+        shape: ShapeType::HeightField as u32,
+        material,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: engine_schema::heightfield::height_field_collider_params(base, field),
+    }
+}
+
+/// A dynamic body made of convex hulls (cooked: mass, inertia, centre) at `pos`, `rot`:
+/// its state and its colliders on body `body`, each hull inserted into `arena`.
+pub fn convex_body(
+    arena: &mut engine_schema::convex::HullArena,
+    hulls: &[engine_schema::convex::ConvexHull],
+    pos: glam::Vec3,
+    rot: glam::Quat,
+    density: f32,
+    body: u32,
+) -> (BodyState, Vec<Collider>) {
+    let cooked = engine_schema::convex::cook_body(hulls, density);
+    let (p, q) = cooked.body_pose(pos, rot);
+    let state = BodyState::dynamic(p, q, cooked.mass, cooked.inertia);
+    let colliders = cooked
+        .children
+        .iter()
+        .map(|child| Collider {
+            body,
+            shape: ShapeType::ConvexHull as u32,
+            material: 0,
+            generation: 0,
+            local_pos: child.local_pos.to_array(),
+            density,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: engine_schema::convex::convex_collider_params(
+                arena.insert(&child.hull).expect("hull arena capacity"),
+                1.0,
+                child.hull.bounding_radius(),
+            ),
+        })
+        .collect();
+    (state, colliders)
+}

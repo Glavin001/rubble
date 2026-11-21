@@ -106,6 +106,8 @@ pub struct CudaSim {
     body_reach: Vec<f32>,
     joint_count: u32,
     free_joints: Vec<u32>,
+    /// A height field in the hull arena has a soil (`rigid_host::records_have_soil`).
+    has_soil: bool,
     grid_levels: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
@@ -302,6 +304,7 @@ impl CudaSim {
             body_reach: Vec::new(),
             joint_count: 0,
             free_joints: Vec::new(),
+            has_soil: false,
             grid_levels: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -413,14 +416,6 @@ impl CudaSim {
             count <= self.capacity.max_colliders - start,
             "collider upload exceeds capacity"
         );
-        // Height fields need their records in the hull arena and the soil flags
-        // (WgpuSim::sync_hulls); not wired on CUDA yet.
-        assert!(
-            colliders
-                .iter()
-                .all(|c| c.shape != ShapeType::HeightField as u32),
-            "CudaSim: heightfields are not wired yet"
-        );
         self.upload(
             2,
             u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -447,7 +442,47 @@ impl CudaSim {
             )));
         }
         self.bind_ctx()?;
+        self.has_soil |= rigid_host::records_have_soil(arena.records());
         self.upload(18, 0, bytes)
+    }
+
+    /// A dynamic body of convex hulls (`rigid_host::convex_body`, as WgpuSim), its hulls
+    /// inserted into `arena`, which is then uploaded whole.
+    pub fn add_convex_body(
+        &mut self,
+        arena: &mut engine_schema::convex::HullArena,
+        hulls: &[engine_schema::convex::ConvexHull],
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        density: f32,
+    ) -> anyhow::Result<u32> {
+        let (state, mut colliders) = rigid_host::convex_body(arena, hulls, pos, rot, density, 0);
+        let body = self.add_bodies(&[state]).start;
+        for c in &mut colliders {
+            c.body = body;
+        }
+        self.add_colliders(&colliders);
+        self.set_hulls(arena)?;
+        Ok(body)
+    }
+
+    /// A height field on a static support body at `pos`, `rot` (inserted into `arena`,
+    /// which is then uploaded whole): `(body, collider)`, as WgpuSim and MetalSim.
+    pub fn add_height_field(
+        &mut self,
+        arena: &mut engine_schema::convex::HullArena,
+        field: &engine_schema::heightfield::HeightField,
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        material: u32,
+    ) -> anyhow::Result<(u32, u32)> {
+        let base = arena.insert_height_field(field).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let body = self.add_bodies(&[rigid_host::height_field_support(pos, rot)]).start;
+        let collider = self
+            .add_colliders(&[rigid_host::height_field_collider(body, base, field, material)])
+            .start;
+        self.set_hulls(arena)?;
+        Ok((body, collider))
     }
 
     /// Joint records (binding 5), in released slots first, else after the last
@@ -497,8 +532,7 @@ impl CudaSim {
             joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
             has_convex: self.col_flags.convex,
             has_height_field: self.col_flags.height_field,
-            // No event shapes on CUDA (the World API runs on wgpu).
-            soil: false,
+            soil: self.has_soil,
             reuse_contacts: record,
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,

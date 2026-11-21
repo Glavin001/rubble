@@ -337,23 +337,10 @@ impl MetalSim {
         material: u32,
     ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
         let base = arena.insert_height_field(field)?;
-        let mut support = BodyState::static_plane_support();
-        support.position = pos.to_array();
-        support.orientation = rot.to_array();
-        support.initial_pos = support.position;
-        support.initial_rot = support.orientation;
+        let support = engine_exec::rigid_host::height_field_support(pos, rot);
         let body = self.add_bodies(std::slice::from_ref(&support)).start;
         let collider = self
-            .add_colliders(&[Collider {
-                body,
-                shape: ShapeType::HeightField as u32,
-                material,
-                generation: 0,
-                local_pos: [0.0; 3],
-                density: 0.0,
-                local_rot: [0.0, 0.0, 0.0, 1.0],
-                params: engine_schema::heightfield::height_field_collider_params(base, field),
-            }])
+            .add_colliders(&[engine_exec::rigid_host::height_field_collider(body, base, field, material)])
             .start;
         self.sync_hulls(arena);
         Ok((body, collider))
