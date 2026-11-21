@@ -1025,34 +1025,80 @@ pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) 
 /// move. A moving collider above the top level would take the oversized-static list,
 /// which never queries: it would pass through every static.
 pub fn hierarchical_grid_with(cols: &[crate::Collider], bodies: &[crate::BodyState], movable_radius: f32) -> (f32, u32) {
-    let mut diameters: Vec<f32> = cols
-        .iter()
-        .filter(|c| c.shape != crate::ShapeType::Plane as u32)
-        .map(|c| 2.0 * collider_radius(c) + 0.0004)
-        .collect();
-    if diameters.is_empty() {
-        return (1.0, 2);
+    match HierGridGeometry::new(cols) {
+        Some(g) => g.grid(cols, bodies, movable_radius),
+        None => (1.0, 2),
     }
-    // O(n) median (three-avbd uses Wirth selection for the same reason).
-    let mid = diameters.len() / 2;
-    let largest = diameters.iter().copied().fold(0.0f32, f32::max);
-    let median = *diameters.select_nth_unstable_by(mid, f32::total_cmp).1;
-    let base = (median.max(0.001) * (1.0 + 1e-5)).max(0.001);
-    let level = |d: f32| ((d / base).max(1.0)).log2().ceil().max(0.0) as u32;
-    let dynamic_max = cols
-        .iter()
-        .filter(|c| c.shape != crate::ShapeType::Plane as u32)
-        .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.moves()))
-        .map(|c| level(2.0 * collider_radius(c) + 0.0004))
-        .chain((movable_radius > 0.0).then(|| level(2.0 * movable_radius + 0.0004)))
-        .max()
-        .unwrap_or(0);
-    let mut levels = (dynamic_max + 2).max(2);
-    let oversized = diameters.iter().filter(|&&d| level(d) >= levels).count();
-    if oversized > 10 {
-        levels = level(largest) + 1;
+}
+
+/// The part of the hierarchical grid's sizing that depends only on the colliders' shapes
+/// and sizes: the base cell (their median diameter) and how many sit at each level. A host
+/// keeps it while no collider's shape or size changes (a split re-points colliders and
+/// re-frames bodies, and changes neither), so sizing the grid again does not sort every
+/// collider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HierGridGeometry {
+    base: f32,
+    largest: f32,
+    /// Colliders (planes aside) per level.
+    per_level: Vec<u32>,
+}
+
+impl HierGridGeometry {
+    /// `None` without a collider other than planes.
+    pub fn new(cols: &[crate::Collider]) -> Option<Self> {
+        let mut diameters: Vec<f32> = cols
+            .iter()
+            .filter(|c| c.shape != crate::ShapeType::Plane as u32)
+            .map(|c| 2.0 * collider_radius(c) + 0.0004)
+            .collect();
+        if diameters.is_empty() {
+            return None;
+        }
+        // O(n) median (three-avbd uses Wirth selection for the same reason).
+        let mid = diameters.len() / 2;
+        let largest = diameters.iter().copied().fold(0.0f32, f32::max);
+        let median = *diameters.select_nth_unstable_by(mid, f32::total_cmp).1;
+        let base = (median.max(0.001) * (1.0 + 1e-5)).max(0.001);
+        let mut g = Self { base, largest, per_level: Vec::new() };
+        for &d in &diameters {
+            let l = g.level(d) as usize;
+            if l >= g.per_level.len() {
+                g.per_level.resize(l + 1, 0);
+            }
+            g.per_level[l] += 1;
+        }
+        Some(g)
     }
-    (base, levels.min(31))
+
+    fn level(&self, d: f32) -> u32 {
+        ((d / self.base).max(1.0)).log2().ceil().max(0.0) as u32
+    }
+
+    /// The grid: (base cell, levels). `cols` are the colliders this was made from.
+    pub fn grid(&self, cols: &[crate::Collider], bodies: &[crate::BodyState], movable_radius: f32) -> (f32, u32) {
+        let reserved = (movable_radius > 0.0).then(|| self.level(2.0 * movable_radius + 0.0004));
+        let top = self.per_level.len() as u32 - 1;
+        // The largest level of a collider that moves. With a reserved radius at or above
+        // every collider's level it is the reserved level, whichever bodies move.
+        let dynamic_max = match reserved {
+            Some(l) if l >= top => l,
+            _ => cols
+                .iter()
+                .filter(|c| c.shape != crate::ShapeType::Plane as u32)
+                .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.moves()))
+                .map(|c| self.level(2.0 * collider_radius(c) + 0.0004))
+                .chain(reserved)
+                .max()
+                .unwrap_or(0),
+        };
+        let mut levels = (dynamic_max + 2).max(2);
+        let oversized: u32 = self.per_level.iter().skip(levels as usize).sum();
+        if oversized > 10 {
+            levels = self.level(self.largest) + 1;
+        }
+        (self.base, levels.min(31))
+    }
 }
 
 // ---- triangle hull construction -------------------------------------------------
@@ -1260,4 +1306,82 @@ pub fn sat_oracle(
 ) -> Option<(Vec3, f32)> {
     let (n, sep) = sat_separation(&WorldPolytope::new(a, scale_a, pose_a), &WorldPolytope::new(b, scale_b, pose_b));
     (sep <= 0.0).then_some((n, sep))
+}
+
+#[cfg(test)]
+mod hier_grid_geometry_tests {
+    use super::*;
+
+    /// The sizing as it was written before `HierGridGeometry`: one pass over everything.
+    fn reference(cols: &[crate::Collider], bodies: &[crate::BodyState], movable_radius: f32) -> (f32, u32) {
+        let mut diameters: Vec<f32> = cols
+            .iter()
+            .filter(|c| c.shape != crate::ShapeType::Plane as u32)
+            .map(|c| 2.0 * collider_radius(c) + 0.0004)
+            .collect();
+        if diameters.is_empty() {
+            return (1.0, 2);
+        }
+        let mid = diameters.len() / 2;
+        let largest = diameters.iter().copied().fold(0.0f32, f32::max);
+        let median = *diameters.select_nth_unstable_by(mid, f32::total_cmp).1;
+        let base = (median.max(0.001) * (1.0 + 1e-5)).max(0.001);
+        let level = |d: f32| ((d / base).max(1.0)).log2().ceil().max(0.0) as u32;
+        let dynamic_max = cols
+            .iter()
+            .filter(|c| c.shape != crate::ShapeType::Plane as u32)
+            .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.moves()))
+            .map(|c| level(2.0 * collider_radius(c) + 0.0004))
+            .chain((movable_radius > 0.0).then(|| level(2.0 * movable_radius + 0.0004)))
+            .max()
+            .unwrap_or(0);
+        let mut levels = (dynamic_max + 2).max(2);
+        let oversized = diameters.iter().filter(|&&d| level(d) >= levels).count();
+        if oversized > 10 {
+            levels = level(largest) + 1;
+        }
+        (base, levels.min(31))
+    }
+
+    #[test]
+    fn the_kept_geometry_sizes_the_grid_as_one_pass_does() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut cases = 0;
+        for round in 0..400 {
+            let n_bodies = 1 + (next() * 12.0) as usize;
+            let bodies: Vec<crate::BodyState> = (0..n_bodies)
+                .map(|_| {
+                    let mut b: crate::BodyState = bytemuck::Zeroable::zeroed();
+                    if next() < 0.4 {
+                        b.inv_mass = 1.0;
+                    }
+                    b
+                })
+                .collect();
+            let n_cols = (next() * 60.0) as usize;
+            let cols: Vec<crate::Collider> = (0..n_cols)
+                .map(|_| {
+                    let mut c: crate::Collider = bytemuck::Zeroable::zeroed();
+                    c.body = (next() * n_bodies as f64) as u32;
+                    c.shape = if next() < 0.05 { crate::ShapeType::Plane as u32 } else { crate::ShapeType::Box as u32 };
+                    // Sizes over five orders of magnitude; some round counts have many large ones.
+                    let big = round % 3 == 0 && next() < 0.4;
+                    let r = (10f64.powf(next() * 3.0 - 2.0) * if big { 300.0 } else { 1.0 }) as f32;
+                    c.params = [r, 0.5 * r, 0.25 * r, 0.0];
+                    c
+                })
+                .collect();
+            for movable in [0.0f32, 0.01, 0.3, 5.0, 4000.0] {
+                assert_eq!(hierarchical_grid_with(&cols, &bodies, movable), reference(&cols, &bodies, movable), "round {round}, movable {movable}");
+                cases += 1;
+            }
+        }
+        assert_eq!(cases, 2000);
+    }
 }
