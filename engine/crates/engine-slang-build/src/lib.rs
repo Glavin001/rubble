@@ -969,7 +969,25 @@ pub mod cuda_layout {
             if version.is_empty() {
                 return Ok(None);
             }
-            let mut words = format!("{}\n{version}\n", nvcc.display());
+            // The compilers' own bytes too: NVIDIA's aarch64 and x86_64 nvcc print the
+            // same --version but write different SASS for some kernels, so a cache shared
+            // between build images must not take one's fatbin for the other's.
+            static TOOLS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let tools = TOOLS.get_or_init(|| {
+                use std::hash::{Hash, Hasher};
+                let bin = std::fs::canonicalize(nvcc).unwrap_or_else(|_| nvcc.to_path_buf());
+                let dir = bin.parent().map(Path::to_path_buf).unwrap_or_default();
+                let mut out = String::new();
+                for tool in [bin.clone(), dir.join("ptxas"), dir.join("../nvvm/bin/cicc")] {
+                    if let Ok(bytes) = std::fs::read(&tool) {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        bytes.hash(&mut h);
+                        out.push_str(&format!("{} {:016x}\n", tool.display(), h.finish()));
+                    }
+                }
+                out
+            });
+            let mut words = format!("{}\n{version}\n{tools}", nvcc.display());
             for a in cmd.get_args() {
                 words.push_str(&a.to_string_lossy());
                 words.push('\n');
