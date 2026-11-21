@@ -180,16 +180,6 @@ pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, &str); 2] = [
     ("explicit_beams_selfsplit_list", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list.wgsl"))),
     ("explicit_beams_selfsplit_list_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list_wide.wgsl"))),
 ];
-/// Measurement (vehicle-perf-first-principles.md §8.47): the wide passes that carry the
-/// World's coupling (the node pass, the aux pass, the list kernel) compiled without its
-/// code (`EB_NO_PROXY`, name `<module>_noproxy`), for a frame in which no vehicle has a
-/// proxy shape (`ExplicitBeamsGpu::set_noproxy_modules`).
-pub const EXPLICIT_BEAMS_NOPROXY: [(&str, &str); 4] = [
-    ("explicit_beams_wide_nodes_noproxy", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nodes_noproxy.wgsl"))),
-    ("explicit_beams_wide_aux_noproxy", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_aux_noproxy.wgsl"))),
-    ("explicit_beams_selfsplit_list_noproxy", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list_noproxy.wgsl"))),
-    ("explicit_beams_selfsplit_list_wide_noproxy", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list_wide_noproxy.wgsl"))),
-];
 pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
     ("explicit_beams_selfsplit_step", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step.wgsl"))),
     ("explicit_beams_selfsplit_walk", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk.wgsl"))),

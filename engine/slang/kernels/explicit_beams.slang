@@ -1179,14 +1179,12 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
         nodeRetire(gi);
         return;
     }
-#ifndef EB_NO_PROXY
     if (cplHas(vehicle))
     {
         nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                           groupCount, hits, false);
         return;
     }
-#endif
     if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM | FLAG_SHIFT_MEM)) != 0u)
     {
         nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
@@ -1260,13 +1258,11 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
         nodeRetire(gi);
         return 0u;
     }
-#ifndef EB_NO_PROXY
     if (cplHas(vehicle))
     {
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
                                  groupOff, groupCount, hits, true);
     }
-#endif
     if ((flagsV & (FLAG_SHAPES | FLAG_CFORCE | FLAG_TREAD | FLAG_TWO_BODY | FLAG_CLIP_MEM | FLAG_SHIFT_MEM)) != 0u)
     {
         return nodeUpdateShapes(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
@@ -7627,14 +7623,12 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
 {
     // The coupling's header for the nodes' proxy contacts (cplContacts reads it from
     // workgroup memory; no sphere or node-range copies there: every read from the buffers).
-#ifndef EB_NO_PROXY
     if (lid.x == 0u)
     {
         coupleBegin();
         cplGsClear();
     }
     sync();
-#endif
     uint i = id.x;
     if (i < gP.totalNodes)
     {
@@ -8542,9 +8536,6 @@ void wideAheadApart(uint v, uint lane)
 // ran beside each other.
 void wideCoupleApart(uint v, uint lane)
 {
-#ifdef EB_NO_PROXY
-    return;
-#else
     uint s = gP.pad2;
     if (lane == 0u)
     {
@@ -8566,7 +8557,6 @@ void wideCoupleApart(uint v, uint lane)
     if (aheadFold) cplFoldB(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
     sync();
     if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
-#endif
 }
 void wideWheelsApart(uint v, uint lane)
 {

@@ -588,17 +588,6 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             if pass == "aux" { &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")][..] } else { &[("ENGINE_WGSL", "1")][..] },
         )?;
         explicit_post(&out)?;
-        // Measurement (vehicle-perf-first-principles.md §8.47): the node and aux passes
-        // without the coupling's code (EB_NO_PROXY, `<pass>_noproxy`).
-        if pass == "nodes" || pass == "aux" {
-            let out = wgsl_dir.join(format!("{entry}_noproxy.wgsl"));
-            let mut d = vec![("ENGINE_WGSL", "1"), ("EB_NO_PROXY", "1")];
-            if pass == "aux" {
-                d.push(("EB_LANES", "512"));
-            }
-            compile_with_defines(&explicit_beams_source(slang_root), &entry, SlangTarget::Wgsl, &out, &[], &d)?;
-            explicit_post(&out)?;
-        }
     }
     // The same module with 512 lanes per vehicle, for large vehicles.
     let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
@@ -837,12 +826,6 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 format!("explicit_beams_selfsplit_list{tag}"),
                 "explicit_beams_wide_list",
                 vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1")],
-            ));
-            // Measurement (§8.47): the same without the coupling's code (EB_NO_PROXY).
-            jobs.push((
-                format!("explicit_beams_selfsplit_list{tag}_noproxy"),
-                "explicit_beams_wide_list",
-                vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1"), ("EB_NO_PROXY", "1")],
             ));
         }
         // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group

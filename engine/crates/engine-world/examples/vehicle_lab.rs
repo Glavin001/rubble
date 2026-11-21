@@ -1308,14 +1308,6 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // whether every state word is the same. `--ab-switch reuse`: the reused pair list
     // (`set_pair_reuse`) on then off instead.
     let reuse_ab = arg("--ab-switch").as_deref() == Some("reuse");
-    // `--ab-switch noproxy` (measurement, §8.47): the wide passes that carry the coupling
-    // compiled without its code (`set_noproxy_modules`) against the shipped ones. The same
-    // state only where no vehicle has a proxy shape.
-    let noproxy_ab = arg("--ab-switch").as_deref() == Some("noproxy");
-    // `--ab-switch cplhdr` (measurement, §8.47): the coupling header's `on` word on (as the
-    // World leaves it) against off (`set_coupling_header_on`): what the coupling's code
-    // runs for a vehicle without proxies. The same state only where none has a shape.
-    let cplhdr_ab = arg("--ab-switch").as_deref() == Some("cplhdr");
     // `--ab-switch pieces`: the pair list's piece labels (the lab's) against none.
     let pieces_ab = arg("--ab-switch").as_deref() == Some("pieces");
     // `--ab-switch coupling`: the coupling's candidate list and folded step
@@ -1402,10 +1394,6 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.set_piece_labels(0, if on && !labels.is_empty() { labels } else { &zeros });
         } else if reuse_ab {
             x.set_pair_reuse(on);
-        } else if noproxy_ab {
-            x.set_noproxy_modules(on);
-        } else if cplhdr_ab {
-            x.set_coupling_header_on(on);
 
         } else {
             x.set_surface_culls(on);
@@ -1507,12 +1495,6 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             let labels = lab.piece_labels().to_vec();
             let x = world.explicit_vehicles_mut().expect("vehicles");
             x.wait();
-            // (`--ab-empty-proxies`, measurement, §8.47: the A/B from this state with every
-            // vehicle's proxy set emptied, as a window with nothing in reach.)
-            if std::env::args().any(|a| a == "--ab-empty-proxies") {
-                x.clear_proxies();
-                x.wait();
-            }
             let snap = x.snapshot();
             // `--ab-ablate M1,M2,…`: after the A/B, the same frames under each ablation
             // mask (time only; 2147483648 is the ablation kernel with nothing skipped).
@@ -2404,19 +2386,6 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out.push((ms, y.state_words(), y.coupling_words()));
                 engine_webgpu::set_explicit_module_override(None);
             }
-            // (`--ab-switch noproxy`: each vehicle's proxy bodies and shapes at the state.)
-            if noproxy_ab || cplhdr_ab {
-                if let Some(c) = x.coupling() {
-                    let recs = x.coupling_words();
-                    let heads: Vec<String> = (0..c.vehicles as usize)
-                        .map(|v| {
-                            let at = v * c.recs() as usize * 4;
-                            format!("{}/{}", recs[0].1[at], recs[0].1[at + 1])
-                        })
-                        .collect();
-                    println!("   proxies at the state (bodies/shapes a vehicle): {}", heads.join(" "));
-                }
-            }
             // (AB_WARM_MS=n: frames from the snapshot for n ms before the timed halves, so a
             // GPU still at its idle clock after the process's start does not slow the
             // first half alone: a small scene's 20 ms of frames is over before it ramps.)
@@ -2451,10 +2420,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.frame(34);
                 x.wait();
                 x.restore(&snap);
-                if sleeplist_ab || cplhdr_ab {
+                if sleeplist_ab {
                     // (The listing's switch asks for a new contact plan, which the
-                    // restored snapshot's planner state forgot; the header's word is in
-                    // the restored records.)
+                    // restored snapshot's planner state forgot.)
                     switch(x, on, &labels);
                 }
                 x.wait();
@@ -2627,10 +2595,6 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     "piece labels"
                 } else if reuse_ab {
                     "pair reuse"
-                } else if noproxy_ab {
-                    "modules without the coupling's code"
-                } else if cplhdr_ab {
-                    "coupling header"
                 } else {
                     "surface culls"
                 },
