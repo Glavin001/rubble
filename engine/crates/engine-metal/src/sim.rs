@@ -289,8 +289,9 @@ impl MetalSim {
             bytes,
         );
         self.host_bodies.extend_from_slice(bodies);
-        self.motion.ccd |= bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0);
-        self.motion.kinematic |= bodies.iter().any(|b| b.flags & 3 == 2);
+        let (ccd, kinematic) = engine_exec::rigid_host::body_motion_flags(bodies);
+        self.motion.ccd |= ccd;
+        self.motion.kinematic |= kinematic;
         self.body_count += count;
         start..self.body_count
     }
@@ -336,23 +337,10 @@ impl MetalSim {
         material: u32,
     ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
         let base = arena.insert_height_field(field)?;
-        let mut support = BodyState::static_plane_support();
-        support.position = pos.to_array();
-        support.orientation = rot.to_array();
-        support.initial_pos = support.position;
-        support.initial_rot = support.orientation;
+        let support = engine_exec::rigid_host::height_field_support(pos, rot);
         let body = self.add_bodies(std::slice::from_ref(&support)).start;
         let collider = self
-            .add_colliders(&[Collider {
-                body,
-                shape: ShapeType::HeightField as u32,
-                material,
-                generation: 0,
-                local_pos: [0.0; 3],
-                density: 0.0,
-                local_rot: [0.0, 0.0, 0.0, 1.0],
-                params: engine_schema::heightfield::height_field_collider_params(base, field),
-            }])
+            .add_colliders(&[engine_exec::rigid_host::height_field_collider(body, base, field, material)])
             .start;
         self.sync_hulls(arena);
         Ok((body, collider))
@@ -487,7 +475,9 @@ impl MetalSim {
             self.steps_done += 1;
             return Ok(());
         }
-        let (cell, levels) = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, false);
+        // No hulls on MetalSim (asserted at upload): the uniform grid, or the
+        // hierarchical one when its large list overflows (rigid_host, as every host).
+        let (cell, levels, _) = engine_exec::rigid_host::choose_grid(&self.host_cols, &self.host_bodies, None, false, 0.0);
         self.params.grid_cell_size = cell;
         self.grid_levels = levels;
         // A ring slot is reused only after the step that last used it finished.

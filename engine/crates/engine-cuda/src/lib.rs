@@ -8,14 +8,22 @@
 //! SLANG_globalParams` block; the host fills it once per module with device
 //! pointers and rewrites only the pass-uniform pointer between dispatches.
 //!
-//! CUDA has no indirect dispatch: the host reads the 12-byte work/colour slots
-//! of binding 23 back after a kernel that may have written them, then launches
-//! the counted grid. Every other step input is forwarded on the GPU, as on Metal.
+//! CUDA has no indirect dispatch. Each kernel has a second entry, `{entry}_gs`
+//! (engine-slang-build `grid_stride_entry`), whose blocks walk the workgroups the GPU
+//! wrote in its 12-byte slot of binding 23: an indirect command is that entry over a
+//! fixed grid (the blocks the device keeps resident) with a pointer to the slot, queued
+//! without waiting. No indirect kernel writes binding 23, so every block reads the
+//! counts the slot held at launch, as an indirect dispatch would. With
+//! [`CudaSim::set_device_indirect`] off (`RUBBLE_CUDA_HOST_INDIRECT=1`, measurement), the
+//! host reads binding 23 back after a kernel that may have written it (a wait for the
+//! stream) and launches the counted grid. Every other step input is forwarded on the
+//! GPU, as on Metal.
 //!
 //! Needs only the NVIDIA driver at run time (`libcuda` is loaded dynamically).
 //! Build hosts without nvcc embed no device code; [`CudaSim::available`] is then false.
 
 use cudarc::driver::{result, sys, DriverError};
+use engine_exec::rigid_host;
 use engine_exec::rigid_plan::{
     self, Cmd, StepInputs, StepModes, BIND_COUNT, COUNTER_UPLOAD, PASS_ALIGN,
 };
@@ -72,6 +80,8 @@ struct Kernel {
     writes_indirect: bool,
     /// Pass slot the constant bank currently points at.
     bound_pass: Option<u32>,
+    /// The indirect entry (`{entry}_gs`) and the blocks a launch of it runs.
+    indirect: Option<(sys::CUfunction, u32)>,
 }
 
 pub struct CudaSim {
@@ -90,6 +100,14 @@ pub struct CudaSim {
     /// CCD / kinematic bodies uploaded (the motion passes of the step graph).
     motion: rigid_plan::MotionInputs,
     host_cols: Vec<Collider>,
+    /// What the colliders turn on (`rigid_host::ColliderFlags`).
+    col_flags: rigid_host::ColliderFlags,
+    /// Each body's reach, for joints' default torque arm.
+    body_reach: Vec<f32>,
+    joint_count: u32,
+    free_joints: Vec<u32>,
+    /// A height field in the hull arena has a soil (`rigid_host::records_have_soil`).
+    has_soil: bool,
     grid_levels: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
@@ -102,6 +120,8 @@ pub struct CudaSim {
     indirect_dirty: bool,
     /// Host readbacks of binding 23 (each one waits for the stream).
     pub indirect_syncs: u64,
+    /// Indirect commands read their counts on the GPU (`{entry}_gs`).
+    device_indirect: bool,
     /// `ENGINE_CUDA_SYNC=1`: wait after every launch so a fault names its kernel.
     sync_each: bool,
     /// Last kernel queued (error context: faults surface at the next sync).
@@ -172,12 +192,35 @@ impl CudaSim {
                 .map_err(map)?;
         }
 
+        let sms = unsafe {
+            result::device::get_attribute(
+                dev,
+                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+        }
+        .map_err(map)? as u32;
         let mut kernels = Vec::with_capacity(CUDA_KERNELS.len());
         for k in CUDA_KERNELS {
             let module = unsafe { result::module::load_data(k.image.as_ptr() as *const c_void) }
                 .map_err(|e| anyhow::anyhow!("CUDA: load module {}: {e:?}", k.entry))?;
             let function = unsafe { result::module::get_function(module, CString::new(k.entry)?) }
                 .map_err(|e| anyhow::anyhow!("CUDA: function {}: {e:?}", k.entry))?;
+            let indirect = match unsafe {
+                result::module::get_function(module, CString::new(format!("{}_gs", k.entry))?)
+            } {
+                Ok(f) => {
+                    let per_sm = unsafe {
+                        result::occupancy::max_active_block_per_multiprocessor(
+                            f,
+                            (k.threads[0] * k.threads[1] * k.threads[2]) as i32,
+                            0,
+                        )
+                    }
+                    .map_err(|e| anyhow::anyhow!("CUDA: occupancy {}: {e:?}", k.entry))?;
+                    Some((f, per_sm.max(1) as u32 * sms))
+                }
+                Err(_) => None,
+            };
             let mut globals = 0;
             let mut pass_offset = None;
             if k.params_bytes > 0 {
@@ -215,6 +258,7 @@ impl CudaSim {
                 pass_offset,
                 writes_indirect: k.writes_indirect,
                 bound_pass: pass_offset.map(|_| 0),
+                indirect,
             });
         }
 
@@ -256,6 +300,11 @@ impl CudaSim {
             host_bodies: Vec::new(),
             motion: rigid_plan::MotionInputs::default(),
             host_cols: Vec::new(),
+            col_flags: Default::default(),
+            body_reach: Vec::new(),
+            joint_count: 0,
+            free_joints: Vec::new(),
+            has_soil: false,
             grid_levels: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -266,11 +315,22 @@ impl CudaSim {
             indirect,
             indirect_dirty: true,
             indirect_syncs: 0,
+            device_indirect: std::env::var("RUBBLE_CUDA_HOST_INDIRECT").as_deref() != Ok("1"),
             sync_each: std::env::var("ENGINE_CUDA_SYNC").as_deref() == Ok("1"),
             last_kernel: "",
             profiling: false,
             phase_events: Vec::new(),
         })
+    }
+
+    /// Indirect commands read their workgroup counts on the GPU (the default), or
+    /// the host reads binding 23 back first (`false`: the old path, for A/Bs).
+    pub fn set_device_indirect(&mut self, on: bool) {
+        self.device_indirect = on;
+    }
+
+    pub fn device_indirect(&self) -> bool {
+        self.device_indirect
     }
 
     pub fn device_name(&self) -> &str {
@@ -341,8 +401,9 @@ impl CudaSim {
         )
         .expect("upload previous bodies");
         self.host_bodies.extend_from_slice(bodies);
-        self.motion.ccd |= bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0);
-        self.motion.kinematic |= bodies.iter().any(|b| b.flags & 3 == 2);
+        let (ccd, kinematic) = rigid_host::body_motion_flags(bodies);
+        self.motion.ccd |= ccd;
+        self.motion.kinematic |= kinematic;
         self.body_count += count;
         start..self.body_count
     }
@@ -355,19 +416,6 @@ impl CudaSim {
             count <= self.capacity.max_colliders - start,
             "collider upload exceeds capacity"
         );
-        assert!(
-            colliders
-                .iter()
-                .all(|c| c.shape != ShapeType::ConvexHull as u32),
-            "CudaSim: convex hulls are not wired yet"
-        );
-        // Heightfield pairs take the convex stages, which this backend lacks.
-        assert!(
-            colliders
-                .iter()
-                .all(|c| c.shape != ShapeType::HeightField as u32),
-            "CudaSim: heightfields are not wired yet"
-        );
         self.upload(
             2,
             u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -375,8 +423,85 @@ impl CudaSim {
         )
         .expect("upload colliders");
         self.host_cols.extend_from_slice(colliders);
+        self.col_flags.add(colliders);
+        rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         self.collider_count += count;
         start..self.collider_count
+    }
+
+    /// The convex hull arena (binding 18, `HullArena::records`), whole. Its size is the
+    /// capacity's `max_hull_vertices` records (the kernels' constant banks hold the
+    /// buffer's address): a larger arena is an error, never a truncation.
+    pub fn set_hulls(&mut self, arena: &engine_schema::convex::HullArena) -> Result<(), ExecError> {
+        let bytes: &[u8] = bytemuck::cast_slice(arena.records());
+        if bytes.len() as u64 > self.sizes[18] {
+            return Err(ExecError::Backend(format!(
+                "CudaSim: hull arena of {} records exceeds the capacity's {} (WorldCapacity::max_hull_vertices)",
+                arena.records().len(),
+                self.sizes[18] / 16
+            )));
+        }
+        self.bind_ctx()?;
+        self.has_soil |= rigid_host::records_have_soil(arena.records());
+        self.upload(18, 0, bytes)
+    }
+
+    /// A dynamic body of convex hulls (`rigid_host::convex_body`, as WgpuSim), its hulls
+    /// inserted into `arena`, which is then uploaded whole.
+    pub fn add_convex_body(
+        &mut self,
+        arena: &mut engine_schema::convex::HullArena,
+        hulls: &[engine_schema::convex::ConvexHull],
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        density: f32,
+    ) -> anyhow::Result<u32> {
+        let (state, mut colliders) = rigid_host::convex_body(arena, hulls, pos, rot, density, 0);
+        let body = self.add_bodies(&[state]).start;
+        for c in &mut colliders {
+            c.body = body;
+        }
+        self.add_colliders(&colliders);
+        self.set_hulls(arena)?;
+        Ok(body)
+    }
+
+    /// A height field on a static support body at `pos`, `rot` (inserted into `arena`,
+    /// which is then uploaded whole): `(body, collider)`, as WgpuSim and MetalSim.
+    pub fn add_height_field(
+        &mut self,
+        arena: &mut engine_schema::convex::HullArena,
+        field: &engine_schema::heightfield::HeightField,
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        material: u32,
+    ) -> anyhow::Result<(u32, u32)> {
+        let base = arena.insert_height_field(field).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let body = self.add_bodies(&[rigid_host::height_field_support(pos, rot)]).start;
+        let collider = self
+            .add_colliders(&[rigid_host::height_field_collider(body, base, field, material)])
+            .start;
+        self.set_hulls(arena)?;
+        Ok((body, collider))
+    }
+
+    /// Joint records (binding 5), in released slots first, else after the last
+    /// (`rigid_host::alloc_joint_slot`, as WgpuSim).
+    pub fn add_joints(&mut self, joints: &[Joint]) -> Result<Vec<u32>, ExecError> {
+        self.bind_ctx()?;
+        let mut ids = Vec::with_capacity(joints.len());
+        for j in joints {
+            let id = rigid_host::alloc_joint_slot(&mut self.joint_count, &mut self.free_joints, self.capacity.max_joints);
+            self.upload(5, rigid_host::joint_offset(id), bytemuck::bytes_of(j))?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// A joint from its description, its default torque arm from the bodies' reach.
+    pub fn add_joint_desc(&mut self, desc: &engine_schema::JointDesc) -> Result<u32, ExecError> {
+        let j = rigid_host::joint_from_desc(desc, &self.host_bodies, &self.body_reach);
+        Ok(self.add_joints(&[j])?[0])
     }
 
     fn reuse_on(&self) -> bool {
@@ -386,6 +511,9 @@ impl CudaSim {
     fn step_modes(&self) -> StepModes {
         StepModes {
             manifold_insert: self.modes.manifold_insert && self.reuse_on(),
+            // The persist list is written by narrowphase only; convex kernels emit
+            // contacts after it, so hull scenes take the full persistence scan (WgpuSim).
+            listed_persist: self.modes.listed_persist && !self.col_flags.convex && !self.col_flags.height_field,
             ..self.modes
         }
     }
@@ -400,12 +528,11 @@ impl CudaSim {
         StepInputs {
             body_count: self.body_count,
             collider_count: self.collider_count,
-            joint_count: 0,
-            joint_hash_slots: engine_schema::joint_hash_size(0),
-            has_convex: false,
-            has_height_field: false,
-            // No event shapes on CUDA (the World API runs on wgpu).
-            soil: false,
+            joint_count: self.joint_count,
+            joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
+            has_convex: self.col_flags.convex,
+            has_height_field: self.col_flags.height_field,
+            soil: self.has_soil,
             reuse_contacts: record,
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,
@@ -455,11 +582,24 @@ impl CudaSim {
         grid: (u32, u32, u32),
         pass: u32,
     ) -> Result<(), ExecError> {
+        self.launch_with(logical, grid, pass, None)
+    }
+
+    /// [`Self::launch`], or with `counts` (a device address of three words) the
+    /// kernel's indirect entry over its resident grid, reading the counts there.
+    fn launch_with(
+        &mut self,
+        logical: &'static str,
+        grid: (u32, u32, u32),
+        pass: u32,
+        counts: Option<sys::CUdeviceptr>,
+    ) -> Result<(), ExecError> {
         let idx = Self::kernel_index(logical)?;
         let threads = CUDA_KERNELS[idx].threads;
         self.last_kernel = logical;
         let stream = self.stream;
         let pass_ptr = self.bufs[PASS_BINDING as usize] + u64::from(pass) * PASS_ALIGN;
+        let body_groups = self.body_count.div_ceil(64);
         let k = &mut self.kernels[idx];
         if let Some(offset) = k.pass_offset {
             if k.bound_pass != Some(pass) {
@@ -475,20 +615,46 @@ impl CudaSim {
                 k.bound_pass = Some(pass);
             }
         }
-        if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
-            return Ok(());
+        if let Some(mut ptr) = counts {
+            let (f, resident) = k.indirect.ok_or_else(|| {
+                ExecError::Backend(format!("CUDA: {logical} has no indirect entry"))
+            })?;
+            // The blocks the device keeps resident, or one per 64 bodies when that is
+            // more (most indirect passes run a workgroup per 64 awake bodies): a block
+            // then rarely walks a second workgroup, and the hardware keeps balancing
+            // blocks across SMs. Measured on a T4 (2026-11-21): resident blocks alone
+            // were 12 % slower at 100k bodies (the static split's tail), and 4x or 16x
+            // the resident blocks at every size 4 % / 46 % slower at 10k (idle blocks).
+            // Any grid gives the same result: each workgroup runs once, whichever block.
+            let blocks = resident.max(body_groups);
+            let mut params = [&mut ptr as *mut sys::CUdeviceptr as *mut c_void];
+            unsafe {
+                result::launch_kernel(
+                    f,
+                    (blocks, 1, 1),
+                    (threads[0], threads[1], threads[2]),
+                    0,
+                    stream,
+                    &mut params,
+                )
+            }
+            .map_err(|e| ExecError::Backend(format!("CUDA: launch {logical}_gs: {e:?}")))?;
+        } else {
+            if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
+                return Ok(());
+            }
+            unsafe {
+                result::launch_kernel(
+                    k.function,
+                    grid,
+                    (threads[0], threads[1], threads[2]),
+                    0,
+                    stream,
+                    &mut [],
+                )
+            }
+            .map_err(|e| ExecError::Backend(format!("CUDA: launch {logical}: {e:?}")))?;
         }
-        unsafe {
-            result::launch_kernel(
-                k.function,
-                grid,
-                (threads[0], threads[1], threads[2]),
-                0,
-                stream,
-                &mut [],
-            )
-        }
-        .map_err(|e| ExecError::Backend(format!("CUDA: launch {logical}: {e:?}")))?;
         if k.writes_indirect {
             self.indirect_dirty = true;
         }
@@ -538,7 +704,13 @@ impl CudaSim {
             self.steps_done += 1;
             return Ok(());
         }
-        let (cell, levels) = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, false);
+        let (cell, levels, _) = rigid_host::choose_grid(
+            &self.host_cols,
+            &self.host_bodies,
+            None,
+            self.col_flags.convex,
+            0.0,
+        );
         self.params.grid_cell_size = cell;
         self.grid_levels = levels;
         let m = self.step_modes();
@@ -550,7 +722,7 @@ impl CudaSim {
             &rigid_plan::HostState {
                 contacts_parity: self.contacts_parity,
                 grid_levels: self.grid_levels,
-                has_filters: false,
+                has_filters: self.col_flags.filters,
                 record_hash: self.reuse_on(),
                 np_defer_limit: 0,
                 persist_list_limit: 0,
@@ -613,8 +785,13 @@ impl CudaSim {
                     self.launch(kernel, (x, y, 1), pass)?;
                 }
                 Cmd::Indirect { kernel, slot, pass } => {
-                    let g = self.indirect_groups(slot)?;
-                    self.launch(kernel, g, pass)?;
+                    if self.device_indirect {
+                        let at = self.bufs[INDIRECT_BINDING as usize] + u64::from(slot) * 12;
+                        self.launch_with(kernel, (0, 0, 0), pass, Some(at))?;
+                    } else {
+                        let g = self.indirect_groups(slot)?;
+                        self.launch(kernel, g, pass)?;
+                    }
                 }
             }
             // Diagnostics: `ENGINE_CUDA_STOP_AFTER=kernel@step` ends that step
@@ -686,6 +863,60 @@ impl CudaSim {
     pub fn download_words(&mut self, slot: usize, words: usize) -> Vec<u32> {
         let words = words.min((self.sizes[slot] / 4) as usize);
         self.download(slot, words).expect("download binding")
+    }
+
+    /// Overwrite bodies `first..` (pose, velocity, mass, flags), current and previous
+    /// rows alike, as [`Self::add_bodies`] writes them; the next step runs even if the
+    /// last one left no body awake.
+    pub fn write_bodies(&mut self, first: u32, bodies: &[BodyState]) {
+        self.bind_ctx().expect("CUDA context");
+        let count = bodies.len() as u32;
+        assert!(
+            first <= self.body_count && count <= self.body_count - first,
+            "write_bodies {first}..{} outside the {} bodies",
+            first + count,
+            self.body_count
+        );
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        let bytes = bytemuck::cast_slice(bodies);
+        self.upload(0, u64::from(first) * stride, bytes).expect("write bodies");
+        self.upload(0, u64::from(self.capacity.max_bodies + first) * stride, bytes)
+            .expect("write previous bodies");
+        self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
+        let (ccd, kinematic) = rigid_host::body_motion_flags(bodies);
+        self.motion.ccd |= ccd;
+        self.motion.kinematic |= kinematic;
+        // Not the skip of a step whose counters say nothing is awake.
+        self.counted_steps = self.counted_steps.wrapping_sub(1);
+    }
+
+    /// The colliders added so far.
+    pub fn colliders(&self) -> &[Collider] {
+        &self.host_cols
+    }
+
+    /// The parallel solve's precondition on the last step
+    /// ([`rigid_plan::validate_contact_coloring`], the WebGPU host's check).
+    pub fn validate_contact_coloring(&mut self) -> Result<(), String> {
+        let bodies = self.download_bodies();
+        let colors = self.download_words(12, self.body_count as usize);
+        let manifolds: Vec<Manifold> = {
+            let n = self.last_counters.manifold_count as usize;
+            let words = self.download_words(25, n * std::mem::size_of::<Manifold>() / 4);
+            bytemuck::cast_slice(&words).to_vec()
+        };
+        rigid_plan::validate_contact_coloring(
+            &bodies,
+            &colors,
+            &manifolds,
+            &self.host_cols,
+            self.capacity.max_colors,
+        )
+    }
+
+    /// Words in binding `slot` (for [`Self::download_words`] of the whole buffer).
+    pub fn binding_words(&self, slot: usize) -> usize {
+        (self.sizes[slot] / 4) as usize
     }
 
     pub fn download_bodies(&mut self) -> Vec<BodyState> {
