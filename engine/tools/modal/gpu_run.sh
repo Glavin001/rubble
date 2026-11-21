@@ -100,6 +100,13 @@ done
 # Measured 2026-11-21 (T4, 12 rows, perf=0): 12 containers with 8 cores and 8 GiB billed
 # 58 s ($0.0167); one container with 1 core and 2 GiB 26 s ($0.0048), wall 29 s.
 if [ -n "${matrix_cuda:-}" ]; then
+  # COUNTERS=1: Nsight Compute replays every launch, saving and restoring the GPU's memory
+  # on the CPU. On 1 core the GPU sat at 0-1 % and two rows passed the 600 s cap
+  # (2026-11-21): 8 cores, 8 GiB and the 1800 s cap.
+  if [ "${COUNTERS:-}" = 1 ]; then
+    : "${cpus:=8}" "${mem:=8}"
+    [ "$cap" = 600 ] && cap=1800
+  fi
   : "${cpus:=1}" "${mem:=2}" "${pack:=1}"
 fi
 : "${cpus:=8}" "${mem:=8}" "${pack:=0}"
@@ -118,7 +125,7 @@ if [ "$fanout" = matrix ]; then
   data+=(--data engine/tools/scenario-matrix)
   if [ -n "${CAR:-}" ]; then sedan="$CAR"; fi
   envs+=("CAR=@sedan")
-  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT; do
+  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP; do
     v="$(printenv "$k" || true)"
     if [ -n "$v" ]; then envs+=("$k=$v"); fi
   done
@@ -217,8 +224,12 @@ esac
 if [ -n "${base_ref:-}${head_ref:-}" ]; then
   [ -n "${matrix_cuda:-}" ] || { echo "gpu_run: --base/--head are for --matrix-cuda" >&2; exit 2; }
   [ -n "${base_ref:-}" ] || { echo "gpu_run: --head needs --base" >&2; exit 2; }
+  # Every row's fixture, in the matrix's order, whichever rows run: the library's key
+  # covers the fixtures, so a build serves any selection of rows.
   fx=()
-  for r in "${matrix_rows[@]}"; do fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx"); done
+  for r in $(python3 "$matrix_py" --rows --two-builds); do
+    [ -f "$repo/engine/out/scenario-matrix/portable/$r.pfx" ] && fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx")
+  done
   "$here/build_ref.sh" "$base_ref" "$run/refs/base_replay" "${fx[@]}"
   pack_opts+=(--exe base_replay=/out/refs/base_replay)
   if [ -n "${head_ref:-}" ]; then

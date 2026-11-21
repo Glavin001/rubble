@@ -25,6 +25,8 @@ one state, the same build), compares every state word and times each frame apart
         process each, the base's spread as the noise, the end states word by word (a changed
         layout: the bindings both have). ALLOW_DIFF=1 reports state differences without
         failing (a change that reorders arithmetic). run.sh --cuda --base REF [--head REF].
+        COUNTERS=1: then each row's kernels under Nsight Compute, both builds (time, registers,
+        occupancy, SM and DRAM throughput, L1 and L2 hit rates; COUNTER_METRICS, COUNTER_TOP).
     matrix.py --end-state DIR [ROW ...] each row's state after END_FRAMES (default 20)
         frames from its moment, into DIR/ROW.fx (one build's; a host refactor's gate)
     matrix.py --compare-end A B [ROW ...]  two builds' end states, every state word:
@@ -237,6 +239,116 @@ def run_build(binary, row, state_out):
     return None, None, out
 
 
+# COUNTERS=1 (two builds): NVIDIA's hardware counters for each kernel, both builds, after
+# the timing (Nsight Compute replays every launch several times: never inside a timed
+# run). Clocks are not locked (Modal's sandbox refuses it), so the counters explain where
+# time goes; the timed A/B above judges speed. COUNTER_METRICS replaces the list.
+COUNTER_METRICS = os.environ.get("COUNTER_METRICS", ",".join([
+    "gpu__time_duration.sum",
+    "launch__registers_per_thread",
+    "sm__warps_active.avg.pct_of_peak_sustained_active",
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+    "l1tex__t_sector_hit_rate.pct",
+    "lts__t_sector_hit_rate.pct",
+    "smsp__inst_executed.sum",
+]))
+
+
+def ncu_path():
+    import glob
+    import shutil
+    return shutil.which("ncu") or next(iter(sorted(glob.glob("/opt/nvidia/nsight-compute/*/ncu")
+                                                   + glob.glob("/usr/local/cuda*/bin/ncu"))), None)
+
+
+def kernel_counters(binary, row):
+    """One build's kernels on the row's fixture: {kernel: {metric: value summed (time,
+    instructions) or time-weighted mean (the rest)}, 'calls': n}, per frame. Two frames are
+    profiled (`--run --ab-frames 1`: the module-loading frame and the timed one, the same
+    work), so the sums are halved."""
+    import csv
+    import io
+    ncu = ncu_path()
+    if not ncu:
+        return None, "no ncu in this image (COUNTERS=1 runs on gpu_run's counters image)"
+    # (--replay-mode application: the whole replay runs once per counter pass instead of
+    # every launch saving and restoring the GPU's memory; valid because a replay is bit
+    # for bit deterministic. --cache-control none: caches stay as the frame left them, so
+    # hit rates are the frame's, not a flushed cache's.)
+    cmd = [ncu, "--clock-control", "none", "--cache-control", "none", "--replay-mode", "application",
+           "--csv", "--page", "raw", "--metrics", COUNTER_METRICS,
+           binary, "--fixture", portable_file(row), "--run", "--ab-frames", "1"]
+    env = dict(os.environ, AB_WARM_MS="0", AB_ROUNDS="1")
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE, env=env)
+    lines = [l for l in p.stdout.splitlines() if l.startswith('"')]
+    if len(lines) < 3:
+        return None, "ncu: " + " | ".join((p.stdout + p.stderr).strip().splitlines()[-4:])
+    rows = list(csv.reader(io.StringIO("\n".join(lines))))
+    head, data = rows[0], rows[2:]  # rows[1]: units
+    col = {n: i for i, n in enumerate(head)}
+    out = {}
+    frames = 2.0
+    for r in data:
+        name = r[col["Kernel Name"]].split("(")[0]
+        k = out.setdefault(name, {"calls": 0.0, "_w": 0.0})
+        k["calls"] += 1 / frames
+        try:
+            t = float(r[col["gpu__time_duration.sum"]].replace(",", ""))
+        except (KeyError, ValueError):
+            t = 0.0
+        k["_w"] += t
+        for m in COUNTER_METRICS.split(","):
+            if m not in col:
+                continue
+            try:
+                v = float(r[col[m]].replace(",", ""))
+            except ValueError:
+                continue
+            if m.endswith(".sum"):
+                k[m] = k.get(m, 0.0) + v / frames
+            else:
+                k[m] = k.get(m, 0.0) + v * t  # time-weighted, divided below
+    for k in out.values():
+        w = k.pop("_w")
+        for m in list(k):
+            if m != "calls" and not m.endswith(".sum"):
+                k[m] = k[m] / w if w else 0.0
+    return out, ""
+
+
+def print_counters(base, head):
+    """Each kernel's frame time base and head (ns from ncu, shown in µs), then the head's
+    counters with the base's in brackets where they moved."""
+    names = sorted(set(base) | set(head), key=lambda n: -max(head.get(n, {}).get("gpu__time_duration.sum", 0),
+                                                             base.get(n, {}).get("gpu__time_duration.sum", 0)))
+    tb = sum(k.get("gpu__time_duration.sum", 0) for k in base.values()) / 1e3
+    th = sum(k.get("gpu__time_duration.sum", 0) for k in head.values()) / 1e3
+    print(f"    counters (Nsight Compute, clocks unlocked; a frame): kernels {th:.0f} µs head, {tb:.0f} µs base")
+    print(f"    {'kernel':<44} {'calls':>5} {'base µs':>8} {'head µs':>8} {'delta':>7} {'regs':>7} {'occ %':>11} "
+          f"{'SM %':>11} {'DRAM %':>11} {'L1 hit':>11} {'L2 hit':>11}")
+    def cell(m, fmt="{:.0f}"):
+        h, b = head_k.get(m), base_k.get(m)
+        if h is None and b is None:
+            return "-"
+        if h is None:
+            return "(" + fmt.format(b) + ")"
+        if b is None or abs(h - b) < 0.5:
+            return fmt.format(h)
+        return fmt.format(h) + " (" + fmt.format(b) + ")"
+    for n in names[:int(os.environ.get("COUNTER_TOP", "12"))]:
+        head_k, base_k = head.get(n, {}), base.get(n, {})
+        hb = base_k.get("gpu__time_duration.sum", 0) / 1e3
+        hh = head_k.get("gpu__time_duration.sum", 0) / 1e3
+        d = f"{100.0 * (hh - hb) / hb:+.0f}%" if hb else "new"
+        calls = head_k.get("calls", base_k.get("calls", 0))
+        print(f"    {n[:44]:<44} {calls:>5.0f} {hb:>8.1f} {hh:>8.1f} {d:>7} "
+              f"{cell('launch__registers_per_thread'):>7} {cell('sm__warps_active.avg.pct_of_peak_sustained_active'):>11} "
+              f"{cell('sm__throughput.avg.pct_of_peak_sustained_elapsed'):>11} "
+              f"{cell('dram__throughput.avg.pct_of_peak_sustained_elapsed'):>11} "
+              f"{cell('l1tex__t_sector_hit_rate.pct'):>11} {cell('lts__t_sector_hit_rate.pct'):>11}")
+
+
 def two_builds(rows):
     """The A/B of two builds (BASE_BIN against REPLAY_BIN; gpu_run.sh --base REF): each row's
     fixture replayed by one build's process, then the other's, PROCS times, the order
@@ -297,6 +409,13 @@ def two_builds(rows):
         print(f"{row[0]:<8} {bfb:>7} {head:>8.3f} {base:>8.3f} {delta:>+7.1f}%  {flag:<6} {noise:>5.1f}% {secs:>5.1f}  {row[5]}")
         for n in notes:
             print("    " + n)
+        if os.environ.get("COUNTERS") == "1":
+            cb, why_b = kernel_counters(BASE, row)
+            ch, why_h = kernel_counters(REPLAY, row)
+            if cb is None or ch is None:
+                print("    counters: " + (why_b or why_h))
+            else:
+                print_counters(cb, ch)
     verdict = "PASS" if not bad else "FAIL (" + ", ".join(bad) + ")"
     print(f"verdict: {verdict}; {len(rows)} rows in {time.time() - t_all:.1f} s")
     return 0 if not bad else 1
