@@ -56,6 +56,7 @@ fn def() -> ExplicitVehiclesDef {
             shapes: 128,
             planes: 4096,
         },
+        bit_exact: true,
         ..ExplicitVehiclesDef::default()
     }
 }

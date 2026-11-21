@@ -25,7 +25,7 @@ use crate::{
 };
 use engine_exec::explicit_plan::schedule::{
     self, Fine, GroupOp, Launch, Op, SelfDispatch, FLEET_ARGS_BYTES, SELF_ARGS_BYTES, SELF_AWAKE_ARGS,
-    SPLIT_ALL_ARGS, SPLIT_MEMBER_ARGS,
+    SPLIT_ALL_ARGS, SPLIT_GROUP_ARGS, SPLIT_MEMBER_ARGS,
 };
 use engine_exec::explicit_plan::{
     self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, Kernel, PlannerState, BIND_TABLE,
@@ -52,6 +52,9 @@ pub struct ExplicitBeamsGpu {
     /// created at first use; its frame module.
     split: std::sync::OnceLock<Split>,
     split_module: &'static str,
+    /// Bit-exact results ([`Self::set_bit_exact`]): the kernels' strict arithmetic as
+    /// built (true), or without it (false: the compilers may fuse and reassociate).
+    bit_exact: bool,
     params: wgpu::Buffer,
     nodes: wgpu::Buffer,
     beams: wgpu::Buffer,
@@ -162,6 +165,25 @@ pub struct ExplicitBeamsGpu {
     sleep_inputs: Vec<Option<engine_softbody::explicit_drive::DriveInput>>,
     sleep_grab: Option<usize>,
     sleep_wake: std::sync::Mutex<Vec<usize>>,
+    /// Raycast wheels that see the rigid proxies ([`Self::set_wheels_see_bodies`]): per
+    /// vehicle its drive flags word without that bit (None: no wheels), and whether it is on.
+    drive_flags: Vec<Option<u32>>,
+    wheels_bodies: bool,
+    /// The perf flags as last asked for ([`Self::set_perf_flags`]); the planner holds them
+    /// less what wheels on bodies leave out.
+    perf_asked: u32,
+}
+
+/// A vehicle's drive flags word (`explicit_plan::drive` record 5 .y) without the
+/// see-bodies bit, and whether that bit is set.
+fn drive_flags_of(v: &ExplicitBeams) -> (Option<u32>, bool) {
+    match v.drive.as_deref() {
+        Some(d) if !d.config.wheels.is_empty() => {
+            let r = plan::drive::records(Some(d), plan::drive::DriveLayout::stride_for(d.config.wheels.len()));
+            (Some(r[5][1] & !plan::drive::FLAG_SEE_BODIES), d.config.see_bodies)
+        }
+        _ => (None, false),
+    }
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -352,6 +374,10 @@ struct Contact {
     /// which spares a one-vehicle scene the contact frame's compile (the largest
     /// kernel, about a minute cold in Chrome on Metal).
     pipes: Option<ContactPipes>,
+    /// The plan passes' and the contact entries' layouts (the pipelines are made again
+    /// when the arithmetic setting changes: [`ExplicitBeamsGpu::set_bit_exact`]).
+    plan_layout: wgpu::PipelineLayout,
+    contact_layout: wgpu::PipelineLayout,
     plan_group: wgpu::BindGroup,
     contact_group: wgpu::BindGroup,
     /// Indirect arguments: the solo vehicles (word 0) and the groups (word 4).
@@ -492,7 +518,7 @@ struct Split {
 }
 
 impl Split {
-    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], frame_module: &str) -> Self {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], frame_module: &str, bit_exact: bool) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("explicit-beams-split"),
             entries: &split_entries(),
@@ -505,7 +531,7 @@ impl Split {
         let pipe = |module_name: &str, entry: &str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(module_name),
-                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(module_name)).into()),
+                source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(module_name), bit_exact).into()),
             });
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(module_name),
@@ -548,6 +574,8 @@ pub fn group_split_default() -> bool {
 /// The split group path's entry points (`explicit_beams_split.slang`).
 pub const SPLIT_MEMBER_ENTRY: &str = plan::SPLIT_MEMBER_ENTRY;
 pub const SPLIT_GROUP_ENTRY: &str = plan::SPLIT_GROUP_ENTRY;
+/// The members' raycast wheels on each other (`explicit_beams_drive.slang` wheelsPartners).
+pub const SPLIT_WHEELS_ENTRY: &str = plan::SPLIT_WHEELS_ENTRY;
 pub const SPLIT_TESTS_ENTRY: &str = plan::SPLIT_TESTS_ENTRY;
 
 /// Whether the split path runs the small groups' triangle tests across workgroups
@@ -617,6 +645,8 @@ struct GroupSplit {
     device: wgpu::Device,
     pipeline_layout: wgpu::PipelineLayout,
     kind: (bool, u32, bool),
+    /// The modules' WGSL as built (true) or without strict arithmetic ([`host_wgsl`]).
+    bit_exact: bool,
     group: wgpu::ComputePipeline,
     tests: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
@@ -629,6 +659,8 @@ struct GroupSplit {
     /// the buffer it runs from; a spare at the other binding); the groups' module zeroes
     /// both (`bind_args`).
     fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 4]>,
+    /// The members' wheels on each other, created at first use.
+    wheels: std::sync::OnceLock<wgpu::ComputePipeline>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -653,7 +685,7 @@ const FLEET_LEVELS_ENTRY: &str = "explicit_beams_fleet_levels";
 /// LV_*): SPLIT_LV | phase << 8 | level.
 
 impl GroupSplit {
-    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool, bit_exact: bool) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("explicit-beams-group-split"),
             entries: &split_entries(),
@@ -685,8 +717,8 @@ impl GroupSplit {
         };
         let fleet_args = [args_buffer(), args_buffer()];
         let spare = [args_buffer(), args_buffer()];
-        let group = split_pipe(device, &args_layout, kind, "group", SPLIT_GROUP_ENTRY);
-        let tests = split_pipe(device, &pipeline_layout, kind, "tests", SPLIT_TESTS_ENTRY);
+        let group = split_pipe(device, &args_layout, kind, bit_exact, "group", SPLIT_GROUP_ENTRY);
+        let tests = split_pipe(device, &pipeline_layout, kind, bit_exact, "tests", SPLIT_TESTS_ENTRY);
         fn entries<'a>(bufs: &'a [wgpu::Buffer; 9], args: Option<[&'a wgpu::Buffer; 2]>) -> Vec<wgpu::BindGroupEntry<'a>> {
             let mut e: Vec<wgpu::BindGroupEntry> = (0..9)
                 .map(|i| wgpu::BindGroupEntry {
@@ -720,10 +752,12 @@ impl GroupSplit {
             device: device.clone(),
             pipeline_layout,
             kind,
+            bit_exact,
             group,
             tests,
             bind,
             fleet: std::sync::OnceLock::new(),
+            wheels: std::sync::OnceLock::new(),
             args_layout,
             bind_args,
             bind_first,
@@ -736,17 +770,22 @@ impl GroupSplit {
     fn fleet(&self) -> &[wgpu::ComputePipeline; 4] {
         self.fleet.get_or_init(|| {
             [
-                split_pipe(&self.device, &self.pipeline_layout, self.kind, "fleetfront", FLEET_FRONT_ENTRY),
-                split_pipe(&self.device, &self.args_layout, self.kind, "fleetplan", FLEET_PLAN_ENTRY),
-                split_pipe(&self.device, &self.pipeline_layout, self.kind, "fleetpost", FLEET_POST_ENTRY),
-                split_pipe(&self.device, &self.pipeline_layout, self.kind, "fleetlevels", FLEET_LEVELS_ENTRY),
+                split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "fleetfront", FLEET_FRONT_ENTRY),
+                split_pipe(&self.device, &self.args_layout, self.kind, self.bit_exact, "fleetplan", FLEET_PLAN_ENTRY),
+                split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "fleetpost", FLEET_POST_ENTRY),
+                split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "fleetlevels", FLEET_LEVELS_ENTRY),
             ]
         })
     }
 
+    fn wheels(&self) -> &wgpu::ComputePipeline {
+        self.wheels
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "wheels", SPLIT_WHEELS_ENTRY))
+    }
+
     fn member(&self) -> &wgpu::ComputePipeline {
         self.member
-            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, "member", SPLIT_MEMBER_ENTRY))
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "member", SPLIT_MEMBER_ENTRY))
     }
 }
 
@@ -755,13 +794,14 @@ fn split_pipe(
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
     (aero, lanes, zero): (bool, u32, bool),
+    bit_exact: bool,
     which: &str,
     entry: &str,
 ) -> wgpu::ComputePipeline {
     let name = split_module(which, aero, lanes);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(name),
-        source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
+        source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(name), bit_exact).into()),
     });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(name),
@@ -871,10 +911,12 @@ struct SelfSplit {
     pairs_layout: wgpu::PipelineLayout,
     tag: &'static str,
     zero: bool,
+    /// The modules' WGSL as built (true) or without strict arithmetic ([`host_wgsl`]).
+    bit_exact: bool,
 }
 
 impl SelfSplit {
-    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool, bit_exact: bool) -> Self {
         let pairs_entries = split_entries();
         let step_entries = self_split_step_entries();
         let layouts = [&step_entries, &pairs_entries].map(|entries| {
@@ -933,13 +975,14 @@ impl SelfSplit {
             pairs_layout,
             tag,
             zero,
+            bit_exact,
         }
     }
 
     fn pipeline(&self, name: &str, entry: &str, layout: &wgpu::PipelineLayout) -> wgpu::ComputePipeline {
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),
-            source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
+            source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(name), self.bit_exact).into()),
         });
         self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(name),
@@ -1066,6 +1109,19 @@ fn module_override(name: &str) -> Option<&'static str> {
     Some(*text)
 }
 
+/// A module's WGSL as the host creates its pipeline: the uniform-load rewrite
+/// ([`crate::uniformize_workgroup_lanes`]), then with bit-exact results off the strict
+/// arithmetic's rewrite ([`crate::fast_float_wgsl`]; `bit_exact`: the build's text as
+/// before).
+fn host_wgsl(src: &str, bit_exact: bool) -> String {
+    let u = crate::uniformize_workgroup_lanes(src);
+    if bit_exact {
+        u
+    } else {
+        crate::fast_float_wgsl(&u).into_owned()
+    }
+}
+
 /// The WGSL of a plan module ([`engine_exec::explicit_plan::MODULES`]).
 fn module_wgsl(name: &str) -> &'static str {
     if let Some(text) = module_override(name) {
@@ -1152,6 +1208,7 @@ impl Contact {
         args_init: &[u8],
         build_pipes: bool,
         big_groups: bool,
+        bit_exact: bool,
     ) -> Self {
         let args_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("explicit-beams-vv-args"),
@@ -1195,10 +1252,40 @@ impl Contact {
             });
             (pipeline_layout, group)
         };
+        let (plan_layout, plan_group) = layout_with(true);
+        let (contact_layout, contact_group) = layout_with(false);
+        let pipes = build_pipes.then(|| {
+            Self::pipes(device, (&plan_layout, &contact_layout), (contact_wgsl, solo_wgsl, big_wgsl), big_groups, bit_exact)
+        });
+        Self {
+            pipes,
+            plan_layout,
+            contact_layout,
+            plan_group,
+            contact_group,
+            args: args_buffer,
+            acc: acc.clone(),
+            status_at,
+            cap_at,
+            status: Default::default(),
+            levels_at,
+            levels: Default::default(),
+        }
+    }
+
+    /// The contact pipelines from the contact, solo and larger groups' modules' WGSL,
+    /// as built (`bit_exact`) or without strict arithmetic ([`host_wgsl`]).
+    fn pipes(
+        device: &wgpu::Device,
+        (plan_layout, contact_layout): (&wgpu::PipelineLayout, &wgpu::PipelineLayout),
+        (contact_wgsl, solo_wgsl, big_wgsl): (&str, &str, &str),
+        big_groups: bool,
+        bit_exact: bool,
+    ) -> ContactPipes {
         let make = |entry: &str, wgsl: &str, layout: &wgpu::PipelineLayout| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(entry),
-                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
+                source: wgpu::ShaderSource::Wgsl(host_wgsl(wgsl, bit_exact).into()),
             });
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -1209,26 +1296,12 @@ impl Contact {
                 cache: None,
             })
         };
-        let (plan_layout, plan_group) = layout_with(true);
-        let (contact_layout, contact_group) = layout_with(false);
-        let pipes = build_pipes.then(|| ContactPipes {
-            plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout)),
-            sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
-            groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
-            solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
-            big: big_groups.then(|| make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout)),
-        });
-        Self {
-            pipes,
-            plan_group,
-            contact_group,
-            args: args_buffer,
-            acc: acc.clone(),
-            status_at,
-            cap_at,
-            status: Default::default(),
-            levels_at,
-            levels: Default::default(),
+        ContactPipes {
+            plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), plan_layout)),
+            sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), plan_layout),
+            groups: make(plan::FRAME_ENTRY, contact_wgsl, contact_layout),
+            solo: make(plan::FRAME_ENTRY, solo_wgsl, contact_layout),
+            big: big_groups.then(|| make(plan::CONTACT_ENTRY, big_wgsl, contact_layout)),
         }
     }
 
@@ -1378,6 +1451,8 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
 /// The wide passes' pipelines and bind group ([`ExplicitBeamsGpu::set_wide`]).
 struct Wide {
     passes: Vec<wgpu::ComputePipeline>,
+    /// The passes' layout (made again with the arithmetic setting: [`Wide::pipes`]).
+    pipeline_layout: wgpu::PipelineLayout,
     group: wgpu::BindGroup,
     /// The kernel's vehicle table (constant memory): static records, then per
     /// vehicle (origin, steps) copied from the misc buffer each frame.
@@ -1398,9 +1473,19 @@ impl ExplicitBeamsGpu {
         vehicles: &[ExplicitBeams],
         coupling: Option<CouplingCapacity>,
     ) -> Vec<crate::ComputeSpec> {
+        Self::compute_specs_for(vehicles, coupling, true)
+    }
+
+    /// [`Self::compute_specs`] for [`Self::with_settings`]'s arithmetic setting
+    /// (`bit_exact` false: the modules without strict arithmetic, [`Self::set_bit_exact`]).
+    pub fn compute_specs_for(
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        bit_exact: bool,
+    ) -> Vec<crate::ComputeSpec> {
         let layout = ExplicitUpload::new(vehicles, coupling).layout;
         let (aero, lanes, surface) = (layout.aero, layout.lanes, layout.surface);
-        let u = crate::uniformize_workgroup_lanes;
+        let u = |w: &str| host_wgsl(w, bit_exact);
         // More than one vehicle: the contact kernels run while contact is on; the
         // plain frame only once it is turned off (created at first use).
         let deferred = vehicles.len() > 1;
@@ -1596,6 +1681,22 @@ impl ExplicitBeamsGpu {
         coupling: Option<CouplingCapacity>,
         sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
     ) -> Self {
+        Self::with_settings(device, queue, vehicles, coupling, sleep, true)
+    }
+
+    /// [`Self::with_sleep`] with the arithmetic setting (`bit_exact`, see
+    /// [`Self::set_bit_exact`]) from the first frame: the pipelines are compiled once,
+    /// for that setting. This type's other constructors are bit-exact (its suites hold
+    /// GPU == CPU reference); a World and the vehicle lab are not unless asked
+    /// (`bit_exact_default`).
+    pub fn with_settings(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+        bit_exact: bool,
+    ) -> Self {
         let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
         let layout = upload.layout.clone();
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
@@ -1640,7 +1741,7 @@ impl ExplicitBeamsGpu {
         let vehicles_n = layout.spans.len();
         let wide = layout
             .wide_ok
-            .then(|| Wide::new(device, queue, &buffers, upload.table_records()));
+            .then(|| Wide::new(device, queue, &buffers, upload.table_records(), bit_exact));
         let contact = Contact::new(
             device,
             &buffers,
@@ -1660,6 +1761,7 @@ impl ExplicitBeamsGpu {
             &upload.bytes(plan::BIND_ARGS),
             vehicles.len() > 1,
             vehicles.len() > plan::VV_SIDE,
+            bit_exact,
         );
         let bufs = [
             params.clone(),
@@ -1681,13 +1783,14 @@ impl ExplicitBeamsGpu {
         // rule; `RUBBLE_WIDE_SLEEP=0`: a workgroup or a step's dispatches, as before).
         planner.set_wide_sleep(std::env::var("RUBBLE_WIDE_SLEEP").as_deref() != Ok("0"));
         let one = vehicles.len() <= 1;
-        let gpu = Self {
+        let mut gpu = Self {
             device: device.clone(),
             queue: queue.clone(),
             frame: std::sync::OnceLock::new(),
             frame_module,
             split: std::sync::OnceLock::new(),
             split_module: Kernel::FrameSeg.module(aero, lanes),
+            bit_exact,
             params,
             nodes,
             beams,
@@ -1745,7 +1848,13 @@ impl ExplicitBeamsGpu {
             sleep_inputs: vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect(),
             sleep_grab: None,
             sleep_wake: Default::default(),
+            drive_flags: vehicles.iter().map(|v| drive_flags_of(v).0).collect(),
+            wheels_bodies: vehicles.iter().any(|v| drive_flags_of(v).1),
+            perf_asked: 0,
         };
+        // Wheels that see bodies leave out the schedules that run rays ahead.
+        let f = gpu.planner.perf_flags();
+        gpu.set_perf_flags(f);
         // One vehicle runs the plain frame (or, with surface contact, the split one)
         // from the first frame on.
         if one {
@@ -1822,6 +1931,10 @@ impl ExplicitBeamsGpu {
         self.labelled.iter_mut().for_each(|l| *l = false);
         self.planner.words[plan::W_RETIRE_BASE] = 0;
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
+        self.drive_flags = vehicles.iter().map(|v| drive_flags_of(v).0).collect();
+        self.wheels_bodies = vehicles.iter().any(|v| drive_flags_of(v).1);
+        let f = self.perf_asked;
+        self.set_perf_flags(f);
         self.sleep_grab = None;
         self.sleep_wake.lock().unwrap().clear();
         self.contact_errors.lock().unwrap().clear();
@@ -1843,7 +1956,7 @@ impl ExplicitBeamsGpu {
 
     /// The split frame's pipelines (see `split`).
     fn split_pipes(&self) -> &Split {
-        self.split.get_or_init(|| Split::new(&self.device, &self.bufs, self.split_module))
+        self.split.get_or_init(|| Split::new(&self.device, &self.bufs, self.split_module, self.bit_exact))
     }
 
     /// The plain frame's pipeline and bind group, created at first use (see `frame`).
@@ -1852,9 +1965,7 @@ impl ExplicitBeamsGpu {
             let device = &self.device;
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("explicit_beams"),
-                source: wgpu::ShaderSource::Wgsl(
-                    crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module)).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(self.frame_module), self.bit_exact).into()),
             });
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("explicit_beams_frame"),
@@ -1879,7 +1990,7 @@ impl ExplicitBeamsGpu {
     /// Diagnostic: the per-vehicle frame module's WGSL as the frame compiles it.
     #[doc(hidden)]
     pub fn debug_frame_wgsl(&self) -> String {
-        crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module))
+        host_wgsl(module_wgsl(self.frame_module), self.bit_exact)
     }
 
     /// Diagnostic (ablations of an edited frame module, [`Self::debug_set_frame_wgsl`]):
@@ -1906,7 +2017,7 @@ impl ExplicitBeamsGpu {
             "groups" => Kernel::Contact,
             _ => Kernel::ContactBig,
         };
-        crate::uniformize_workgroup_lanes(module_wgsl(frame_module(k, aero, lanes, self.layout.surface, self.layout.coupling.is_some())))
+        host_wgsl(module_wgsl(frame_module(k, aero, lanes, self.layout.surface, self.layout.coupling.is_some())), self.bit_exact)
     }
 
     /// Diagnostic: run `src` as a contact module ("solo", "groups" or "big") from now on.
@@ -2687,6 +2798,62 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// Bit-exact results (an engine-wide setting; the owner's decision of 2026-11-19:
+    /// bit-identical results across machines are for testing and reproduction, not for
+    /// run time). On, the kernels run as built: every strict float operation keeps the
+    /// CPU reference's IEEE order (`slang/physics/strict.slang`), so the GPU's results
+    /// are the CPU reference's bit for bit on every target, and every suite that holds
+    /// that runs this way. Off, the pipelines are made from the same modules without
+    /// the strict helpers' opaque zero and division and square-root corrections
+    /// ([`crate::fast_float_wgsl`]): the same equations, contact rules, iterations and
+    /// tolerances, with the compilers free to fuse and reassociate their arithmetic, so
+    /// results differ in the last bits from machine to machine
+    /// (`vehicle-perf-first-principles.md` §8.40). Changing it makes the pipelines again
+    /// (each compiled at its first use; a browser compiles them synchronously) and
+    /// changes no state. The constructors other than [`Self::with_settings`] start on.
+    pub fn set_bit_exact(&mut self, on: bool) {
+        if on == self.bit_exact {
+            return;
+        }
+        self.bit_exact = on;
+        self.frame = std::sync::OnceLock::new();
+        self.split = std::sync::OnceLock::new();
+        self.group_split_pipes = std::sync::OnceLock::new();
+        self.self_split_pipes = std::sync::OnceLock::new();
+        if let Some(w) = &mut self.wide {
+            w.passes = Wide::pipes(&self.device, &w.pipeline_layout, on);
+        }
+        if self.contact.pipes.is_some() {
+            let (aero, _, lanes) = self.module_kind;
+            let (surface, coupled) = (self.layout.surface, self.layout.coupling.is_some());
+            let big = self.contact.pipes.as_ref().is_some_and(|p| p.big.is_some());
+            self.contact.pipes = Some(Contact::pipes(
+                &self.device,
+                (&self.contact.plan_layout, &self.contact.contact_layout),
+                (
+                    module_wgsl(frame_module(Kernel::Contact, aero, lanes, surface, coupled)),
+                    module_wgsl(frame_module(Kernel::Solo, aero, lanes, surface, coupled)),
+                    module_wgsl(frame_module(Kernel::ContactBig, aero, lanes, surface, coupled)),
+                ),
+                big,
+                on,
+            ));
+        }
+        // (A single vehicle runs its frame from the first frame on: as the constructor.)
+        if self.layout.spans.len() <= 1 {
+            if self.planner.split_frames(true) {
+                self.split_pipes();
+            } else {
+                self.frame_pipe();
+            }
+        }
+    }
+
+    /// Whether results are bit-exact ([`Self::set_bit_exact`]).
+    pub fn bit_exact(&self) -> bool {
+        self.bit_exact
+    }
+
     /// The self-collision grid walk's pair list built once and reused over steps while
     /// it provably holds every pair the walk would test (`explicit_beams.slang`
     /// pairReuse*; lossless: the same hits, bit for bit) on, or listed every step (off).
@@ -2709,8 +2876,41 @@ impl ExplicitBeamsGpu {
     /// The kernels' lossless schedule switches ([`plan::W_PERF_FLAGS`], `plan::PERF_*`
     /// bits; `RUBBLE_PERF_FLAGS` sets the start value): each the same results bit for
     /// bit on or off. Applies from the next frame.
+    /// While raycast wheels see bodies ([`Self::set_wheels_see_bodies`]) the schedules that
+    /// run the wheels' rays or tyres beside the coupling's step rather than after it
+    /// ([`schedule::WHEELS_AHEAD_FLAGS`], and the wide passes' fused aux work:
+    /// [`schedule::Switches::wide_fused_on`]) are left out (the
+    /// kernel fails a frame that takes them with the bit set); they come back with it off.
     pub fn set_perf_flags(&mut self, flags: u32) {
+        self.perf_asked = flags;
+        let flags = if self.wheels_bodies { flags & !schedule::WHEELS_AHEAD_FLAGS } else { flags };
         self.planner.set_perf_flags(flags);
+    }
+
+    /// Raycast wheels that also meet the rigid proxies and push back on them
+    /// (`engine_softbody::explicit_drive::DriveConfig::see_bodies`; the World's
+    /// `wheels_hit_bodies`) for every vehicle with wheels, from the next frame. Off, every
+    /// frame is the frame without it bit for bit.
+    pub fn set_wheels_see_bodies(&mut self, on: bool) {
+        let Some(d) = self.layout.drive else {
+            return;
+        };
+        self.wheels_bodies = on;
+        // The header's .x bit 2: the groups' wheels on each other (wheelsPartners).
+        let x: u32 = if on { 3 } else { 1 };
+        self.queue.write_buffer(&self.misc, u64::from(d.header) * 16, bytemuck::bytes_of(&x));
+        for (v, f) in self.drive_flags.iter().enumerate() {
+            let Some(f) = *f else { continue };
+            let w = if on { f | plan::drive::FLAG_SEE_BODIES } else { f };
+            let at = u64::from(d.vehicle(v) + 5) * 16 + 4;
+            self.queue.write_buffer(&self.misc, at, bytemuck::bytes_of(&w));
+        }
+        let f = self.perf_asked;
+        self.set_perf_flags(f);
+    }
+
+    pub fn wheels_see_bodies(&self) -> bool {
+        self.wheels_bodies
     }
 
     pub fn perf_flags(&self) -> u32 {
@@ -3679,6 +3879,7 @@ impl ExplicitBeamsGpu {
             wide_list: self.wide_list,
             wide_fused: self.wide_fused,
             vv_grid: self.vv_grid,
+            wheels_bodies: self.wheels_bodies,
         };
         plan::portable::Portable::new(t, note, self.layout.clone(), self.planner.settings(), switches, bindings)
     }
@@ -4007,7 +4208,7 @@ impl ExplicitBeamsGpu {
         self.self_split_pipes.get_or_init(|| {
             let (aero, _, lanes) = self.module_kind;
             let zero = std::env::var("RUBBLE_SELF_SPLIT_ZERO").as_deref() == Ok("1");
-            SelfSplit::new(&self.device, &self.bufs, aero, lanes, zero)
+            SelfSplit::new(&self.device, &self.bufs, aero, lanes, zero, self.bit_exact)
         })
     }
 
@@ -4231,7 +4432,7 @@ impl ExplicitBeamsGpu {
 
     /// The perf flags of a frame on the split group path ([`schedule::fleet_flags`]).
     fn fleet_flags(&self) -> u32 {
-        schedule::fleet_flags(&self.planner, &self.switches(true))
+        schedule::fleet_flags(&self.planner, &self.switches(true), self.self_split_vv.get())
     }
 
     /// What this host chose for its frames and what its modules allow
@@ -4244,6 +4445,7 @@ impl ExplicitBeamsGpu {
             self_split: self.self_split,
             wide_list: self.wide_list,
             wide_fused: self.wide_fused,
+            wheels_bodies: self.wheels_bodies,
             vv_grid: self.vv_grid,
             current: self.variant == KernelVariant::Current,
             ablate: self.variant == KernelVariant::Ablate,
@@ -4285,7 +4487,7 @@ impl ExplicitBeamsGpu {
     fn group_split_pipes(&self) -> &GroupSplit {
         self.group_split_pipes.get_or_init(|| {
             let (aero, _, lanes) = self.module_kind;
-            GroupSplit::new(&self.device, &self.bufs, aero, lanes, self.group_split_zero)
+            GroupSplit::new(&self.device, &self.bufs, aero, lanes, self.group_split_zero, self.bit_exact)
         })
     }
 
@@ -4299,6 +4501,11 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(if tests { &g.tests } else { &g.group });
                 pass.set_bind_group(0, if tests { &g.bind } else { &g.bind_args }, &at(copy));
                 pass.dispatch_workgroups_indirect(args, off);
+            }
+            GroupOp::Wheels { copy } => {
+                pass.set_pipeline(g.wheels());
+                pass.set_bind_group(0, &g.bind, &at(copy));
+                pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the
@@ -4550,6 +4757,16 @@ impl ExplicitBeamsGpu {
         self.layout.velocities(&self.read_f4(&self.nodes))
     }
 
+    /// Per vehicle, node masses (kg; the node records' fourth word).
+    pub fn masses(&self) -> Vec<Vec<f32>> {
+        let f = self.read_f4(&self.nodes);
+        self.layout
+            .spans
+            .iter()
+            .map(|s| (0..s.nodes).map(|i| f[(s.node_off + i) as usize * 3][3]).collect())
+            .collect()
+    }
+
     /// Per vehicle, its wings' broken flags (file order).
     pub fn wings_broken(&self) -> Vec<Vec<bool>> {
         self.layout.wings_broken(&self.read_f4(&self.beams))
@@ -4617,6 +4834,7 @@ impl Wide {
         queue: &wgpu::Queue,
         buffers: &[&wgpu::Buffer; 9],
         vehicle_recs: &[[u32; 4]],
+        bit_exact: bool,
     ) -> Self {
         let table = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-vehicle-table"),
@@ -4634,34 +4852,7 @@ impl Wide {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let passes = plan::WIDE_PASSES
-            .iter()
-            .map(|&entry| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(entry),
-                    source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(entry)).into()),
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    // No zeroing of workgroup memory natively (naga's MSL writer zeroes it
-                    // from one thread on every dispatch: 70 us each, 7 ms a frame). Every
-                    // workgroup value a wide pass reads it wrote earlier in the same
-                    // dispatch: the coupling's header and table (coupleBegin, cplGsClear on
-                    // lane 0 before a barrier: wide_nodes, wide_aux), the hit flags (lane 0
-                    // before a barrier: wide_hits), the drive's word (driveBegin); wide_tris
-                    // only writes its two. vehicle-perf-first-principles.md §8.8.
-                    // RUBBLE_WIDE_ZERO=1 zeroes (a check: the same results).
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        zero_initialize_workgroup_memory: std::env::var("RUBBLE_WIDE_ZERO").as_deref() == Ok("1"),
-                        ..Default::default()
-                    },
-                    cache: None,
-                })
-            })
-            .collect();
+        let passes = Self::pipes(device, &pipeline_layout, bit_exact);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams-wide"),
             layout: &layout,
@@ -4686,7 +4877,40 @@ impl Wide {
                 }))
                 .collect::<Vec<_>>(),
         });
-        Self { passes, group, table }
+        Self { passes, pipeline_layout, group, table }
+    }
+
+    /// The wide passes' pipelines, from the modules as built (`bit_exact`) or without
+    /// strict arithmetic ([`host_wgsl`]).
+    fn pipes(device: &wgpu::Device, pipeline_layout: &wgpu::PipelineLayout, bit_exact: bool) -> Vec<wgpu::ComputePipeline> {
+        plan::WIDE_PASSES
+            .iter()
+            .map(|&entry| {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(entry),
+                    source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(entry), bit_exact).into()),
+                });
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(pipeline_layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    // No zeroing of workgroup memory natively (naga's MSL writer zeroes it
+                    // from one thread on every dispatch: 70 us each, 7 ms a frame). Every
+                    // workgroup value a wide pass reads it wrote earlier in the same
+                    // dispatch: the coupling's header and table (coupleBegin, cplGsClear on
+                    // lane 0 before a barrier: wide_nodes, wide_aux), the hit flags (lane 0
+                    // before a barrier: wide_hits), the drive's word (driveBegin); wide_tris
+                    // only writes its two. vehicle-perf-first-principles.md §8.8.
+                    // RUBBLE_WIDE_ZERO=1 zeroes (a check: the same results).
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        zero_initialize_workgroup_memory: std::env::var("RUBBLE_WIDE_ZERO").as_deref() == Ok("1"),
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+            })
+            .collect()
     }
 }
 

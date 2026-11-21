@@ -134,6 +134,15 @@ fn options(script: &Value) -> LabOptions {
         }
         o.insert("vehicleSleep".into(), d);
     }
+    // `--bit-exact 0|1`: bit-exact results (the lab's `bitExact`; off by default,
+    // `RUBBLE_BIT_EXACT=1` turns it on: the bit-for-bit harnesses).
+    if let Some(s) = arg("--bit-exact") {
+        o.insert("bitExact".into(), json!(s == "1"));
+    }
+    // `--wheels-bodies 0|1`: raycast wheels hit World bodies (off by default).
+    if let Some(s) = arg("--wheels-bodies") {
+        o.insert("wheelsHitBodies".into(), json!(s == "1"));
+    }
     // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
     if let Some(s) = arg("--pieces") {
         o.insert("pieceLabels".into(), json!(s == "1"));
@@ -1192,7 +1201,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         "selfSplit": arg("--self-split").as_deref() == Some("1"),
         // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
         "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"), "groupSplit": arg("--group-split").as_deref() != Some("0"),
-        "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
+        "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [],
+        "wheelsHitBodies": arg("--wheels-bodies").as_deref() == Some("1") });
     // `--scenario FILE`: a JSON object whose keys replace the script's (the scenario
     // matrix's rows, engine/tools/scenario-matrix/scenes/: `scene`, `cars`, `parked`,
     // `others`, `events`, `restart` (a start or crash preset, applied after the build as
@@ -1320,6 +1330,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let selfsplit_ab = arg("--ab-switch").as_deref() == Some("selfsplit");
     // `--ab-switch beams`: the beam phase on its records sorted by kind against file order.
     let beams_ab = arg("--ab-switch").as_deref() == Some("beams");
+    // `--ab-switch wheels`: raycast wheels hitting bodies (`set_wheels_see_bodies`) on
+    // against off (not bit for bit where a wheel stands on a body: its cost and effect).
+    let wheels_ab = arg("--ab-switch").as_deref() == Some("wheels");
     // `--ab-switch kernel --ab-kernel-dir DIR`: this build's explicit kernel (A) against
     // the modules' WGSL in DIR (B: e.g. a copy of an older build's OUT_DIR/wgsl;
     // `engine_webgpu::set_explicit_module_override`). B is a second lab of the same
@@ -1354,13 +1367,18 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let sleep_ab = arg("--ab-switch").as_deref() == Some("sleep");
     let sleeplist_ab = arg("--ab-switch").as_deref() == Some("sleeplist");
     let sleep_cfg = options(&script).vehicle_sleep_cfg;
+    // `--ab-switch bitexact`: bit-exact results (`set_bit_exact`) on against off (the
+    // strict arithmetic's cost; the states differ in their last bits by design).
+    let bitexact_ab = arg("--ab-switch").as_deref() == Some("bitexact");
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if groupsplit_ab {
+        if bitexact_ab {
+            x.set_bit_exact(on);
+        } else if groupsplit_ab {
             x.set_group_split(on);
             x.set_self_split(on);
         } else if sleep_ab {
@@ -1383,6 +1401,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.set_perf_flags(if on { f | mask } else { f & !mask });
         } else if beams_ab {
             x.set_beam_order(on);
+        } else if wheels_ab {
+            x.set_wheels_see_bodies(on);
         } else if selfsplit_ab {
             x.set_self_split(on);
         } else if coupling_ab {
@@ -1580,8 +1600,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // load on the machine: the low figures are the comparable ones); "=": the
             // frames ended in the first mask's state, bit for bit. A lossless switch's
             // cost or gain, and a kernel's time-only measurement bits when a build has any.
+            // Mask bit 31 (2147483648) runs that mask with bit-exact results off.
             if let Some(masks) = arg("--ab-perf-masks") {
                 let f = x.perf_flags();
+                let bit_exact0 = x.bit_exact();
                 let masks: Vec<u32> = masks.split(',').filter_map(|m| m.parse().ok()).collect();
                 let mut ms = vec![Vec::new(); masks.len()];
                 // (On the fleet-wide passes: each mask's GPU ms a frame by pass, every
@@ -1592,7 +1614,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 for _ in 0..3 {
                     for (k, m) in masks.iter().enumerate() {
                         x.restore(&snap);
-                        x.set_perf_flags(f ^ m);
+                        // (Mask bit 31: bit-exact results off, the fast setting.)
+                        x.set_bit_exact(m & 0x8000_0000 == 0 && bit_exact0);
+                        x.set_perf_flags(f ^ (m & 0x7FFF_FFFF));
                         x.wait();
                         for _ in 0..3 {
                             x.frame(34);
@@ -1617,6 +1641,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     }
                 }
                 println!("   self-collision hits of the last step, per vehicle: {:?}", x.self_hit_counts());
+                x.set_bit_exact(bit_exact0);
                 x.set_perf_flags(f);
                 x.restore(&snap);
                 println!(
@@ -2359,6 +2384,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 println!("   self split skips at t {:.1} (ms/frame): {}", lab.bench.t, line.join(", "));
             }
             let mut out = Vec::new();
+            // (Each side's world positions, broken beams, nodes' kinetic energy: the
+            // tolerance report below, for a switch that is not bit for bit by design.)
+            let mut physical: Vec<(Vec<Vec<glam::Vec3>>, usize, f64)> = Vec::new();
             if kernel_ab {
                 let timed = |y: &mut engine_webgpu::ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot| {
                     // Two untimed frames first (a lazily created pipeline compiles there).
@@ -2493,7 +2521,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 // Vehicle contact's kept candidates (PERF_FLEET_KEEP), when this run used
                 // them (counted from the snapshot's own counts: a fixture's are zero).
                 let fk = x.take_fleet_keep_stats();
-                if fk[0] + fk[1] > 0 {
+                if fk[0] + fk[1] + fk[3] > 0 {
                     println!(
                         "     kept candidates ({}): {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
                         if on { "on" } else { "off" },
@@ -2531,6 +2559,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let mut extra = x.coupling_words();
                 extra.extend(sleep_words);
                 out.push((ms, x.state_words(), extra));
+                let broken = x.beams().iter().flatten().filter(|b| b.broken).count();
+                let masses = x.masses();
+                let ke: f64 = x
+                    .velocities()
+                    .iter()
+                    .zip(&masses)
+                    .flat_map(|(v, m)| v.iter().zip(m).map(|(v, m)| 0.5 * f64::from(*m) * f64::from(v.length_squared())))
+                    .sum();
+                physical.push((x.positions(), broken, ke));
             }
             // The vehicle-contact plan's records are planning state, as in
             // tests/explicit_vehicles.rs: a vehicle's "big" flag is whichever vehicle
@@ -2583,6 +2620,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if bitexact_ab {
+                    "bit-exact (on) / fast (off)"
                 } else if groupsplit_ab {
                     "group split"
                 } else if sleep_ab {
@@ -2619,8 +2658,29 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             if wide_ab {
                 println!("   wide: nodes, beams and groups bit for bit: {physics}");
             }
+            // The two sides' physical difference (for a switch not bit for bit by design,
+            // as bitexact): the largest node distance per car, the broken beams and the
+            // nodes' kinetic energy each side, and whether every position is finite.
+            if physical.len() == 2 {
+                let (pa, ba, ka) = &physical[0];
+                let (pb, bb, kb) = &physical[1];
+                let worst: Vec<f32> = pa
+                    .iter()
+                    .zip(pb)
+                    .map(|(a, b)| a.iter().zip(b).map(|(p, q)| (*p - *q).length()).fold(0.0f32, f32::max))
+                    .collect();
+                let finite = pa.iter().chain(pb).flatten().all(|p| p.is_finite());
+                println!(
+                    "   A/B physical: largest node difference {:.3} mm (cars: {}); broken beams on {ba} / off {bb}; kinetic energy on {:.1} / off {:.1} J; finite {finite}",
+                    worst.iter().fold(0.0f32, |m, w| m.max(*w)) * 1e3,
+                    worst.iter().map(|w| format!("{:.2}", w * 1e3)).collect::<Vec<_>>().join(" "),
+                    ka,
+                    kb
+                );
+            }
             // (AB_TIME_ONLY=1: a measurement switch that changes the results on purpose.)
-            anyhow::ensure!(same || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
+            // (bitexact: not bit for bit by design; the physical line above is its verdict.)
+            anyhow::ensure!(same || bitexact_ab || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();
@@ -2816,7 +2876,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     );
                 }
                 let fk = x.take_fleet_keep_stats();
-                if fk[0] + fk[1] > 0 {
+                if fk[0] + fk[1] + fk[3] > 0 {
                     println!(
                         "   vehicle contact's kept candidates: {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
                         fk[0],

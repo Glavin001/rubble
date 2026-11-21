@@ -146,7 +146,7 @@ Two wheel models:
 | What it is | The rigid World's raycast vehicle model (suspension spring and damper, bump stop, anti-roll bars, tyre friction curves within a friction ellipse, brakes, steering with Ackermann), evaluated **as forces on the hub nodes inside each 0.5 ms step** | Real node–beam tyres: hub and tread rings joined by beams, plus a pressure group (air in the tyre) |
 | Deforms with crashes | Yes: forces go through the beams, a crushed suspension moves the hub, and the ray moves with it | Yes, fully |
 | Cost | Cheap | Many more nodes and beams |
-| Limits today | Rays see the ground and static shapes, **not World rigid bodies** (known-bugs F7). Drive is a direct-drive simplification (no engine, clutch, gearbox or differentials) | The converted ETK has no tyre content, so it rides on its rims |
+| Limits today | In the World the rays also see rigid bodies and other cars, and push back on them (`wheels_hit_bodies`, off by default until known-bugs F8 is fixed; known-bugs F7). The wheel is a ray, not a tyre volume. Drive is a direct-drive simplification (no engine, clutch, gearbox or differentials) | The converted ETK has no tyre content, so it rides on its rims |
 
 **Powertrain is a gap.** BeamNG simulates engine, gearbox, differentials and damage to them. Rubble doesn't yet.
 

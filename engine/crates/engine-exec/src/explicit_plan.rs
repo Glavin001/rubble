@@ -281,7 +281,7 @@ pub const FLEET_KEEP_COVER: usize = 8;
 /// Words of [`W_VV_FLEET_NEXT`] the kept candidates take ([`PERF_FLEET_KEEP`]), at its end;
 /// their counters ([`FLEET_CTL_WORDS`]) last.
 pub const fn fleet_keep_words(nv: usize, tris: usize) -> usize {
-    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS
+    tris + nv * (FLEET_KEEP_COVER + 1) + 4 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -421,6 +421,12 @@ pub const FLEET_LEVEL_CACHE: usize = 4096;
 /// vehicles' nodes may have moved past the list's allowances; in place of the gather, the
 /// grids, the sorted copy and the walk every substep.
 pub const PERF_FLEET_KEEP: u32 = 32768;
+/// [`W_PERF_FLAGS`], set by the host alone (a caller's is ignored): with [`PERF_FLEET_KEEP`],
+/// [`PERF_FLEET_FUSE`] and the members' rest dispatches ([`PERF_MEMBER_LIST`] with
+/// self-collision split), the kept candidates track every node's motion in the members'
+/// rest (the kernel's PERF_KEEP_TRACK_REST, `fkTrackVehicle`), so the pairs' scans stay
+/// fused in the plan's workgroup (no scans' dispatch). contact-groups-design.md §8.10.
+pub const PERF_KEEP_TRACK_REST: u32 = 8;
 /// [`W_PERF_FLAGS`], on a wide frame with the reused pair list and [`PERF_WIDE_FUSED`]:
 /// step s + 1's coupling and wheels (rays, bars) on a workgroup of their own in the list
 /// kernel's dispatch (the kernel's PERF_AHEAD_APART, `wideAheadApart`: workgroup
@@ -461,6 +467,12 @@ pub const PERF_SELF_HITS_LOCAL: u32 = 33554432;
 /// step s's rest dispatch (its second row), its tyres at step s + 1's start (the kernel's
 /// PERF_SPLIT_WHEELS_AHEAD, `splitWheelsAhead`, `splitTyres`). §8.36.
 pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
+/// [`W_PERF_FLAGS`], with [`PERF_HITS_LOCAL`]: in the wide hits kernel each hit node's
+/// slot (the first (hit, role) item naming it) is found through a map of the vehicle's nodes
+/// in workgroup memory (one atomic maximum an item) instead of each item scanning every
+/// item before it, a chain that grew with the step's hits (the kernel's PERF_HIT_SLOT_MAP,
+/// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.46.
+pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
@@ -468,11 +480,12 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`] (§8.29),
 /// [`PERF_AHEAD_APART`], [`PERF_TYRE_AHEAD`] (§8.31), [`PERF_FLEET_HITLAT`] and
 /// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
-/// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off). Not
-/// [`PERF_FLEET_KEEP`]: bit for bit natively, but the lab page in Chrome ends elsewhere
-/// with it (§8.28).
+/// [`PERF_FLEET_KEEP`] (§8.39: bit for bit natively and in Chrome, faster at the median
+/// with 8 cars, a tie at 32; on by the owner's decision, 2026-11-19); and
+/// [`PERF_HIT_SLOT_MAP`] (§8.46);
+/// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).map(|f| f & !PERF_KEEP_TRACK_REST).unwrap_or(
         PERF_HIT_FB
             | PERF_VV_STREAM
             | PERF_VV_BIG_GRID
@@ -490,7 +503,9 @@ pub fn perf_flags_default() -> u32 {
             | PERF_AHEAD_APART
             | PERF_TYRE_AHEAD
             | PERF_HITS_LOCAL
-            | PERF_WHEELS_APART,
+            | PERF_WHEELS_APART
+            | PERF_FLEET_KEEP
+            | PERF_HIT_SLOT_MAP,
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.
@@ -1042,7 +1057,7 @@ fn variant_tag(aero: bool, lanes: u32) -> &'static str {
 }
 
 /// The split group path's module `which` (member, group, tests, fleetfront, fleetplan,
-/// fleetpost, fleetlevels) at the frame variant with `aero` and `lanes`.
+/// fleetpost, fleetlevels, wheels) at the frame variant with `aero` and `lanes`.
 pub fn split_module_name(which: &str, aero: bool, lanes: u32) -> String {
     format!("explicit_beams_split_{which}{}", variant_tag(aero, lanes))
 }
@@ -1080,6 +1095,7 @@ pub fn wide_list_module_name(lanes: u32) -> &'static str {
 
 pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
 pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+pub const SPLIT_WHEELS_ENTRY: &str = "explicit_beams_split_wheels";
 pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
 pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
@@ -1098,7 +1114,7 @@ pub fn split_modules() -> Vec<SplitModule> {
         out.push(SplitModule { name, entry, defines });
     };
     for (tag, aero, lanes) in VARIANTS {
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
             // (The members' module without EB_VV_GROUPS: its frame step never reaches
             // contactGroup, so it binds the workgroup variables of the steps alone:
             // Metal allows 31 a kernel.)
@@ -1108,7 +1124,9 @@ pub fn split_modules() -> Vec<SplitModule> {
             }
             d.push(match which {
                 "member" => ("EB_SOLO_STEP", "1"),
-                "group" => GROUPS,
+                // Raycast wheels on each other (explicit_beams_split_wheels: the groups'
+                // module's defines, a small kernel).
+                "group" | "wheels" => GROUPS,
                 // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => ("EB_FLEET_FRONT", "1"),
@@ -1127,6 +1145,7 @@ pub fn split_modules() -> Vec<SplitModule> {
             let entry = match which {
                 "member" => SPLIT_MEMBER_ENTRY,
                 "group" => SPLIT_GROUP_ENTRY,
+                "wheels" => SPLIT_WHEELS_ENTRY,
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
                 "fleetpost" => "explicit_beams_fleet_post",
@@ -2510,15 +2529,20 @@ impl ExplicitUpload {
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
         let drive_wheels = vehicles.iter().filter_map(|v| v.drive.as_ref()).map(|d| d.config.wheels.len()).max();
         let drive = drive_wheels.map(|w| {
-            let layout = drive::DriveLayout {
+            let mut layout = drive::DriveLayout {
                 header: drive_rec as u32,
+                partner: 0,
                 base: misc.len() as u32,
                 stride: drive::DriveLayout::stride_for(w),
             };
             for v in vehicles {
                 misc.extend(drive::records(v.drive.as_deref(), layout.stride));
             }
-            misc[drive_rec] = layout.header_words();
+            // The wheels' partner records (wheels on other vehicles), zero.
+            layout.partner = misc.len() as u32;
+            misc.extend(std::iter::repeat_n([0u32; 4], (drive::PARTNER_RECS * w as u32) as usize * vehicles.len()));
+            let see = vehicles.iter().any(|v| v.drive.as_ref().is_some_and(|d| d.config.see_bodies));
+            misc[drive_rec] = layout.header_words(see);
             layout
         });
         // Vehicle contact's two-body mass splitting (jbeam-semantics-spec.md §10.3):
@@ -3371,7 +3395,8 @@ impl FramePlanner {
     /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
-        self.words[W_PERF_FLAGS] = flags;
+        // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
+        self.words[W_PERF_FLAGS] = flags & !PERF_KEEP_TRACK_REST;
     }
 
     pub fn perf_flags(&self) -> u32 {
@@ -3986,7 +4011,7 @@ mod tests {
         assert_eq!(names.len(), list.len(), "a split module twice");
         assert!(MODULES.iter().all(|m| !names.contains(m.name)));
         for (aero, lanes) in [(false, 256), (false, 512), (true, 256), (true, 512)] {
-            for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+            for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
                 assert!(names.contains(split_module_name(which, aero, lanes).as_str()));
             }
             for vv in [false, true] {

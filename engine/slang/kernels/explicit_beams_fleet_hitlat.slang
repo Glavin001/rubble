@@ -368,6 +368,7 @@ void fkSortCandOf(uint va, uint e)
     uint br = gNext[gP.vvHits + 4u * VV_PART * vvTotalCp() + base + e];
     gBeams[gP.vvRun + VV_PART * vvTotalCp() + base + gNext[flOffAt(va) + (br & (GRID_BUCKETS - 1u))] + (br >> 10)] = gBeams[gP.vvRun + base + e];
 }
-// The plan's scans (PERF_FLEET_FUSE) unless the kept candidates are on: their scans'
-// dispatch is also a thread a node (fkTrack), so it stays, and the host keeps it.
-bool fuseScansOn() { return flFuseOn() && (gP.perfFlags & PERF_FLEET_KEEP) == 0u; }
+// The plan's scans (PERF_FLEET_FUSE) unless the kept candidates track their nodes in the
+// scans' dispatch (fkTrack, a thread a node): then it stays, and the host keeps it. With
+// the tracking in the members' rest (PERF_KEEP_TRACK_REST) the scans are fused as without.
+bool fuseScansOn() { return flFuseOn() && ((gP.perfFlags & PERF_FLEET_KEEP) == 0u || fkTrackInRest()); }

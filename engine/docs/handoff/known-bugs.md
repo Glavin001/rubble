@@ -17,12 +17,12 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
      - **Static-brick control:** 0.003–0.009 m. A 1,300 kg rigid box pushed into the same wall overlaps at most 3 cm, so the rigid side is fine.
      - **Partial evidence about the window:** at a 240 Hz World, depth falls only from 0.21 to 0.13 m.
   2. **Node-only contact.** The ring drive never turns on surface contact (`ExplicitBeams::surface_contact` defaults to false). A 45°-turned static brick pushed into the nose ends 21 cm inside the car with surface contact off, 0.000 with it on (CPU). Against dynamic bricks surface contact helps but isn't enough (hull 0.64 → 0.15–0.22 m), because mechanism 1 remains.
-  - **Wheels:** F7 (raycast wheels don't see rigid bodies). Bricks reached up to 11 cm inside the wheel cylinders; only hub nodes collide.
+  - **Wheels:** F7 (raycast wheels didn't see rigid bodies; fixed 2026-11-18). Bricks reached up to 11 cm inside the wheel cylinders; only hub nodes collide (the wheel is still a ray, not a cylinder).
 - **Fixes, ranked; each changes physics and needs the user's decision:**
   1. Turn on surface contact in the ring drive (exists and is tested; cost unmeasured here).
   2. Give proxy node contact the penetration response ground and soft↔soft contact already have (the §37 position step or `0.2·p/h`), CPU and Slang. This is the root fix for mechanism 1, and ties in with F1.
   3. Make the proxy's motion inside a window match the World's (ground and contact-connected neighbours in the window, or the World adopting the window's prediction). This is a larger design change.
-  4. F7: wheels that query the World broadphase once per window.
+  4. F7: wheels that see the bodies (done 2026-11-18: per step against the car's proxies, not once a window).
 
 ### B2. Authored sedan: about 41 km/h top speed and "dragging" (Confirmed, root cause found)
 - **Cause:** the deployed `?car=sedan` (the two-tier showcase sedan) isn't in the BeamNG profile. Its truck text has no `rubble_beamng_profile` or `rubble_drag_coef`, so it runs Rigs of Rods' per-node air drag: F = −0.05·|v|·v **on every node**. 987 nodes give 49.4·v² N in total, against a physical ½ρC_dAv² = 0.39·v² (C_d 0.30, A 2.16 m²): **127× too much**.
@@ -61,10 +61,27 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
 - **Checked.** The GPU tears the same dashpots at the same steps as the CPU and the node keeps the same speed to the bit (`engine-webgpu showcase_car_gpu`); `explicit_beams_bitwise` 12 passed; `showcase_car`, `showcase_skin_integrity` and the T-bone test give the same passes and failures as before.
 - **Not done.** The generated sedan (the vehicle lab's `car=gen`, JBeam) is rigged by other code and was not checked for the same pattern. `engine-metal` parity not run (cold compile). The lab still colours k = 0 beams by k·|ℓ − L|.
 
-### F7. Raycast wheels don't see rigid bodies (Confirmed)
-- **Cause:** `explicit_drive.rs` `ray_cast` sees the car's own ground plane, boxes and static shapes only.
-- **Effect:** cars can't drive up onto debris or rigid ramps; wheels pass through bricks (part of B1).
-- **Decision:** the user's.
+### F7. Raycast wheels don't see rigid bodies (Fixed 2026-11-18, `fix/wheels-see-bodies`)
+- **Was:** `explicit_drive.rs` `ray_cast` saw the car's own ground plane, boxes and static shapes only. Cars could not drive up onto debris, rigid ramps or another car; a car resting on bricks or on another car's crushed nose had its wheels in the air (the Derby's "stopped moving").
+- **Fix (the user's decision, "Yes, fix wheels"):** `DriveConfig::see_bodies`, the World's `ExplicitVehiclesDef::wheels_hit_bodies` (off by default since 2026-11-21 because of F8, live: `World::set_explicit_wheels_hit_bodies`, the lab's "wheels on bodies" checkbox). A wheel's ray also meets:
+  - the car's rigid proxies (every World body the coupling plan gives the car: boxes, spheres, capsules, hulls, awake or asleep), at their poses this step; the plan's margin grows to the wheels' reach (`explicit_vehicles::wheel_reach`) so a body under a wheel is a proxy whenever the ray can reach it;
+  - the other cars' live collision triangles (cars in one contact group), as they stand at the step's start.
+  The nearest surface wins. On a body the tyre takes the two-body form (relative velocity at the contact point, reduced mass, the hub force's share; the body's inverse mass split among this car's wheels on it and the cars holding it), and the reaction goes back: onto the proxy shape at the contact point (force and moment, the node contact's path to the World's impulse), or onto the other car's triangle nodes by barycentric weight before the next step (vehicle contact's timing).
+- **Checks:** off is the old frame bit for bit (fast-check `--ab-switch kernel` against the committed kernels, the suites); GPU == CPU: bit for bit on another car (`engine-webgpu/tests/wheels_hit_bodies_gpu.rs`, group on one workgroup and across workgroups), to float noise on a body (the coupling's own tolerance); CPU tests `engine-softbody/tests/wheels_hit_bodies.rs`, World test `engine-world/tests/wheels_hit_bodies_world.rs`.
+- **Still true:** only hub nodes collide with a brick through a wheel's tyre volume (the wheel is a ray, not a cylinder: S2 item 3); a wheel on a light body uses node contact's scalar effective mass along the normal (the same convention, exact for the normal load).
+
+### F8. Wheels on bodies: cars in a pile go non-finite in Chrome (Confirmed 2026-11-21, setting off by default)
+- **Seen:** `vehicle-lab.html?mode=mountain&cars=8&terrain=ledges&wheelsHitBodies=1` in headless Chrome (`tools/vehicle-lab/run.sh --probe`): at the first collisions (t = 3.2 s) every car's position, velocity and energy are non-finite and the page stops with its engine error. Both with `bitExact=1` and without it.
+- **Not seen:** with `wheelsHitBodies=0` (the same page, to t = 8.3 s, finite); natively in the scenario matrix's pile8 and pile32 rows (wheels on, bit-exact, through the same collisions).
+- **Suspects:** the reaction onto another car's triangle nodes (−F·w by barycentric weight) or the two-body tyre's reduced mass with a partner of zero or non-finite inverse mass. The browser's path differs from the native one in the wheels' split module and the group launch layout.
+- **Next:** a CPU-reference run of the same 8-car scene with the setting on; then save the last finite Chrome state as a fixture (`--abSaveAll`), and replay it natively with `fast-check.sh`.
+- **Meanwhile:** `ExplicitVehiclesDef::wheels_hit_bodies` and the lab's checkbox are off by default (F7's fix is still available, one setting away).
+
+### F9. pile32 in bit-exact mode does not repeat between two GPU objects when wgpu's bounds checks and loop bound are both left out (Open 2026-11-21)
+- **Seen** (PR #144 merged with #145, scenario matrix pile32 only, `BIT_EXACT=1`, two GPU objects from one snapshot; `RUBBLE_SHADER_CHECKS_OFF` from #144, bits 1 bounds, 2 loop bound, 4 integer division): checks off `3` or `7` on both sides is not bit for bit (5 of 5 runs). `0`, `1`, `2`, `4`, `5` and `6` on both sides are bit for bit. Before #145's merge, `7` on both sides was bit for bit. The other 11 matrix rows are bit for bit with `7`. Turning #134's kept candidates and #141's slot map off through `RUBBLE_PERF_FLAGS` changed nothing, but the replay may restore the fixture's own flags.
+- **Reading:** bounds out alone repeats, so this is not a read past a buffer. It needs the two fastest builds, so it looks like an order dependence (a race) in the 32-car path that came with #145 and only shows when the kernels run faster. With the checks on, which is how the code ships natively today and always in Chrome, pile32 is bit for bit (#145's matrix: 12 of 12 rows).
+- **Meanwhile:** #144 ships mask `5` (the loop bound kept), which repeats.
+- **Repro:** on #144's branch, `tools/scenario-matrix/run.sh checks=3:3 pile32`. Next: bisect it with the perf switches applied after the fixture's flags are restored, then look for a missing barrier or a read of another workgroup's output in the pass that switch selects.
 
 ### R1. AVBD rigid solver loses about 5.5 % of momentum in multi-body impacts (Confirmed, on `main` too)
 - **Measured:** a rigid-only World, 1,453 kg block into floating bricks, no car: 20,197 → 19,080 N·s.

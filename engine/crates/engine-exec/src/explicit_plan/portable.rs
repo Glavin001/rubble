@@ -26,6 +26,10 @@ pub struct HostSwitches {
     pub wide_list: bool,
     pub wide_fused: bool,
     pub vv_grid: bool,
+    /// Raycast wheels see bodies (`schedule::Switches::wheels_bodies`; absent in older
+    /// fixtures: off).
+    #[serde(default)]
+    pub wheels_bodies: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

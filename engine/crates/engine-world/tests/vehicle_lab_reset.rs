@@ -57,7 +57,7 @@ fn a_restarted_lab_steps_bit_for_bit_as_a_new_one() {
     let (mut wa, mut la) = Lab::build(
         GpuContext::Default,
         &template,
-        LabOptions::default(),
+        LabOptions { bit_exact: true, ..LabOptions::default() },
         |_| {},
     )
     .unwrap();
@@ -67,7 +67,7 @@ fn a_restarted_lab_steps_bit_for_bit_as_a_new_one() {
     let (mut wb, mut lb) = Lab::build(
         GpuContext::Default,
         &template,
-        LabOptions::default(),
+        LabOptions { bit_exact: true, ..LabOptions::default() },
         |_| {},
     )
     .unwrap();
@@ -115,7 +115,7 @@ fn a_restart_of_another_fleet_is_refused() {
     let (mut w, _lab) = Lab::build(
         GpuContext::Default,
         &template,
-        LabOptions::default(),
+        LabOptions { bit_exact: true, ..LabOptions::default() },
         |_| {},
     )
     .unwrap();
@@ -130,7 +130,7 @@ fn the_side_pole_sled_arrives_at_its_stated_speed() {
     let (mut w, mut lab) = Lab::build(
         GpuContext::Default,
         &template,
-        LabOptions::default(),
+        LabOptions { bit_exact: true, ..LabOptions::default() },
         |_| {},
     )
     .unwrap();

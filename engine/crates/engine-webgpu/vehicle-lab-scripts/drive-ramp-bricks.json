@@ -1,0 +1,13 @@
+{
+  "title": "Drive: up a rigid ramp body and onto a layer of 25 kg bricks (wheels on bodies)",
+  "mode": "drive",
+  "scene": "flat",
+  "duration": 9,
+  "events": [
+    { "t": 0.1, "obstacle": { "kind": "ramp", "ahead": 10, "length": 5, "rise": 0.6, "width": 3 } },
+    { "t": 0.1, "obstacle": { "kind": "bricks", "ahead": 15.5, "cols": 4, "rows": 1, "deep": 4 } },
+    { "t": 0.3, "cam": "side" },
+    { "t": 0.3, "drive": { "forward": 0.6 } },
+    { "t": 7.5, "drive": { "forward": 0, "brake": 1 } }
+  ]
+}
