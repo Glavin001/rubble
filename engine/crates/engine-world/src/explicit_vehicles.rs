@@ -37,6 +37,14 @@ pub struct ExplicitVehiclesDef {
     /// default in the World (large maps: a parked vehicle costs nothing per step); `None`
     /// steps every vehicle every step, bit for bit as without it (the crash lab).
     pub sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    /// Bit-exact results (an engine-wide setting, the owner's decision of 2026-11-19):
+    /// on, the solver's kernels keep the CPU reference's IEEE order and its results are
+    /// the CPU reference's bit for bit on every machine (testing and reproduction); off
+    /// (the default; `RUBBLE_BIT_EXACT=1` turns it on), the same equations, contact
+    /// rules, iterations and tolerances with the compilers free to fuse and reassociate
+    /// arithmetic: faster, last-bit differences between machines
+    /// (`ExplicitBeamsGpu::set_bit_exact`). At run time: [`World::set_explicit_bit_exact`].
+    pub bit_exact: bool,
 }
 
 impl Default for ExplicitVehiclesDef {
@@ -52,6 +60,7 @@ impl Default for ExplicitVehiclesDef {
             margin: 0.1,
             vehicle_contact: true,
             sleep: Some(engine_softbody::explicit_sleep::VehicleSleep::default()),
+            bit_exact: engine_webgpu::bit_exact_default(),
         }
     }
 }
@@ -223,7 +232,7 @@ impl ExplicitVehicles {
         );
         let device = world.sim.device();
         let queue = world.sim.queue();
-        let mut gpu = ExplicitBeamsGpu::with_sleep(device, queue, vehicles, Some(def.capacity), def.sleep);
+        let mut gpu = ExplicitBeamsGpu::with_settings(device, queue, vehicles, Some(def.capacity), def.sleep, def.bit_exact);
         gpu.set_vehicle_contact(def.vehicle_contact);
         gpu.set_coupling_on(true);
         let layout = gpu.coupling().expect("coupling room");
@@ -961,6 +970,22 @@ impl World {
             queue.write_buffer(&x.work, 4 * x.sleep_mask_word, bytemuck::cast_slice(&x.sleep_mask));
         }
         Ok(())
+    }
+
+    /// Bit-exact results at runtime, from the next step on ([`ExplicitVehiclesDef::bit_exact`];
+    /// `ExplicitBeamsGpu::set_bit_exact`): the solver's pipelines are made again for the
+    /// setting (compiled at their first use); no state changes. No explicit vehicles: an
+    /// error.
+    pub fn set_explicit_bit_exact(&mut self, on: bool) -> anyhow::Result<()> {
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        x.gpu.set_bit_exact(on);
+        x.def.bit_exact = on;
+        Ok(())
+    }
+
+    /// Whether the explicit vehicles' results are bit-exact (`None`: no explicit vehicles).
+    pub fn explicit_bit_exact(&self) -> Option<bool> {
+        self.explicit.as_ref().map(|x| x.gpu.bit_exact())
     }
 
     /// Vehicle sleep's thresholds when it is on (`None`: off, or no explicit vehicles).

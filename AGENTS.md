@@ -51,6 +51,16 @@
 - Checking a kernel change: climb a ladder, cheapest rung first, and do not go up a
   rung until the one below passes. Never wait minutes for an answer a rung of seconds
   gives. The bar does not move: what must be bit for bit is checked bit for bit.
+  Bit-for-bit means with **bit-exact results on** (owner decision 2026-11-19):
+  bit-identical results across machines are for testing and reproduction, so the
+  explicit vehicles' `bit_exact` setting (`ExplicitVehiclesDef::bit_exact`, the lab's
+  `bitExact`, `vehicle_lab --bit-exact 1`, `RUBBLE_BIT_EXACT=1`) is off by default in
+  the World and the lab, and a perf change is proven bit for bit with it on (GPU == CPU
+  reference). Every harness below turns it on itself. With it off the kernels run the
+  same physics without strict float order (`engine/crates/engine-webgpu/src/fast_float.rs`);
+  that setting is judged by tolerance against the scene's own last-bit spread
+  (`tests/fast_arithmetic_gpu.rs`, `scenario-matrix/run.sh bitexact`), never used as a
+  bit-for-bit proof.
   1. **Seconds, after every edit.** `engine/tools/explicit-2khz/fast-check.sh SWITCH
      [FIXTURE ...]` replays saved moments of the lab's multi-car run (1, 2, 4, 8 and 32
      cars; falling, first collisions, pile, rest) both ways from one state, compares

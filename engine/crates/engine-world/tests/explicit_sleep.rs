@@ -58,6 +58,7 @@ fn parked(sleep: bool, nudge: f32) -> anyhow::Result<Option<(World, f32, Vec3)>>
     let mid = car.nodes.iter().map(|n| n.pos).sum::<Vec3>() / car.nodes.len() as f32;
     let def = ExplicitVehiclesDef {
         sleep: sleep.then(Default::default),
+        bit_exact: true,
         ..ExplicitVehiclesDef::default()
     };
     w.add_explicit_vehicles(&[car], &def)?;

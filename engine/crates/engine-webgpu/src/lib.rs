@@ -12,6 +12,8 @@ mod explicit_beams_gpu;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
 #[cfg(feature = "gpu")]
+mod fast_float;
+#[cfg(feature = "gpu")]
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -30,6 +32,8 @@ pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
+#[cfg(feature = "gpu")]
+pub use fast_float::{bit_exact_default, explicit_wgsl, fast_float_wgsl};
 #[cfg(feature = "gpu")]
 pub use features::{
     ContactStorage, EngineFeatures, GpuTiming, GridLayout, KernelGroups, ManifoldPersistence,
