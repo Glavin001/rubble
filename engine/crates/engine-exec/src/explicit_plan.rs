@@ -281,7 +281,7 @@ pub const FLEET_KEEP_COVER: usize = 8;
 /// Words of [`W_VV_FLEET_NEXT`] the kept candidates take ([`PERF_FLEET_KEEP`]), at its end;
 /// their counters ([`FLEET_CTL_WORDS`]) last.
 pub const fn fleet_keep_words(nv: usize, tris: usize) -> usize {
-    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS
+    tris + nv * (FLEET_KEEP_COVER + 1) + 4 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -421,6 +421,12 @@ pub const FLEET_LEVEL_CACHE: usize = 4096;
 /// vehicles' nodes may have moved past the list's allowances; in place of the gather, the
 /// grids, the sorted copy and the walk every substep.
 pub const PERF_FLEET_KEEP: u32 = 32768;
+/// [`W_PERF_FLAGS`], set by the host alone (a caller's is ignored): with [`PERF_FLEET_KEEP`],
+/// [`PERF_FLEET_FUSE`] and the members' rest dispatches ([`PERF_MEMBER_LIST`] with
+/// self-collision split), the kept candidates track every node's motion in the members'
+/// rest (the kernel's PERF_KEEP_TRACK_REST, `fkTrackVehicle`), so the pairs' scans stay
+/// fused in the plan's workgroup (no scans' dispatch). contact-groups-design.md §8.10.
+pub const PERF_KEEP_TRACK_REST: u32 = 8;
 /// [`W_PERF_FLAGS`], on a wide frame with the reused pair list and [`PERF_WIDE_FUSED`]:
 /// step s + 1's coupling and wheels (rays, bars) on a workgroup of their own in the list
 /// kernel's dispatch (the kernel's PERF_AHEAD_APART, `wideAheadApart`: workgroup
@@ -468,11 +474,11 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`] (§8.29),
 /// [`PERF_AHEAD_APART`], [`PERF_TYRE_AHEAD`] (§8.31), [`PERF_FLEET_HITLAT`] and
 /// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
-/// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off). Not
-/// [`PERF_FLEET_KEEP`]: bit for bit natively, but the lab page in Chrome ends elsewhere
-/// with it (§8.28).
+/// and [`PERF_FLEET_KEEP`] (§8.39: bit for bit natively and in Chrome, faster at the median
+/// with 8 cars, a tie at 32; on by the owner's decision, 2026-11-19);
+/// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).map(|f| f & !PERF_KEEP_TRACK_REST).unwrap_or(
         PERF_HIT_FB
             | PERF_VV_STREAM
             | PERF_VV_BIG_GRID
@@ -490,7 +496,8 @@ pub fn perf_flags_default() -> u32 {
             | PERF_AHEAD_APART
             | PERF_TYRE_AHEAD
             | PERF_HITS_LOCAL
-            | PERF_WHEELS_APART,
+            | PERF_WHEELS_APART
+            | PERF_FLEET_KEEP,
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.
@@ -3380,7 +3387,8 @@ impl FramePlanner {
     /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
-        self.words[W_PERF_FLAGS] = flags;
+        // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
+        self.words[W_PERF_FLAGS] = flags & !PERF_KEEP_TRACK_REST;
     }
 
     pub fn perf_flags(&self) -> u32 {

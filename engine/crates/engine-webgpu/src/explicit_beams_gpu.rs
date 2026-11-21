@@ -4432,7 +4432,7 @@ impl ExplicitBeamsGpu {
 
     /// The perf flags of a frame on the split group path ([`schedule::fleet_flags`]).
     fn fleet_flags(&self) -> u32 {
-        schedule::fleet_flags(&self.planner, &self.switches(true))
+        schedule::fleet_flags(&self.planner, &self.switches(true), self.self_split_vv.get())
     }
 
     /// What this host chose for its frames and what its modules allow

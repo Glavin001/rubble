@@ -3525,6 +3525,163 @@ the work left is in the drawing itself, lossless first:
   10–15 %): levels of detail for the generated car (a different picture by design, the
   asset side: §8.30's follow-up).
 
+### 8.39 The kept candidates with today's defaults (2026-11-18, 19)
+
+`contact-groups-design.md` §8.12 (what changed and why the results are the same). Perf flag
+32768 (`PERF_FLEET_KEEP`), the lab's "contact candidates kept between steps". Branch
+`perf/keep-with-defaults`; native M3 Max, the GPU shared with other sessions' jobs through
+the lock (wall figures for ranking; the fixtures' and the matrix's are A/B from one state).
+
+**What blocked it.** On main, turning 32768 on made the host drop two of today's defaults:
+the throttles across the fleet (`PERF_FLEET_POST`: its dispatch is sized and indexed by the
+walk's prefix of the listed triangles, which a reused pass never computes; the updates went
+back into the levels, +0.7 to 0.9 ms a frame) and the fused scans (the kept candidates'
+node tracking lived in the scans' dispatch, which came back, +0.37 to 0.53 ms). On the
+rolling gully a third thing kept the list from working at all: a piled owner's padded
+list was past its region's 32,767 pairs (33,103 to 66,207 measured), so every build was
+void and the list was never reused (0 builds kept and 677 of 680 passes on today's front,
+t 20 to 30, 20 frames each).
+
+**What changed** (§8.12): the throttles a thread a triangle in the elements' size
+(`fkPost`); the tracking in the members' rest, per lane, and none after a pass with nothing
+offered (`fkTrackVehicle`, the host's `PERF_KEEP_TRACK_REST`), so the scans are fused again;
+the kept pairs in the fleet's whole pair room, each owner a share from its last build's count
+(`fkAlloc`, `fkShareAt`; a change of the buffers' layout: fixtures and matrix states
+remade); a list kept down to 3 passes (`FK_SHORT`, 8 before). The partial rebuild (only the
+cars past their allowance, one list) was weighed and not built (§8.12).
+
+**Per phase** (`--ab-profile`, ms a frame of 34 substeps by dispatch kind, 8 cars; "main"
+columns from main's binary on its own fixtures, the others from this branch's on its own;
+the default (off) columns agree to 0.1 ms; untimed frame in the last row):
+
+| phase | ledges t 16: off / main keep / keep | ledges t 30 | rolling t 25 | rolling t 28 |
+|---|---|---|---|---|
+| fleet walk | 2.59 / 0.69 / 0.69 | 4.81 / 0.68 / 0.69 | 6.06 / 6.02 / **2.19** | 6.88 / 6.88 / **2.80** |
+| split levels | 1.17 / 1.90 / **1.21** | 4.23 / 5.07 / **4.33** | 5.14 / 5.88 / **5.12** | 5.04 / 5.86 / **5.05** |
+| fleet scans | 0 / 0.53 / **0** | 0 / 0.52 / **0** | 0 / 0.37 / **0** | 0 / 0.36 / **0** |
+| fleet throttles | 0.23 / 0 / 0.22 | 0.24 / 0 / 0.22 | 0.24 / 0 / 0.22 | 0.24 / 0 / 0.22 |
+| self members' hits (the rest; tracking with keep) | 1.73 / 1.70 / 2.01 | 1.77 / 1.77 / 2.05 | 1.75 / 1.72 / 2.04 | 1.78 / 1.76 / 2.06 |
+| fleet owners' parts (first plan; fused scans) | 0.89 / 1.05 / 1.22 | 0.86 / 1.04 / 1.21 | 0.89 / 1.00 / 1.26 | 0.88 / 1.00 / 1.25 |
+| fleet triangles, points | 1.08 / 0.56 / 0.56 | 1.56 / 0.60 / 0.59 | 1.60 / 1.62 / 0.73 | 1.64 / 1.66 / 0.81 |
+| fleet grids (reused: the kept tests) | 0.72 / 0.60 / 0.61 | 0.70 / 0.59 / 0.61 | 0.73 / 0.75 / 1.41 | 0.73 / 0.75 / 1.82 |
+| fleet pairs, both prefixes | 1.25 / 0.14 / 0.14 | 1.32 / 0.11 / 0.11 | 1.41 / 1.69 / 0.31 | 1.56 / 1.86 / 0.43 |
+| **untimed frame (wall)** | 17.40 / 15.18 / **14.88** | 22.23 / 17.85 / **17.52** | 25.43 / 25.74 / **21.70** | 26.63 / 27.99 / **23.50** |
+
+The levels are back at the default's, the scans' dispatch is gone, and on the rolling gully
+the list now works (builds every 7 passes, 82 to 85 % of passes reused; the kept tests
+over 140,000 to 210,000 pairs a build are the grids' 1.4 to 1.8 ms). What the composition
+costs: the members' rest +0.3 ms (the tracking, a few dependent loads behind the rest's
+barrier: 9 µs a pass; per lane maxima and sums did not change it) and the first plan
++0.2 to 0.35 ms (the scans fused in it again, the kept checks).
+
+**Proofs.**
+- `fast-check.sh perf=32768`, the 20 standard fixtures (1, 2, 4, 8, 32 cars, remade for the
+  layout) and the rolling gully's four (`cars8_t{20,25,28,30}rolling`, native
+  `--terrain rolling`, replayed with `EXTRA="--terrain rolling"`): every state word the same
+  after each step; 20 frames on 8 cars ledges t 3.7, 16, 30 and the four rolling: the same.
+- Chrome: all 124 modules compile (`EXPLICIT_WGSL_MODULES_ONLY=1`) after each step.
+- `perf-verify.sh 30932933` (the defaults and 32768) and `perf-verify.sh default`:
+  `explicit_loop_cap` 5, `fleet_contact_gpu` 1 (the kept candidates against off on the two
+  sedans head-on and the column of six, with and without self split, now with the throttles
+  across the fleet, the fused scans and the tracking in the rest all on), `group_split_gpu`
+  3, `self_split_gpu` 8, `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12,
+  `explicit_pair_reuse_gpu` 2, `vv_grid_gpu` 2, `staged_state_gpu` 1, `free_flight_gpu` 1,
+  engine-world `explicit_vehicles` 11, engine-metal `vehicle_parity` 4: PASS.
+- Chrome, rung 3 (`run.sh --probe --locked --ab 32768 --abUntil 40`, 8 cars): ledges 40
+  samples, 0 differ; rolling gully 40 samples, 0 differ.
+- Whole 40 s native runs end in the same state with the flag as without
+  (`--compare-final`: every car's largest node difference 0.0 mm; 8 cars ledges and rolling,
+  32 cars).
+
+**The scenario matrix** (`tools/scenario-matrix/run.sh perf=32768`, states remade for the
+layout): PASS, every row bit for bit, none slower past its threshold.
+
+| row | on ms | off ms | delta |
+|---|---|---|---|
+| drive | 3.300 | 3.817 | −13.5 % (one car: the switch does nothing; noise) |
+| tumble | 3.803 | 3.814 | −0.3 % |
+| wall | 4.106 | 4.110 | −0.1 % |
+| pile2 | 9.004 | 8.884 | +1.4 % |
+| pile8 | 13.743 | 14.828 | **−7.3 %** |
+| pile32 | 37.777 | 37.480 | +0.8 % |
+| headon | 13.157 | 14.197 | **−7.3 %** |
+| side | 9.732 | 9.957 | −2.3 % |
+| bricks | 3.923 | 3.986 | −1.6 % |
+| rocks | 4.384 | 4.388 | −0.1 % |
+| barrier | 7.858 | 7.745 | +1.5 % |
+| truss | 1.805 | 1.807 | −0.1 % |
+
+(Before the tracking was skipped after idle passes the matrix failed on pile2, +9.4 %: two
+cars grouped but apart paid the tracking every pass for nothing.)
+
+**Whole 40 s runs, native** (release, vehicles' GPU ms a World step, t ≥ 0.5 s, 2,371 steps;
+off, on, off, on, each alone on the GPU through the lock):
+
+| run | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| 8 cars ledges, off | 17.37, 17.54 | 21.49, 21.49 | 21.96, 21.91 | 22.99, 23.01 (t 5.37, 5.35) |
+| 8 cars ledges, on | **14.87, 14.86** | **18.00, 17.77** | **19.79, 18.90** | 23.57, 23.46 (t 5.37, 5.35) |
+| 8 cars rolling, off | 24.38, 24.44 | 28.06, 28.07 | 29.56, 29.31 | 41.83, 41.36 (t 27.5) |
+| 8 cars rolling, on | **20.71, 20.76** | 27.65, 27.81 | 29.01, 29.05 | 33.19 (t 27.05), 42.35 (t 27.50) |
+| 32 cars ledges, off | 77.73, 79.17 | 87.48, 88.86 | 391.2, 397.1 | 405.4, 412.0 (t 18.3) |
+| 32 cars ledges, on | 78.11, 78.19 | 87.35, 87.72 | 391.9, 399.3 | 407.2, 412.4 (t 18.3) |
+
+Eight cars: −15 % at the median on both terrains, −16 % at p95 on the ledges, −1 % on the
+rolling gully. The worst step on the ledges (the crash's levels, t 5.35) is +2 % in both
+rounds; replayed from t 5.2 frame by frame (`AB_EACH=1`, 12 frames) the frames there are no
+slower with the flag (median 21.50 against 22.08 ms), so it is one step's build beside the
+levels' peak. Thirty-two cars: a tie (+0.5 %, −1.2 %); the kept list does nothing there
+(every build past the fleet's room or a car with more partners than a build covers, 8:
+0 builds in 2,000 passes). Covering 16 partners was tried (rung 1, 32-car fixtures): t 2.5
+builds 505,000 pairs and is 8 % slower, t 1 and t 4 still past the room; reverted.
+
+**Chrome** (the page's real-time loop, `run.sh --probe --secs N`, vehicles' GPU ms a World
+step, t ≥ 0.5 s; `&fleetKeep=0|1`, interleaved; the page runs at most 8 cars on the mountain):
+
+| run | steps | median | p95 | p99 | worst |
+|---|---|---|---|---|---|
+| ledges, 90 s, off | 2,755, 2,779 | 15.66, 15.61 | 16.81, 16.76 | 17.88, 17.66 | 21.01, 21.52 |
+| ledges, 90 s, on | 2,884, 2,801 | **14.47, 14.70** | **16.39, 16.62** | 17.87, 17.89 | **20.54, 21.22** |
+| rolling, 90 s, off | 2,683, 2,678 | 17.00, 17.16 | 18.28, 18.32 | 18.96, 18.78 | 22.16, 23.52 |
+| rolling, 90 s, on | 2,846, 2,860 | **14.92, 14.90** | 18.37, 18.38 | 19.04, 19.05 | **20.59, 21.21** |
+| rolling, 40 s (t ≤ 19.5), off | 1,178, 1,176, 1,174, 1,172 | 16.71, 16.81, 16.84, 16.91 | 18.42, 18.49, 18.46, 18.56 | | 19.99, 20.32, 19.67, 19.92 |
+| rolling, 40 s (t ≤ 19.5), on | 1,175, 1,172, 1,172, 1,168, 1,166 | 16.99, 16.98, 16.90, 17.05, 16.97 | 18.71, 18.76, 18.73, 18.84, 18.76 | | 20.38, 20.49, 20.29, 20.79, 20.27 |
+
+Over the whole run: −6 to −8 % at the median on the ledges, −12 % on the rolling gully, and
+the page simulates 1 to 6 % more in the same time; the worst step lower on both. In the
+rolling gully's first 19.5 s (the falls and the first collisions) the flag is 0.4 to 1.6 %
+slower at the median and 1 to 2 % at p95: there the builds are past the fleet's room or the
+lists short, and what is left is the flag's own cost (the plan's checks, the per-triangle
+listing marks; the tracking is skipped while the passes wait).
+
+**The Demolition Derby** (Chrome, `mode=derby&derbyPlayer=0`, spectator, the derby probe,
+`run.sh --probe --secs 40`, one run each way; the AI's paths differ run to run, so a pair is
+not one run): 8 cars off 13.77 / 15.25 / 17.04 (median / p95 / worst, 1,373 steps), on
+14.60 / 16.01 / 19.00 (1,311 steps): **6 % slower**. 4 cars on 11.74 / 13.16 / 14.12 (1,626
+steps) against 9.35 / 12.23 / 13.17 off (1,512 steps, a run before a machine restart). On a
+flat arena the cars ram at speed, as in the mountain's first collisions: lists past the
+fleet's room or outlived in a few passes, and the flag's own cost on top.
+
+**Default: on** (the owner's decision, 2026-11-19: "just as good or faster and prepares us for
+the future"; main's default becomes 30932933, the lab page's box is ticked). Bit for bit
+everywhere it was checked (fixtures on both terrains, the suites, the matrix, whole runs'
+final states, Chrome's frame-locked A/B on both terrains), and faster at the median on both
+terrains natively (−15 %) and in Chrome (−6 to −12 %). The earlier rule was faster
+everywhere, and these places are not: the worst step of the native ledges run
+(+2 % in both rounds: the crash's levels and a build in one step), 32 cars (a tie, +0.5 % and
+−1.2 %: the list never holds there), the rolling gully's first 20 s in Chrome (+0.4 to
+1.6 %, the flag's own cost before the cars pile), and the derby (+6 % at 8 cars, one noisy real-time run each way). The
+stop rule ended the work: after the composition (−12 to −19 % on the 8-car fixtures) and the
+fleet's room (−12 to −16 % on the rolling gully), three attempts in a row each under 5 %
+(the per-lane tracking, no tracking after idle passes, 16 partners covered).
+
+What would be next, measured first: the first collisions (8 cars ledges t 3.7: the first two
+builds are past the fleet's room, 262,136 pairs, while the cars close at speed and the
+allowance between vehicles is 30 cm; 12 frames on today's front with the flag's costs on
+top), and 32 cars (more partners than a build covers, and past the room when covered): a
+list whose allowance between two vehicles is the pair's own rather than the fleet's
+fastest pair's would shrink both.
+
 ### 8.40 Bit-exact results as a setting, off by default: the fast arithmetic (2026-11-19)
 
 **Owner decision (2026-11-19).** Bit-identical results across machines are needed for

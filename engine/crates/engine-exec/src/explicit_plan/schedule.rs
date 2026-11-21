@@ -13,7 +13,7 @@
 use super::{
     self_split_module_names, split_module_name, wide_list_module_name, Cmd, FramePlanner, Kernel, PARAM_COPIES,
     PARAM_LEVEL_COPIES, PARAM_STRIDE, PERF_AHEAD_APART, PERF_FLEET_ANY, PERF_FLEET_FRONT, PERF_FLEET_FUSE,
-    PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_MEMBER_LIST,
+    PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_KEEP_TRACK_REST, PERF_MEMBER_LIST,
     PERF_WHEELS_APART, PERF_WIDE_FUSED, PERF_WIDE_LIST, PERF_DRIVE_AHEAD, PERF_SPLIT_WHEELS_AHEAD, PERF_TYRE_AHEAD,
     PERF_TYRE_EARLY, W_PERF_FLAGS, W_SLEEP, W_VV_FLEET, W_VV_FLEET_NEXT,
     W_VV_TRI_PAIRS, WIDE_AUX, WIDE_BEAMS_PASS, WIDE_END, WIDE_TRIS, FLEET_LEVEL_MAX, FLEET_LEVEL_SLOTS_SHIFT,
@@ -459,8 +459,10 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
 /// The perf flags of a frame on the split group path: vehicle contact's state by owner
 /// vehicle ([`PERF_FLEET_STATE`], contact-groups-design.md §8) only with the tests in
 /// their own dispatches, the candidates' grid, the pair list and the state's regions (a
-/// fleet of two or more); otherwise the groups' slots, the same results.
-pub fn fleet_flags(planner: &FramePlanner, sw: &Switches) -> u32 {
+/// fleet of two or more); otherwise the groups' slots, the same results. `vv`: the frame
+/// runs self-collision split with vehicle contact ([`FrameKind::self_split_vv`]; it
+/// decides [`PERF_KEEP_TRACK_REST`]).
+pub fn fleet_flags(planner: &FramePlanner, sw: &Switches, vv: bool) -> u32 {
     let w = &planner.words;
     let ok = sw.group_split_tests && sw.vv_grid && w[W_VV_TRI_PAIRS] != 0 && w[W_VV_FLEET] != 0 && w[W_VV_FLEET_NEXT] != 0;
     // (The front as fleet-wide dispatches: with the state by vehicle, once its modules
@@ -478,14 +480,26 @@ pub fn fleet_flags(planner: &FramePlanner, sw: &Switches) -> u32 {
         // (Groups of any size on the fleet-wide passes: only with the front there.)
         flags &= !(PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST | PERF_FLEET_FUSE | PERF_FLEET_HITLAT | PERF_FLEET_KEEP);
     }
-    // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates stay
-    // in the groups' levels, which find them by each owner's listed count. The
-    // throttles' own dispatch is sized and indexed by the walk's prefix of the listed
-    // triangles, which a pass that reuses the kept pairs does not compute; and the
-    // levels across the GPU leave the throttles to that dispatch. The kernel's
-    // flPostOn says the same.)
+    // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates
+    // across the fleet, PERF_FLEET_POST, take the elements' dispatch, a thread a
+    // triangle (a pass that reuses the kept pairs computes no walk, so no prefix of the
+    // listed triangles: the kernel's fkPost). The levels across the GPU are not taken
+    // with them.)
     if flags & PERF_FLEET_KEEP != 0 {
-        flags &= !(PERF_FLEET_POST | PERF_FLEET_LEVELS);
+        flags &= !PERF_FLEET_LEVELS;
+    }
+    // (The kept candidates' tracking in the members' rest, PERF_KEEP_TRACK_REST: the
+    // host's alone, when the frame has the rest dispatches and the fused scans, and no
+    // wheels in the rest's dispatch beside the members; else the scans' dispatch.)
+    flags &= !PERF_KEEP_TRACK_REST;
+    let rest = PERF_FLEET_FRONT | PERF_FLEET_KEEP | PERF_FLEET_FUSE | PERF_MEMBER_LIST;
+    if front
+        && sw.group_split_tests
+        && flags & rest == rest
+        && flags & PERF_SPLIT_WHEELS_AHEAD == 0
+        && member_rest_on(planner, vv)
+    {
+        flags |= PERF_KEEP_TRACK_REST;
     }
     // (The levels across the GPU: with groups of any size and the throttles across the
     // fleet, once their module is compiled.)
@@ -504,7 +518,7 @@ pub fn fleet_flags(planner: &FramePlanner, sw: &Switches) -> u32 {
 /// Levels past them run in their group's workgroup in the end dispatch (the same
 /// results).
 pub fn fleet_level_slots(planner: &FramePlanner, sw: &Switches, steps: u32) -> u32 {
-    if fleet_flags(planner, sw) & PERF_FLEET_LEVELS == 0 {
+    if fleet_flags(planner, sw, false) & PERF_FLEET_LEVELS == 0 {
         return 0;
     }
     let room = (PARAM_COPIES + PARAM_LEVEL_COPIES).saturating_sub(3 * steps + 2 + 3) / 4;
@@ -517,8 +531,8 @@ pub fn fleet_level_slots(planner: &FramePlanner, sw: &Switches, steps: u32) -> u
 
 /// [`fleet_flags`] for a frame of `slots` level slots past the switches
 /// ([`FLEET_LEVEL_SLOTS_SHIFT`]; with the levels across the GPU).
-pub fn fleet_flags_for(planner: &FramePlanner, sw: &Switches, slots: u32) -> u32 {
-    let flags = fleet_flags(planner, sw);
+pub fn fleet_flags_for(planner: &FramePlanner, sw: &Switches, vv: bool, slots: u32) -> u32 {
+    let flags = fleet_flags(planner, sw, vv);
     if flags & PERF_FLEET_LEVELS == 0 {
         return flags;
     }
@@ -617,7 +631,7 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
     // over the solo vehicles (explicit_beams_selfsplit.slang), then the groups.
     let vv = kind.self_split_vv;
     let slots = kind.level_slots;
-    let fleet = fleet_flags(planner, sw);
+    let fleet = fleet_flags(planner, sw, vv);
     // Raycast wheels on each other (Switches::wheels_bodies): before each step's members,
     // the last step's reactions and this step's rays; after the last step the reactions.
     let wheels = sw.wheels_bodies;
@@ -653,8 +667,10 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             // grids' workgroups.)
             // (With the kept candidates the scans' dispatch stays: it also tracks every
             // node, fkTrack; the kernel's fuseScansOn.)
+            // (PERF_KEEP_TRACK_REST: the tracking in the members' rest, the scans fused.)
             let fuse = fleet & PERF_FLEET_FUSE != 0;
-            if !fuse || fleet & PERF_FLEET_KEEP != 0 {
+            let keep = fleet & (PERF_FLEET_KEEP | PERF_KEEP_TRACK_REST) == PERF_FLEET_KEEP;
+            if !fuse || keep {
                 out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
             }
             out.push(GroupOp::Fleet { copy: c0, kernel: 1, args: FLEET_FIRST_ARGS, from: 0, part: 1 });
@@ -668,8 +684,13 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             out.push(GroupOp::Fleet { copy: cl, kernel: 1, args: FLEET_ONE_ARGS, from: 1, part: 7 });
             out.push(GroupOp::Fleet { copy: cl, kernel: 2, args: FLEET_PAIRS_ARGS, from: 2, part: 8 });
             // (The listed triangles' throttle updates, a thread each: the walk's size.)
+            // (With the kept candidates: a thread a triangle, the elements' size.)
             if fleet & PERF_FLEET_POST != 0 {
-                out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                if fleet & PERF_FLEET_KEEP != 0 {
+                    out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_ELEMENT_ARGS, from: 1, part: 9 });
+                } else {
+                    out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                }
             }
             out.push(GroupOp::Group { copy: cl, tests: false, args: SPLIT_GROUP_ARGS, part: 4 });
             // The levels across the GPU (explicit_beams_fleet_levels.slang): the plan (one
@@ -769,7 +790,17 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         bytes.resize((PARAM_STRIDE * u64::from(steps + 1 + extra + lv)) as usize, 0);
         // The owners' state by vehicle only where its dispatches and regions are (the
         // groups' dispatches' copies carry the flags that hold this frame).
-        let flags = fleet_flags_for(planner, sw, slots);
+        let flags = fleet_flags_for(planner, sw, vv, slots);
+        // (The kept candidates' tracking in the members' rest: the steps' copies, which
+        // the scans and the first plan read, say so too.)
+        if flags & PERF_KEEP_TRACK_REST != 0 {
+            let stride = PARAM_STRIDE as usize;
+            let at = 4 * W_PERF_FLAGS;
+            for k in 0..=steps as usize {
+                let w = u32::from_le_bytes(bytes[stride * k + at..stride * k + at + 4].try_into().unwrap());
+                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(w | PERF_KEEP_TRACK_REST).to_le_bytes());
+            }
+        }
         let mut put = |k: u32, word: u32| {
             let mut w = planner.words;
             w[W_PERF_FLAGS] = flags;
