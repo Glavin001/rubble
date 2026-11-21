@@ -631,13 +631,17 @@ What changed (`gpu_run.sh`, `build_ref.sh`, `build/Dockerfile`, engine-slang-bui
 - **`build_ref.sh`**: one tree for every commit, updated by content (`rsync -c`, so
   unchanged files keep their times and cargo rebuilds only the crates that changed), and
   the same kernel caches. Before, each commit rebuilt every workspace crate and all its
-  kernels (491-576 s).
+  kernels (491-576 s). Now (the matrix's twelve fixtures): a first commit 349 s, then a
+  commit that changed only a doc 11 s, one that added a line to
+  `explicit_beams_fleet_levels.slang` 149 s.
 
 Device code is unchanged. All 237 modules (rigid, terrain, explicit) were built both ways
 from one tree and compared with `cuobjdump -sass` and `-ptx`: identical, apart from the
 translation unit's name hash (`_INTERNAL_xxxxxxxx_`, nvcc hashes the source's path, which
 differs between the two targets' build directories) and the debug sections that name
-that path. At the same path the fatbins are byte-identical.
+that path. At the same path the fatbins are byte-identical. End to end,
+`run.sh --cuda perf=0` (strict floats) built this way passed on a T4: every row bit for
+bit, $0.0047.
 
 Findings that decided this:
 
