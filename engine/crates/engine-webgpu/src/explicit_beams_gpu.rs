@@ -1111,13 +1111,16 @@ pub fn set_explicit_shader_checks_off(mask: Option<u32>) {
 
 static SHADER_CHECKS_OFF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
-/// The default on a native Metal device: all three checks left out. Measured there and
-/// only there (vehicle-perf-first-principles.md §8.48: 5 to 12 % of every scenario row,
-/// every state word the same, the GPU == CPU suites passing). The checked build is the
-/// debugging mode: `RUBBLE_SHADER_CHECKS_OFF=0` clamps a suspect index again. Other
+/// The default on a native Metal device: the bounds checks and the integer-division
+/// guards left out, the forced loop bound kept. Measured there and only there
+/// (vehicle-perf-first-principles.md §8.48: 3 to 9 % of every scenario row, every state
+/// word the same, the GPU == CPU suites passing). The loop bound stays in because with
+/// it and the bounds checks both out the 32-car pile does not repeat between two GPU
+/// objects (known-bugs.md F9); 7 is the mask once that is found. The checked build is
+/// the debugging mode: `RUBBLE_SHADER_CHECKS_OFF=0` clamps a suspect index again. Other
 /// native backends keep every check until they are measured and proven the same way;
 /// a browser injects its own and a page cannot turn them off.
-pub const SHADER_CHECKS_OFF_METAL: u32 = 7;
+pub const SHADER_CHECKS_OFF_METAL: u32 = 5;
 
 /// The mask [`explicit_shader_module`] compiles a module on `device` without.
 #[doc(hidden)]

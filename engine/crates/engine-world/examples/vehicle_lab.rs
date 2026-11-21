@@ -1379,7 +1379,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     // `--ab-switch checks=MASK`: the same kernels compiled without wgpu's injected runtime
     // checks (1 bounds, 2 loop bounding, 4 integer division; on) against the checked
-    // modules (off; 7 is the default on Metal), each on a GPU object of its own from one snapshot, in turn for
+    // modules (off; 5 is the default on Metal), each on a GPU object of its own from one snapshot, in turn for
     // AB_ROUNDS rounds: every state word and each frame's time. Native only.
     // `checks=ON:OFF`: the off half's mask too (8: no zeroing of workgroup memory on the
     // explicit pipelines that still zero it, a measurement).

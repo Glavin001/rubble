@@ -5645,8 +5645,36 @@ experiment: #139's layout was 1.8 times slower than today's frame kernel with th
 checks in both. Whether the checks weigh more on that layout (its hot loops index
 workgroup arrays every turn) was not measured: #139's kernel is not on this branch.
 
-**Default: the three checks out on native Metal** (the owner's decision, 2026-11-21;
-`SHADER_CHECKS_OFF_METAL`, `explicit_shader_checks_off`). The checked build is the
+**Default: the bounds checks and the division guards out on native Metal, the loop
+bound kept** (mask 5; the owner's decision for the checks, 2026-11-21;
+`SHADER_CHECKS_OFF_METAL`, `explicit_shader_checks_off`). On `main`'s kernels all three
+were out (mask 7) and every proof below this paragraph is that build's. After the merge
+with the integration branch (#145) the 32-car pile does not repeat between two GPU
+objects when the bounds checks and the loop bound are both out (`known-bugs.md` F9, open;
+the other 11 rows are bit for bit at 7), so the loop bound stays in until that is found.
+With mask 5 on the merged code, against the checked build:
+
+| row | checked | mask 5 | delta |
+|---|---|---|---|
+| drive | 4.02 | 3.64 | −9.3 % |
+| tumble | 3.84 | 3.57 | −7.0 % |
+| wall | 4.56 | 4.24 | −7.0 % |
+| pile2 | 8.92 | 8.22 | −7.8 % |
+| pile8 | 13.72 | 12.89 | −6.1 % |
+| pile32 | 38.52 | 36.42 | −5.5 % |
+| headon | 13.34 | 12.80 | −4.1 % |
+| side | 9.59 | 9.30 | −3.0 % |
+| bricks | 4.03 | 3.70 | −8.1 % |
+| rocks | 4.43 | 4.09 | −7.7 % |
+| barrier | 7.74 | 7.44 | −3.8 % |
+| truss | 1.89 | 1.79 | −5.2 % |
+
+12 rows bit for bit, PASS (the loop bound is worth another 2 to 6 % on the piles, the
+first table's last column). Also with mask 5 on the merged code: pile32 with 5 on
+both sides and 5 against checked, 3 runs each, bit for bit; the 20 fixtures bit for bit;
+`perf-verify.sh default`'s 11 suites; `engine-metal` `vehicle_parity` 4; Chrome's
+validation of the 128 modules, strict and fast (unchanged WGSL); the 11 rigid scenes'
+hashes the same as the fully checked build's. The whole 40 s runs were not repeated. The checked build is the
 debugging mode (`RUBBLE_SHADER_CHECKS_OFF=0`): without the checks an index out of range
 reads or writes other memory where the checked build clamped it to the last element,
 which hid the bug as well. Scope, each a measured limit and not a preference:
