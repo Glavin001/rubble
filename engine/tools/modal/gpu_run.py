@@ -35,6 +35,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -259,6 +260,22 @@ def run(archive_key: str, spec: dict) -> dict:
     return _run_impl(archive_key, spec)
 
 
+# COUNTERS=1 (the two-build matrix's hardware counters): the same run in an image with
+# NVIDIA's Nsight Compute (ncu, ~1.2 GB; built once and cached by Modal). Measured
+# 2026-11-21 on a T4: Modal's sandbox refuses to lock the GPU clocks, and every counter
+# works with --clock-control none.
+counters_image = modal.Image.from_registry("nvidia/cuda:12.8.0-base-ubuntu22.04", add_python="3.12").run_commands(
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends"
+    " cuda-nsight-compute-12-8 && rm -rf /var/lib/apt/lists/*"
+)
+
+
+@app.function(**{**FUNCTION, "image": counters_image})
+def run_counters(archive_key: str, spec: dict) -> dict:
+    PREFIX[0] = f"[{spec['shard']['label']}] " if spec.get("shard") else ""
+    return _run_impl(archive_key, spec)
+
+
 # (Modal preempted two long cold runs: the call restarts from the beginning, billed
 # again. Non-preemptible containers are not offered for GPU functions.)
 
@@ -308,6 +325,9 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
     base = {
         **os.environ,
         "RUST_BACKTRACE": "1",
+        # matrix.py's rows reach the log as they finish (a pipe is block-buffered), so
+        # a run the cap kills keeps the rows it finished.
+        "PYTHONUNBUFFERED": "1",
         "RUBBLE_GPU_LOCK": "0",  # one job per container: no machine lock to share
         "WGPU_BACKEND": "vulkan",
         "VK_ICD_FILENAMES": "/etc/vulkan/icd.d/nvidia_icd.json",
@@ -330,6 +350,10 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
         # The working directory (a test's crate dir, as cargo test uses) exists even
         # when no data file of that crate is shipped.
         Path(e["cwd"]).mkdir(parents=True, exist_ok=True)
+    # Prebuilt executables (the two-build A/B's builds of other commits) by variable.
+    for e in exes:
+        if e["role"] == "extra":
+            base[{"base_replay": "BASE_BIN", "head_replay": "HEAD_BIN"}.get(e["name"], f"EXE_{e['name']}")] = e["exec"]
     probe = next((e for e in exes if e["role"] == "probe"), None)
     if probe:
         code, _ = _run([probe["exec"]], "/work", base, deadline, 0)
@@ -384,7 +408,7 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
     if timing:
         _say(DIRECTIONAL.format(gpu=spec["gpu"]))
     worst, results, lines = 0, [], []
-    if shard and shard.get("row"):
+    if shard and shard.get("rows"):
         worst, results, lines = _matrix_row(spec, shard, runs, base, deadline)
     else:
         for rep in range(spec["repeat"]):
@@ -430,30 +454,34 @@ def _matrix_row(spec: dict, shard: dict, runs: list[dict], base: dict, deadline:
         return 1, [], []
     states = Path("/tmp/states")
     (states / "portable").mkdir(parents=True, exist_ok=True)
-    row = shard["row"]
+    rows = [r["row"] for r in shard["rows"]]
     make = spec["matrix_args"][:1] == ["--make"]
     if not make:
-        src = Path(STATES_MOUNT) / shard["state"]
-        if not src.is_file():
-            _say(f"matrix: no saved state {shard['state']} in the states volume")
-            return 1, [], []
-        (states / ("portable" if cuda else "") / f"{row}{'.pfx' if cuda else '.fx'}").symlink_to(src)
+        for r in shard["rows"]:
+            src = Path(STATES_MOUNT) / r["state"]
+            if not src.is_file():
+                _say(f"matrix: no saved state {r['state']} in the states volume")
+                return 1, [], []
+            (states / ("portable" if cuda else "") / f"{r['row']}{'.pfx' if cuda else '.fx'}").symlink_to(src)
     env = {**base, "LAB_BIN": lab["exec"], "STATES": str(states),
            "CAR": base.get("CAR", "/scenarios/sedan_new")}
     if cuda:
-        env["REPLAY_BIN"] = lab["exec"]
+        # (--head REF: that commit's build is the head; else the one built from the tree.)
+        env["REPLAY_BIN"] = base.get("HEAD_BIN", lab["exec"])
     lines: list[str] = []
-    # (The rows named on the command line are the shards: this container's is `row` alone.)
+    # (The rows named on the command line are spread over the containers: this one's
+    # are `rows`, run by one matrix.py in turn.)
     picked = set(spec["matrix_rows"])
-    cmd = ["python3", MATRIX_PY, *[a for a in spec["matrix_args"] if a not in picked], row]
-    _say(f"=== row {row}: {' '.join(cmd[2:])}")
+    cmd = ["python3", MATRIX_PY, *[a for a in spec["matrix_args"] if a not in picked], *rows]
+    _say(f"=== rows {','.join(rows)}: {' '.join(cmd[2:])}")
     code, secs = _run(cmd, "/repo/engine", env, deadline, spec["monitor"], keep=lines)
+    row = rows[0]
     if make and code == 0 and (states / f"{row}.fx").is_file():
         dest = Path(STATES_MOUNT) / "made" / spec["id"]
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(states / f"{row}.fx", dest / f"{row}.fx")
         states_volume.commit()
-    return (124 if code == NOT_RUN else code), [(f"row {row}", code, secs)], lines
+    return (124 if code == NOT_RUN else code), [(f"rows {','.join(rows)}", code, secs)], lines
 
 
 def _status(code: int) -> str:
@@ -513,9 +541,9 @@ def _shards(s: dict, manifest: dict, run_dir: Path) -> list[dict]:
         # (CUDA: each row's portable fixture, matrix.py --make-portable.)
         cuda = s["env"].get("MATRIX_CUDA") == "1"
         rel, ext = ("portable/", ".pfx") if cuda else ("", ".fx")
-        shards = []
+        rows = []
         for row in s["matrix_rows"]:
-            sh = {"label": row, "row": row}
+            sh = {"row": row}
             if not make:
                 local = run_dir / "states" / f"{rel}{row}{ext}"
                 if not local.is_file():
@@ -524,8 +552,12 @@ def _shards(s: dict, manifest: dict, run_dir: Path) -> list[dict]:
                                      + (", then matrix.py --make-portable" if cuda else ""))
                 sh["state"] = _sha256(local) + ext
                 sh["local"] = str(local)
-            shards.append(sh)
-        return shards
+            rows.append(sh)
+        # --pack N: the rows in N containers, in turn within each (a container's start
+        # is billed once, not once per row). --make keeps one row a container.
+        n = len(rows) if make or not s.get("pack") else max(1, min(int(s["pack"]), len(rows)))
+        groups = [rows[i::n] for i in range(n)]
+        return [{"label": ",".join(r["row"] for r in g), "rows": g} for g in groups]
     return []
 
 
@@ -572,10 +604,13 @@ def main(archive: str, spec: str):
         manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
     shards = _shards(s, manifest, run_dir)
     if shards and s.get("fanout") == "matrix" and s["matrix_args"][:1] != ["--make"]:
-        _upload(states_volume, {sh["state"]: Path(sh["local"]) for sh in shards}, "saved states")
-    cpus = int(s.get("cpus", CPUS))
-    rate = GPU_PRICE[gpu] + cpus * CPU_PRICE + MEM_GIB * MEM_PRICE
-    fn = run.with_options(gpu=gpu, timeout=cap, cpu=cpus)
+        _upload(states_volume, {r["state"]: Path(r["local"]) for sh in shards for r in sh["rows"]},
+                "saved states")
+    cpus = float(s.get("cpus", CPUS))
+    mem = float(s.get("mem", MEM_GIB))
+    rate = GPU_PRICE[gpu] + cpus * CPU_PRICE + mem * MEM_PRICE
+    fn = (run_counters if s["env"].get("COUNTERS") == "1" else run).with_options(
+        gpu=gpu, timeout=cap, cpu=cpus, memory=int(mem * 1024))
     t0 = time.time()
     if not shards:
         # Spawned, so the wait has a bound of its own: a GPU type without capacity leaves
@@ -591,7 +626,7 @@ def main(archive: str, spec: str):
             raise SystemExit(125)
         secs = out["secs"]
         print(f"[gpu_run] container {secs:.1f} s (call {time.time() - t0:.1f} s); "
-              f"cost about ${secs * rate:.4f} at ${rate * 60:.4f}/min ({gpu} + {cpus} cores + {MEM_GIB} GiB)",
+              f"cost about ${secs * rate:.4f} at ${rate * 60:.4f}/min ({gpu} + {cpus:g} cores + {mem:g} GiB)",
               flush=True)
         (run_dir / "exit_code").write_text(str(out["code"]))
         if out["code"] != 0:
@@ -619,7 +654,10 @@ def _fanout(fn, key: str, s: dict, shards: list[dict], run_dir: Path, rate: floa
     print(f"[gpu_run] fan-out: {len(shards)} containers ({s['fanout']}), all at once", flush=True)
 
     def spawn(i: int, sh: dict, **extra):
-        spec = {**s, "shard": {k: v for k, v in sh.items() if k != "local"}, "id": f"{s['id']}-{i}", **extra}
+        shard = {k: v for k, v in sh.items() if k not in ("local", "rows")}
+        if "rows" in sh:
+            shard["rows"] = [{k: v for k, v in r.items() if k != "local"} for r in sh["rows"]]
+        spec = {**s, "shard": shard, "id": f"{s['id']}-{i}", **extra}
         return fn.spawn(key, spec)
 
     def collect(label: str, call, timeout: float) -> dict | None:
@@ -728,8 +766,9 @@ def _matrix_report(s: dict, done: list[tuple[dict, dict | None]], run_dir: Path)
         for i, (sh, o) in enumerate(done):
             if o and o["code"] == 0:
                 where = f"made/{s['id']}-{i}"
-                blob = b"".join(states_volume.read_file(f"{where}/{sh['row']}.fx"))
-                (out_dir / f"{sh['row']}.fx").write_bytes(blob)
+                row = sh["rows"][0]["row"]
+                blob = b"".join(states_volume.read_file(f"{where}/{row}.fx"))
+                (out_dir / f"{row}.fx").write_bytes(blob)
                 states_volume.remove_file(where, recursive=True)
                 made += 1
         print(f"[gpu_run] matrix: {made} state(s) written to engine/out/scenario-matrix/", flush=True)
@@ -740,11 +779,20 @@ def _matrix_report(s: dict, done: list[tuple[dict, dict | None]], run_dir: Path)
         if not header:
             header = [l for l in lines if l.startswith(("scenario matrix", "row "))]
         body = [l for l in lines if l and not l.startswith(("scenario matrix", "row ", "verdict:", "baseline:"))]
-        rows += body or [f"{sh['row']:<8} NO RESULT ({_status(o['code']) if o else 'NO GPU'})"]
+        names = [r["row"] for r in sh["rows"]]
+        got = [l for l in body if l.split()[:1] and l.split()[0] in names]
+        rows += body + [f"{n:<8} NO RESULT ({_status(o['code']) if o else 'NO GPU'})"
+                        for n in names if not any(l.split()[0] == n for l in got)]
         if not o or o["code"] != 0:
-            bad.append(sh["row"])
+            # The container's own verdict names its failing rows (a packed container fails
+            # as a whole when one row does); without one, every row it held failed.
+            own = next((l for l in lines if l.startswith("verdict:")), "")
+            m = re.search(r"FAIL \(([^)]*)\)", own)
+            bad += [n.strip() for n in m.group(1).split(",")] if m else names
     print("\n" + "\n".join(header + rows), flush=True)
     kind = "baseline" if s["matrix_args"][:1] == ["--baseline"] else "verdict"
     verdict = "PASS" if not bad else "FAIL (" + ", ".join(bad) + ")"
-    print(f"{kind}: {verdict}; {len(done)} rows on Modal {s['gpu']}, one container each "
+    nrows = sum(len(sh["rows"]) for sh, _ in done)
+    where = "one container each" if nrows == len(done) else f"in {len(done)} container(s)"
+    print(f"{kind}: {verdict}; {nrows} rows on Modal {s['gpu']}, {where} "
           f"(timing directional: each row's on/off in one container)", flush=True)

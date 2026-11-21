@@ -80,11 +80,15 @@ def main() -> None:
     argv = sys.argv[1:]
     out = Path(argv.pop(0))
     extra: list[str] = []
+    prebuilt: list[tuple[str, str]] = []
     list_tests = False
     while argv and argv[0] != "--":
         flag = argv.pop(0)
         if flag == "--data":
             extra.append(argv.pop(0))
+        elif flag == "--exe":
+            name, _, path = argv.pop(0).partition("=")
+            prebuilt.append((name, path))
         elif flag == "--list-tests":
             list_tests = True
         else:
@@ -135,6 +139,12 @@ def main() -> None:
     runs = [e for e in exes if e["role"] == "run"]
     if not runs:
         raise SystemExit("the selection built no executables (did you pass --test/--example/--bin?)")
+    # Prebuilt executables shipped beside the selection, not run by it (the two-build
+    # A/B's base and head, built from other commits).
+    for name, path in prebuilt:
+        if not Path(path).is_file():
+            raise SystemExit(f"--exe {name}={path}: no such file")
+        exes.append({"path": path, "name": name, "kind": "example", "cwd": str(ENGINE), "role": "extra"})
     if list_tests:
         # `--fanout-tests`: each test harness's test names (libtest lists them without
         # running anything or opening a device), with the run args' filter applied.
