@@ -17,11 +17,47 @@
 #   FRAMES=n (default 10) frames a half, ROUNDS=r (default 3) the halves in turn; PROFILE_SPLIT=1 each row's frame by dispatch
 #   kind (slower); PROFILE=fast|release (default fast); THRESHOLD=% and NOISE_MS=ms.
 #
+# Where it runs: the Mac's GPU, under the GPU lock (the default).
+#   tools/scenario-matrix/run.sh --cuda SWITCH [ROW ...]   every row in one T4 container
+#       (1 core, 2 GiB) on Modal, on CUDA (engine-cuda's explicit_replay; device code built
+#       locally with nvcc, so a kernel edit costs a local build, ~4 min, then ~30 s and half
+#       a cent on Modal; MODAL_OPTS="--pack N" spreads the rows over N containers). It
+#       replays each row's portable fixture (out/scenario-matrix/portable/ROW.pfx: run
+#       `python3 tools/scenario-matrix/matrix.py --make-portable` under the GPU lock once
+#       after --make). Bit for bit holds within CUDA (ENGINE_CUDA_FMAD=0 for strict floats
+#       when a switch runs other modules: nvcc fuses multiply-adds per module); timing is
+#       directional (a T4, this host's launch overheads).
+#   tools/scenario-matrix/run.sh --modal ...   opt-in: every row in a T4 container of its
+#       own on Modal through Vulkan (tools/modal/gpu_run.sh --matrix; build in local
+#       Docker). Not for kernel edits: NVIDIA compiles each new kernel version on Modal's
+#       hosts (one explicit-beams pipeline took over 28 minutes, past the cap), so a
+#       changed kernel costs dollars before a row runs. Use --cuda.
+#   MODAL_OPTS="--gpu L4 --allow-cold-compile --timeout 1500" passes gpu_run options.
+#
 # Rows and how the states are made: docs/measurements/scenario-matrix.md.
 here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 profile="${PROFILE:-fast}"
 cd "$engine" || exit 1
+if [ "$1" = "--cuda" ] && { [ "${2:-}" = "--base" ] || [ "${2:-}" = "--head" ]; }; then
+  # Two builds: --base REF [--head REF] [ROW ...] (head default: the working tree).
+  shift
+  refs=()
+  while [ "${1:-}" = "--base" ] || [ "${1:-}" = "--head" ]; do refs+=("$1" "$2"); shift 2; done
+  # shellcheck disable=SC2086
+  exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} "${refs[@]}" --matrix-cuda -- --two-builds "$@"
+fi
+if [ "$1" = "--cuda" ]; then
+  shift
+  # shellcheck disable=SC2086
+  exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} --matrix-cuda -- "$@"
+fi
+if [ "$1" = "--modal" ]; then
+  shift
+  # shellcheck disable=SC2086
+  exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} --matrix -- "$@"
+fi
+[ "$1" = "--local" ] && shift  # the default; kept for scripts that pass it
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
 export LAB_BIN="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 if [ -z "$SCENARIO_MATRIX_LOCKED" ]; then

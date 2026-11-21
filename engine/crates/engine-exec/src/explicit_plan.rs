@@ -13,6 +13,12 @@
 //!   and the ordered command list ([`FramePlanner::commands`]): dispatches, indirect
 //!   dispatches and buffer copies, with the vehicle-contact plan's and the wide
 //!   passes' scheduling decided here.
+//! * [`schedule::frame`]: the whole frame a host replays: the planner's commands with
+//!   the split paths around them (self-collision split, the split group path and its
+//!   fleet-wide passes, the wide passes' reused pair list), their parameter copies, and
+//!   for each split launch its module, workgroups and argument buffers
+//!   ([`schedule::split_launch`]). [`MODULES`] and [`split_modules`] are every module
+//!   those launches name.
 //! * [`ExplicitLayout`]'s readback decoders (positions, beams, ...) and the host
 //!   writes' offsets (a node's velocity, the grab, the coupling switch).
 //!
@@ -22,6 +28,8 @@
 
 pub mod coupling;
 pub mod drive;
+pub mod portable;
+pub mod schedule;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
@@ -44,7 +52,7 @@ impl GpuBeam {
 }
 
 /// A vehicle's place in the shared buffers.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub node_off: u32,
     pub nodes: u32,
@@ -58,7 +66,7 @@ pub struct Span {
 }
 
 /// Room for rigid-body proxies per vehicle (`ExplicitBeamsGpu::with_coupling`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingCapacity {
     /// Proxy bodies, shapes (at most 1024, at least the bodies) and hull planes (at most
     /// 65535) per vehicle.
@@ -70,7 +78,7 @@ pub struct CouplingCapacity {
 /// Where the coupling's records live (`explicit_beams_rigid.slang`): gMisc records from
 /// `misc_base`, `recs` per vehicle (a header, then 5 per body, 7 per shape, 1 per plane);
 /// gAcc words from `acc_base`, `bodies + 6 shapes` per vehicle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingLayout {
     pub cap: CouplingCapacity,
     pub vehicles: u32,
@@ -189,6 +197,21 @@ pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
 pub const PARAM_WORDS: usize = 106;
+
+/// [`PARAM_WORDS`] words through serde as a sequence (serde's arrays stop at 32).
+pub mod param_words_serde {
+    use super::PARAM_WORDS;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(w: &[u32; PARAM_WORDS], s: S) -> Result<S::Ok, S::Error> {
+        w.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u32; PARAM_WORDS], D::Error> {
+        let v = Vec::<u32>::deserialize(d)?;
+        v.try_into().map_err(|v: Vec<u32>| serde::de::Error::custom(format!("{} parameter words, not {PARAM_WORDS}", v.len())))
+    }
+}
 /// Params word: the partners' room (the kernel's `vvRoom`): vehicle contact's candidate
 /// run, hit list and ranks hold this many times the fleet's contact points and a node's
 /// two-body point counts this many owners ([`vv_room`]). Past it the contact status
@@ -995,6 +1018,170 @@ pub const MODULES: &[Module] = &[
     },
 ];
 
+/// A module of the split paths, named by its frame variant ([`split_modules`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitModule {
+    pub name: String,
+    pub entry: &'static str,
+    pub defines: Vec<(&'static str, &'static str)>,
+}
+
+/// The frame module's four variants: the tag their split modules' names end with,
+/// whether they have wings (`EB_AERO`), and their lanes.
+const VARIANTS: [(&str, bool, (&str, &str)); 4] =
+    [("", false, L256), ("_wide", false, L512), ("_aero", true, L256), ("_aero_wide", true, L512)];
+
+/// The tag of the frame variant with `aero` and `lanes` ([`VARIANTS`]).
+fn variant_tag(aero: bool, lanes: u32) -> &'static str {
+    match (aero, lanes) {
+        (false, 512) => "_wide",
+        (false, _) => "",
+        (true, 512) => "_aero_wide",
+        (true, _) => "_aero",
+    }
+}
+
+/// The split group path's module `which` (member, group, tests, fleetfront, fleetplan,
+/// fleetpost, fleetlevels) at the frame variant with `aero` and `lanes`.
+pub fn split_module_name(which: &str, aero: bool, lanes: u32) -> String {
+    format!("explicit_beams_split_{which}{}", variant_tag(aero, lanes))
+}
+
+/// The self-collision split's modules at the frame variant with `aero` and `lanes`,
+/// with vehicle contact (`vv`) or not: (name, entry, binds the arguments at binding 10).
+/// With contact, the split group path's group and tests modules follow.
+pub fn self_split_module_names(aero: bool, lanes: u32, vv: bool) -> Vec<(String, &'static str, bool)> {
+    let tag = variant_tag(aero, lanes);
+    if vv {
+        vec![
+            (format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, true),
+            (format!("explicit_beams_selfsplit_walk_vv{tag}"), SELF_WALK_ENTRY, false),
+            (format!("explicit_beams_selfsplit_pairs_vv{tag}"), SELF_PAIRS_ENTRY, false),
+            (split_module_name("group", aero, lanes), SPLIT_GROUP_ENTRY, false),
+            (split_module_name("tests", aero, lanes), SPLIT_TESTS_ENTRY, false),
+        ]
+    } else {
+        vec![
+            (format!("explicit_beams_selfsplit_step{tag}"), SELF_STEP_ENTRY, true),
+            (format!("explicit_beams_selfsplit_walk{tag}"), SELF_WALK_ENTRY, false),
+            (format!("explicit_beams_selfsplit_pairs{tag}"), SELF_PAIRS_ENTRY, false),
+        ]
+    }
+}
+
+/// The wide passes' list module for a fleet at `lanes` (wide fleets have no aero).
+pub fn wide_list_module_name(lanes: u32) -> &'static str {
+    if lanes == 512 {
+        "explicit_beams_selfsplit_list_wide"
+    } else {
+        "explicit_beams_selfsplit_list"
+    }
+}
+
+pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
+pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
+pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
+pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
+pub const SELF_PAIRS_ENTRY: &str = "explicit_beams_self_pairs";
+pub const WIDE_LIST_ENTRY: &str = "explicit_beams_wide_list";
+
+/// Every module of the split paths, which every host's build compiles from the one
+/// Slang source as it does [`MODULES`]: the split group path (EB_VV_SPLIT;
+/// docs/measurements/contact-groups-design.md: the members' steps, the groups' passes,
+/// their tests across workgroups and the fleet-wide front and levels), self-collision
+/// split (EB_SELF_SPLIT; docs/measurements/selfcol-design.md), the wide passes' reused
+/// pair list, and self split with vehicle contact. At the frame module's four variants.
+pub fn split_modules() -> Vec<SplitModule> {
+    let mut out = Vec::new();
+    let mut push = |name: String, entry: &'static str, defines: Vec<(&'static str, &'static str)>| {
+        out.push(SplitModule { name, entry, defines });
+    };
+    for (tag, aero, lanes) in VARIANTS {
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+            // (The members' module without EB_VV_GROUPS: its frame step never reaches
+            // contactGroup, so it binds the workgroup variables of the steps alone:
+            // Metal allows 31 a kernel.)
+            let mut d = vec![W, lanes, SOLO, ("EB_VV_SPLIT", "1")];
+            if aero {
+                d.push(AERO);
+            }
+            d.push(match which {
+                "member" => ("EB_SOLO_STEP", "1"),
+                "group" => GROUPS,
+                // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
+                // thread kernels, and the one that writes the next dispatches' counts.
+                "fleetfront" => ("EB_FLEET_FRONT", "1"),
+                "fleetplan" => ("EB_FLEET_PLAN", "1"),
+                "fleetpost" => ("EB_FLEET_POST", "1"),
+                // The levels across the GPU (explicit_beams_fleet_levels.slang).
+                "fleetlevels" => ("EB_FLEET_LEVELS", "1"),
+                // The tests across workgroups: their counters in global memory.
+                _ => ("EB_VV_GLOBAL", "1"),
+            });
+            // The owners' state by vehicle (explicit_beams_fleet.slang), in the groups'
+            // and the tests' modules.
+            if which != "member" {
+                d.push(("EB_VV_FLEET", "1"));
+            }
+            let entry = match which {
+                "member" => SPLIT_MEMBER_ENTRY,
+                "group" => SPLIT_GROUP_ENTRY,
+                "fleetfront" => "explicit_beams_fleet_front",
+                "fleetplan" => "explicit_beams_fleet_plan",
+                "fleetpost" => "explicit_beams_fleet_post",
+                "fleetlevels" => "explicit_beams_fleet_levels",
+                _ => SPLIT_TESTS_ENTRY,
+            };
+            push(format!("explicit_beams_split_{which}{tag}"), entry, d);
+        }
+        // Self-collision's listed pairs across workgroups: a solo frame a step a
+        // dispatch, cut at its tests, and the pairs dispatch. (Without surface contact:
+        // these frames run only without it, and the module compiles as the frame's
+        // `_nosurf` twin does.)
+        for (which, entry) in [("step", SELF_STEP_ENTRY), ("walk", SELF_WALK_ENTRY), ("pairs", SELF_PAIRS_ENTRY)] {
+            push(format!("explicit_beams_selfsplit_{which}{tag}"), entry, self_split_defines(aero, lanes));
+        }
+        // The wide passes' reused pair list (the list's part of a step alone, a small
+        // kernel); wide fleets have no aero.
+        if !aero {
+            push(
+                format!("explicit_beams_selfsplit_list{tag}"),
+                WIDE_LIST_ENTRY,
+                vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), NOSURF],
+            );
+        }
+        // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group
+        // path's members' (a solo vehicle's step cut at its tests, a member's step
+        // whole), and the walk and pairs skip the members.
+        let mut base = vec![W, lanes, SOLO, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), NOSURF];
+        if aero {
+            base.push(AERO);
+        }
+        let mut member = base.clone();
+        member.push(("EB_VV_SPLIT", "1"));
+        push(format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, member);
+        push(format!("explicit_beams_selfsplit_walk_vv{tag}"), SELF_WALK_ENTRY, base.clone());
+        push(format!("explicit_beams_selfsplit_pairs_vv{tag}"), SELF_PAIRS_ENTRY, base);
+    }
+    out
+}
+
+/// The self-collision split's defines (without vehicle contact) at a frame variant;
+/// a host's measurement builds (EB_ABLATE) add to them.
+pub fn self_split_defines(aero: bool, lanes: (&'static str, &'static str)) -> Vec<(&'static str, &'static str)> {
+    let mut d = vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), NOSURF];
+    if aero {
+        d.push(AERO);
+    }
+    d
+}
+
+/// [`VARIANTS`] for a host's own builds of split modules: (tag, aero, lanes define).
+pub fn split_variants() -> [(&'static str, bool, (&'static str, &'static str)); 4] {
+    VARIANTS
+}
+
 /// A dispatch's kernel. The frame kernels' module depends on the fleet
 /// ([`ExplicitLayout::aero`], [`ExplicitLayout::lanes`]): [`Kernel::module`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1176,7 +1363,7 @@ pub enum Cmd {
 /// The status a host reads every [`STATUS_EVERY`] frames: 4 contact counters
 /// (outside, overflow, unconverged, too big) at byte `base + 16` of gAcc, and the
 /// loop-cap flag at byte `cap` (the kernel's `EB_LOOP_CAP`, every target).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StatusWords {
     pub base: u64,
     pub cap: u64,
@@ -1235,7 +1422,7 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
 }
 
 /// Vehicle sleep's records (`explicit_beams_sleep.slang`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SleepLayout {
     /// gMisc record of the header (the Params word [`W_SLEEP`] when on), and of vehicle
     /// 0's record (one per vehicle: still steps, flags, 0, 0).
@@ -1272,7 +1459,7 @@ pub struct ExplicitUpload {
 }
 
 /// Where everything lives, and the fleet's module choice.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitLayout {
     /// gAcc word of the first vehicle's self-collision hit counters (two words a
     /// vehicle: the step's hits, its pending beams; the kernel's hitAcc).
@@ -1288,6 +1475,7 @@ pub struct ExplicitLayout {
     /// Spawn rest lengths of every beam, in buffer order.
     pub rest0: Vec<f32>,
     /// The parameter words at upload.
+    #[serde(with = "param_words_serde")]
     pub words: [u32; PARAM_WORDS],
     /// JBeam deform group words (spec §19): gGroups word of the first, and per
     /// vehicle (first, count).
@@ -2956,8 +3144,20 @@ struct ContactPlan {
     fresh: bool,
 }
 
+/// A planner's words, state and frame choices ([`FramePlanner::settings`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlannerSettings {
+    pub words: Vec<u32>,
+    pub state: PlannerState,
+    pub contact_on: bool,
+    pub wide_on: bool,
+    pub sleep_listing: bool,
+    pub wide_sleep: bool,
+    pub surface_split: bool,
+}
+
 /// The planner's state a host saves with a GPU snapshot (tests).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlannerState {
     left: u32,
     fresh: bool,
@@ -3337,6 +3537,31 @@ impl FramePlanner {
         self.contact.fresh = s.fresh;
         self.frames = s.frames;
         self.contact.replan.store(s.replan, Ordering::Relaxed);
+    }
+
+    /// Everything this planner holds that its layout does not give it: the words, the
+    /// contact plan's state, the host's frame choices ([`portable`]).
+    pub fn settings(&self) -> PlannerSettings {
+        PlannerSettings {
+            words: self.words.to_vec(),
+            state: self.state(),
+            contact_on: self.contact.on,
+            wide_on: self.wide_on,
+            sleep_listing: self.sleep_listing,
+            wide_sleep: self.wide_sleep,
+            surface_split: self.surface_split,
+        }
+    }
+
+    /// Put back [`Self::settings`] (on a planner made from the same layout).
+    pub fn apply(&mut self, s: &PlannerSettings) {
+        self.words.copy_from_slice(&s.words);
+        self.restore(s.state);
+        self.contact.on = s.contact_on;
+        self.wide_on = s.wide_on;
+        self.sleep_listing = s.sleep_listing;
+        self.wide_sleep = s.wide_sleep;
+        self.surface_split = s.surface_split;
     }
 
     /// The wide passes of a frame: (parameter copy, pass, workgroups).
@@ -3751,6 +3976,30 @@ fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every split module a host names at run time is in the one list every build
+    /// compiles, once, and none shares a name with a plan module.
+    #[test]
+    fn split_modules_cover_the_names_hosts_load() {
+        let list = split_modules();
+        let names: std::collections::HashSet<&str> = list.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names.len(), list.len(), "a split module twice");
+        assert!(MODULES.iter().all(|m| !names.contains(m.name)));
+        for (aero, lanes) in [(false, 256), (false, 512), (true, 256), (true, 512)] {
+            for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+                assert!(names.contains(split_module_name(which, aero, lanes).as_str()));
+            }
+            for vv in [false, true] {
+                for (name, entry, _) in self_split_module_names(aero, lanes, vv) {
+                    let m = list.iter().find(|m| m.name == name).unwrap_or_else(|| panic!("{name}"));
+                    assert_eq!(m.entry, entry, "{name}");
+                }
+            }
+            if !aero {
+                assert!(names.contains(wide_list_module_name(lanes)));
+            }
+        }
+    }
 
     /// Each vehicle's box slots (its boxes, then its static shapes) start after every
     /// earlier vehicle's: two vehicles with a box and a cylinder each, the second's

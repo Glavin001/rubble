@@ -1449,6 +1449,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         lab.bench.t = t + f64::from(pre) / 60.0;
         let t = lab.bench.t;
         ab = vec![t];
+        // `--save-portable FILE`: this state as a portable fixture (every binding, the
+        // layout, the planner, the host's paths: engine_exec::explicit_plan::portable) for
+        // a host with no World (engine-cuda's explicit_replay). Exits.
+        if let Some(out) = arg("--save-portable") {
+            let p = x.portable(t, &format!("{file} (vehicle_lab, wgpu)"));
+            let bytes = p.to_bytes();
+            std::fs::write(&out, &bytes)?;
+            println!("portable {out} ({:.1} MB, t {t:.3})", bytes.len() as f64 / 1e6);
+            std::process::exit(0);
+        }
         // `--compare-fixture B`: this fixture's state words against B's (two runs' states at
         // one time, e.g. the page's flag-on and flag-off runs saved by vehicle-lab-record.mjs
         // --abSaveAll), the verdict's masking; host state (labels, retired nodes) compared

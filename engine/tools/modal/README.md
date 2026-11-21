@@ -89,6 +89,13 @@ engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_v
 | `--no-shader-cache` | Neither read nor write the shared shader cache |
 | `--data PATH` | An extra repo-relative file or directory to ship (32 MB cap, not counting the generated WGSL) |
 | `--sedan DIR` | The generated sedan's JBeam export (default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`). Shipped only when an argument, `--env` or `--variant` says `@sedan`, which becomes `/scenarios/sedan_new`; only `files.json`, `*.jbeam` and `*.pc` (under 1 MB), never the `.glb`/`.rskin` |
+| `--fanout` | One container per executable of the selection (each test binary), all at once (see Fan-out) |
+| `--fanout-tests` | One container per test, all at once |
+| `--matrix` | The scenario matrix, one container per row (`tools/scenario-matrix/run.sh` calls it) |
+| `--matrix-cuda` | The scenario matrix on CUDA, every row in one container with 1 core and 2 GiB (`run.sh --cuda`; see below) |
+| `--base REF` / `--head REF` | `--matrix-cuda`: also ship `explicit_replay` built from commit REF (`build_ref.sh`, kept in `engine/target/gpu-run-refs/`) for `matrix.py --two-builds`; the head defaults to the working tree's build (see "Two builds, head to head") |
+| `--pack N` | Matrix: the rows in N containers, in turn within each (default one per row; 1 for `--matrix-cuda`) |
+| `--cpus N` / `--mem GIB` | The container's cores (fractional allowed) and memory: default 8 and 8 (the Vulkan driver compiles on the CPU); 1 and 2 for `--matrix-cuda` |
 | `--build-only` | Build and pack, no Modal call |
 | `--keep` | Keep `engine/target/gpu-run/<id>/` |
 
@@ -103,6 +110,246 @@ binary, the runner names the test that was running and reprints its last 60 line
 the summary marks it KILLED and any binary after it NOT RUN (exit 124). The container sets
 `RUBBLE_GPU_LOCK=0` (one job per container), `WGPU_BACKEND=vulkan` and
 `SEDAN=/scenarios/sedan_new`.
+
+## Fan-out: many GPU containers from one build
+
+What the Mac does and what Modal does: the Mac builds (free, local Docker) and runs
+CPU-only tests natively; Modal runs only GPU work, every job in a T4 container of its
+own (the smallest GPU Modal has), so no two runs share a GPU and nothing queues.
+
+```bash
+# Each test binary in its own container, all at once
+engine/tools/modal/gpu_run.sh --fanout -- -p engine-webgpu \
+  --test explicit_pair_reuse_gpu --test vv_grid_gpu --test debris_retire_gpu
+# Each test in its own container (names listed at build time; the run args' filter applies)
+engine/tools/modal/gpu_run.sh --fanout-tests -- -p engine-world --test explicit_vehicles
+# The scenario matrix: each row in its own container (the default for run.sh)
+engine/tools/scenario-matrix/run.sh perf=8388608
+```
+
+1. One build and pack, as for a single run.
+2. The archive uploads once to the Volume `rubble-gpu-run-archives`, named by its
+   SHA-256: a rerun of the same build uploads nothing; archives older than 2 days are
+   pruned.
+3. Every shard is spawned at once (Modal starts as many containers as the workspace's
+   GPU limit allows and queues the rest). Each streams its output prefixed with
+   `[label]`.
+4. One summary (status and container seconds a shard, its GPU and driver), the summed
+   billed estimate, and the first failure's exit code.
+
+Cold kernels: a shard whose kernel version is not compiled on its host's driver stops
+at once (the guard, ~5 s billed, `COLD` in the summary). With `--allow-cold-compile`
+a fan-out first runs **one** warm-up container that compiles every pipeline and saves
+the cache; then the shards, which start warm. Modal mixes driver versions (610.57.04
+and 620.70.06 seen; the cache is per driver), so a shard that lands on the other
+driver reruns up to twice hoping for a warm host (~5 s each), and only then compiles
+its own pipelines. Never let every shard compile: 12 cold matrix rows would each pay
+the ~18-minute warm-up.
+
+The scenario matrix's own pieces: `--matrix` builds `-p engine-world --example
+vehicle_lab`, ships `tools/scenario-matrix` (matrix.py, scenes) and the generated
+sedan (`CAR`, default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`),
+forwards `FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT`, and gives
+each row `engine/out/scenario-matrix/ROW.fx`, uploaded once by hash to the Volume
+`rubble-scenario-states`. Each container runs matrix.py for its row (both halves, the
+retries and the median in that one container, so the speed comparison is between
+runs on one GPU), and the local side prints one table and one verdict. `run.sh --make`
+saves new states on Modal and writes them back to `engine/out/scenario-matrix/`.
+Options for gpu_run go in `MODAL_OPTS`, e.g. `MODAL_OPTS="--allow-cold-compile
+--timeout 1500"` for a kernel version new on Modal. This route is opt-in
+(`run.sh --modal`): on 2026-11-19 the warm-up for one kernel version hit the 1800 s cap
+on both drivers with 16 cores (one `explicit_beams_split_member_wide` pipeline compiled
+for over 1,700 s on one thread, so more cores do not help), about $2 across tries with
+no states made. Kernel edits go to the CUDA route instead.
+
+## The scenario matrix on CUDA
+
+`tools/scenario-matrix/run.sh --cuda SWITCH [ROW ...]` (from `engine/`) runs every row in
+one T4 container, in turn (`gpu_run.sh --matrix-cuda`; `MODAL_OPTS="--pack N"` spreads them
+over N containers): engine-cuda's `explicit_replay`
+replays the row's portable fixture (`engine_exec::explicit_plan::portable`: every binding
+as the GPU held it, the layout, the planner's settings and the host's frame paths) with
+the switch on and off, and matrix.py prints the usual table and verdict. No World, scene
+or vehicle is built on Modal, so nothing compiles there; the device code is built locally
+(the 33 modules the rows need, listed by `explicit_replay --modules`).
+
+Once, after `run.sh --make` (on the Mac, under the GPU lock; reads each `ROW.fx` back as
+`portable/ROW.pfx`): `python3 scripts/with-gpu-lock.py -- env RUBBLE_GPU_LOCK=0 python3
+tools/scenario-matrix/matrix.py --make-portable`.
+
+Bit for bit is exact within CUDA. A switch that runs other modules (the split paths)
+needs `ENGINE_CUDA_FMAD=0` for that: by default nvcc fuses multiply-adds per module, so two
+modules doing the same arithmetic can differ in the last bit. Measured 2026-11-19 (T4):
+`perf=0` every row bit for bit, deltas within 2.4 %; `groupsplit` (strict) every row bit for
+bit, the contact rows 3 to 20 times faster with it. A run: about 4 minutes of local build
+after a kernel edit, then about half a minute on Modal and half a cent for the 12 rows.
+
+What one verdict costs (2026-11-21, T4, `perf=0` strict, all 12 rows; each row's on and off
+halves always run in the same container, so a verdict never reuses a stored control):
+
+| Containers, cores, memory | Billed | Cost | Wall on Modal |
+|---|---|---|---|
+| 12 (one per row), 8 cores, 8 GiB (the old default) | 53-63 s | $0.015-0.018 | 65-495 s (twelve GPUs to find) |
+| 12, 1 core, 2 GiB | 57 s | $0.0104 | 37 s |
+| 1, 8 cores, 8 GiB | 24 s | $0.0069 | 27 s |
+| **1, 1 core, 2 GiB (the default)** | **26 s** | **$0.0048** | **29 s** |
+| 1, 0.5 core, 2 GiB | 25 s | $0.0044 | 28 s |
+| L4: 1, 1 core, 2 GiB | 21 s | $0.0051 | 330 s (queued for an L4) |
+
+- Twelve containers bill twelve starts (about 2.5 s each) and wait for twelve GPUs; one
+  container bills one and waits for one. The rows' own work is about 21-25 s either way.
+- The container only launches GPU work: 1 core and 2 GiB time the same as 8 and 8, at 63 % of
+  the rate. Half a core saves another 8 %; one core is kept as the margin for host-heavy
+  rows.
+- One container also gave steadier numbers: no row needed its two extra runs, while the
+  per-row layout reran two rows, and its truss row read 2.18 ms against 1.26 ms on a
+  different container.
+- The T4 stays the default: the L4 costs the same per verdict (faster, at 1.32 times the
+  rate) and Modal often has none free. The L4 is for large scenes, where GPU time dominates.
+- At $0.0048 a verdict, $30 a month is about 6,000 matrix verdicts (200 a day).
+
+`PROFILE_SPLIT=1` adds each row's frame on CUDA (`explicit_replay --ab-profile`, both
+halves): wall and GPU time, the kernels' sum, the gaps between launches (GPU minus
+kernels), the host (wall minus GPU), and launches, bank writes and argument reads a frame,
+then each kernel's time. Indirect dispatches read their workgroup counts on the GPU
+(each module's `{entry}_gs`, engine-slang-build `grid_stride_entry`), so a frame has no
+wait for the host; switch `devindirect` (or `RUBBLE_CUDA_HOST_INDIRECT=1`) reads them
+back instead. Measured 2026-11-19 (T4, strict floats): every row bit for bit, 10 to 32 %
+faster (pile32 1 %); the gaps went from 0.5 to 5.7 ms a frame to none, the host's share is
+under 0.2 ms (pile32 0.5 ms), and what remains is the kernels' own time.
+
+Tried and not kept (2026-11-19, same matrix): replaying each frame as a CUDA graph. Bit for
+bit, but within noise: -2.6 to +1.3 % against the same launches queued one by one. A graph
+cannot hold the banks' pointer rewrites as host writes, and the device copies that replace
+them cost more than the small host copies the driver puts in the stream. With no gaps left
+between launches, a graph has nothing to remove.
+
+Where CUDA stands against the Mac (2026-11-19, `run.sh --cuda perf=0`, ms a frame; Mac =
+`run.sh --baseline`, wgpu on an M3 Max, the same fixtures). One thing changed at a time:
+
+| row | T4 strict | T4 default floats | T4 strict, L1 loads | L4 strict | Mac |
+|---|---|---|---|---|---|
+| drive | 3.90 | 3.71 | 3.65 | 3.28 | 3.93 |
+| tumble | 4.35 | 4.31 | 3.79 | 3.76 | 3.79 |
+| wall | 4.22 | 4.01 | 3.66 | 3.65 | 4.73 |
+| pile2 | 11.79 | 11.87 | 9.90 | 9.58 | 8.44 |
+| pile8 | 24.37 | 24.48 | 21.41 | 16.17 | 15.40 |
+| pile32 | 75.39 | 74.95 | 65.92 | 42.68 | 38.03 |
+| headon | 17.91 | 17.98 | 16.64 | 14.69 | 13.99 |
+| side | 13.48 | 13.45 | 12.12 | 10.64 | 9.88 |
+| truss | 1.68 | 2.34 | 1.27 | 1.33 | 1.53 |
+
+- Strict floats (`ENGINE_CUDA_FMAD=0`) cost nothing measurable: the bit-for-bit test mode is
+  also the timing mode.
+- `-dlcm=cg` (plain loads cached in L2 only, the correctness rule in `fatbin_threads`) costs 3
+  to 16 % a row; `ENGINE_CUDA_LOAD_CACHE=ca` is measurement only (a plain load may then read a
+  value another block changed by atomics). Keeping the speed means making those reads atomic
+  or coherent in the CUDA build, not flipping the flag.
+- The rest of the T4's gap on contact rows is the T4: on an L4 the same build is 0.75 to 1.1
+  times the Mac's time (pile32 1.12). Use the T4 for verdicts and ranking (cheapest, nearly
+  always available); an L4 for absolute numbers (Modal had none for some rows at times:
+  `NO RESULT (NO GPU)`).
+
+## Two builds, head to head (commit against commit)
+
+For performance experiments, prefer comparing two builds to adding a runtime switch.
+A switch adds branches you have to remove later. A branch inside a hot kernel can change
+register use and spill values, so you end up timing the branch. An architecture change
+(a new buffer layout, a new schedule, rewritten kernels) cannot sit behind a switch at
+all. Two builds time exactly what would ship.
+
+From `engine/`:
+
+```bash
+ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda --base main --head my-experiment [ROW ...]
+```
+
+- Without `--head`, the head is the working tree's build.
+- `ENGINE_CUDA_FMAD=0` (strict floats) keeps bit for bit meaningful between builds that
+  launch different modules. It costs nothing measurable.
+
+What happens:
+
+1. **Building.** Each ref is built once in local Docker by `tools/modal/build_ref.sh`
+   (`git archive` of the commit, the CUDA build image, device code for the modules the
+   rows' fixtures need, as that commit names them). It is kept in a library under
+   `engine/target/gpu-run-refs/<commit>-<settings>/` (gitignored), with an `info.txt`
+   giving the commit, subject, branches, settings, modules, fixtures and build time.
+   - `build_ref.sh --list` shows the library.
+   - `--prune N` keeps the newest N builds.
+   - The key covers the commit, every `ENGINE_*` setting (SASS 75 for the T4, 89 for the
+     L4; strict floats or not) and the saved states (every row's, whichever rows a run
+     names, so one build serves any selection). A commit built before costs no build.
+   - A new commit takes about 8 minutes (491–512 s measured; the dependencies are shared
+     between commits, and the workspace crates and nvcc modules rebuild).
+   - The working tree is never kept, since it has no commit to name it by. Commit an
+     experiment to keep it.
+2. **Shipping.** Both binaries go up in one archive (`gpu_run_pack.py --exe`).
+3. **Running.** One container. For each row, `matrix.py --two-builds` alternates a base
+   process and a head process, A B, B A, A B (`PROCS=3`), each running
+   `explicit_replay --run` on the row's portable fixture: `ROUNDS` x `FRAMES` frames, each
+   frame's best round, mean. Its end state is saved word by word (`--save-state`).
+4. **Judging.**
+   - The median process of each build is compared.
+   - `noise` is the spread between the base's own processes. Trust a delta well above it.
+   - `bit4bit` compares the end states word for word, base against head, and each build
+     against its own other processes.
+   - A changed layout compares the bindings both builds have and names the rest.
+   - The verdict fails a row that differs, or that is slower than 5 % and 0.05 ms.
+   - `ALLOW_DIFF=1` reports differences without failing, for a change that reorders
+     arithmetic on purpose. Equivalence then needs its own evidence (rung 3).
+
+Both builds must read the same portable fixtures. A head that changes what a fixture
+holds needs fixtures made from the head (`run.sh --make`, `matrix.py --make-portable`)
+that the base can also read, or a fixture per build. A base older than
+`explicit_replay --run` (before 58a0cfe1) is timed through its no-op A/B and has no end
+state to compare (`bit4bit` reads `n/a`).
+
+Measured 2026-11-21 (T4, strict floats, all 12 rows):
+
+| Comparison | Result | Billed |
+|---|---|---|
+| 58a0cfe1 against itself (base from the library, head from the tree) | PASS: every row bit for bit, deltas −0.1 to +0.7 %, noise 0.0–0.5 % (drive 9.5 %: one base process ran at another level; the median ignores it) | 112 s, $0.020 |
+| 58a0cfe1 against `claude/fake-ab-slow`: a demo commit that turns off GPU-side indirect counts (the host reads them back), lossless and slower | FAIL as it should: 11 rows slower by 13–42 %, pile32 +2.4 % (its long frame hides the waits), every row bit for bit, noise ≤ 0.5 % (drive 4.1 %) | 103 s, $0.019 |
+
+A two-build verdict costs about four times a switch verdict (six processes a row, each
+starting CUDA and loading its fixture). That is about 2 cents, so about 1,500 verdicts for
+$30.
+
+### Hardware counters (`COUNTERS=1`)
+
+`COUNTERS=1` adds NVIDIA's counters for each kernel to every row, both builds:
+time, registers, achieved occupancy, SM and DRAM throughput against peak, and L1 and L2
+hit rates. Builds that differ show the base's value in brackets. Nsight Compute replays
+every launch several times, so this runs after the timing, never inside it. It runs in
+its own Modal image with `ncu` (`run_counters` in `gpu_run.py`, built once).
+`COUNTER_METRICS` replaces the metric list; `COUNTER_TOP` sets how many kernels are shown
+(default 12).
+
+- Modal's sandbox (gVisor) refuses to lock the GPU clocks, so ncu runs with
+  `--clock-control none`. Every counter works that way (probed 2026-11-21), but ratios
+  can come out wrong (one probe showed 142 % achieved occupancy). Use the counters to
+  explain where time goes; the timed A/B decides what is faster.
+- Nsight Systems (`nsys`, the launch timeline) also works there. It is not wired in.
+- Profiling is slow: about 6.5 minutes and 11 cents for one small row (truss, both
+  builds, 8 cores; 388 s billed). Name one or two rows (`... --head X truss`).
+  - `COUNTERS=1` gives the container 8 cores, 8 GiB and the 1800 s cap: Nsight works on
+    the CPU, and on 1 core two rows passed the 600 s cap with the GPU at 0–1 %.
+  - Nsight runs with `--replay-mode application` (the whole replay once per counter pass,
+    valid because a replay is bit for bit deterministic) and `--cache-control none` (hit
+    rates are the frame's, not a flushed cache's).
+- Kernel names show which path ran. A kernel present in one build and absent in the
+  other reads −100 % or `new`.
+- Measured 2026-11-21, truss, base 58a0cfe1 against `claude/fake-ab-slow` (host readback
+  of indirect counts):
+  - The head was 36.8 % slower per frame, yet its kernels summed to less GPU time: 899 µs
+    against 1,162 µs.
+  - The head skips launches whose count is zero, and the base's grid-stride `self_pairs`
+    and `self_walk` launch with no work, about 254 µs a frame (about 4 µs a launch).
+  - So the head's cost is all host waits, and the base has an optimization lead.
+  - That run's timing was noisier than usual: the base's truss processes spread 81 %,
+    against 0.4 % on 1 core, and the cause is not established. Judge speed by a run
+    without `COUNTERS`.
 
 ## Cold kernel compiles (WebGPU route; read this first)
 
@@ -324,7 +571,8 @@ Mac was not checked here.
 ## Cost and turnaround
 
 Modal bills per second while the container runs; `gpu_run.py` prints an estimate at
-the end. With the default 8 cores and 8 GiB: T4 ≈ $0.00029/s (≈ $0.017/min); 16 cores
+the end. With the default 8 cores and 8 GiB: T4 ≈ $0.00029/s (≈ $0.017/min); with 1 core and
+2 GiB (the CUDA matrix's default) ≈ $0.00018/s (≈ $0.011/min); 16 cores
 ≈ $0.024/min (GPU prices of 2026-10 from modal.com/pricing, plus CPU
 $0.0000131/core/s and memory $0.00000222/GiB/s). The 10-minute cap bounds a T4 run at
 about $0.17.
