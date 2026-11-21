@@ -31,7 +31,7 @@ use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
 use stress_ref::math::Vec3;
 use stress_ref::scene::{ImpactorDesc, ImpactorShape, Methods, Scene};
-use stress_rubble::threshold::ThresholdWorld;
+use stress_rubble::threshold::{FractureOptions, ThresholdWorld};
 
 const RADIUS: f64 = 0.4;
 const MASS: f64 = 500.0;
@@ -69,6 +69,7 @@ fn ball(scene: &Scene, speed: f64) -> (ImpactorDesc, f64) {
         angular_velocity: [0.0; 3],
         material: "projectile".into(),
         crush: None,
+        ccd: true,
     };
     (desc, lo[0])
 }
@@ -138,8 +139,10 @@ fn fracture_world(gpu: &Gpu, profile: Profile, predict: bool, speed: f64) -> Pat
     let scene = house(profile);
     let (desc, wall_x) = ball(&scene, speed);
     // The end-of-frame strike prediction alone (the in-step contact fracture off: its own
-    // tests are tests/contact_fracture.rs).
-    let mut w = ThresholdWorld::with_contact_fracture(gpu, &scene, RADIUS, MASS, profile, Some(false)).expect("fracture world");
+    // tests are tests/contact_fracture.rs), and no swept collision (the profiles' TOI CCD
+    // off), as the module's account of the rebound has it.
+    let options = FractureOptions { contact: Some(false), toi_ccd: Some(false), ..FractureOptions::default() };
+    let mut w = ThresholdWorld::with_options(gpu, &scene, RADIUS, MASS, profile, options).expect("fracture world");
     w.set_strike_prediction(gpu, predict).expect("strike prediction");
     assert!(w.launch(gpu, &desc));
     let mut path = Path::new(wall_x);

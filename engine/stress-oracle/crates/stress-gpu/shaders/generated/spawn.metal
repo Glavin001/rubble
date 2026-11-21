@@ -38,7 +38,7 @@ struct SpawnParams_0
     uint island_cap_0;
     uint moments_base_0;
     uint info_base_0;
-    uint pad0_0;
+    uint ccd_flag_0;
     uint pad1_0;
     uint pad2_0;
 };
@@ -947,6 +947,15 @@ void child_record_0(uint slot_2, uint p_3, bool anchored_1, float mass_1, float3
     {
         spin_0 = to_rubble_0((float4(*(kernelContext_11->children_0+(8U * slot_2 + 6U))) ).xyz);
     }
+    uint ccd_0;
+    if(((uint4((kernelContext_11->chunks_0+(uint4(*(kernelContext_11->islands_of_0+p_3)) ).x)->load_range_0) ).w) != 0U)
+    {
+        ccd_0 = kernelContext_11->params_0->ccd_flag_0;
+    }
+    else
+    {
+        ccd_0 = 0U;
+    }
     uint flags_0;
     if(anchored_1)
     {
@@ -954,7 +963,7 @@ void child_record_0(uint slot_2, uint p_3, bool anchored_1, float mass_1, float3
     }
     else
     {
-        flags_0 = 9U;
+        flags_0 = 9U | ccd_0;
     }
     thread Quat_0 _S79 = pose_rot_1;
     float3 _S80 = rotate_0(&_S79, com_1);
@@ -964,13 +973,13 @@ void child_record_0(uint slot_2, uint p_3, bool anchored_1, float mass_1, float3
     array<float4, int(7)> _S84 = { { _S81, _S83, float4(inv_inertia_0, (as_type<float>((flags_0)))), float4(velocity_0, 0.0f), float4(spin_0, 0.0f), float4(0.0f) , float4(0.0f, 0.0f, 0.0f, 1.0f) } };
     if((kernelContext_11->params_0->live_0) != 0U)
     {
-        flags_0 = _S64.x;
+        ccd_0 = _S64.x;
     }
     else
     {
-        flags_0 = _S64.x - *(kernelContext_11->control_0+4U);
+        ccd_0 = _S64.x - *(kernelContext_11->control_0+4U);
     }
-    uint _S85 = 7U * flags_0;
+    uint _S85 = 7U * ccd_0;
     uint w_1 = 0U;
     for(;;)
     {

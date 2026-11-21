@@ -109,7 +109,9 @@ pub(crate) struct SpawnParams {
     /// slot), `member_offsets` from this word (4 per member).
     pub(crate) moments_base: u32,
     pub(crate) info_base: u32,
-    pub(crate) pad: [u32; 3],
+    /// The body flag a free piece of a CCD structure takes (`SpawnTarget::ccd_flag`).
+    pub(crate) ccd_flag: u32,
+    pub(crate) pad: [u32; 2],
 }
 
 /// Float4s of `extras` and words of `member_offsets` for `slots` child slots (and as many
@@ -128,6 +130,9 @@ pub struct SpawnTarget<'a> {
     pub bodies: &'a wgpu::Buffer,
     pub colliders: &'a wgpu::Buffer,
     pub max_bodies: u32,
+    /// The engine's continuous-collision body flag (`ResidentEngine::ccd_flag`), which a
+    /// free piece of a CCD structure takes.
+    pub ccd_flag: u32,
 }
 
 const SPAWN_BINDINGS: [Binding; 17] = [
@@ -333,7 +338,7 @@ impl GpuSplitter {
             })
             .collect();
         let islands_of = gpu.storage("spawn parents", if islands_of.is_empty() { &[[0u32; 4]][..] } else { &islands_of });
-        let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_cap: u32::MAX, moments_base: 2 * total as u32, info_base: total as u32, pad: [0; 3] });
+        let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_cap: u32::MAX, moments_base: 2 * total as u32, info_base: total as u32, ccd_flag: target.as_ref().map_or(0, |t| t.ccd_flag), pad: [0; 2] });
         let control = gpu.storage("spawn control", &control_words(run.parent_count as u32, 0, 0, first_body, first_collider, total as u32));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let member_offsets = gpu.storage("spawn member offsets", &vec![0u32; member_offsets_len(total)]);
@@ -695,7 +700,7 @@ impl GpuSplitter {
 
         let spawn_params = gpu.uniform(
             "pass spawn params",
-            &SpawnParams { parent_count: parents.len() as u32, first_body: engine.first_body, first_collider: engine.first_collider, live: 1, max_bodies: engine.target.max_bodies, max_colliders: engine.max_colliders, island_cap: island_cap as u32, moments_base: 2 * total.max(1) as u32, info_base: total.max(1) as u32, pad: [0; 3] },
+            &SpawnParams { parent_count: parents.len() as u32, first_body: engine.first_body, first_collider: engine.first_collider, live: 1, max_bodies: engine.target.max_bodies, max_colliders: engine.max_colliders, island_cap: island_cap as u32, moments_base: 2 * total.max(1) as u32, info_base: total.max(1) as u32, ccd_flag: engine.target.ccd_flag, pad: [0; 2] },
         );
         // The layout's: copies of the tables as they are, its plan.
         let mut params = layout_params;

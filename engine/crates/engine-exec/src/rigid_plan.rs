@@ -962,8 +962,12 @@ pub fn encode_step(
         e.phase("soft_plastic");
     }
     if mo.ccd && !reuse_manifolds {
-        // Post-solve sweep check: no CCD body ends the step past a surface.
+        // Post-solve sweep check: no CCD body ends the step past a surface. The
+        // late sweep first adds the pairs of bodies the solve carried past their
+        // bounds (ccd_step.slang).
         e.phase("solveMain");
+        e.d("ccd_late_mark", u64::from(CCD_BODY_CAP));
+        e.d("ccd_late_sweep", u64::from(engine_schema::CCD_LATE_CAP) * 64);
         e.d("ccd_validate", u64::from(engine_schema::CCD_PAIR_CAP));
         e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
         e.phase("ccdValidate");
@@ -1110,6 +1114,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_slot_reach",
     "ccd_slot_reach_listed",
     "ccd_wake_colliders",
+    "ccd_late_mark",
+    "ccd_late_sweep",
     "ccd_validate",
     "ccd_clamp",
     "ccd_emit_persistent",

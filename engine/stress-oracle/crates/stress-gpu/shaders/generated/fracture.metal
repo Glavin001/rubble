@@ -5558,6 +5558,15 @@ uint frame_step_0(KernelContext_0 thread* kernelContext_125)
     {
         spin_0 = w_parent_0;
     }
+    uint ccd_0;
+    if(((&kernelContext_119)->info_0[c_16] & 2U) != 0U)
+    {
+        ccd_0 = 256U;
+    }
+    else
+    {
+        ccd_0 = 0U;
+    }
     uint flags_0;
     if(anchored_0)
     {
@@ -5565,7 +5574,7 @@ uint frame_step_0(KernelContext_0 thread* kernelContext_125)
     }
     else
     {
-        flags_0 = 9U;
+        flags_0 = 9U | ccd_0;
     }
     uint _S820 = stage_0(c_16, &kernelContext_126);
     *((&kernelContext_126)->frames_0+_S820) = packed_float4(float4(pos_0, inv_mass_3)) ;

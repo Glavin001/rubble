@@ -38,6 +38,7 @@ fn wall(nx: usize, nz: usize, anchored: bool, ram: Option<f64>) -> Scene {
             angular_velocity: [0.0; 3],
             material: "steel".into(),
             crush: None,
+            ccd: true,
         });
     }
     if !anchored {

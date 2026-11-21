@@ -428,25 +428,28 @@ fn record_live_0( slot_0 : u32) -> bool
 @workgroup_size(64, 1, 1)
 fn ingest_count(@builtin(global_invocation_id) id_2 : vec3<u32>)
 {
-    var _S32 : u32 = id_2.x;
-    var _S33 : bool;
-    if(_S32 >= (params_0.record_count_0))
+    var i_3 : u32 = id_2.x;
+    loop
     {
-        _S33 = true;
-    }
-    else
-    {
-        var _S34 : bool = record_live_0(_S32);
-        _S33 = !_S34;
-    }
-    if(_S33)
-    {
-        return;
-    }
-    var r_1 : Record_std430_0 = records_0[_S32];
-    if((records_0[_S32].ids_0.w) != u32(0))
-    {
-        var _S35 : u32 = atomicAdd(&(counts_0[r_1.ids_0.x]), u32(1));
+        if(i_3 < (params_0.record_count_0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var _S32 : bool = record_live_0(i_3);
+        if(!_S32)
+        {
+            i_3 = i_3 + u32(4194240);
+            continue;
+        }
+        var r_1 : Record_std430_0 = records_0[i_3];
+        if((records_0[i_3].ids_0.w) != u32(0))
+        {
+            var _S33 : u32 = atomicAdd(&(counts_0[r_1.ids_0.x]), u32(1));
+        }
+        i_3 = i_3 + u32(4194240);
     }
     return;
 }
@@ -488,14 +491,14 @@ fn group_scan_0( tid_0 : u32)
 fn ingest_scan(@builtin(local_invocation_id) thread_0 : vec3<u32>, @builtin(workgroup_id) group_0 : vec3<u32>)
 {
     var tid_1 : u32 = thread_0.x;
-    var _S36 : u32 = group_0.x;
-    var k_0 : u32 = _S36 * u32(1024) + tid_1;
-    var _S37 : bool = k_0 < (params_0.chunk_count_0);
+    var _S34 : u32 = group_0.x;
+    var k_0 : u32 = _S34 * u32(1024) + tid_1;
+    var _S35 : bool = k_0 < (params_0.chunk_count_0);
     var v_2 : u32;
-    if(_S37)
+    if(_S35)
     {
-        var _S38 : u32 = atomicLoad(&(counts_0[k_0]));
-        v_2 = _S38;
+        var _S36 : u32 = atomicLoad(&(counts_0[k_0]));
+        v_2 = _S36;
     }
     else
     {
@@ -503,13 +506,13 @@ fn ingest_scan(@builtin(local_invocation_id) thread_0 : vec3<u32>, @builtin(work
     }
     g_scan_0[tid_1] = v_2;
     group_scan_0(tid_1);
-    if(_S37)
+    if(_S35)
     {
         sort_0[k_0] = g_scan_0[tid_1] - v_2;
     }
     if(tid_1 == u32(1023))
     {
-        scan_blocks_0[_S36] = g_scan_0[i32(1023)];
+        scan_blocks_0[_S34] = g_scan_0[i32(1023)];
     }
     return;
 }
@@ -519,12 +522,12 @@ fn ingest_scan(@builtin(local_invocation_id) thread_0 : vec3<u32>, @builtin(work
 fn ingest_scan_blocks(@builtin(local_invocation_id) thread_1 : vec3<u32>)
 {
     var tid_2 : u32 = thread_1.x;
-    var _S39 : u32 = (params_0.chunk_count_0 + u32(1023)) / u32(1024);
+    var _S37 : u32 = (params_0.chunk_count_0 + u32(1023)) / u32(1024);
     var base_1 : u32 = u32(0);
     var carry_0 : u32 = u32(0);
     loop
     {
-        if(base_1 < _S39)
+        if(base_1 < _S37)
         {
         }
         else
@@ -532,9 +535,9 @@ fn ingest_scan_blocks(@builtin(local_invocation_id) thread_1 : vec3<u32>)
             break;
         }
         var b_1 : u32 = base_1 + tid_2;
-        var _S40 : bool = b_1 < _S39;
+        var _S38 : bool = b_1 < _S37;
         var v_3 : u32;
-        if(_S40)
+        if(_S38)
         {
             v_3 = scan_blocks_0[b_1];
         }
@@ -544,7 +547,7 @@ fn ingest_scan_blocks(@builtin(local_invocation_id) thread_1 : vec3<u32>)
         }
         g_scan_0[tid_2] = v_3;
         group_scan_0(tid_2);
-        if(_S40)
+        if(_S38)
         {
             scan_blocks_0[b_1] = carry_0 + g_scan_0[tid_2] - v_3;
         }
@@ -577,37 +580,41 @@ fn ingest_scan_add(@builtin(global_invocation_id) id_3 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn ingest_scatter(@builtin(global_invocation_id) id_4 : vec3<u32>)
 {
-    var _S41 : u32 = id_4.x;
-    var _S42 : bool;
-    if(_S41 >= (params_0.record_count_0))
+    var _S39 : u32 = params_0.chunk_count_0;
+    var i_4 : u32 = id_4.x;
+    loop
     {
-        _S42 = true;
+        if(i_4 < (params_0.record_count_0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var _S40 : bool = record_live_0(i_4);
+        if(!_S40)
+        {
+            i_4 = i_4 + u32(4194240);
+            continue;
+        }
+        var r_2 : Record_std430_0 = records_0[i_4];
+        if((records_0[i_4].ids_0.w) == u32(0))
+        {
+            i_4 = i_4 + u32(4194240);
+            continue;
+        }
+        var _S41 : u32 = r_2.ids_0.x;
+        var at_0 : u32 = atomicAdd(&(counts_0[_S39 + _S41]), u32(1));
+        sort_0[u32(2) * _S39 + u32(1) + sort_0[_S41] + at_0] = i_4;
+        i_4 = i_4 + u32(4194240);
     }
-    else
-    {
-        var _S43 : bool = record_live_0(_S41);
-        _S42 = !_S43;
-    }
-    if(_S42)
-    {
-        return;
-    }
-    var r_2 : Record_std430_0 = records_0[_S41];
-    if((records_0[_S41].ids_0.w) == u32(0))
-    {
-        return;
-    }
-    var n_1 : u32 = params_0.chunk_count_0;
-    var _S44 : u32 = r_2.ids_0.x;
-    var at_0 : u32 = atomicAdd(&(counts_0[params_0.chunk_count_0 + _S44]), u32(1));
-    sort_0[u32(2) * n_1 + u32(1) + sort_0[_S44] + at_0] = _S41;
     return;
 }
 
 fn record_before_0( a_1 : u32,  b_2 : u32) -> bool
 {
-    var _S45 : vec4<u32> = records_0[a_1].key_0;
-    var _S46 : vec4<u32> = records_0[b_2].key_0;
+    var _S42 : vec4<u32> = records_0[a_1].key_0;
+    var _S43 : vec4<u32> = records_0[b_2].key_0;
     var q_1 : u32 = u32(0);
     loop
     {
@@ -618,11 +625,11 @@ fn record_before_0( a_1 : u32,  b_2 : u32) -> bool
         {
             break;
         }
-        var _S47 : u32 = q_1;
-        var _S48 : u32 = q_1;
-        if((_S45[q_1]) != (_S46[q_1]))
+        var _S44 : u32 = q_1;
+        var _S45 : u32 = q_1;
+        if((_S42[q_1]) != (_S43[q_1]))
         {
-            return (_S45[_S47]) < (_S46[_S48]);
+            return (_S42[_S44]) < (_S43[_S45]);
         }
         q_1 = q_1 + u32(1);
     }
@@ -636,63 +643,63 @@ fn ingest_merge(@builtin(global_invocation_id) id_5 : vec3<u32>)
     var b_3 : u32;
     var m_0 : u32;
     var k_2 : u32 = id_5.x;
-    var n_2 : u32 = params_0.chunk_count_0;
+    var n_1 : u32 = params_0.chunk_count_0;
     if(k_2 >= (params_0.chunk_count_0))
     {
         return;
     }
     var begin_0 : u32 = sort_0[k_2];
-    var _S49 : u32 = sort_0[k_2 + u32(1)];
-    var _S50 : u32 = u32(2) * n_2 + u32(1);
+    var _S46 : u32 = sort_0[k_2 + u32(1)];
+    var _S47 : u32 = u32(2) * n_1 + u32(1);
     var a_2 : u32 = sort_0[k_2] + u32(1);
     loop
     {
-        if(a_2 < _S49)
+        if(a_2 < _S46)
         {
         }
         else
         {
             break;
         }
-        var v_4 : u32 = sort_0[_S50 + a_2];
+        var v_4 : u32 = sort_0[_S47 + a_2];
         b_3 = a_2;
         loop
         {
-            var _S51 : bool;
+            var _S48 : bool;
             if(b_3 > begin_0)
             {
-                _S51 = record_before_0(v_4, sort_0[_S50 + b_3 - u32(1)]);
+                _S48 = record_before_0(v_4, sort_0[_S47 + b_3 - u32(1)]);
             }
             else
             {
-                _S51 = false;
+                _S48 = false;
             }
-            if(_S51)
+            if(_S48)
             {
             }
             else
             {
                 break;
             }
-            var _S52 : u32 = _S50 + b_3;
-            sort_0[_S52] = sort_0[_S52 - u32(1)];
+            var _S49 : u32 = _S47 + b_3;
+            sort_0[_S49] = sort_0[_S49 - u32(1)];
             b_3 = b_3 - u32(1);
         }
-        sort_0[_S50 + b_3] = v_4;
+        sort_0[_S47 + b_3] = v_4;
         a_2 = a_2 + u32(1);
     }
     a_2 = begin_0;
     b_3 = u32(0);
     loop
     {
-        if(a_2 < _S49)
+        if(a_2 < _S46)
         {
         }
         else
         {
             break;
         }
-        var r_3 : Record_std430_0 = records_0[sort_0[_S50 + a_2]];
+        var r_3 : Record_std430_0 = records_0[sort_0[_S47 + a_2]];
         var q_2 : u32 = u32(0);
         loop
         {
@@ -718,37 +725,37 @@ fn ingest_merge(@builtin(global_invocation_id) id_5 : vec3<u32>)
             a_2 = a_2 + u32(1);
             continue;
         }
-        var _S53 : u32 = begin_0 + m_0;
+        var _S50 : u32 = begin_0 + m_0;
         var acc_0 : Record_0;
-        acc_0.ids_0 = manifolds_0[_S53].ids_0;
-        acc_0.point_0 = manifolds_0[_S53].point_0;
-        acc_0.impulse_0 = manifolds_0[_S53].impulse_0;
-        acc_0.other_0 = manifolds_0[_S53].other_0;
-        acc_0.key_0 = manifolds_0[_S53].key_0;
+        acc_0.ids_0 = manifolds_0[_S50].ids_0;
+        acc_0.point_0 = manifolds_0[_S50].point_0;
+        acc_0.impulse_0 = manifolds_0[_S50].impulse_0;
+        acc_0.other_0 = manifolds_0[_S50].other_0;
+        acc_0.key_0 = manifolds_0[_S50].key_0;
         var w0_0 : f32 = acc_0.point_0.w;
         var w_0 : f32 = r_3.point_0.w;
         var total_1 : f32 = w0_0 + w_0;
         if(total_1 > 0.0f)
         {
-            var _S54 : vec3<f32> = (acc_0.point_0.xyz * vec3<f32>(w0_0) + r_3.point_0.xyz * vec3<f32>(w_0)) / vec3<f32>(total_1);
-            acc_0.point_0.x = _S54.x;
-            acc_0.point_0.y = _S54.y;
-            acc_0.point_0.z = _S54.z;
+            var _S51 : vec3<f32> = (acc_0.point_0.xyz * vec3<f32>(w0_0) + r_3.point_0.xyz * vec3<f32>(w_0)) / vec3<f32>(total_1);
+            acc_0.point_0.x = _S51.x;
+            acc_0.point_0.y = _S51.y;
+            acc_0.point_0.z = _S51.z;
             acc_0.impulse_0[i32(3)] = (acc_0.impulse_0.w * w0_0 + r_3.impulse_0.w * w_0) / total_1;
         }
-        var _S55 : vec3<f32> = acc_0.impulse_0.xyz + r_3.impulse_0.xyz;
-        acc_0.impulse_0.x = _S55.x;
-        acc_0.impulse_0.y = _S55.y;
-        acc_0.impulse_0.z = _S55.z;
+        var _S52 : vec3<f32> = acc_0.impulse_0.xyz + r_3.impulse_0.xyz;
+        acc_0.impulse_0.x = _S52.x;
+        acc_0.impulse_0.y = _S52.y;
+        acc_0.impulse_0.z = _S52.z;
         acc_0.point_0[i32(3)] = total_1;
-        manifolds_0[_S53].ids_0 = acc_0.ids_0;
-        manifolds_0[_S53].point_0 = acc_0.point_0;
-        manifolds_0[_S53].impulse_0 = acc_0.impulse_0;
-        manifolds_0[_S53].other_0 = acc_0.other_0;
-        manifolds_0[_S53].key_0 = acc_0.key_0;
+        manifolds_0[_S50].ids_0 = acc_0.ids_0;
+        manifolds_0[_S50].point_0 = acc_0.point_0;
+        manifolds_0[_S50].impulse_0 = acc_0.impulse_0;
+        manifolds_0[_S50].other_0 = acc_0.other_0;
+        manifolds_0[_S50].key_0 = acc_0.key_0;
         a_2 = a_2 + u32(1);
     }
-    sort_0[n_2 + u32(1) + k_2] = b_3;
+    sort_0[n_1 + u32(1) + k_2] = b_3;
     return;
 }
 

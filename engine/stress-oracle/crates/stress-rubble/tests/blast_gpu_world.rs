@@ -101,6 +101,7 @@ fn strike(gpu: &Gpu) -> (Vec<bool>, u32, u32, Vec<f64>) {
         angular_velocity: [0.0; 3],
         material: "projectile".into(),
         crush: None,
+        ccd: true,
     };
     for frame in 0..60 {
         if frame == 2 {
@@ -377,6 +378,7 @@ fn lab_shot_on_cuboid(gpu: &Gpu, p: Profile, frames: u32) -> (u32, u32) {
         angular_velocity: [0.0; 3],
         material: "projectile".into(),
         crush: None,
+        ccd: true,
     };
     println!("{p:?}: ball {} kg, r {r} m, {speed} m/s", lab.projectile_mass);
     for frame in 0..frames {
@@ -437,6 +439,7 @@ fn a_scene_without_blast_authoring_stands_and_breaks_under_blast() {
         angular_velocity: [0.0; 3],
         material: "projectile".into(),
         crush: None,
+        ccd: true,
     };
     for frame in 0..60 {
         if frame == 2 {

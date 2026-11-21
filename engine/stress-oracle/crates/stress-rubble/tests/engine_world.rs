@@ -317,8 +317,79 @@ fn ram_scene() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.5;
     s.sim.methods = Methods::established();
     s
+}
+
+/// The late sweep (ccd_step.slang `ccd_late_mark`, `ccd_late_sweep`): a CCD body at rest,
+/// struck within the step by a 2 t CCD ram at 100 m/s, is carried by the solve past the
+/// bounds its pairs were found in; it must still stop at a fixed 5 cm slab 0.4 m behind it,
+/// not cross it in the step it was struck (z up in the oracle frame; the wall is 6x2x6
+/// boxes of 0.1 m). Without CCD on the wall, the same strike carries it through.
+#[test]
+fn a_ccd_body_struck_within_the_step_stops_at_a_slab() {
+    for ccd in [false, true] {
+        let Ok(mut e) = RubbleEngine::new(Vec3::ZERO) else {
+            eprintln!("no wgpu adapter; skipping");
+            return;
+        };
+        e.set_toi_ccd(true);
+        let slab = EngineBody {
+            key: BodyKey::Cluster(1),
+            signature: 1,
+            geometry: BodyGeometry::Boxes(vec![BoxShape { local: Pose::default(), half_extents: Vec3::new(0.5, 0.025, 0.5), mass: 100.0, chunk: Some((0, 0)), hull: None }].into()),
+            poses: None,
+            fixed: true,
+            ccd: false,
+            pose: Pose::new(Vec3::new(0.0, 1.025, 0.0), Quat::IDENTITY),
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        };
+        let mut boxes = Vec::new();
+        for i in 0..6 {
+            for j in 0..2 {
+                for k in 0..6 {
+                    let c = Vec3::new(-0.25 + 0.1 * i as f64, 0.45 + 0.1 * j as f64, -0.25 + 0.1 * k as f64);
+                    boxes.push(BoxShape { local: Pose::new(c, Quat::IDENTITY), half_extents: Vec3::splat(0.05), mass: 2.3, chunk: Some((1, boxes.len())), hull: None });
+                }
+            }
+        }
+        let wall = EngineBody { key: BodyKey::Cluster(2), signature: 2, geometry: BodyGeometry::Boxes(boxes.into()), poses: None, fixed: false, ccd, pose: Pose::default(), velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO };
+        let ram = EngineBody {
+            key: BodyKey::Impactor(0),
+            signature: 3,
+            geometry: BodyGeometry::Boxes(vec![BoxShape { local: Pose::default(), half_extents: Vec3::splat(0.1), mass: 2000.0, chunk: None, hull: None }].into()),
+            poses: None,
+            fixed: false,
+            ccd: true,
+            pose: Pose::new(Vec3::new(0.0, 0.4 - 0.1 - 100.0 / 120.0, 0.0), Quat::IDENTITY),
+            velocity: Vec3::new(0.0, 100.0, 0.0),
+            angular_velocity: Vec3::ZERO,
+        };
+        let centres: Vec<Vec3> = match &wall.geometry {
+            BodyGeometry::Boxes(b) => b.iter().map(|s| s.local.position).collect(),
+            _ => unreachable!(),
+        };
+        e.sync_bodies(&[slab, wall, ram]);
+        let mut back = f64::MIN;
+        for step in 0..6 {
+            e.step(1.0 / 60.0, &[], &[]);
+            let m = e.motion();
+            let w = m.iter().find(|m| m.key == BodyKey::Cluster(2)).unwrap();
+            // Each 0.1 m box's far side along y (a bound: its centre plus its half diagonal
+            // would be looser; the boxes turn little).
+            let far = centres.iter().map(|&c| w.pose.position.y + w.pose.rotation.rotate(c).y + 0.05).fold(f64::MIN, f64::max);
+            back = back.max(far);
+            let q = w.pose.rotation;
+            println!("ccd {ccd} step {step}: wall's far side at y {far:.3}, v {:.1}, turned {:.1} deg, w {:.1} rad/s, centre y {:.3}", w.velocity.norm(), 2.0 * q.w.abs().min(1.0).acos().to_degrees(), w.angular_velocity.norm(), (w.pose.position + q.rotate(Vec3::new(0.0, 0.5, 0.0))).y);
+        }
+        if ccd {
+            assert!(back < 1.0 + 0.02, "the CCD wall crossed the slab's front face at y 1.0: {back:.3}");
+        } else {
+            assert!(back > 1.05, "control: the plain wall stopped at the slab ({back:.3}): the test cannot see the crossing");
+        }
+    }
 }

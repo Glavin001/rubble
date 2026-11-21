@@ -24,8 +24,7 @@ fn run(gpu: &Gpu, window: Option<f64>) -> (f64, f64, f64) {
     let mut scene = realtime(wall_ram_late(), 0.25);
     p.apply_scene(&mut scene);
     let mut e = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).expect("rubble engine");
-    let (iterations, substeps) = p.engine_policy();
-    e.set_policy(iterations, substeps);
+    e.apply_profile(p);
     let mut w = GpuWorld::with_resident_engine(gpu, &scene, e).expect("resident world");
     w.redo_fractured_frames = false;
     w.set_impact_islands(true);

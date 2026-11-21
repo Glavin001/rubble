@@ -611,7 +611,17 @@ impl RubbleEngine {
         }
     }
 
-    /// CCD impactors as `BODY_CCD` rubble bodies with time-of-impact contacts in one
+    /// A capability profile's engine settings: its policy (`set_policy`) and its
+    /// continuous collision (`Profile::engine_ccd`, `set_toi_ccd`). Before the bodies are
+    /// created: CCD is their body flag.
+    pub fn apply_profile(&mut self, profile: stress_ref::capability::Profile) {
+        let (iterations, substeps) = profile.engine_policy();
+        self.set_policy(iterations, substeps);
+        // `STRESS_RUBBLE_TOI_CCD=0` (a measurement): no CCD in the profile's one step.
+        self.set_toi_ccd(profile.engine_ccd() && !std::env::var("STRESS_RUBBLE_TOI_CCD").is_ok_and(|v| v == "0"));
+    }
+
+    /// CCD bodies as `BODY_CCD` rubble bodies with time-of-impact contacts in one
     /// step (true), or whole-world substeps (false, the default). Set before the
     /// impactors are created: it is their body flag.
     pub fn set_toi_ccd(&mut self, on: bool) {
@@ -760,7 +770,9 @@ impl RubbleEngine {
         }
         // TOI CCD: `BODY_CCD`, also on a parked (fixed) shot slot, where it is inert until
         // a launch makes the body dynamic, and tells the engine to schedule its CCD passes.
-        if b.ccd && self.toi_ccd {
+        // Not on a fixed cluster (an anchored part of a CCD structure): static, it would
+        // only schedule the passes; it gets the flag when it is made again free.
+        if b.ccd && self.toi_ccd && (!b.fixed || matches!(b.key, BodyKey::Impactor(_))) {
             state.flags |= engine_schema::BODY_CCD;
         }
         let id = self.sim.add_body(state);
@@ -988,7 +1000,7 @@ impl RigidEngine for RubbleEngine {
         let mut stale: Vec<BodyKey> = self
             .bodies
             .iter()
-            .filter(|(k, e)| wanted.get(k).is_none_or(|b| b.signature != e.signature || b.fixed != e.fixed))
+            .filter(|(k, e)| wanted.get(k).is_none_or(|b| b.signature != e.signature || b.fixed != e.fixed || b.ccd != e.ccd))
             .map(|(k, _)| *k)
             .collect();
         stale.sort();

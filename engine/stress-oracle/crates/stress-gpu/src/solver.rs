@@ -966,7 +966,8 @@ impl GpuSolver {
             for t in list {
                 packed.extend(pack_term(t, k as u32, &mut data, data_base));
             }
-            chunk_static[k].load_range = [begin, (packed.len() / 5) as u32, 0, 0];
+            // w (the structure's CCD flag) as the pack wrote it.
+            chunk_static[k].load_range = [begin, (packed.len() / 5) as u32, 0, chunk_static[k].load_range[3]];
         }
         packed.extend(data);
         let item_island = |it: &ProbeItem| -> Option<(u32, u32)> {
@@ -2908,7 +2909,7 @@ impl GpuSolver {
                     status: &status,
                     island_copy: &layout_islands,
                     island_args: args.as_ref().expect("island args"),
-                    target: crate::gpu_split::SpawnTarget { bodies: f.target.bodies, colliders: f.target.colliders, max_bodies: f.target.max_bodies },
+                    target: crate::gpu_split::SpawnTarget { bodies: f.target.bodies, colliders: f.target.colliders, max_bodies: f.target.max_bodies, ccd_flag: f.target.ccd_flag },
                     max_colliders: f.max_colliders,
                     table: f.table,
                     colliders: f.colliders,
