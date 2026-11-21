@@ -93,6 +93,7 @@ Where the vehicle time goes:
   - a per-node shape-range lookup compiled to 755 ms a frame, so `set_coupling_node_ranges` (bit 64) is off on wasm. It is lossless;
   - a running min/max loop miscompiled at n = 16, fixed by building the box in its own pass (`memberBox`).
 - **New kernel features go in separate functions behind an early return** (Metal fast-math codegen changes otherwise). Run Metal `vehicle_parity` after kernel edits.
+- **Native Metal compiles the explicit vehicle kernels without wgpu's runtime checks** (the index clamps, the loop counters, the integer-division guards): 5 to 12 % of every frame, every state word the same (`vehicle-perf-first-principles.md` §8.46). `RUBBLE_SHADER_CHECKS_OFF=0` brings every check back: the debugging mode when an index is suspect. The rigid solver's kernels, the other native backends and Chrome keep the checks.
 - **A hidden or background tab throttles to a few frames a second.** See the `measuring-web-physics-perf` skill.
 
 ### Determinism and measurement

@@ -3767,7 +3767,8 @@ compile time on a T4 (`kernel-compile-time.md`: no change); never for run time.
 **The measurement.** Every explicit module now goes through one helper
 (`engine_webgpu::explicit_shader_module`) that can compile it without a mask of the
 checks (1 bounds, 2 loop bound, 4 integer division; `RUBBLE_SHADER_CHECKS_OFF`, or
-`set_explicit_shader_checks_off`; 0, every check, by default). `vehicle_lab --ab-switch
+`set_explicit_shader_checks_off`; at the time of the measurement 0, every check, by
+default). `vehicle_lab --ab-switch
 checks=MASK` builds a second GPU object with the mask, restores both from one snapshot,
 runs them in turn and compares every state word, so the scenario matrix times it as it
 does a perf flag. Control (`checks=0`, checked against checked, two objects): bit for
@@ -3819,9 +3820,9 @@ queries.)
   census 5, explicit_beams_bitwise 12, explicit_contact_gpu 13, explicit_pair_reuse_gpu
   2, explicit_beam_order_gpu 3, debris_retire_gpu 1, showcase_car_gpu 6, vv_grid_gpu 2,
   explicit_vehicles 11, vehicle_lab_reset 3, vehicle_lab_piece_windows 1).
-- Not run: `engine-metal` parity (that host has no injected checks to remove), the 40 s
-  whole runs, and any kernel outside the explicit vehicles (the rigid solver's modules
-  are created in `gpu.rs` and still carry every check).
+- Not run at the time: `engine-metal` parity, the 40 s whole runs, and any kernel outside
+  the explicit vehicles (the rigid solver's modules are created in `gpu.rs` and still
+  carry every check).
 - Chrome: nothing changes there. A page cannot turn Tint's own checks off, so this is a
   native gain only (native hosts, and what the matrix and every native figure in this
   doc measure).
@@ -3838,18 +3839,35 @@ experiment: #139's layout was 1.8 times slower than today's frame kernel with th
 checks in both. Whether the checks weigh more on that layout (its hot loops index
 workgroup arrays every turn) was not measured: #139's kernel is not on this branch.
 
-**Default.** Unchanged: every check on. Recommendation: leave the three checks out on
-native hosts by default, with the checked build kept as the debugging mode
-(`RUBBLE_SHADER_CHECKS_OFF=0`), because an index out of range is then a wrong read and
-not a clamped one. That is the owner's decision.
+**Default: the three checks out on native Metal** (the owner's decision, 2026-11-21;
+`SHADER_CHECKS_OFF_METAL`, `explicit_shader_checks_off`). The checked build is the
+debugging mode (`RUBBLE_SHADER_CHECKS_OFF=0`): without the checks an index out of range
+reads or writes other memory where the checked build clamped it to the last element,
+which hid the bug as well. Scope, each a measured limit and not a preference:
+- *Metal only.* The device's backend decides. Every figure and proof here is Metal's;
+  Vulkan and DX12 keep every check until they are measured and proven the same way
+  (`RUBBLE_SHADER_CHECKS_OFF=7` turns them off there for that measurement).
+- *The explicit vehicles' kernels and the World's coupling only.* The rigid solver's
+  modules are not changed by this default.
+- *Proven in the bit-exact mode.* The kernels' strict helpers hold their rounding with
+  and without the checks. Under fast arithmetic (#135's setting) a change of generated
+  code can move a rounding (`gpu-determinism-wgsl`), so there the checked and unchecked
+  builds are each valid and need not agree bit for bit.
+
+With the default in (the lab's checked half built with every check, `checks=7`): the
+matrix again, 12 rows bit for bit, PASS, −5.4 to −14.9 % (drive 3.18 against 3.73, pile8
+13.41 against 14.96, pile32 34.57 against 38.85, truss 1.69 against 1.79); the 20
+fixtures bit for bit; the 11 suites of `perf-verify.sh default` with no variable set
+pass; `engine-metal` `explicit_parity` 7, `vehicle_parity` 4, `explicit_drive_parity` 1
+pass.
 
 **To run again** (from `engine/`):
 ```sh
-tools/scenario-matrix/run.sh checks=7                  # all three out, every row
+tools/scenario-matrix/run.sh checks=7                  # all three out (the default) against checked, every row
 tools/scenario-matrix/run.sh checks=1                  # bounds checks alone (2: loop bound, 4: division)
 tools/scenario-matrix/run.sh checks=0                  # control: checked against checked
 tools/explicit-2khz/fast-check.sh checks=7             # every fixture
-RUBBLE_SHADER_CHECKS_OFF=7 tools/explicit-2khz/perf-verify.sh default
+tools/explicit-2khz/perf-verify.sh default             # the suites on the default (RUBBLE_SHADER_CHECKS_OFF=0: checked)
 RUBBLE_BENCH_CARS=1,16 cargo run --profile fast -p engine-metal --example explicit_bench
 ```
 The first run with a new mask compiles every pipeline again (4 to 6 minutes).

@@ -1230,6 +1230,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `trace_row`): its spin, its height over the fall line and what it can touch.
     let mut trace = arg("--trace").map(|_| String::from(TRACE_HEADER));
     let mut escaped: Vec<usize> = Vec::new();
+    // `--ab-switch checks=MASK`: this Lab is the A/B's checked half, so it is built with
+    // every check whatever the default (the A/B resets the setting when it is done).
+    if arg("--ab-switch").is_some_and(|s| s.starts_with("checks=")) {
+        engine_webgpu::set_explicit_shader_checks_off(Some(0));
+    }
     let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
         d.gpu_timing = match timing.as_deref() {
             Some("phases") => GpuTiming::Phases,
@@ -1356,8 +1361,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let sleep_cfg = options(&script).vehicle_sleep_cfg;
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     // `--ab-switch checks=MASK`: the same kernels compiled without wgpu's injected runtime
-    // checks (1 bounds, 2 loop bounding, 4 integer division; on) against today's checked
-    // modules (off), each on a GPU object of its own from one snapshot, in turn for
+    // checks (1 bounds, 2 loop bounding, 4 integer division; on) against the checked
+    // modules (off; 7 is the default on Metal), each on a GPU object of its own from one snapshot, in turn for
     // AB_ROUNDS rounds: every state word and each frame's time. Native only.
     let checks_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("checks=").and_then(|m| m.parse().ok()));
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);

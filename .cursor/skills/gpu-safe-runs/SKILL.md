@@ -13,6 +13,7 @@ On macOS, Metal cannot abort a kernel that is already running. A runaway loop ke
 - **Size budgets from the work.** The host computes the explicit frame's budget per frame (2^22–2^31); don't hard-code a small one.
 - **The census test enforces this:** `cargo test -p engine-webgpu --test explicit_loop_cap` fails on any uncapped loop. Run it after kernel edits.
 - **Distrust indices read from GPU state** (headers, counts). Validate them in the kernel, and on the CPU before submit where it's cheap (NaN, capacities, header sanity).
+- **On native Metal the explicit vehicle kernels run without wgpu's index clamps and loop counters** (5 to 12 % of every frame; the default since `vehicle-perf-first-principles.md` §8.46). An index out of range there reads or writes other memory instead of the last element. When a kernel edit gives garbage or a result that moves between runs, run it once with `RUBBLE_SHADER_CHECKS_OFF=0` (every check back): if the result changes, an index is out of range. Chrome and the other backends always have the checks.
 
 ## Launching runs
 1. **CPU reference first.**
