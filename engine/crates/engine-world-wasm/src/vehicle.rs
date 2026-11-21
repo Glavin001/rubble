@@ -141,6 +141,31 @@ impl WebWorld {
         }))
     }
 
+    /// Everything a renderer needs to read the vehicle pool ([`Self::vehicle_pool_buffer`],
+    /// `vec4<u32>` slots): the region bases (`vehicleBase`, `wheelBase`, …), the record
+    /// strides and offsets (`engine_schema::vehicle::LAYOUT`: `WHEEL_STRIDE`, `W_O_POS`,
+    /// `WD_DETACHED`, …), `wheelRimMaterial` and `wheels` (wheel slots in use).
+    #[wasm_bindgen(js_name = vehicleRecordLayout)]
+    pub fn vehicle_record_layout(&self) -> JsValue {
+        let host = self.world.sim().vehicle_host();
+        let l = host.capacity.layout();
+        let mut m: serde_json::Map<String, serde_json::Value> = engine_schema::vehicle::LAYOUT
+            .iter()
+            .map(|&(n, v)| (n.into(), v.into()))
+            .collect();
+        for (k, v) in [
+            ("vehicleBase", l.vehicle_base),
+            ("wheelBase", l.wheel_base),
+            ("partBase", l.part_base),
+            ("wheelRimMaterial", rubble::WHEEL_RIM_MATERIAL),
+            ("wheels", host.wheel_count()),
+            ("vehicles", host.vehicle_count()),
+        ] {
+            m.insert(k.into(), v.into());
+        }
+        js(serde_json::Value::Object(m))
+    }
+
     /// The vehicle pool `GPUBuffer` (vehicle, wheel and part records), for
     /// renderers.
     #[wasm_bindgen(js_name = vehiclePoolBuffer)]

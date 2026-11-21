@@ -18,6 +18,55 @@ Principles (unchanged from the lab):
 - Lossless: no scene loses bodies, contacts, iterations or detail in the move. Every page
   keeps its frame time (checked before and after each phase, one GPU run at a time).
 
+## 2026-11-17: three.js draws every page (branch `claude/playground-threejs`)
+
+Decision (user, 2026-11-17): the web demos render with **three.js** (`WebGPURenderer`),
+and they prove that Rubble and three.js integrate easily and run fast. That replaces this
+plan's Slang render layers (phase 4's `layers.mjs` stays only until `demo.html` moves).
+Physics, scenes, scripts, settings and every physics-derived visual quantity (skins,
+damage) stay Rust/Slang; three.js does drawing, materials, lights and shadows. Unreal is
+out of scope for now; the client API stays neutral so it can follow (one registry, the
+same manifest over the C API).
+
+How it fits together:
+
+- `World::render_manifest()` (engine-world `render_manifest.rs`; wasm `renderManifest()`,
+  `renderVersion()`): every drawable collider grouped by geometry (box, sphere and capsule
+  collider lists; hulls and heightfields merged per tag with a collider per vertex), planes
+  apart, skips counted with their reason.
+- `rubble-three.mjs` (`RubbleThree`): three.js on `world.device()`; TSL vertex stages read
+  the World's body, collider, motion (projectile tracers) and vehicle (wheels) buffers in
+  place, bound as three storage attributes over the engine's own `GPUBuffer`s: no
+  readback, no copy, one draw per group.
+- three.js 0.186.1 is pinned in `engine-webgpu/package.json` and vendored into
+  `generated/three` (`vendor-three.mjs`, run by `build-web.sh`); pages import it through
+  their import map (`three/webgpu`, `three/tsl`, `three/addons/`).
+- `play.html` / `play.mjs`: the shell on three.js; the menu is the Rust registry grouped by
+  `Family::hub`. Families on it: rigid (every table scene, snapshot rigs with their joint
+  controls, `__regression()`: ring110k and gables506k oracles pass), motion, terrain,
+  vehicle (drive, chase camera, wheels).
+- `fracture/render-three.mjs` replaces `fracture/render.mjs` behind its interface: the lab,
+  compare (Why Rubble), Broadside and the timber yard draw with three.js (`?renderer=slang`
+  keeps the old draw for A/B).
+
+Render cost against the hand-written renderers (headless Chrome 1280×720, draw plus GPU
+wait, median; three.js with PBR and a shadow pass): ring 0.6 vs 0.6 ms, ring110k 1.8 vs
+1.5 ms, gables506k 3.4 vs 4.2 ms, the lab's 49-house grid at its peak 1.8 vs 2.3 ms.
+
+Still on their own renderers, in order of the remaining work:
+
+1. The soft-body cluster (`softbody`, `vehicle-lab`, `one-world`, `explicit-world`,
+   `brick-ring-drive`, `showcase-car`, `crash-orbit`): their car renderer
+   (`showcase-car-render.mjs`) also computes the skin, node frames, components and damage
+   in WGSL dispatched from JS. Move those passes into engine Slang kernels Rust dispatches
+   (with parity against `node_frames.rs` / `skin.rs`), expose the deformed skin as an
+   output buffer, and draw it with three.js materials (paint, glass, mirrors).
+2. Deformable terrain (`impact`, `showcase`): the MPM surface and particles as World
+   outputs drawn by three.js.
+3. `vehicle.html`, `city.html`, `demo.html` (benchmark protocol and kernel A/B switches
+   into the rigid family), then each page becomes a redirect to its preset.
+4. Phases 5–6 as below (one check matrix, one wasm, typed bindings, docs).
+
 ## Status (2026-11-05, branch `claude/amazing-euler-eefda7`)
 
 | Phase | State |
@@ -26,7 +75,10 @@ Principles (unchanged from the lab):
 | 2 | Done: `demo.html`'s built scenes are made in Rust (`engine-scenes::web`, `play::rigid`). |
 | 3 | Done for vehicles, soft bodies, motion and terrain (`play::{vehicles, softbody, motion, hills}`); the city was already Rust (`rubble::city`). The street and range layouts moved to `engine_vehicle::streets`. |
 | 3b | Done: one `SceneDef` over those families (`play::scene`): its world, its placement, a page's URL switches read in Rust (`from_query`, so a preset's query is its page's scene), and `Playground`. Bindings: wasm `createScene`/`placeScene`/`sceneFromQuery`/`presetScene`; C `rbCreatePlay`/`rbPlay_Step`/`rbPlay_GetStats`; native `tests/play_presets.rs` (all 44 placed presets). |
-| 4–6 | Not started. |
+| 3c | Done for vehicles, soft bodies, motion and terrain: `play::Action` and `play::Director` (`play::director`, `play::vehicle_director`). Each scene's script (the gallery's volleys, the playground's NPCs and platform, the T-bone ram, the crusher's winch, the traffic drivers, the gauntlet's shelling, the range's volleys and scoring, the meteor run's director and judge, directed debris) runs in Rust before each step or frame, and the player's actions (fire, cannon, ram, crater, rain, guide, targets, reset) are `act` calls. Pages call `world.act()` and follow `takeEvents()`; natively `Playground::act`/`frame`. `World::begin_body_read` reads body records without waiting, as the pages' `readBodies`. The gauntlet, range and run scripts moved to `engine_vehicle::scripts`. |
+| 3d | The city (`play::city_scene`: `city.html`'s switches, every house placed, shell and scenario actions) and the range scenes (Broadside, the timber yard: `stage::RangeSceneDef`) run through `Playground` (`Playground::with_assets` for the GLB; native hosts read the repository's). The meteor impact (`play::impact`: the prediction, the plain, the terrain and the world from `impact.html`'s switches; its script launches, strikes after the approach, bakes and drives the truck out) is in `SceneDef`; checked in Chrome: heightfield, bodies, terrain settings and prediction byte for byte, the strike's run (particles identical), the crater and the truck (within 0.2 m: the truck now comes 1.5 s of sim time after the bake, not 1.5 s of wall time). The page records its strata start positions a step after the strike now (render only). The meteor run (`play::showcase`, `Family::Showcase`: every scene, drive/drive1/pass/bts/play) likewise: its terrain, dunes or basin, track, car and world, its strike schedules, the car's autopilot and the play scene's director in Rust (`Action::Strike`, `Action::Drive`); checked in Chrome: setup byte for byte for four scenes, the same strikes (times, points, regions) for drive, drive1 and play (seed 7); the car within ~1 m (its pose is read a step earlier now). Not yet: the lab (its own Rust API, `rubble::lab`; folded in with its page in phase 4). |
+| 4 | Started. The shell: `play.html?preset=<name>` (the device, canvas, frame loop, orbit camera, HUD and the preset menu from `presetList()`, the Rust registry) with family modules (`play-<family>.mjs`: a preset's controls, HUD fields, look and hooks). Families on it: terrain (`play-terrain.mjs`: `terrain.html` redirects; frames pixel-identical, `__check` the same) and motion (`play-motion.mjs` with the projectile layer `projectiles.slang` and the motion look; `motion.html` redirects; frames within 0.02% of pixels, the three `__check`s identical). Render layers in `slang/render` (shared `common.slang`: the records, the frame, the pages' two lighting models): `rigid_bodies.slang` (every collider by instance: boxes, ray-hit spheres and capsules, the ground square; colours and lighting are the preset's look, as data) and `heightfield.slang` (a heightfield from its physics records in the hull arena), exported to WGSL by `wgsl_export`, drawn through `layers.mjs` (`createRigidLayer`, `createHeightfieldLayer`). `demo.html` and `terrain.html` draw through them; pixel captures against their own shaders: the wall identical, every other scene within 0.02% of pixels (silhouette edges: the projection's rounding). |
+| 5–6 | Not started. |
 
 Every move was checked in Chrome against the page before it: the body records before the
 first frame (and every soft body's entry, the heightfield) byte for byte. Demo 12
@@ -39,12 +91,26 @@ How this differs from the target below, so far:
   the shell (phase 4), when one page needs it.
 - No `Action` type yet: firing, ramming, shelling, meteors and crash runs are still each
   page's script over what placement returns.
-- Not in `SceneDef` yet: the lab, the range (Broadside, the timber yard), impact and the
-  city; the explicit solver's own scene (the page builds the sim, Rust places its shapes);
+- Not in `SceneDef` yet: the lab, impact and showcase (the range and the city run
+  through `Playground`, each on its own placement, not composed parts); the explicit solver's own scene (the page builds the sim, Rust places its shapes);
   imported vehicles (the page adds the file to the scene).
 - `World::settle_uploads` (new): bulk placement hands its uploads over in batches;
   natively, one write per body piled up Metal staging buffers (gables506k placed in over
   10 minutes, now 7.7 s).
+
+How the directors' results compare with the pages before them (outcome checks in Chrome,
+the pages' own scripts):
+
+- Same: the CCD gallery, bullets and character checks (positions to 1 mm), the NPC
+  circles, the crusher, the meteor range (static and moving: identical hits, turns and
+  scores), the meteor run's take (identical score, near misses and hits), cruise traffic
+  (the player's car identical), the cannons.
+- Different, and why: the pages' frame-stepped hooks (`__step`, the takes) skipped some
+  of what the interactive page did. The T-bone ram fired before the page had read the
+  car (its default spot; the interactive page aimed at the car, as the director now
+  always does: 14 broken beams, as the old page gives once it has read the car), and the
+  gauntlet take never latched the car's rest height for its zones (rAF stubbed).
+  The derby (chase) traffic is chaotic and differs run to run.
 
 Known on main, not from this work: R (reset) in `motion.html`'s ccd and character scenes
 fails ("forcing a body to sleep" is unsupported).
@@ -184,17 +250,16 @@ for frame time.
 | 5 | **One check, one wasm.** The preset matrix (native, C, web); fold the per-page scripts; merge `engine-vehicle-wasm`. | One matrix covers every preset on three hosts; one wasm download per page |
 | 6 | **Docs and cleanup.** README gallery links to presets; `public-api.md` covers `rubble::play`; delete the replaced page code. | No page-specific engine code left outside presets |
 
-## Decisions needed
+## Decisions (2026-11-06)
 
-1. **The legacy engine (`crates/`, `web/`).** Recommendation: retire it in its own PR
-   (delete, keeping a tag for history), since nothing deployed uses it. Your call.
-2. **`blast_parity`.** Recommendation: keep it on the stress world as the one labelled
-   exception until it's ported onto `World` (a separate piece of work, as decided in the
-   lab plan).
-3. **Old page URLs.** Recommendation: redirects kept indefinitely (cheap, and recordings
-   and README media depend on them).
-4. **Page-only tuning** (camera paths, HUD fields, crash-cam timings). Recommendation: carried
-   into each preset as data; nothing dropped. Any difference is listed in the phase's report.
+1. **The legacy engine (`crates/`, `web/`).** Retired in its own PR (deleted, with a git
+   tag for history). The playground PRs leave it alone.
+2. **`blast_parity`.** Stays on the stress world as the one labelled exception until it's
+   ported onto `World` (separate work, as decided in the lab plan).
+3. **Old page URLs.** Redirect to their presets indefinitely (README media and recordings
+   depend on them).
+4. **Page-only tuning** (camera paths, HUD fields, crash-cam timings). Carried into each
+   preset as data; nothing dropped. Any difference is listed in the phase's report.
 
 ## Risks
 

@@ -10,14 +10,9 @@ use rubble::*;
 use wasm_bindgen::prelude::*;
 
 fn family(name: &str) -> Result<Family, JsValue> {
-    Ok(match name {
-        "rigid" => Family::Rigid,
-        "vehicle" => Family::Vehicle,
-        "soft" => Family::Soft,
-        "motion" => Family::Motion,
-        "terrain" => Family::Terrain,
-        _ => return Err(err(format!("family {name}: not placed through SceneDef"))),
-    })
+    Family::from_name(name)
+        .filter(|f| rubble::play::scene::placed_here(*f))
+        .ok_or_else(|| err(format!("family {name}: not placed through SceneDef")))
 }
 
 /// The scene a family's page builds from its URL query (`location.search`): a `SceneDef`
@@ -30,6 +25,24 @@ pub fn scene_from_query(family_name: &str, query: &str) -> Result<JsValue, JsVal
 }
 
 /// Preset `name`'s scene (`Preset::scene_def`), as `sceneFromQuery` gives it.
+/// Every preset (`rubble::play::presets`): `[{ name, title, family, hub, menu ('main' | 'more' | 'alias'), page, query, placed }]`,
+/// `placed`: its scene is placed through `SceneDef` (the playground shell can run it).
+#[wasm_bindgen(js_name = presetList)]
+pub fn preset_list() -> JsValue {
+    js(serde_json::Value::Array(
+        rubble::play::presets()
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name, "title": p.title, "family": p.family.name(), "hub": p.hub, "menu": p.menu.name(),
+                    "page": p.page, "query": p.query,
+                    "placed": rubble::play::scene::placed_here(p.family),
+                })
+            })
+            .collect(),
+    ))
+}
+
 #[wasm_bindgen(js_name = presetScene)]
 pub fn preset_scene(name: &str) -> Result<JsValue, JsValue> {
     let p = rubble::play::preset(name).ok_or_else(|| err(format!("unknown preset {name}")))?;
@@ -61,7 +74,7 @@ impl WebWorld {
             &wd,
         ))?;
         crate::creation_check(&world).await?;
-        Ok(WebWorld { world })
+        Ok(WebWorld::of(world))
     }
 
     /// Place scene `def` in this (empty) world (`SceneDef::place`). Returns its family's
@@ -71,6 +84,7 @@ impl WebWorld {
     pub fn place_scene(&mut self, def: JsValue) -> Result<JsValue, JsValue> {
         let scene: SceneDef = from_js("SceneDef", def)?;
         let placed = res(scene.place(&mut self.world))?;
+        self.director = Some(res(rubble::play::Director::new(&scene, &placed, &mut self.world))?);
         if let Placed::Rigid(p) = &placed {
             let o = js_sys::Object::new();
             let bodies: Vec<f64> = p.bodies.iter().map(|b| handle(b.to_bits())).collect();
@@ -93,5 +107,82 @@ impl WebWorld {
             return Ok(o.into());
         }
         Ok(js(res(placed.to_json())?))
+    }
+
+    /// Do a player action on the placed scene before the next step (`play::Action`, e.g.
+    /// `{action: 'fire', aim: {eye, dir}}`, `{action: 'reset'}`).
+    pub fn act(&mut self, action: JsValue) -> Result<(), JsValue> {
+        let action: rubble::play::Action = from_js("Action", action)?;
+        let d = self
+            .director
+            .as_mut()
+            .ok_or_else(|| err("act: no scene placed (placeScene first)"))?;
+        res(d.act(&mut self.world, &action))
+    }
+
+    /// The placed scene's frame scripts before the frame's steps (the crusher's winch, the
+    /// traffic drivers): `dt` the frame's time (s), `userCar` the soft body the player is
+    /// steering now (−1: none; its driver leaves it alone).
+    #[wasm_bindgen(js_name = beforeFrame)]
+    pub fn before_frame(&mut self, dt: f64, user_car: i32) -> Result<(), JsValue> {
+        let Some(d) = &mut self.director else {
+            return Ok(());
+        };
+        res(d.before_frame(&mut self.world, dt, u32::try_from(user_car).ok()))
+    }
+
+    /// After the frame's steps: start the reads the scripts use next frame (never waits).
+    #[wasm_bindgen(js_name = afterFrame)]
+    pub fn after_frame(&mut self) -> Result<(), JsValue> {
+        let Some(d) = &mut self.director else {
+            return Ok(());
+        };
+        res(d.after_frame(&self.world))
+    }
+
+    /// Frame-locked runs: start every read the next `beforeFrame` needs; then wait while
+    /// `scriptPending()`.
+    #[wasm_bindgen(js_name = prepareFrame)]
+    pub fn prepare_frame(&mut self) -> Result<(), JsValue> {
+        let Some(d) = &mut self.director else {
+            return Ok(());
+        };
+        res(d.prepare(&self.world))
+    }
+
+    /// Whether a script read is still in flight.
+    #[wasm_bindgen(js_name = scriptPending)]
+    pub fn script_pending(&self) -> bool {
+        self.director.as_ref().is_some_and(|d| d.pending(&self.world))
+    }
+
+    /// The soft body the player drives (the ram aims at it).
+    #[wasm_bindgen(js_name = setPlayer)]
+    pub fn set_player(&mut self, soft: u32) {
+        if let Some(d) = &mut self.director {
+            d.set_player(soft);
+        }
+    }
+
+    /// The placed scene's script state (`play::Director::state`).
+    #[wasm_bindgen(js_name = scriptState)]
+    pub fn script_state(&self) -> JsValue {
+        js(self.director.as_ref().map(|d| d.state()).unwrap_or_default())
+    }
+
+    /// What the placed scene's director did since the last call (`[{step, what}]`, oldest
+    /// first): the script's own volleys as well as the player's actions.
+    #[wasm_bindgen(js_name = takeEvents)]
+    pub fn take_events(&mut self) -> Result<JsValue, JsValue> {
+        let ev = self.director.as_mut().map(|d| d.take_events()).unwrap_or_default();
+        Ok(js(serde_json::to_value(ev).map_err(err)?))
+    }
+
+    /// Whether the placed scene's script fires on its own (checks fire at steps of their own).
+    #[wasm_bindgen(js_name = setAutofire)]
+    pub fn set_autofire(&mut self, on: bool) {
+        if let Some(d) = &mut self.director {
+            d.set_autofire(on);
+        }
     }
 }

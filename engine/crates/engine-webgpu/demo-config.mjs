@@ -33,6 +33,31 @@ export const DROPPED_SWITCHES = {
 
 export const SLEEP_OFF_TIME = 1e6;
 
+// The switches parseDemoQuery reads, for pages that show them as controls (the playground
+// shell's engine panel): key, label, the values it accepts ('' = the default, which may
+// depend on other switches) and what it is. parseDemoQuery stays the one validator: a
+// combination it refuses fails with its reason.
+export const DEMO_SWITCHES = [
+  { key: 'contacts', label: 'Contacts', values: ['persistent', 'compact', 'canonical'], title: 'Contact storage (ENGINE_CONTACTS)' },
+  { key: 'persistence', label: 'Persistence', values: ['contact', 'manifold', 'fused'], title: 'Warm-start persistence per contact, per manifold, or fused' },
+  { key: 'hashInsert', label: 'Warm hash', values: ['record', 'manifold', 'contact'], title: 'What the warm-start hash keys on' },
+  { key: 'reuse', label: 'Reuse', values: ['', 'copy', 'pass'], title: 'Contact reuse: copy (persistent, per contact) or a pass' },
+  { key: 'np', label: 'Narrowphase', values: ['', 'split', 'fused'], title: 'Narrowphase split (needs reuse=copy) or fused' },
+  { key: 'persist', label: 'Persist', values: ['', 'list', 'scan'], title: 'Persistence by list (needs reuse=copy) or scan' },
+  { key: 'repair', label: 'Colour repair', values: ['local', 'rounds'], title: 'Graph colouring repair: local or full rounds' },
+  { key: 'rest', label: 'Resting pairs', values: ['archive', 'carry', 'drop', 'touch'], title: 'Resting contacts in a sleeping world: sleep archive (default), carry, drop (measurement) or the touch query' },
+  { key: 'grid', label: 'Grid', values: ['split', 'scaled', 'fixed'], title: 'Broadphase grid layout' },
+  { key: 'gridlevels', label: 'Hierarchical grid', values: ['', 'on', 'off'], title: 'Hierarchical grid (default: convex scenes only)' },
+  { key: 'broadphase', label: 'Broadphase', values: ['', 'awake', 'hier', 'full'], title: 'Awake-indexed broadphase (default), on hierarchical grids only, or full' },
+  { key: 'costfloor', label: 'Cost floor', values: ['', 'on', 'off'], title: 'The cost-floor passes (off: every collider and body slot each step, for A/B timing)' },
+  { key: 'colors', label: 'Colour dispatch', values: ['', 'full'], title: 'Adaptive colour headroom (default) or the whole palette' },
+  { key: 'rounds', label: 'Round dispatch', values: ['', 'full'], title: 'Adaptive JP round headroom (default) or all rounds' },
+  { key: 'sparse', label: 'Sparse from colour', values: ['', ...Array.from({ length: 33 }, (_, i) => String(i))], title: 'Sparse colouring from this colour index (default: 10 on ring110k, 32 elsewhere)' },
+  { key: 'ccd', label: 'CCD', values: ['', '1', '0'], title: 'Continuous collision for the smash balls and projectiles (default on; off with check=)' },
+  { key: 'order', label: 'Upload order', values: ['', 'morton'], title: 'Upload bodies in Morton order (spatial locality)' },
+  { key: 'batch', label: 'Bench batch', values: ['', '1'], title: 'Benchmark batch size: 10 steps (default) or 1' },
+];
+
 // URL → { scene, cfg, worldDef pieces, page switches }. Throws on any invalid
 // or dropped value, before the world is made.
 export function parseDemoQuery(search) {

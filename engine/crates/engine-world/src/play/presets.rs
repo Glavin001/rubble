@@ -20,13 +20,37 @@ pub enum Family {
     Motion,
     /// The heightfield collider (`terrain.html`).
     Terrain,
-    /// Meteors on deformable (MPM) ground (`impact.html`, `showcase.html`).
+    /// A meteor or a charge on deformable (MPM) ground (`impact.html`).
     Impact,
+    /// The meteor run on deformable ground (`showcase.html`).
+    Showcase,
     /// The large-maps city (`city.html`).
     City,
+    /// A demo with a page of its own, not (yet) a scene of the registry: the vehicle lab,
+    /// one World, Why Rubble, the tools. Listed so the menu holds every demo.
+    Page,
 }
 
 impl Family {
+    pub const ALL: [Family; 11] = [
+        Family::Rigid,
+        Family::Lab,
+        Family::Range,
+        Family::Vehicle,
+        Family::Soft,
+        Family::Motion,
+        Family::Terrain,
+        Family::Impact,
+        Family::Showcase,
+        Family::City,
+        Family::Page,
+    ];
+
+    /// The family named `name` ([`Self::name`]).
+    pub fn from_name(name: &str) -> Option<Family> {
+        Self::ALL.into_iter().find(|f| f.name() == name)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Family::Rigid => "rigid",
@@ -37,7 +61,20 @@ impl Family {
             Family::Motion => "motion",
             Family::Terrain => "terrain",
             Family::Impact => "impact",
+            Family::Showcase => "showcase",
             Family::City => "city",
+            Family::Page => "page",
+        }
+    }
+
+    /// The playground hub the family's presets are listed under (play.html's menu).
+    pub const fn hub(self) -> &'static str {
+        match self {
+            Family::Lab | Family::Range | Family::City => "Destruction",
+            Family::Vehicle | Family::Soft => "Vehicles",
+            Family::Terrain | Family::Impact | Family::Showcase => "Terrain",
+            Family::Rigid | Family::Motion => "Scale & motion",
+            Family::Page => "Studio",
         }
     }
 }
@@ -52,6 +89,31 @@ pub struct Preset {
     /// The page (relative to `engine-webgpu/`) and its query.
     pub page: &'static str,
     pub query: &'static str,
+    /// The playground hub it is listed under.
+    pub hub: &'static str,
+    /// How the menu lists it.
+    pub menu: Menu,
+}
+
+/// How the playground menu lists a preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    /// A main entry of its hub.
+    Main,
+    /// Under its hub's "More" (the legacy engine's scenes, diagnostics).
+    More,
+    /// Not listed: another name for a listed preset (an old URL that keeps working).
+    Alias,
+}
+
+impl Menu {
+    pub fn name(self) -> &'static str {
+        match self {
+            Menu::Main => "main",
+            Menu::More => "more",
+            Menu::Alias => "alias",
+        }
+    }
 }
 
 impl Preset {
@@ -78,7 +140,24 @@ const fn p(
         family,
         page,
         query,
+        hub: family.hub(),
+        menu: Menu::Main,
     }
+}
+
+/// A preset listed under its hub's "More".
+const fn more(name: &'static str, title: &'static str, family: Family, page: &'static str, query: &'static str) -> Preset {
+    Preset { menu: Menu::More, ..p(name, title, family, page, query) }
+}
+
+/// Another name for a listed preset (an old URL): not listed.
+const fn alias(name: &'static str, title: &'static str, family: Family, page: &'static str, query: &'static str) -> Preset {
+    Preset { menu: Menu::Alias, ..p(name, title, family, page, query) }
+}
+
+/// A demo on a page of its own, listed under `hub`.
+const fn page(name: &'static str, title: &'static str, hub: &'static str, page: &'static str, query: &'static str) -> Preset {
+    Preset { hub, ..p(name, title, Family::Page, page, query) }
 }
 
 use Family::*;
@@ -128,92 +207,79 @@ const PRESETS: &[Preset] = &[
         "demo.html",
         "scene=motorfield10k",
     ),
-    p(
-        "legacy-pyramid",
+    more("legacy-pyramid",
         "Pyramid (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyPyramid",
     ),
-    p(
-        "legacy-stack",
+    more("legacy-stack",
         "Stack (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyStack",
     ),
-    p(
-        "legacy-stack-ratio",
+    more("legacy-stack-ratio",
         "Stack ratio (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyStackRatio",
     ),
-    p(
-        "legacy-dynamic-friction",
+    more("legacy-dynamic-friction",
         "Dynamic friction (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyDynamicFriction",
     ),
-    p(
-        "legacy-static-friction",
+    more("legacy-static-friction",
         "Static friction (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyStaticFriction",
     ),
-    p(
-        "legacy-scatter",
+    more("legacy-scatter",
         "Scatter (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyScatter",
     ),
-    p(
-        "legacy-scatter-boxes",
+    more("legacy-scatter-boxes",
         "Scatter boxes (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyScatterBoxes",
     ),
-    p(
-        "legacy-grid-boxes",
+    more("legacy-grid-boxes",
         "Grid boxes (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyGridBoxes",
     ),
-    p(
-        "legacy-slanted-grid",
+    more("legacy-slanted-grid",
         "Slanted grid (legacy)",
         Rigid,
         "demo.html",
         "scene=legacySlantedGrid",
     ),
-    p(
-        "legacy-grid10k",
+    more("legacy-grid10k",
         "10k grid (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyGrid10k",
     ),
-    p(
-        "legacy-grid100k",
+    more("legacy-grid100k",
         "100k grid (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyGrid100k",
     ),
-    p(
-        "legacy-ground",
+    more("legacy-ground",
         "Ground (legacy)",
         Rigid,
         "demo.html",
         "scene=legacyGround",
     ),
-    p(
-        "legacy-empty",
+    more("legacy-empty",
         "Empty (legacy)",
         Rigid,
         "demo.html",
@@ -222,10 +288,10 @@ const PRESETS: &[Preset] = &[
     // fracture/
     p("lab", "Fracture lab", Lab, "fracture/", ""),
     // broadside.html, timber.html
-    p("broadside", "Broadside", Range, "broadside.html", ""),
-    p("timber-yard", "Timber yard", Range, "timber.html", ""),
+    p("broadside", "Broadside", Range, "broadside.html", "scene=broadside"),
+    p("timber-yard", "Timber yard", Range, "timber.html", "scene=timber"),
     // vehicle.html
-    p("vehicles", "Vehicles", Vehicle, "vehicle.html", ""),
+    alias("vehicles", "Vehicles", Vehicle, "vehicle.html", ""),
     p("bridge", "Bridge", Vehicle, "vehicle.html", "scene=bridge"),
     p(
         "buggies",
@@ -295,7 +361,7 @@ const PRESETS: &[Preset] = &[
         "scene=vibeland",
     ),
     // softbody.html
-    p("soft", "Soft-body vehicles", Soft, "softbody.html", ""),
+    alias("soft", "Soft-body vehicles", Soft, "softbody.html", ""),
     p(
         "soft-arena",
         "Explicit fleet arena",
@@ -400,25 +466,35 @@ const PRESETS: &[Preset] = &[
     p(
         "showcase",
         "Meteor run showcase",
-        Impact,
+        Showcase,
         "showcase.html",
         "",
     ),
     p(
         "showcase-play",
         "Meteor run (play)",
-        Impact,
+        Showcase,
         "showcase.html",
         "scene=play",
     ),
     p(
         "showcase-bts",
         "Meteor run (behind the scenes)",
-        Impact,
+        Showcase,
         "showcase.html",
         "scene=bts",
     ),
     p("city", "Large-maps city", City, "city.html", ""),
+    // Demos on pages of their own (not yet scenes of the registry).
+    page("why-rubble", "Why Rubble (compare)", "Destruction", "fracture/compare.html", ""),
+    page("vehicle-lab", "Vehicle lab", "Vehicles", "vehicle-lab.html", ""),
+    page("one-world", "Cars into buildings (one World)", "Vehicles", "one-world.html", ""),
+    page("brick-ring-drive", "Drive through the 110k ring", "Vehicles", "brick-ring-drive.html", ""),
+    page("crash-town", "Crash town (2 kHz fleet)", "Vehicles", "explicit-world.html", ""),
+    page("showcase-car", "Showcase car test", "Studio", "showcase-car.html", ""),
+    page("vehicle-designer", "Vehicle designer", "Studio", "vehicle-designer.html", ""),
+    page("models", "Generated models", "Studio", "models/", ""),
+    page("crash-orbit", "Crash replay orbit", "Studio", "crash-orbit.html", ""),
 ];
 
 /// Every preset, in the landing page's order.

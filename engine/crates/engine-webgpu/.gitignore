@@ -6,3 +6,6 @@
 
 # Local BeamNG mod caches and the generated gen2 car (never committed)
 /__mods
+
+# npm dependencies (three.js); vendored into generated/three by vendor-three.mjs
+/node_modules/

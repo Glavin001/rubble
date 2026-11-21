@@ -33,7 +33,7 @@ fn a_preset_steps_through_the_c_abi() {
         assert_eq!(s.overflow, 0);
         rbDestroyPlay(play);
 
-        for bad in ["no-such-preset", "broadside"] {
+        for bad in ["no-such-preset", "lab"] {
             let name = CString::new(bad).unwrap();
             assert_ne!(
                 rbCreatePlay(name.as_ptr(), std::ptr::null(), &mut play),

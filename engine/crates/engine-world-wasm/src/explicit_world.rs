@@ -71,7 +71,7 @@ impl WebWorld {
             &town_coupling(),
         ))?;
         crate::creation_check(&town.world).await?;
-        Ok(WebWorld { world: town.world })
+        Ok(WebWorld::of(town.world))
     }
 
     /// The explicit vehicles' node state `GPUBuffer` (3 `vec4<f32>` per node: position

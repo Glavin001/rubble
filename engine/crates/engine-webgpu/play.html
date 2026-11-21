@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rubble playground</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    #stage canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(13, 17, 23, 0.84); border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; }
+    #side { left: 12px; top: 12px; bottom: 12px; width: 200px; overflow: auto; display: flex; flex-direction: column; }
+    #hud { left: 234px; top: 12px; max-width: min(620px, calc(100vw - 250px)); max-height: calc(100vh - 24px); overflow: auto; }
+    #search { width: 100%; box-sizing: border-box; margin: 8px 0 4px; }
+    #menu a { display: block; color: #c9d1d9; text-decoration: none; padding: 2px 6px; border-radius: 5px; }
+    #menu a:hover { background: #21262d; }
+    #menu a.here { background: #1f6feb; color: #fff; }
+    #menu a.away::after { content: ' ↗'; color: #8b949e; }
+    #menu summary { cursor: pointer; color: #8b949e; padding: 2px 6px; }
+    .hub { margin: 10px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #8b949e; }
+    .brand { font-weight: 600; font-size: 15px; } .brand small { color: #8b949e; font-weight: 400; }
+    .row { display: flex; gap: 6px 10px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+    .muted { color: #8b949e; } .bad { color: #f85149; } .ok { color: #3fb950; } .warn { color: #d29922; }
+    button, select, input[type=search] { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 3px 8px; font: inherit; }
+    kbd { font-size: 11px; padding: 0 4px; border: 1px solid #30363d; border-radius: 4px; }
+    table { border-collapse: collapse; } td, th { padding: 1px 6px; text-align: left; }
+    details.section > summary { cursor: pointer; color: #8b949e; margin-top: 4px; }
+    #err { color: #f85149; white-space: pre-wrap; }
+    h1 { font-size: 14px; margin: 0 0 4px; }
+    .away-note { font-size: 11px; color: #8b949e; margin-top: auto; padding-top: 8px; }
+    @media (max-width: 700px) { #side { display: none; } #hud { left: 12px; max-width: calc(100vw - 24px); } }
+  </style>
+  <script type="importmap">{ "imports": {
+    "rubble-gpu-wait": "./fracture/gpu-wait.mjs",
+    "three": "./generated/three/three.webgpu.js",
+    "three/webgpu": "./generated/three/three.webgpu.js",
+    "three/tsl": "./generated/three/three.tsl.js",
+    "three/addons/": "./generated/three/addons/"
+  } }</script>
+</head>
+<body>
+  <div id="stage"></div>
+  <nav id="side" class="panel">
+    <div class="brand">Rubble <small>playground</small></div>
+    <div class="muted">GPU physics, drawn with three.js</div>
+    <input id="search" type="search" placeholder="Search demos…" aria-label="Search demos" />
+    <div id="menu"></div>
+    <div class="away-note">↗ opens the demo's own page</div>
+  </nav>
+  <div id="hud" class="panel">
+    <h1 id="title">Rubble playground</h1>
+    <div class="row">
+      <label>Colour <select id="color"><option value="0">material</option><option value="1">awake / asleep</option><option value="2">speed</option></select></label>
+      <label><input type="checkbox" id="shadows" checked /> shadows</label>
+    </div>
+    <div id="controls" class="row"></div>
+    <details class="section"><summary>Engine settings</summary><div id="engine" class="row"></div></details>
+    <div id="help" class="row muted"></div>
+    <div id="perf" class="muted"></div>
+    <div class="row"><span id="perfButtons" class="row"></span></div>
+    <div id="perfExtra" class="muted"></div>
+    <div id="stats" class="muted"></div>
+    <div id="famHudLine"></div>
+    <div id="famHud"></div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <script type="module" src="./play.mjs"></script>
+</body>
+</html>

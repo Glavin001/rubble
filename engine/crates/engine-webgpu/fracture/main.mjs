@@ -1,6 +1,8 @@
 import {parseFractureGlb,sceneHandle,glassTowerPack,nearMissSettings,labFractureDefaults,labDefaultPhysicsHz,SAMPLES} from './wasm.mjs';
 import {createLab,labDevice} from './lab-world.mjs';
-import {createRenderer} from './render.mjs';
+// three.js draws the lab (render-three.mjs); ?renderer=slang: the Slang draw shader it
+// replaces (render.mjs), kept for A/B measurements.
+const {createRenderer}=await import(new URLSearchParams(location.search).get('renderer')==='slang'?'./render.mjs':'./render-three.mjs');
 import {createRates} from './rates.mjs';
 // The fracture lab: one World (rubble's Rust engine, the one the C library gives Unreal) per
 // run, drawn by this page's renderer. The page wires its controls to the lab API
