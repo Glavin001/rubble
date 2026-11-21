@@ -512,7 +512,7 @@ impl Split {
                 layout: Some(&pipeline_layout),
                 module: &module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: explicit_compilation_options(device),
                 cache: None,
             })
         };
@@ -1146,7 +1146,26 @@ pub fn explicit_shader_checks_off(device: &wgpu::Device) -> u32 {
 /// An explicit module, with wgpu's runtime checks as [`explicit_shader_checks_off`] says.
 #[doc(hidden)]
 pub fn explicit_shader_module(device: &wgpu::Device, desc: wgpu::ShaderModuleDescriptor<'_>) -> wgpu::ShaderModule {
-    let off = explicit_shader_checks_off(device);
+    shader_module_without(device, desc, explicit_shader_checks_off(device))
+}
+
+/// Measurement only (mask bit 8, never in a default): the compile options of the explicit
+/// pipelines that still zero their workgroup memory at each workgroup's start (the frame
+/// kernel, the vehicle pairs' grid, the variants, the first split path, the World's
+/// coupling), without the zeroing. Time only until each kernel is read for a workgroup
+/// value it reads before writing.
+#[doc(hidden)]
+pub fn explicit_compilation_options(device: &wgpu::Device) -> wgpu::PipelineCompilationOptions<'static> {
+    wgpu::PipelineCompilationOptions {
+        zero_initialize_workgroup_memory: explicit_shader_checks_off(device) & 8 == 0,
+        ..Default::default()
+    }
+}
+
+/// A module compiled without the mask `off` of wgpu's runtime checks (1 bounds, 2 loop
+/// bound, 4 integer division).
+pub(crate) fn shader_module_without(device: &wgpu::Device, desc: wgpu::ShaderModuleDescriptor<'_>, off: u32) -> wgpu::ShaderModule {
+    let off = off & 7;
     if off == 0 {
         return device.create_shader_module(desc);
     }
@@ -1312,7 +1331,7 @@ impl Contact {
                 layout: Some(layout),
                 module: &module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: explicit_compilation_options(device),
                 cache: None,
             })
         };
@@ -1941,7 +1960,7 @@ impl ExplicitBeamsGpu {
                 layout: None,
                 module: &module,
                 entry_point: Some(plan::FRAME_ENTRY),
-                compilation_options: Default::default(),
+                compilation_options: explicit_compilation_options(&self.device),
                 cache: None,
             });
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3719,7 +3738,7 @@ impl ExplicitBeamsGpu {
                 layout: Some(layout),
                 module: &module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: explicit_compilation_options(&self.device),
                 cache: None,
             })
         };

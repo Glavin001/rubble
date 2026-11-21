@@ -3848,7 +3848,7 @@ which hid the bug as well. Scope, each a measured limit and not a preference:
   Vulkan and DX12 keep every check until they are measured and proven the same way
   (`RUBBLE_SHADER_CHECKS_OFF=7` turns them off there for that measurement).
 - *The explicit vehicles' kernels and the World's coupling only.* The rigid solver's
-  modules are not changed by this default.
+  modules are not changed by this default (§8.47 is theirs).
 - *Proven in the bit-exact mode.* The kernels' strict helpers hold their rounding with
   and without the checks. Under fast arithmetic (#135's setting) a change of generated
   code can move a rounding (`gpu-determinism-wgsl`), so there the checked and unchecked
@@ -3871,3 +3871,93 @@ tools/explicit-2khz/perf-verify.sh default             # the suites on the defau
 RUBBLE_BENCH_CARS=1,16 cargo run --profile fast -p engine-metal --example explicit_bench
 ```
 The first run with a new mask compiles every pipeline again (4 to 6 minutes).
+
+### 8.47 The same checks on the World's own kernels (the rigid solver), and the zeroing that was left (2026-11-21)
+
+The question (§8.46's open rows): the rigid solver's modules (`gpu.rs`, 283 of the build's
+409) still carried every check and zeroed their workgroup memory at every dispatch, and
+five kinds of explicit pipeline still zeroed theirs. Native M3 Max. Rigid figures are
+`rigid_gate` (`engine-world/examples`): ms a World step (step and wait), median of 240
+steps after 60, sleep off, a process a figure, the masks in turn for 4 to 6 rounds; its
+hash mode is a hash of every body at 12 checkpoints to step 300 in 11 rigid scenes (two
+runs of the checked build agree at every one). `RUBBLE_RIGID_SHADER_CHECKS_OFF=MASK`: 1
+bounds, 2 loop bound, 4 integer division, 8 the zeroing.
+
+**What each check does to the rigid scenes' results** (11 scenes, sleep off, against the
+checked build):
+
+| left out | end states |
+|---|---|
+| nothing, run twice | the same |
+| the loop bound (2) | the same in all 11 |
+| the integer-division guards (4) | the same in all 11 |
+| the zeroing of workgroup memory (8) | the same in all 11 |
+| **the bounds checks (1)** | **differ in 10 of 11**, first at the checkpoint of step 20 (both brick rings), 30 (brick walls), 50 (pyramid, box pile, ragdoll pile), 75 (wall smash, 100k grid), 100 (chain mail), 200 (sphere pile); hinge chains the same |
+
+So unlike the explicit kernels (strict arithmetic, every word the same without the
+checks), a rigid kernel's result depends on the bounds checks. It is not a rounding of
+the whole build: the first ten steps are bit for bit and the scenes part at different
+steps. Which kernel and whether it is an index the clamp makes harmless or a rounding in
+a path first taken then is not found; until it is, the bounds checks stay on the World's
+kernels. What they would be worth is below.
+
+**Time** (ms a step; the level of the machine moved between rounds, so the deltas are
+each round's pair, and the later rounds are the steadier):
+
+| | Brick Ring 110k | Box Pile 32k |
+|---|---|---|
+| checked, 4 rounds | 16.48 | 5.36 |
+| the three checks out (7): results differ | 15.58 (−5.5 %) | 5.04 (−6.1 %) |
+| the zeroing out (8) | 15.86 (−3.8 %) | 5.05 (−5.8 %) |
+| all four out (15): results differ | 15.16 (−8.0 %) | 4.69 (−12.6 %) |
+| the loop bound out alone (2), 4 rounds | −1.7 to −2.6 % a round | −1.0 to −3.3 % a round |
+| the result-preserving three on every module (14), 6 paired rounds | −3.7 % (median of rounds) | −3.9 % |
+| **the default as built, 6 paired rounds** | **16.14 → 15.18; −4.7, −4.1, −3.8 % in the three steady rounds** | **4.92 → 4.52; −7.8, −8.8, −7.3 %** |
+
+**The default** (`rigid_shader_checks_off` in `gpu.rs`):
+- *The loop bound out on native Metal*, every World kernel. It changes nothing of a loop
+  that ends (the counter allows 2^64 turns), and the 11 scenes are bit for bit.
+- *The zeroing out, natively, for the `solve_primal*` kernels alone.* Their workgroup
+  memory is 864 floats a workgroup (`gsA`, `gsRhs`), zeroed by one lane at every
+  dispatch of every colour of every iteration. Read: every value they read from it was
+  written in the same dispatch before a barrier. A body's lanes are live together
+  (`live` is a function of the body's slot), so in `primalReduceStep` the lane that
+  reads slot `slot * s + lane` has a live partner `lane + s` that wrote it before the
+  barrier; `gsUniformLanes` is written by lane 0 before each read. The other World
+  kernels with workgroup memory (46 modules, most of them 64 words) keep the zeroing:
+  not read one by one, and little to gain.
+- *The bounds checks and the division guards stay* (results differ; unproven and
+  untimed alone).
+- `RUBBLE_RIGID_SHADER_CHECKS_OFF=0` is the fully checked build.
+
+**Proofs with the default in.** The 11 scenes' hashes: the same as the checked build's
+at every checkpoint. Suites (release, one at a time): engine-webgpu `ring_hold` 1,
+`columns_hold` 4, `gables_hold` 1, `invariants_small_gpu` 6, `sleep_fast_gpu` 2,
+`breakable_joints` 4, `pipelined_gate` 1, `broadphase_oracle` 2, `ccd_unit` 5,
+`ccd_tunnel` 5, `kinematic` 3, `queries` 4; engine-world `world` 18, `contacts` 7,
+`post_stabilization` 1, `explicit_vehicles` 11: all pass. (`destruction`: 7 pass, 3 fail
+on "Invalid GLB header": this worktree's fracture assets are LFS pointers, not the
+change.) The scenario matrix again, the vehicles' checks against checked: 12 rows bit
+for bit, PASS; `run.sh --world`: PASS, the World adds 0.44 to 1.46 ms a step. The WGSL
+is unchanged (compile options only), and no GPU call is added or removed. Not run: the
+rigid gate's sleep-on rows and its Chrome rows (Chrome is not changed: a page cannot set
+either option).
+
+**The explicit pipelines that still zeroed** (the frame kernel, the vehicle pairs' grid,
+the variants, the first split path, the World's coupling; mask bit 8 of
+`RUBBLE_SHADER_CHECKS_OFF`, `checks=15:7` on the matrix): 12 rows bit for bit, −0.8 to
++1.7 %, no row moves. Nothing there on the default paths (the wide and split paths
+already skip it, §8.8). Not adopted; the bit stays as a measurement.
+
+**What is left of this lesson.** One thing: the bounds checks on the World's kernels, 5
+to 6 % of a rigid step on Metal (the 110k ring 16.5 → 15.6 ms), blocked on finding where
+a result depends on them. That is a search by kernel (the mask a module, the hash after
+each), then either a real index out of range to fix or a rounding to hold.
+
+**To run again** (from `engine/`):
+```sh
+GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world --example rigid_gate   # the default
+RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world --example rigid_gate
+RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=time GATE_SLEEP=off GATE_SCENES="Brick Ring (110k),Box Pile (32k)" cargo run --profile fast -p engine-world --example rigid_gate
+tools/scenario-matrix/run.sh checks=15:7     # the explicit pipelines' zeroing (ON:OFF masks)
+```

@@ -1232,8 +1232,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let mut escaped: Vec<usize> = Vec::new();
     // `--ab-switch checks=MASK`: this Lab is the A/B's checked half, so it is built with
     // every check whatever the default (the A/B resets the setting when it is done).
-    if arg("--ab-switch").is_some_and(|s| s.starts_with("checks=")) {
-        engine_webgpu::set_explicit_shader_checks_off(Some(0));
+    if let Some(s) = arg("--ab-switch").filter(|s| s.starts_with("checks=")) {
+        let off = s.split_once(':').and_then(|(_, off)| off.parse().ok()).unwrap_or(0);
+        engine_webgpu::set_explicit_shader_checks_off(Some(off));
     }
     let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
         d.gpu_timing = match timing.as_deref() {
@@ -1364,7 +1365,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // checks (1 bounds, 2 loop bounding, 4 integer division; on) against the checked
     // modules (off; 7 is the default on Metal), each on a GPU object of its own from one snapshot, in turn for
     // AB_ROUNDS rounds: every state word and each frame's time. Native only.
-    let checks_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("checks=").and_then(|m| m.parse().ok()));
+    // `checks=ON:OFF`: the off half's mask too (8: no zeroing of workgroup memory on the
+    // explicit pipelines that still zero it, a measurement).
+    let checks_pair: Option<(u32, u32)> = arg("--ab-switch").and_then(|s| {
+        let m = s.strip_prefix("checks=")?;
+        let (on, off) = m.split_once(':').unwrap_or((m, "0"));
+        Some((on.parse().ok()?, off.parse().ok()?))
+    });
+    let checks_ab: Option<u32> = checks_pair.map(|p| p.0);
+    let checks_ab_off: u32 = checks_pair.map_or(0, |p| p.1);
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
@@ -2451,7 +2460,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 for _ in 0..rounds {
                     engine_webgpu::set_explicit_shader_checks_off(Some(mask));
                     pooled[0].push(run(y, &snap_b));
-                    engine_webgpu::set_explicit_shader_checks_off(Some(0));
+                    engine_webgpu::set_explicit_shader_checks_off(Some(checks_ab_off));
                     pooled[1].push(run(x, &snap));
                 }
                 engine_webgpu::set_explicit_shader_checks_off(None);

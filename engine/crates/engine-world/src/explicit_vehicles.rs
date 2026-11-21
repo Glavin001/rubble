@@ -308,7 +308,7 @@ impl ExplicitVehicles {
                     layout: Some(if *e == "cpl_query" { &pl_q } else { &pl }),
                     module: &module,
                     entry_point: Some(e),
-                    compilation_options: Default::default(),
+                    compilation_options: engine_webgpu::explicit_compilation_options(device),
                     cache: None,
                 })
             })
