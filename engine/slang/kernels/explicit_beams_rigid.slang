@@ -312,16 +312,23 @@ bool cplCullOn() { return (gsCpl[0] & 2u) == 0u; }
 // Lane 0: an empty table.
 void cplGsClear()
 {
+#ifdef EB_NO_PROXY
+    return; // (EB_NO_PROXY, coupleBegin: no table, nothing reads it)
+#else
     for (uint e = 0u; e < CPL_GS_VEHICLES; e++)
     {
         gsCpl[CPL_GS_TAB + 5u * e + 0u] = 0xFFFFFFFFu;
         gsCpl[CPL_GS_TAB + 5u * e + 2u] = 0u;
         gsCpl[CPL_GS_TAB + 5u * e + 4u] = 0u;
     }
+#endif
 }
 // Vehicle v as entry e: its spheres from `base`, its nodes' ranges from `nodeBase`.
 void cplGsAdd(uint e, uint v, uint base, uint nodeBase)
 {
+#ifdef EB_NO_PROXY
+    return;
+#else
     // The header's .x bit 2 (tests): no workgroup copies, every read from the buffers.
     if ((gsCpl[0] & 4u) != 0u) return;
     uint shapes = gsCpl[0] != 0u ? cplVeh(v).y : 0u;
@@ -337,6 +344,7 @@ void cplGsAdd(uint e, uint v, uint base, uint nodeBase)
     // bounds-checked form).
     bool ranges = (gsCpl[0] & 64u) == 0u;
     gsCpl[CPL_GS_TAB + 5u * e + 4u] = ranges && shapes > 0u && nodeBase < CPL_GS_NODES ? min(nodes, CPL_GS_NODES - nodeBase) : 0u;
+#endif
 }
 
 // Vehicle v's node ranges in workgroup memory: (base, count), (0, 0) when none.
@@ -795,10 +803,12 @@ bool cplListFirst(uint s)
 // maxima cleared.
 void cplListBegin(uint v)
 {
+#ifndef EB_NO_PROXY
     if (gsCpl[0] == 0u || !cplListOn()) return;
     uint la = cplListAcc(v);
     gAcc[la].store(0);
     gAcc[la + 1u].store(0);
+#endif
 }
 
 // After cplSpheresBy, the same lanes and shapes (each lane reads the spheres it wrote):
@@ -1075,7 +1085,9 @@ void cplFoldMark(uint v)
     // Written, never read here: every read of gsUniformCouple becomes a
     // workgroupUniformLoad (a barrier), which lane 0 alone must not execute. gsCpl[0] is
     // the same word (coupleBegin).
+#ifndef EB_NO_PROXY
     if (gsCpl[0] != 0u && cplFoldOn(v, LANES)) gsUniformCouple = gsCpl[0] | CPL_FOLD_FRAME;
+#endif
 }
 bool cplFoldOn(uint v, uint lanes)
 {
@@ -1165,6 +1177,13 @@ void cplShapeFolded(uint v, uint k, uint shapes, bool stepped)
 void cplFoldB(uint v, uint lane, uint lanes, uint s, out bool body, out float4 c0, out float4 q, out float4 c2,
               out float3 w)
 {
+#ifdef EB_NO_PROXY
+    body = false;
+    c0 = float4(0.0, 0.0, 0.0, 0.0);
+    q = float4(0.0, 0.0, 0.0, 1.0);
+    c2 = float4(0.0, 0.0, 0.0, 0.0);
+    w = float3(0.0, 0.0, 0.0);
+#else
     uint4 hdr = cplVeh(v);
     bool stepped = s > 0u;
     for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes) cplShapeFolded(v, k, hdr.y, stepped);
@@ -1179,9 +1198,11 @@ void cplFoldB(uint v, uint lane, uint lanes, uint s, out bool body, out float4 c
         cplBodyStepped(v, lane, hdr.y, c0, q, c2, w);
         gAcc[cplAcc(v) + lane].store(0);
     }
+#endif
 }
 void cplFoldC(uint v, uint lane, uint lanes, uint s, bool body, float4 c0, float4 q, float4 c2, float3 w)
 {
+#ifndef EB_NO_PROXY
     uint4 hdr = cplVeh(v);
     bool stepped = s > 0u;
     if (body)
@@ -1218,6 +1239,7 @@ void cplFoldC(uint v, uint lane, uint lanes, uint s, bool body, float4 c0, float
         }
     }
     cplCountListedGr(v, lane, lanes, s, uint2(0u, 0u));
+#endif
 }
 void cplStepFolded(uint v, uint lane, uint lanes, uint s)
 {
@@ -1235,6 +1257,9 @@ void cplStepFolded(uint v, uint lane, uint lanes, uint s)
 // The coupling's part of a step of vehicle v, at the step's start (uniform `on`).
 void coupleStep(uint v, uint lane, uint s, uint on)
 {
+#ifdef EB_NO_PROXY
+    return;
+#else
     if (on == 0u) return;
     // Folded (2 barriers; cplStepFolded): the solo frame's usual case (uniform: on).
     if ((on & CPL_FOLD_FRAME) != 0u)
@@ -1278,11 +1303,13 @@ void coupleStep(uint v, uint lane, uint s, uint on)
     sync();
     cplCountStep(v, lane, LANES, s);
     sync();
+#endif
 }
 
 // After a frame's last step (its closing barrier passed): that step's integration.
 void coupleEnd(uint v, uint lane, uint on)
 {
+#ifndef EB_NO_PROXY
     if (on == 0u) return;
     if (gP.steps > 0u)
     {
@@ -1290,6 +1317,7 @@ void coupleEnd(uint v, uint lane, uint on)
         sync();
         cplIntegrate(v, lane);
     }
+#endif
 }
 
 // coupleStep and coupleEnd for a contact group's k members.
@@ -1503,14 +1531,27 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
 // frame's start, and its region non-empty).
 // The wide passes (no coupleBegin, gsCpl unset) read the header itself: the coupling
 // is off whenever they run, so the record arithmetic never sees an unset copy.
+// EB_NO_PROXY (measurement, vehicle-perf-first-principles.md §8.47): a module without
+// the coupling's code, for a vehicle whose proxy set is empty this window. The header
+// reads as off (coupleBegin), no vehicle has proxy shapes (cplHas), the coupling's step,
+// its tables and its end are empty.
 bool cplHas(uint v)
 {
+#ifdef EB_NO_PROXY
+    return false;
+#else
     return gsCpl[0] != 0u && gMisc[coupleRec()].x != 0u && gMisc[cplBase(v)].y != 0u;
+#endif
 }
 
 // The frame's start (lane 0, before the barrier the uniform read follows).
 void coupleBegin()
 {
+#ifdef EB_NO_PROXY
+    gsUniformCouple = 0u;
+    gsCpl[0] = 0u;
+    return;
+#else
     uint4 h = gMisc[coupleRec()];
     uint on = h.x;
     gsUniformCouple = on;
@@ -1521,4 +1562,5 @@ void coupleBegin()
     gsCpl[CPL_GS_HDR + 2u] = h.w;
     gsCpl[CPL_GS_HDR + 3u] = h1.x;
     gsCpl[CPL_GS_HDR + 4u] = h1.y;
+#endif
 }

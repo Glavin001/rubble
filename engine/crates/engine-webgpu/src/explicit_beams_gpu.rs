@@ -114,6 +114,8 @@ pub struct ExplicitBeamsGpu {
     /// The wide passes with the reused pair list ([`Self::set_wide_list`]), and the steps
     /// of the frame being encoded when it runs so (0: not).
     wide_list: bool,
+    /// Measurement ([`Self::set_noproxy_modules`]).
+    noproxy: bool,
     /// With the list: the aux pass's work on the list and hits kernels' lanes
     /// ([`Self::set_wide_fused`]).
     wide_fused: bool,
@@ -595,6 +597,13 @@ fn self_split_modules(aero: bool, lanes: u32, vv: bool) -> Vec<(String, &'static
     }
 }
 
+/// Measurement (§8.47): which of the modules without the coupling's code
+/// `set_noproxy_modules` swaps in (1 the node pass, 2 the list kernel, 4 the aux pass).
+fn noproxy_parts() -> u32 {
+    static PARTS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PARTS.get_or_init(|| std::env::var("RUBBLE_NOPROXY_PARTS").ok().and_then(|v| v.parse().ok()).unwrap_or(7))
+}
+
 /// The wide passes' list module for a fleet at `lanes` (wide fleets have no aero).
 fn wide_list_module(lanes: u32) -> &'static str {
     if lanes == 512 { "explicit_beams_selfsplit_list_wide" } else { "explicit_beams_selfsplit_list" }
@@ -904,6 +913,7 @@ struct SelfSplit {
     /// Without vehicle contact: [the step, the walk, the pairs], compiled on first use.
     solo: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
     list: std::sync::OnceLock<wgpu::ComputePipeline>,
+    list_noproxy: std::sync::OnceLock<wgpu::ComputePipeline>,
     /// The step's bind group (the arguments buffer at binding 10, storage) and the pairs'
     /// (without it: the pairs dispatch takes its size from it).
     step_bind: wgpu::BindGroup,
@@ -973,6 +983,7 @@ impl SelfSplit {
         Self {
             solo: std::sync::OnceLock::new(),
             list: std::sync::OnceLock::new(),
+            list_noproxy: std::sync::OnceLock::new(),
             step_bind,
             pairs_bind,
             args,
@@ -1019,6 +1030,13 @@ impl SelfSplit {
     /// The wide passes' reused pair list: the list's part of a step (explicit_beams_wide_list).
     fn list_pipe(&self) -> &wgpu::ComputePipeline {
         self.list.get_or_init(|| self.pipeline(&format!("explicit_beams_selfsplit_list{}", self.tag), "explicit_beams_wide_list", &self.step_layout))
+    }
+
+    /// [`Self::list_pipe`] without the coupling's code (measurement, `EB_NO_PROXY`).
+    fn list_noproxy_pipe(&self) -> &wgpu::ComputePipeline {
+        self.list_noproxy.get_or_init(|| {
+            self.pipeline(&format!("explicit_beams_selfsplit_list{}_noproxy", self.tag), "explicit_beams_wide_list", &self.step_layout)
+        })
     }
 
     /// With vehicle contact: [the vehicles' step, the walk, the pairs].
@@ -1145,6 +1163,7 @@ fn module_wgsl(name: &str) -> &'static str {
             .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
             .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
             .chain(crate::EXPLICIT_BEAMS_WIDE_LIST.iter())
+            .chain(crate::EXPLICIT_BEAMS_NOPROXY.iter())
             .chain(SELF_SPLIT_ABLATE.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
@@ -1402,6 +1421,9 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
 /// The wide passes' pipelines and bind group ([`ExplicitBeamsGpu::set_wide`]).
 struct Wide {
     passes: Vec<wgpu::ComputePipeline>,
+    /// Measurement ([`ExplicitBeamsGpu::set_noproxy_modules`]): the node and aux passes
+    /// without the coupling's code.
+    noproxy: Vec<wgpu::ComputePipeline>,
     group: wgpu::BindGroup,
     /// The kernel's vehicle table (constant memory): static records, then per
     /// vehicle (origin, steps) copied from the misc buffer each frame.
@@ -1747,6 +1769,7 @@ impl ExplicitBeamsGpu {
             self_split_pipes: std::sync::OnceLock::new(),
             self_split_frame: std::cell::Cell::new(0),
             wide_list: std::env::var("RUBBLE_WIDE_LIST").as_deref() == Ok("1"),
+            noproxy: false,
             wide_fused: std::env::var("RUBBLE_WIDE_FUSED").as_deref() == Ok("1"),
             wide_list_frame: std::cell::Cell::new(0),
             wide_part: std::cell::Cell::new(0),
@@ -2644,6 +2667,35 @@ impl ExplicitBeamsGpu {
         &self.acc
     }
 
+    /// Measurement (vehicle-perf-first-principles.md §8.47): the wide passes that carry the
+    /// coupling (nodes, aux, the list kernel) run their modules compiled without its code
+    /// (`EB_NO_PROXY`). The same results only while no vehicle has a proxy shape.
+    #[doc(hidden)]
+    pub fn set_noproxy_modules(&mut self, on: bool) {
+        self.noproxy = on;
+    }
+
+    /// Measurement (§8.47): the coupling header's `on` word alone (no change of path, as
+    /// [`Self::set_coupling_on`] makes): off, the kernels' coupling returns at its first
+    /// test. The same results only while no vehicle has a proxy shape.
+    #[doc(hidden)]
+    pub fn set_coupling_header_on(&mut self, on: bool) {
+        self.coupling_on = on;
+        self.write_coupling_header();
+    }
+
+    /// Measurement (§8.47): every vehicle's proxy set emptied, as the World's coupling
+    /// writes a vehicle with nothing in reach (its record's counts 0;
+    /// `vehicle_coupling.slang`'s emit).
+    #[doc(hidden)]
+    pub fn clear_proxies(&self) {
+        if let Some(c) = self.layout.coupling {
+            for v in 0..c.vehicles {
+                self.queue.write_buffer(&self.misc, u64::from(c.vehicle(v)) * 16, bytemuck::bytes_of(&[0u32; 4]));
+            }
+        }
+    }
+
     /// Turn the rigid coupling on or off from the next frame (its header's `on` word).
     /// Panics without [`Self::with_coupling`]. On, the frames run on the per-vehicle
     /// workgroups (the wide passes do not run the coupling; the same steps, as
@@ -3482,7 +3534,13 @@ impl ExplicitBeamsGpu {
             Kernel::Wide(i) => {
                 let w = self.wide.as_ref().expect("explicit beams: wide passes not built");
                 let Cmd::Dispatch { param_copy, .. } = *cmd else { unreachable!() };
-                pass.set_pipeline(&w.passes[i]);
+                // (RUBBLE_NOPROXY_PARTS: 1 the node pass, 2 the list kernel, 4 the aux pass; 7.)
+                let np = if self.noproxy { plan::WIDE_PASSES[i].strip_prefix("explicit_beams_wide_") } else { None };
+                pass.set_pipeline(match np {
+                    Some("nodes") if noproxy_parts() & 1 != 0 => &w.noproxy[0],
+                    Some("aux") if noproxy_parts() & 4 != 0 => &w.noproxy[1],
+                    _ => &w.passes[i],
+                });
                 pass.set_bind_group(0, &w.group, &[param_copy * PARAM_STRIDE as u32]);
             }
         }
@@ -4260,7 +4318,7 @@ impl ExplicitBeamsGpu {
                 }
             }
             SelfDispatch::List { copy, groups } => {
-                pass.set_pipeline(p.list_pipe());
+                pass.set_pipeline(if self.noproxy && noproxy_parts() & 2 != 0 { p.list_noproxy_pipe() } else { p.list_pipe() });
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
                 pass.dispatch_workgroups(groups, 1, 1);
             }
@@ -5033,12 +5091,10 @@ impl Wide {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let passes = plan::WIDE_PASSES
-            .iter()
-            .map(|&entry| {
+        let make = |entry: &str, name: &str| {
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(entry),
-                    source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(entry)).into()),
+                    label: Some(name),
+                    source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
@@ -5059,7 +5115,11 @@ impl Wide {
                     },
                     cache: None,
                 })
-            })
+        };
+        let passes = plan::WIDE_PASSES.iter().map(|&entry| make(entry, entry)).collect();
+        let noproxy = ["explicit_beams_wide_nodes", "explicit_beams_wide_aux"]
+            .iter()
+            .map(|&entry| make(entry, &format!("{entry}_noproxy")))
             .collect();
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams-wide"),
@@ -5085,7 +5145,7 @@ impl Wide {
                 }))
                 .collect::<Vec<_>>(),
         });
-        Self { passes, group, table }
+        Self { passes, noproxy, group, table }
     }
 }
 
