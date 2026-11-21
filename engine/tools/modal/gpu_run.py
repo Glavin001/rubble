@@ -35,6 +35,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -259,6 +260,22 @@ def run(archive_key: str, spec: dict) -> dict:
     return _run_impl(archive_key, spec)
 
 
+# COUNTERS=1 (the two-build matrix's hardware counters): the same run in an image with
+# NVIDIA's Nsight Compute (ncu, ~1.2 GB; built once and cached by Modal). Measured
+# 2026-11-21 on a T4: Modal's sandbox refuses to lock the GPU clocks, and every counter
+# works with --clock-control none.
+counters_image = modal.Image.from_registry("nvidia/cuda:12.8.0-base-ubuntu22.04", add_python="3.12").run_commands(
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends"
+    " cuda-nsight-compute-12-8 && rm -rf /var/lib/apt/lists/*"
+)
+
+
+@app.function(**{**FUNCTION, "image": counters_image})
+def run_counters(archive_key: str, spec: dict) -> dict:
+    PREFIX[0] = f"[{spec['shard']['label']}] " if spec.get("shard") else ""
+    return _run_impl(archive_key, spec)
+
+
 # (Modal preempted two long cold runs: the call restarts from the beginning, billed
 # again. Non-preemptible containers are not offered for GPU functions.)
 
@@ -308,6 +325,9 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
     base = {
         **os.environ,
         "RUST_BACKTRACE": "1",
+        # matrix.py's rows reach the log as they finish (a pipe is block-buffered), so
+        # a run the cap kills keeps the rows it finished.
+        "PYTHONUNBUFFERED": "1",
         "RUBBLE_GPU_LOCK": "0",  # one job per container: no machine lock to share
         "WGPU_BACKEND": "vulkan",
         "VK_ICD_FILENAMES": "/etc/vulkan/icd.d/nvidia_icd.json",
@@ -589,7 +609,8 @@ def main(archive: str, spec: str):
     cpus = float(s.get("cpus", CPUS))
     mem = float(s.get("mem", MEM_GIB))
     rate = GPU_PRICE[gpu] + cpus * CPU_PRICE + mem * MEM_PRICE
-    fn = run.with_options(gpu=gpu, timeout=cap, cpu=cpus, memory=int(mem * 1024))
+    fn = (run_counters if s["env"].get("COUNTERS") == "1" else run).with_options(
+        gpu=gpu, timeout=cap, cpu=cpus, memory=int(mem * 1024))
     t0 = time.time()
     if not shards:
         # Spawned, so the wait has a bound of its own: a GPU type without capacity leaves
@@ -763,7 +784,11 @@ def _matrix_report(s: dict, done: list[tuple[dict, dict | None]], run_dir: Path)
         rows += body + [f"{n:<8} NO RESULT ({_status(o['code']) if o else 'NO GPU'})"
                         for n in names if not any(l.split()[0] == n for l in got)]
         if not o or o["code"] != 0:
-            bad += names
+            # The container's own verdict names its failing rows (a packed container fails
+            # as a whole when one row does); without one, every row it held failed.
+            own = next((l for l in lines if l.startswith("verdict:")), "")
+            m = re.search(r"FAIL \(([^)]*)\)", own)
+            bad += [n.strip() for n in m.group(1).split(",")] if m else names
     print("\n" + "\n".join(header + rows), flush=True)
     kind = "baseline" if s["matrix_args"][:1] == ["--baseline"] else "verdict"
     verdict = "PASS" if not bad else "FAIL (" + ", ".join(bad) + ")"

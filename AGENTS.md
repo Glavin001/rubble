@@ -44,6 +44,10 @@
   after `--make`; `ENGINE_CUDA_FMAD=0` for strict floats when a switch runs other
   modules). Modal timing is
   directional; bit-for-bit verdicts are exact. `engine/tools/modal/README.md`.
+  A performance experiment is judged commit against commit there:
+  `tools/scenario-matrix/run.sh --cuda --base REF [--head REF]` (two builds, kept in a
+  library by commit; `COUNTERS=1` adds each kernel's hardware counters). Read the
+  `gpu-ab-on-modal` skill first.
 - Checking a kernel change: climb a ladder, cheapest rung first, and do not go up a
   rung until the one below passes. Never wait minutes for an answer a rung of seconds
   gives. The bar does not move: what must be bit for bit is checked bit for bit.

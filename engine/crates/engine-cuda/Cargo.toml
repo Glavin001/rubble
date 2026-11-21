@@ -24,4 +24,6 @@ engine-terrain.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+# Path, not the workspace entry: without the default `metal` feature (Linux builds).
+engine-scenes = { path = "../engine-scenes", default-features = false }
 serde_json.workspace = true

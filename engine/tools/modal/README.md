@@ -93,6 +93,7 @@ engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_v
 | `--fanout-tests` | One container per test, all at once |
 | `--matrix` | The scenario matrix, one container per row (`tools/scenario-matrix/run.sh` calls it) |
 | `--matrix-cuda` | The scenario matrix on CUDA, every row in one container with 1 core and 2 GiB (`run.sh --cuda`; see below) |
+| `--base REF` / `--head REF` | `--matrix-cuda`: also ship `explicit_replay` built from commit REF (`build_ref.sh`, kept in `engine/target/gpu-run-refs/`) for `matrix.py --two-builds`; the head defaults to the working tree's build (see "Two builds, head to head") |
 | `--pack N` | Matrix: the rows in N containers, in turn within each (default one per row; 1 for `--matrix-cuda`) |
 | `--cpus N` / `--mem GIB` | The container's cores (fractional allowed) and memory: default 8 and 8 (the Vulkan driver compiles on the CPU); 1 and 2 for `--matrix-cuda` |
 | `--build-only` | Build and pack, no Modal call |
@@ -248,6 +249,115 @@ Where CUDA stands against the Mac (2026-11-19, `run.sh --cuda perf=0`, ms a fram
   times the Mac's time (pile32 1.12). Use the T4 for verdicts and ranking (cheapest, nearly
   always available); an L4 for absolute numbers (Modal had none for some rows at times:
   `NO RESULT (NO GPU)`).
+
+## The rest of the World on CUDA
+
+The rigid step already runs on CUDA (`CudaSim`, the columns gates at 640 / 10k / 100k), and
+the explicit frame does (above). The coupling's World side, terrain, the stress solver and
+fracture do not yet, so they still need the Vulkan route and its cold compiles. The plan,
+the inventory of passes, the host work each needs and the cost per verdict:
+`engine/docs/world-on-cuda.md`.
+
+## Two builds, head to head (commit against commit)
+
+For performance experiments, prefer comparing two builds to adding a runtime switch.
+A switch adds branches you have to remove later. A branch inside a hot kernel can change
+register use and spill values, so you end up timing the branch. An architecture change
+(a new buffer layout, a new schedule, rewritten kernels) cannot sit behind a switch at
+all. Two builds time exactly what would ship.
+
+From `engine/`:
+
+```bash
+ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda --base main --head my-experiment [ROW ...]
+```
+
+- Without `--head`, the head is the working tree's build.
+- `ENGINE_CUDA_FMAD=0` (strict floats) keeps bit for bit meaningful between builds that
+  launch different modules. It costs nothing measurable.
+
+What happens:
+
+1. **Building.** Each ref is built once in local Docker by `tools/modal/build_ref.sh`
+   (`git archive` of the commit, the CUDA build image, device code for the modules the
+   rows' fixtures need, as that commit names them). It is kept in a library under
+   `engine/target/gpu-run-refs/<commit>-<settings>/` (gitignored), with an `info.txt`
+   giving the commit, subject, branches, settings, modules, fixtures and build time.
+   - `build_ref.sh --list` shows the library.
+   - `--prune N` keeps the newest N builds.
+   - The key covers the commit, every `ENGINE_*` setting (SASS 75 for the T4, 89 for the
+     L4; strict floats or not) and the saved states (every row's, whichever rows a run
+     names, so one build serves any selection). A commit built before costs no build.
+   - A new commit takes about 8 minutes (491–512 s measured; the dependencies are shared
+     between commits, and the workspace crates and nvcc modules rebuild).
+   - The working tree is never kept, since it has no commit to name it by. Commit an
+     experiment to keep it.
+2. **Shipping.** Both binaries go up in one archive (`gpu_run_pack.py --exe`).
+3. **Running.** One container. For each row, `matrix.py --two-builds` alternates a base
+   process and a head process, A B, B A, A B (`PROCS=3`), each running
+   `explicit_replay --run` on the row's portable fixture: `ROUNDS` x `FRAMES` frames, each
+   frame's best round, mean. Its end state is saved word by word (`--save-state`).
+4. **Judging.**
+   - The median process of each build is compared.
+   - `noise` is the spread between the base's own processes. Trust a delta well above it.
+   - `bit4bit` compares the end states word for word, base against head, and each build
+     against its own other processes.
+   - A changed layout compares the bindings both builds have and names the rest.
+   - The verdict fails a row that differs, or that is slower than 5 % and 0.05 ms.
+   - `ALLOW_DIFF=1` reports differences without failing, for a change that reorders
+     arithmetic on purpose. Equivalence then needs its own evidence (rung 3).
+
+Both builds must read the same portable fixtures. A head that changes what a fixture
+holds needs fixtures made from the head (`run.sh --make`, `matrix.py --make-portable`)
+that the base can also read, or a fixture per build. A base older than
+`explicit_replay --run` (before 58a0cfe1) is timed through its no-op A/B and has no end
+state to compare (`bit4bit` reads `n/a`).
+
+Measured 2026-11-21 (T4, strict floats, all 12 rows):
+
+| Comparison | Result | Billed |
+|---|---|---|
+| 58a0cfe1 against itself (base from the library, head from the tree) | PASS: every row bit for bit, deltas −0.1 to +0.7 %, noise 0.0–0.5 % (drive 9.5 %: one base process ran at another level; the median ignores it) | 112 s, $0.020 |
+| 58a0cfe1 against `claude/fake-ab-slow`: a demo commit that turns off GPU-side indirect counts (the host reads them back), lossless and slower | FAIL as it should: 11 rows slower by 13–42 %, pile32 +2.4 % (its long frame hides the waits), every row bit for bit, noise ≤ 0.5 % (drive 4.1 %) | 103 s, $0.019 |
+
+A two-build verdict costs about four times a switch verdict (six processes a row, each
+starting CUDA and loading its fixture). That is about 2 cents, so about 1,500 verdicts for
+$30.
+
+### Hardware counters (`COUNTERS=1`)
+
+`COUNTERS=1` adds NVIDIA's counters for each kernel to every row, both builds:
+time, registers, achieved occupancy, SM and DRAM throughput against peak, and L1 and L2
+hit rates. Builds that differ show the base's value in brackets. Nsight Compute replays
+every launch several times, so this runs after the timing, never inside it. It runs in
+its own Modal image with `ncu` (`run_counters` in `gpu_run.py`, built once).
+`COUNTER_METRICS` replaces the metric list; `COUNTER_TOP` sets how many kernels are shown
+(default 12).
+
+- Modal's sandbox (gVisor) refuses to lock the GPU clocks, so ncu runs with
+  `--clock-control none`. Every counter works that way (probed 2026-11-21), but ratios
+  can come out wrong (one probe showed 142 % achieved occupancy). Use the counters to
+  explain where time goes; the timed A/B decides what is faster.
+- Nsight Systems (`nsys`, the launch timeline) also works there. It is not wired in.
+- Profiling is slow: about 6.5 minutes and 11 cents for one small row (truss, both
+  builds, 8 cores; 388 s billed). Name one or two rows (`... --head X truss`).
+  - `COUNTERS=1` gives the container 8 cores, 8 GiB and the 1800 s cap: Nsight works on
+    the CPU, and on 1 core two rows passed the 600 s cap with the GPU at 0–1 %.
+  - Nsight runs with `--replay-mode application` (the whole replay once per counter pass,
+    valid because a replay is bit for bit deterministic) and `--cache-control none` (hit
+    rates are the frame's, not a flushed cache's).
+- Kernel names show which path ran. A kernel present in one build and absent in the
+  other reads −100 % or `new`.
+- Measured 2026-11-21, truss, base 58a0cfe1 against `claude/fake-ab-slow` (host readback
+  of indirect counts):
+  - The head was 36.8 % slower per frame, yet its kernels summed to less GPU time: 899 µs
+    against 1,162 µs.
+  - The head skips launches whose count is zero, and the base's grid-stride `self_pairs`
+    and `self_walk` launch with no work, about 254 µs a frame (about 4 µs a launch).
+  - So the head's cost is all host waits, and the base has an optimization lead.
+  - That run's timing was noisier than usual: the base's truss processes spread 81 %,
+    against 0.4 % on 1 core, and the cause is not established. Judge speed by a run
+    without `COUNTERS`.
 
 ## Cold kernel compiles (WebGPU route; read this first)
 

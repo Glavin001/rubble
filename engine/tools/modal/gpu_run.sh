@@ -100,6 +100,13 @@ done
 # Measured 2026-11-21 (T4, 12 rows, perf=0): 12 containers with 8 cores and 8 GiB billed
 # 58 s ($0.0167); one container with 1 core and 2 GiB 26 s ($0.0048), wall 29 s.
 if [ -n "${matrix_cuda:-}" ]; then
+  # COUNTERS=1: Nsight Compute replays every launch, saving and restoring the GPU's memory
+  # on the CPU. On 1 core the GPU sat at 0-1 % and two rows passed the 600 s cap
+  # (2026-11-21): 8 cores, 8 GiB and the 1800 s cap.
+  if [ "${COUNTERS:-}" = 1 ]; then
+    : "${cpus:=8}" "${mem:=8}"
+    [ "$cap" = 600 ] && cap=1800
+  fi
   : "${cpus:=1}" "${mem:=2}" "${pack:=1}"
 fi
 : "${cpus:=8}" "${mem:=8}" "${pack:=0}"
@@ -118,7 +125,7 @@ if [ "$fanout" = matrix ]; then
   data+=(--data engine/tools/scenario-matrix)
   if [ -n "${CAR:-}" ]; then sedan="$CAR"; fi
   envs+=("CAR=@sedan")
-  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT; do
+  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP; do
     v="$(printenv "$k" || true)"
     if [ -n "$v" ]; then envs+=("$k=$v"); fi
   done
@@ -184,9 +191,9 @@ fi
 #
 # On Apple silicon the build runs natively: an arm64 Linux image cross-compiling to
 # x86_64 (engine/tools/modal/build), about 3x faster than the x86_64 image under Rosetta
-# (vehicle_lab from empty: 112 s vs 328 s). The CUDA route too: the image's aarch64 nvcc
-# is the x86_64 image's release and writes the same fatbin bytes (README, "Build speed");
-# GPU_RUN_X86=1 builds in the x86_64 image instead (to compare).
+# (vehicle_lab from empty: 112 s vs 328 s). The CUDA route too: rustc and slangc native,
+# nvcc the x86_64 image's own toolkit through Rosetta, so the device code is the x86_64
+# build's (README, "Build speed"); GPU_RUN_X86=1 builds in the x86_64 image instead.
 wt_key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
 cuda_route=0
 case " $* " in *" engine-cuda "*|*" -p engine-cuda"*) cuda_route=1 ;; esac
@@ -219,8 +226,12 @@ esac
 if [ -n "${base_ref:-}${head_ref:-}" ]; then
   [ -n "${matrix_cuda:-}" ] || { echo "gpu_run: --base/--head are for --matrix-cuda" >&2; exit 2; }
   [ -n "${base_ref:-}" ] || { echo "gpu_run: --head needs --base" >&2; exit 2; }
+  # Every row's fixture, in the matrix's order, whichever rows run: the library's key
+  # covers the fixtures, so a build serves any selection of rows.
   fx=()
-  for r in "${matrix_rows[@]}"; do fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx"); done
+  for r in $(python3 "$matrix_py" --rows --two-builds); do
+    [ -f "$repo/engine/out/scenario-matrix/portable/$r.pfx" ] && fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx")
+  done
   "$here/build_ref.sh" "$base_ref" "$run/refs/base_replay" "${fx[@]}"
   pack_opts+=(--exe base_replay=/out/refs/base_replay)
   if [ -n "${head_ref:-}" ]; then
@@ -239,14 +250,16 @@ if [ "$platform" = linux/arm64 ]; then jobs_default=$(sysctl -n hw.ncpu 2>/dev/n
 # tests' 21 modules took 301 s at 4 jobs, 222 s at 8 and 211 s at 12, peak 6-7 GB, on a
 # 16-core M3 Max with Docker given 16 cores and 25 GB; 2026-11-19.)
 else jobs_default=6; rjobs_default=12; fi
-# The CUDA route keeps nvcc's fatbins by content in a volume every worktree and every
-# build_ref.sh commit shares (ENGINE_CUDA_FATBIN_CACHE): a module whose CUDA source and
-# flags were compiled before is copied, not compiled (the rigid and terrain kernels after
-# an explicit-beams edit, the modules an edit did not reach, a commit's unchanged ones).
+# The CUDA route keeps nvcc's fatbins (ENGINE_CUDA_FATBIN_CACHE) and slangc's outputs
+# (RUBBLE_SLANG_OBJ_CACHE) by content in a volume every worktree and every build_ref.sh
+# commit shares: a module whose CUDA source and flags were compiled before is copied, not
+# compiled (the rigid and terrain kernels after an explicit-beams edit, the modules an
+# edit did not reach, a commit's unchanged ones, an edit undone).
 cuda_cache=()
 if [ "$cuda_route" = 1 ]; then
-  cuda_cache=(-v rubble-cuda-fatbins:/cache/fatbins -v "$here/fatbin_cache.py:/opt/rubble/fatbin_cache.py:ro"
-    -e ENGINE_CUDA_FATBIN_CACHE=/cache/fatbins -e ENGINE_CUDA_REQUIRE_PTX=1)
+  cuda_cache=(-v rubble-cuda-kernels:/cache/kernels -v "$here/fatbin_cache.py:/opt/rubble/fatbin_cache.py:ro"
+    -e ENGINE_CUDA_FATBIN_CACHE=/cache/kernels/fatbins -e RUBBLE_SLANG_OBJ_CACHE=/cache/kernels/slang
+    -e ENGINE_CUDA_REQUIRE_PTX=1)
 fi
 docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_cache[@]+"${cuda_cache[@]}"} \
   -v "$repo:/repo" \
@@ -255,7 +268,7 @@ docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_
   -v "$target_vol:/cache/target" \
   -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$jobs_default}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-$rjobs_default}" \
-  "$image" bash -c 'if [ -n "${ENGINE_CUDA_FATBIN_CACHE:-}" ]; then python3 /opt/rubble/fatbin_cache.py "$ENGINE_CUDA_FATBIN_CACHE"; fi
+  "$image" bash -c 'if [ -n "${ENGINE_CUDA_FATBIN_CACHE:-}" ]; then python3 /opt/rubble/fatbin_cache.py "$ENGINE_CUDA_FATBIN_CACHE"; python3 /opt/rubble/fatbin_cache.py "$RUBBLE_SLANG_OBJ_CACHE" --max-gib 4; fi
     exec python3 /repo/engine/tools/modal/gpu_run_pack.py "$@"' gpu_run_pack /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
 t1=$(date +%s)
 echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2

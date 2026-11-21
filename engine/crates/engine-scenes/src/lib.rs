@@ -9,6 +9,7 @@ use engine_schema::scene::{HostWorld, SceneBuilder, SceneSink};
 use engine_schema::{AvbdParams, BodyState, WorldCapacity, FLAG_REUSE_CONTACTS};
 use glam::{Quat, Vec3};
 
+pub mod invariants;
 pub mod joints;
 pub use joints::*;
 pub mod legacy;
