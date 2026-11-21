@@ -1556,8 +1556,8 @@ fleet case) are not comparable and are not reported.
 
 Known-bugs F7, the user's decision ("Yes, fix wheels") after the Derby showed cars beached on
 bricks and on each other. An engine-wide setting, `ExplicitVehiclesDef::wheels_hit_bodies`,
-on by default in the World (live: `World::set_explicit_wheels_hit_bodies`; the lab's "wheels
-on bodies" checkbox, `?wheelsHitBodies=0`; `vehicle_lab --wheels-bodies 0`). Underneath it is
+off by default (it was on until 2026-11-21; see "Open: Chrome" below and known-bugs F8) (live: `World::set_explicit_wheels_hit_bodies`; the lab's "wheels
+on bodies" checkbox, `?wheelsHitBodies=1`; `vehicle_lab --wheels-bodies 1`). Underneath it is
 `DriveConfig::see_bodies` per car, off by default outside the World.
 
 **What a wheel's ray meets**, nearest first (ties: the static surfaces, then proxies, then
@@ -1656,3 +1656,16 @@ states with the setting on against off from the same state, `run.sh wheels`; ms 
 The Derby in Chrome (`derby-probe.js`, GPU ms a World step, median): 4 cars 12.1 off, 13.6 on
 (+12 %); 8 cars 18.4 off, 25.9 on (+41 %). No car was beached in those rounds either way
 (vehicle-lab.md, "The derby").
+
+**Open: Chrome (2026-11-21, found while integrating PR #145; known-bugs F8).** In Chrome the
+lab's 8-car mountain (`vehicle-lab.html?mode=mountain&cars=8&terrain=ledges`, the authored
+sedan) with the setting on stops with an engine error at t = 3.2 s: at the first collisions
+every car's position and velocity are non-finite. This is the same with bit-exact results on
+(`bitExact=1`) and off, so it is not the fast arithmetic. With the setting off the same page runs
+to the end of the probe (t = 8.3 s, 337 beams broken, finite), at 9 ms of GPU a frame before
+contact against 22 ms with it on. Natively, the scenario matrix's pile8 and pile32 fixtures
+(this setting on, bit-exact) were made through the same collisions and stayed finite, so the
+difference is in the browser's path or in what only the page does. Until it is found and
+fixed the setting is **off by default** everywhere (World, lab, `vehicle_lab`). It is still
+one checkbox or `?wheelsHitBodies=1` away, and all of its tests pass.
+Probe logs: `engine/out/integration/chrome-probe-m8*.log` on the integration worktree.

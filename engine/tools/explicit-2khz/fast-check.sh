@@ -6,7 +6,7 @@
 #   tools/explicit-2khz/fast-check.sh --make [CARS ...]     (from engine/; once, and again
 #       after a change of the buffers' layout)  saves the fixtures: CARS cars (default
 #       1 2 4 8) driven to the moments below, into out/fixtures/cars<N>_t<T>.fx (EXTRA:
-#       more vehicle_lab options for the run, e.g. EXTRA="--wheels-bodies 0")
+#       more vehicle_lab options for the run, e.g. EXTRA="--wheels-bodies 1")
 #   tools/explicit-2khz/fast-check.sh SWITCH [FIXTURE ...]
 #       SWITCH: a `vehicle_lab --ab-switch` value (perf=<mask>, groupsplit, wide, sleep,
 #       sleeplist, ...; vehicle sleep's own checks: sleep-check.sh).

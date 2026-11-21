@@ -44,7 +44,7 @@ Consequences, all measured (`fix/etk-strength` probes, verification-plan §0.1):
 - **An immovable proxy matches the solver's own static wall.** Momentum agrees within about 5 % (0.8 % without raycast wheels), and a 1 m drop gives 697–720 kN peak force on every path. The bit-for-bit version of this test passes only for Rigs of Rods-profile cars (known-bugs F1).
 - **Inside one World window, proxies don't touch each other.** The bricks in a wall don't push on each other during the car's 33 substeps, only at the next rigid step. Against a loose 25 kg brick wall the result converged across 60, 120 and 240 Hz World rates, so window length is not the driver at those rates.
 - **Only the car's nodes collide with rigid shapes, unless surface contact is on.** Triangle-against-shape contact exists, opt-in. Node-only contact lets a brick corner slip between nodes (known-bugs B1).
-- **Raycast wheels stand on rigid bodies and other cars** (known-bugs F7, fixed 2026-11-18: `ExplicitVehiclesDef::wheels_hit_bodies`, on by default; the reaction goes back onto the body or the other car).
+- **Raycast wheels stand on rigid bodies and other cars** (known-bugs F7, fixed 2026-11-18: `ExplicitVehiclesDef::wheels_hit_bodies`, off by default until known-bugs F8 is fixed; the reaction goes back onto the body or the other car).
 - **Destruction stays forward-only.** A vehicle's strike on a prefractured house goes into the threshold fracture's ingest (a second substep slot). Bonds break and the house splits before the rigid step of that window. Nothing is re-simulated, as `AGENTS.md` requires.
 
 ## 3. Performance: what costs what
