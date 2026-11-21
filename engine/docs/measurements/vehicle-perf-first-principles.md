@@ -5799,3 +5799,171 @@ RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=time GATE_SLEEP=off GATE_SCENES="Bric
 tools/scenario-matrix/run.sh checks=15:7     # the explicit pipelines' zeroing (ON:OFF masks)
 RUBBLE_RIGID_BOUNDS_OFF_NAMES=narrowphase_fresh_copy_persistent GATE_MODE=hash GATE_SLEEP=off GATE_SCENES="Brick Ring (28k)" cargo run --profile fast -p engine-world --example rigid_gate   # differs from step 20
 ```
+
+### 8.50 A module without the coupling's code for a vehicle with an empty proxy set: measured, not built (2026-11-21)
+
+The gpu-floor review (`gpu-floor-vs-production.md`, §6.2 step 1)
+proposes that a vehicle whose proxy set is empty for a coupling window be sent to a
+module without the coupling's code, chosen a frame by an indirect count. Its own kernel
+without that code was 0.16 ms a frame cheaper. This section measures what the same choice
+gives production, on `main` at 96904a44. (It follows §8.47 and §8.48; measured on the
+sibling branch `claude/jovial-moser-8fc7c2`, whose measurement build is reverted.)
+
+**What production does today** (read, each with its place at 96904a44):
+
+* **No module without the coupling's node contact exists.** The `_nocpl` twins
+  (`EB_NO_COUPLING`, twelve frame and contact modules, `engine-webgpu/build.rs`) leave out
+  only the surface pass's proxy paths, and the host picks one once an upload, for a fleet
+  with surface contact and no coupling room (`explicit_beams_gpu.rs:1165` `frame_module`).
+  Every other module carries `explicit_beams_rigid.slang` whole.
+* **The node phase already chooses a vehicle a step, by a branch.** `nodeUpdate` calls the
+  coupled function only when `cplHas(vehicle)` (`explicit_beams.slang:1182`, `:1261`), and
+  `cplHas` is false for a vehicle whose record has no shape
+  (`explicit_beams_rigid.slang:1506`). A vehicle with an empty proxy set runs
+  `nodeUpdateShapes`, the same function a World without coupling runs.
+* **On the lab's path (what the matrix times) the coupling's step is not on the vehicle's
+  own workgroup.** The wide passes with the reused pair list run step s + 1's coupling on a
+  workgroup of its own in the list kernel's dispatch (`wideCoupleApart`,
+  `explicit_beams.slang:8537`; the host dispatches three workgroups a vehicle,
+  `explicit_beams_gpu.rs:3513`). With no shape its count pass returns at its first test
+  (`explicit_beams_rigid.slang:932`).
+* So with an empty proxy set what is left of the coupling on that path is: in the node
+  pass a header read by lane 0 and one barrier a workgroup, and two record reads a node
+  (`cplHas`); on the coupling's workgroup the header, an empty table and four barriers a
+  step (a vehicle with no shape does not take the folded step: `cplSplit` needs a shape);
+  and the code itself, in three modules: the node pass (`explicit_beams_wide_nodes`), the
+  list kernel (`explicit_beams_selfsplit_list`) and the aux pass (`explicit_beams_wide_aux`,
+  two dispatches a frame).
+* A World outside the lab runs the other path: `World::add_explicit_vehicles` turns the
+  coupling on, which turns the wide passes off (`explicit_beams_gpu.rs:2651`; the lab
+  turns them on again, `vehicle_lab/mod.rs:2719`). There the coupling's step, with its
+  four barriers a substep for an empty set, is on the vehicle's own workgroup.
+
+**The matrix's one-car rows as saved** (each vehicle's proxy bodies / shapes in the saved
+state): drive 0 / 0 (flat ground is the solver's own plane); tumble 7 / 7 (the mountain's
+ground is static rigid chunks; the car is in the air); wall 1 / 1 (the wall is a rigid
+body, mid-crush); bricks 34 / 34; rocks 3 / 3. Only the drive row has an empty proxy set,
+so only there would the review's choice act. For the other two the same comparison was
+made from the saved state with the proxy set emptied (`--ab-empty-proxies`: the record's
+counts zero, as the coupling's emit writes a vehicle with nothing in reach,
+`vehicle_coupling.slang:937`); the car then flies on or drives through where the wall was,
+the same in both halves.
+
+**The measurement build** (commit 8417ad38, reverted by the commit after it): the three
+modules compiled a second time with `EB_NO_PROXY`: `cplHas` false, `coupleBegin` without
+the header, the coupling's step, tables and end empty, the node pass without its coupled
+branch and its barrier, the coupling's workgroup returning at once (still dispatched).
+The WGSL: node pass 100,219 → 66,026 bytes, list kernel 271,340 → 205,568, aux pass
+119,007 → 62,534. A host switch swaps them in (`set_noproxy_modules`), and the lab times
+both from one state in one process (`--ab-switch noproxy`). Without the define the two
+kernel files are `main`'s text (`unifdef -UEB_NO_PROXY`). A second switch
+(`--ab-switch cplhdr`) turns the coupling header's `on` word off in the shipped modules:
+what the coupling's code executes for a vehicle without proxies, on either path.
+
+**Results** (native Metal, M3 Max, `--profile fast`, the lab's default path: the wide
+passes with the reused pair list, as the matrix runs a row). Each run is one process: the
+two halves in turn from the saved state, 11 rounds of 10 frames, each frame's best round,
+their mean. Eight runs a line, the comparisons taken in turn; the control is the same
+chain with `perf=0` (both halves the same code). ms a frame of 34 steps:
+
+| row, proxy set | shipped | without the coupling's code | change (median of the runs' own) | range of the runs | control | state |
+|---|---|---|---|---|---|---|
+| drive, empty as saved | 3.303 | 3.232 | **−0.062 ms, −1.9 %** | −2.7 to +0.6 % | +0.1 % | bit for bit, 8 of 8 |
+| tumble, emptied | 2.963 | 2.883 | **−0.069 ms, −2.4 %** | −2.7 to +1.1 % | −0.1 % | bit for bit, 8 of 8 |
+| wall, emptied | 3.912 | 3.847 | **−0.063 ms, −1.6 %** | −2.1 to −1.1 % | +0.2 % | bit for bit, 8 of 8 |
+| tumble as saved, 7 static shapes, none touched (not step 1) | 3.322 | 2.893 | −0.363 ms, −11.2 % | −15.9 to −8.4 % | 0.0 % | bit for bit, 8 of 8 |
+
+A first chain of five runs a line (3 rounds a process) agrees: pooled over the thirteen,
+−1.8, −2.4, −1.7 and −11.1 %. The wall, bricks and rocks rows as saved differ with the
+modules swapped, as they must: their proxies are being touched or are in free flight.
+
+What the shipped modules execute for a vehicle without proxies (`--ab-switch cplhdr`, the
+header's `on` word on against off, five runs a line, 3 rounds; every run bit for bit):
+
+| path | row | on | off | the coupling's executed work |
+|---|---|---|---|---|
+| the lab's (wide passes) | drive | 3.726 | 3.769 | +0.007 ms, +0.2 % (−1.8 to +2.3) |
+| a workgroup a vehicle (`--wide 0`) | drive | 4.479 | 4.324 | **+0.157 ms, +3.6 %** (3.3 to 3.8) |
+| | tumble, emptied | 4.121 | 3.965 | **+0.167 ms, +4.4 %** (2.8 to 4.6) |
+| | wall, emptied | 5.636 | 5.455 | **+0.220 ms, +4.1 %** (2.8 to 7.2) |
+
+Where the lab path's gain is, by module (`RUBBLE_NOPROXY_PARTS`, five runs, 3 rounds):
+on the drive row the node pass alone −1.3 % (−2.9 to +12.5, one run an outlier) and the
+list kernel alone +0.1 %; on the tumble row as saved the node pass −7.9 % (−9.3 to −6.8),
+the list kernel −2.3 % (−2.5 to −1.2), the aux pass −0.7 %.
+
+**Reading.**
+
+* **The choice is exact with no guard, as the review argued.** Every run with an empty
+  proxy set left the same state words and coupling records with the coupling's code out
+  (39 runs over three rows) or its header off (20 runs).
+* **On the path the matrix times it is worth 0.06 to 0.07 ms a frame, 1.6 to 2.4 %.**
+  Nothing of that is executed work (the header's word: +0.2 %): the node phase already
+  takes the uncoupled function for such a vehicle and the coupling's step sits on a
+  workgroup beside the list kernel. What is left is the node pass's barrier and the size
+  of its code.
+* **The review's 0.16 ms is production's too, on the other path.** Where the coupling's
+  step is on the vehicle's own workgroup an empty set costs 0.16 to 0.22 ms a frame, 3.6
+  to 4.4 % of that path's 4.0 to 5.5 ms (by the code, the step's four barriers a substep
+  and the node pass's test; not timed apart). The experiment's kernel has that layout, which is why it saw the cost.
+* **The row where the coupling costs most is not step 1's.** A car in the air over the
+  mountain has seven ground chunks in its proxy set and pays 0.36 ms a frame (11 %) for
+  them without touching one, most of it in the node pass. On the mountain no car's set is
+  ever empty, so the choice by an empty set never acts there.
+
+**Decision: nothing is built.** The stop rule was 5 % of a frame on a one-car row; the
+choice gives 1.6 to 2.4 % on the matrix's path and at most 4.4 % as a bound on the other.
+Two more reasons it would not have been built as the review describes it:
+
+* On the wide path a module a vehicle does not exist for the node pass: one dispatch runs
+  a thread a node over the whole fleet. A module there is chosen a fleet (every vehicle's
+  set empty), or the pass is split by vehicle; the choice a vehicle is the branch it
+  already has.
+* It costs four more modules for a browser to compile (66, 63 and twice 206 kB of WGSL)
+  and a second set of pipelines.
+
+`main`'s kernels and defaults are unchanged; no switch was added.
+
+**Left for a decision, neither built nor verified beyond the runs above:**
+
+1. *The workgroup path's 0.16 ms without a new module.* The header-off half above is the
+   whole change for a vehicle alone on its workgroup: lane 0 at the frame's start leaves
+   the uniform word zero when the vehicle's record has no body and no shape (as
+   `cplFoldMark` sets the fold bit there), so the step returns before its barriers.
+   Uniform for Chrome, bit for bit in the 15 runs above. It is under the 5 % rule today
+   and would be 16 % of a 1 ms frame. A contact group's workgroup needs every member's set
+   empty. It does not show on the matrix (the lab's path), so its gate needs rows on
+   `--wide 0`.
+2. *The untouched ground of the tumble row, 0.36 ms.* This is the review's step 2. A
+   hypothesis for it that needs no new guard: production's per-node candidate lists
+   already say which nodes can touch a shape this step, so a vehicle none of whose nodes
+   lists a shape could take the uncoupled node function for that step. That the two
+   functions agree bit for bit when no node lists a shape is shown here only for this
+   state (the 13 runs above and the 5 with the node pass alone); it has to be argued from the list's rule and checked on the bricks
+   and rocks rows before anything is built.
+
+**Method notes.** The same-against-same control in the same chain is what makes a 2 %
+reading usable: single runs of the control ranged −6.8 to +7.0 % with 3 rounds a process
+and −3.7 to +4.6 % with 11, while the medians of eight were within ±0.2 %. The rounds are
+cheap (a process is mostly its start), so `AB_ROUNDS=11` costs a second a run. Only native
+Metal was measured; Chrome was not.
+
+**To run it again** (the measurement build; from `engine/`):
+
+```sh
+git checkout 8417ad38
+tools/scenario-matrix/run.sh --make drive tumble wall
+ROUNDS=11 tools/scenario-matrix/run.sh noproxy drive       # the row with an empty set as saved
+ROUNDS=11 tools/scenario-matrix/run.sh perf=0 drive        # its control
+# A row with its set emptied, the header's word, the other path, one module alone: the
+# lab as matrix.py runs it, with the option (wall adds --scenario tools/scenario-matrix/scenes/wall.json):
+python3 scripts/with-gpu-lock.py --limit 300 -- env RUBBLE_GPU_LOCK=0 AB_WARM_MS=150 AB_ROUNDS=11 \
+  target/fast/examples/vehicle_lab --mode gpu --measure mountain-perf --rockslide 0 --self-split 1 \
+  --timing step --car ~/Development/rubble-artifacts/sedan-live/mods/sedan_new --cars 1 \
+  --from-fixture out/scenario-matrix/tumble.fx --ab-frames 10 --ab-switch noproxy --ab-empty-proxies
+#   --ab-switch cplhdr [--wide 0]     the shipped modules, the coupling header on against off
+#   RUBBLE_NOPROXY_PARTS=1|2|4        the node pass, the list kernel or the aux pass alone
+```
+
+The lab prints each vehicle's proxy bodies and shapes at the state; a run whose state has
+a touched or moving proxy reports the words that differ and fails.
