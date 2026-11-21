@@ -364,10 +364,13 @@ void lay_bond_ranks(uint4 parent, uint c0, uint b0, uint b1, uint base, uint tid
         for (uint r = 0; r < parent.z; r++)
         {
             uint k = child_by_island(parent, r);
-            uint count = plan[child_bonds_at(base + k)];
+            // Use the count before overwriting it: Slang's CUDA output otherwise keeps
+            // `count` as a pointer and reads it back after the store (the miscompile
+            // engine-slang-build's deferred_load_hazards finds; the same arithmetic).
+            uint next = at + plan[child_bonds_at(base + k)];
             plan[child_bonds_at(base + k)] = b0 + at;
             plan[child_bonds_at(base + k) + 1] = b0 + at;
-            at += count;
+            at = next;
         }
         g_cut_first = b0 + at;
         g_cut_next = b0 + at;

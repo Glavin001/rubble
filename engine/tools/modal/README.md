@@ -250,6 +250,14 @@ Where CUDA stands against the Mac (2026-11-19, `run.sh --cuda perf=0`, ms a fram
   always available); an L4 for absolute numbers (Modal had none for some rows at times:
   `NO RESULT (NO GPU)`).
 
+## The rest of the World on CUDA
+
+The rigid step already runs on CUDA (`CudaSim`, the columns gates at 640 / 10k / 100k), and
+the explicit frame does (above). The coupling's World side, terrain, the stress solver and
+fracture do not yet, so they still need the Vulkan route and its cold compiles. The plan,
+the inventory of passes, the host work each needs and the cost per verdict:
+`engine/docs/world-on-cuda.md`.
+
 ## Two builds, head to head (commit against commit)
 
 For performance experiments, prefer comparing two builds to adding a runtime switch.

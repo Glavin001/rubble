@@ -750,6 +750,37 @@ pub fn default_torque_arm(reach_a: f32, reach_b: f32) -> f32 {
     (size * size).max(1.0e-3)
 }
 
+/// Each body's reach (the largest collider reach from its centre), grown by `colliders`.
+pub fn note_collider_reach(reach: &mut Vec<f32>, colliders: &[crate::Collider]) {
+    for col in colliders {
+        if let Some(r) = collider_reach(col) {
+            let b = col.body as usize;
+            if reach.len() <= b {
+                reach.resize(b + 1, 0.0);
+            }
+            reach[b] = reach[b].max(r);
+        }
+    }
+}
+
+/// A joint record from its description; a non-positive torque arm becomes the default
+/// from each dynamic end's reach (0 for a static end). Every host and `HostWorld` use it.
+pub fn joint_from_desc(desc: &JointDesc, bodies: &[crate::BodyState], reach: &[f32]) -> crate::Joint {
+    let mut j = desc.to_gpu();
+    if desc.torque_arm <= 0.0 {
+        let r = |id: u32| {
+            let dynamic = bodies.get(id as usize).is_some_and(|b| b.inv_mass > 0.0);
+            if dynamic {
+                reach.get(id as usize).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        };
+        j.torque_arm = default_torque_arm(r(desc.body_a), r(desc.body_b));
+    }
+    j
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
