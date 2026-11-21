@@ -471,7 +471,7 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// slot (the first (hit, role) item naming it) is found through a map of the vehicle's nodes
 /// in workgroup memory (one atomic maximum an item) instead of each item scanning every
 /// item before it, a chain that grew with the step's hits (the kernel's PERF_HIT_SLOT_MAP,
-/// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.45.
+/// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.46.
 pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
@@ -482,7 +482,7 @@ pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
 /// [`PERF_FLEET_KEEP`] (§8.39: bit for bit natively and in Chrome, faster at the median
 /// with 8 cars, a tie at 32; on by the owner's decision, 2026-11-19); and
-/// [`PERF_HIT_SLOT_MAP`] (§8.45);
+/// [`PERF_HIT_SLOT_MAP`] (§8.46);
 /// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
     std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).map(|f| f & !PERF_KEEP_TRACK_REST).unwrap_or(

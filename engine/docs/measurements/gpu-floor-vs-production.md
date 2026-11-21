@@ -8,7 +8,7 @@ production and how.
 - **The experiment**: hand-written Metal kernels for one car, the lab's generated sedan
   (548 nodes, 4,251 beam records, 528 collision triangles), checked bit for bit against the
   CPU reference (`engine-softbody`). Nothing depends on it. Its own write-up, with every
-  measurement, is `vehicle-perf-first-principles.md` §8.39.
+  measurement, is `vehicle-perf-first-principles.md` §8.42 and §8.43.
 - **Production**: the Slang kernels in `engine/slang/kernels/explicit_beams*.slang`, planned
   by `crates/engine-exec/src/explicit_plan.rs` and run by
   `crates/engine-webgpu/src/explicit_beams_gpu.rs`, read at `main` 96904a44. Line numbers
@@ -24,16 +24,16 @@ pointer here where they are wrong.
 
 | PR, branch, perf doc section | what it measured | what it changes here |
 |---|---|---|
-| #138 `perf/floor-port`, §8.42 | production by pass against the experiment's phases; one dispatch a frame; the contact words' ceiling (1 to 3 %); and a decision: two workgroups in lockstep is not safe in WebGPU (no forward progress promised across workgroups, no device-scope fence, no buffer bound as both atomic and plain) | §6.4 is a native-only path of its own (Metal or CUDA), a separate decision, not a port into the shared kernels. §6.1 (a)'s first measurement had been done |
-| #139 `perf/solo-car-kernel`, §8.43 | the experiment's layout built as a Slang kernel for the core frame (nodes, centred damping, beams; 1,024 lanes, positions and velocities in workgroup memory, a scalar a beam end, hot words in registers), bit for bit with the frame kernel and the CPU, natively and in Chrome. **Slower: 2.37 ms against 1.33 natively, 2.04 against 1.58 in Chrome. No-go, off by default.** Today's frame kernel at 1,024 lanes: 1.356 against 1.362 at 512 | §6.3, "the large item and where most of the 2 to 2.6 times is", was already built for the core and lost through Slang, WGSL and naga. §1's cause 1 (where the state lives) does not hold for production's core as a cause of the gap: its core frame is 1.33 ms, near the experiment's whole frame at rest |
-| #140 `docs/vehicle-floor-status`, §8.44 | production per phase and per car count against the experiment's phases | the per-phase comparison §3.2 makes from counts exists there from timings |
-| #141 `perf/hits-list-floor`, §8.45 | the experiment's kernel run again on states with hits, strict: its hit passes cost 0.74 to 0.78 ms a frame with 4 to 20 hits a step (0.0005 at rest), its frame 2.22 to 2.75. Production's hits and self-collision list against that, like for like; a slot map for the hits (on by default on that branch) | §1's table sets production's rows against the experiment at rest or in its own scenes; like for like the one-car gap in the hits and the list is smaller than §3.2 says, and what is left has a measured reason there |
+| #138 `perf/floor-port`, §8.44 | production by pass against the experiment's phases; one dispatch a frame; the contact words' ceiling (1 to 3 %); and a decision: two workgroups in lockstep is not safe in WebGPU (no forward progress promised across workgroups, no device-scope fence, no buffer bound as both atomic and plain) | §6.4 is a native-only path of its own (Metal or CUDA), a separate decision, not a port into the shared kernels. §6.1 (a)'s first measurement had been done |
+| #139 `perf/solo-car-kernel` (not merged: its record is the PR) | the experiment's layout built as a Slang kernel for the core frame (nodes, centred damping, beams; 1,024 lanes, positions and velocities in workgroup memory, a scalar a beam end, hot words in registers), bit for bit with the frame kernel and the CPU, natively and in Chrome. **Slower: 2.37 ms against 1.33 natively, 2.04 against 1.58 in Chrome. No-go, off by default.** Today's frame kernel at 1,024 lanes: 1.356 against 1.362 at 512 | §6.3, "the large item and where most of the 2 to 2.6 times is", was already built for the core and lost through Slang, WGSL and naga. §1's cause 1 (where the state lives) does not hold for production's core as a cause of the gap: its core frame is 1.33 ms, near the experiment's whole frame at rest |
+| #140 `docs/vehicle-floor-status`, §8.45 | production per phase and per car count against the experiment's phases | the per-phase comparison §3.2 makes from counts exists there from timings |
+| #141 `perf/hits-list-floor`, §8.46 | the experiment's kernel run again on states with hits, strict: its hit passes cost 0.74 to 0.78 ms a frame with 4 to 20 hits a step (0.0005 at rest), its frame 2.22 to 2.75. Production's hits and self-collision list against that, like for like; a slot map for the hits (on by default on that branch) | §1's table sets production's rows against the experiment at rest or in its own scenes; like for like the one-car gap in the hits and the list is smaller than §3.2 says, and what is left has a measured reason there |
 
 Since then, on `claude/port-gpu-floor-lessons-1289bd` (not merged):
 
-- §8.40: this review's §6.1 (a), (b), (c) measured on production, none pays (§6.1's
+- its §8.40: this review's §6.1 (a), (b), (c) measured on production, none pays (§6.1's
   outcome below).
-- §8.46: wgpu's injected runtime checks (bounds on every access, a forced bound on every
+- its §8.46: wgpu's injected runtime checks (bounds on every access, a forced bound on every
   loop, the integer-division guard) cost 5 to 12 % of every native scenario-matrix row,
   bit for bit without them on 20 fixtures, 12 rows and 11 suites. A measurement switch,
   off by default; Chrome cannot turn its own checks off. The same Slang straight to Metal
@@ -43,7 +43,7 @@ Since then, on `claude/port-gpu-floor-lessons-1289bd` (not merged):
   production's WGSL pays an XOR an operation.
 
 And on `claude/jovial-moser-8fc7c2` (not merged; docs only, its measurement build
-8417ad38 reverted), §8.47: this review's §6.2 step 1 measured on production. A module
+8417ad38 reverted), its §8.47: this review's §6.2 step 1 measured on production. A module
 without the coupling's code is bit for bit for a vehicle with an empty proxy set (39
 runs), and 1.6 to 2.4 % cheaper on the one-car rows (0.06 to 0.07 ms a frame). Not built
 (§6.2's outcome below).
@@ -51,7 +51,7 @@ runs), and 1.6 to 2.4 % cheaper on the one-car rows (0.06 to 0.07 ms a frame). N
 What this leaves of §6 and §8:
 
 - **Still open, measured by none of the above:** §6.1 (d) and the surface half of (b)
-  (no saved state has surface contact on), §6.5's tools, and the two items §8.47 leaves
+  (no saved state has surface contact on), §6.5's tools, and the two items that branch's §8.47 leaves
   for a decision (§6.2's outcome).
 - **Open as a question, not a recommendation:** whether the experiment's layout pays on
   a native path with no injected checks and strict arithmetic by compile option
@@ -59,8 +59,8 @@ What this leaves of §6 and §8:
   WGSL's strict path, so a layout that trades memory for arithmetic loses); nobody has
   measured the layout there. That is the only form in which §6.3 still stands.
 - **Closed for the shared kernels:** §6.3 through Slang to WGSL (#139), §6.4 in WebGPU
-  (#138), §6.1 (a), (b) walk and proxies, (c) (§8.40), §6.2 step 1 as a module choice
-  (§8.47).
+  (#138), §6.1 (a), (b) walk and proxies, (c) (`claude/port-gpu-floor-lessons-1289bd` §8.40), §6.2 step 1 as a module choice
+  (`claude/jovial-moser-8fc7c2` §8.47).
 
 ## 0. Read this first
 
@@ -307,7 +307,7 @@ Two things follow.
 | counts | uniforms and buffer words | constants (as uniforms: +6 %) |
 
 Per phase, one car at rest, timed apart (production: §8.33's table at t 20 with wheels and
-coupling in it; gpu-floor: §8.39, fast):
+coupling in it; gpu-floor: §8.42, fast):
 
 | phase | production | gpu-floor |
 |---|---|---|
@@ -582,7 +582,7 @@ Two things it leaves for a decision, neither built:
 
 ### 6.3 A native frame kernel with the experiment's layout
 
-**Already built and measured, and it lost** (PR #139, §8.43; the correction at the top):
+**Already built and measured, and it lost** (PR #139, not merged; the correction at the top):
 the core frame with this layout in Slang is 2.37 ms against today's 1.33 natively and
 2.04 against 1.58 in Chrome, bit for bit. What follows is the review as written; it
 stands only as a question for a native path without wgpu's checks and WGSL's strict
@@ -632,7 +632,7 @@ The owner's target for one soft body is 1 ms.
 
 ### 6.4 Two bodies in lockstep across workgroups
 
-**Decided against for the shared kernels** (PR #138, §8.42; the correction at the top):
+**Decided against for the shared kernels** (PR #138, §8.44; the correction at the top):
 WebGPU promises neither that two workgroups of one dispatch are resident at once nor a
 fence across them, and a software adapter (CI's SwiftShader) need not run both. It
 stands only as a native path of its own, which is a separate decision.
@@ -681,7 +681,7 @@ Production's `pile2`, `headon`, `side` and `barrier` rows are the gate.
 Position and velocity side by side. A node's lane owning its beams. Unordered atomic force
 sums. Hit sums in registers. A row's first candidate run inline. The contact rule where a
 point passes its box. A phase fewer in the hit passes. What a body publishes laid out by
-lane. The candidates' rule in two stages. Each is in §8.39 with its figure.
+lane. The candidates' rule in two stages. Each is in §8.42 with its figure.
 
 ## 7. What the experiment does not show
 

@@ -3891,167 +3891,6 @@ rewrite alone, as on main). Suites with `RUBBLE_BIT_EXACT=1` (`perf-verify.sh de
 explicit_loop_cap 5, explicit_beams_bitwise 12, explicit_contact_gpu 13, explicit_pair_reuse_gpu 2, explicit_beam_order_gpu 3, debris_retire_gpu 1, showcase_car_gpu 6 (1 ignored, as before), vv_grid_gpu 2, fleet_contact_gpu 1, self_split_gpu 8, engine-world explicit_vehicles 11, vehicle_lab_reset 3, vehicle_lab_piece_windows 1, explicit_drive_world 1: all PASS. engine-metal `vehicle_parity` was not run: no file it compiles or
 runs changed.
 
-### 8.45 Hits and the self-collision list against their floor, like for like; the hits' slot map (2026-11-19)
-
-The question (after PR #140's §8.44): the two phases of one car's frame furthest above their
-floor with no proof they could not close, the self-collision hits (1.63 ms a frame at t 20,
-"14–16×") and the self-collision list and pair tests (1.34 + 0.54, "4.8×"). Close them
-toward 2× losslessly, or measure why not. Native M3 Max, `vehicle_lab --profile fast`, every
-GPU run under `with-gpu-lock.py`; the states are `fast-check.sh --make 1` (one car on the
-mountain at t 2.5, 6 and 20 s) and the scenario matrix's rows (`wall`: the crash preset at
-56 km/h, t 0.1). Figures are ms a frame of 34 substeps; "timed apart" is each dispatch in a
-timed pass of its own (`--ab-perf-masks`, 24 frames); wall figures are medians of 60 frames.
-Bit-exact is the default here (#135 is not merged).
-
-**First, the floor was the wrong one.** §8.44 set production's t 20 (the wreck after the
-mountain's tumble, 22–25 hits a step) against #137's floor *at rest* (a pristine car, 0–2
-hits) with fast arithmetic. #137's kernel was run again here, unchanged (`floor --v2
---profile F`, built from `claude/gpu-floor-kernel-cc397d` outside the workspace), on states
-with hits, strict (bit for bit with the CPU reference, as production is) and fast; the hits a
-step from its emulator:
-
-| floor phase (#137, ms a frame) | at rest (frame 41), strict / fast | wall crash 16 m/s mid-crush (frame 17, up to 20 hits), strict / fast | the wreck against the wall (150 frames after, 4 hits a step), strict / fast |
-|---|---|---|---|
-| self hit passes | 0.0005 / 0.002 | **0.74** / 0.39 | **0.78** / 0.37 |
-| pair rows + candidates' rule + list rebuilds | 0.43 / 0.35 | **0.91** / 0.78 | **0.51** / 0.46 |
-| the whole frame (all groups) | 1.34 / 1.11 | 2.75 / 2.07 | 2.22 / 1.52 |
-
-The floor's hit passes cost about 0.75 ms strict whether a step has 4 hits or 20: like
-production's they are a fixed chain of phases (the round and the residual pass's seven), not
-work per hit. Against a strict floor with hits the comparison is far from §8.44's 0.10.
-
-**Where production's hits pass goes** (t 20, 22–25 hits; the wall row, 4–10 hits; time-only
-cuts, removed after use; a cut that ends a phase early changes the state, so each figure is an
-attribution):
-
-| hits dispatch, timed apart | t 20 | wall |
-|---|---|---|
-| the dispatch alone (return at entry) | 0.19 | 0.20 |
-| + lane 0's start (deferred breaks, the list's record) and its barrier | +0.09 | +0.07 |
-| + the items' loads (record, node, beam sum, accumulators) | +0.22 | +0.20 |
-| + the slots (each item scans every item before it) | **+0.39** | +0.18 |
-| + the round | +0.19 | +0.23 |
-| + the residual pass's phases and the write-back | +0.34 | +0.22 |
-| + the next step's tyres | +0.15 | +0.49 |
-| **all** | **1.62** | **1.61** |
-
-Leaving resolvePending out changed nothing; the beam sum is 0.16 of the loads; selfApply's
-general path and the tyres compiled out of the kernel (not only skipped) gave the same as
-skipping them, so code size and registers are not it.
-
-**The slot map** (perf flag 134217728, `PERF_HIT_SLOT_MAP`). The slot phase was each (hit,
-role) item scanning every item before it for the first one naming its node: a serial chain
-of workgroup loads that grows with the hits squared, 12 µs a substep at 22 hits. Now the
-hits kernel clears a map of the car's nodes in workgroup memory (gsCount's first words, a
-word a node, up to 1,024 nodes) before its first barrier on a step with hits; each item takes
-an atomic maximum of 256 − q at its node's word and reads its slot back after the barrier;
-the slots' copies of the accumulators are written one phase later (the round reads none of
-them, and by then no lane reads the map). The same slots, so the same sums of the same bits.
-
-| one car | off | on |
-|---|---|---|
-| t 20: hits pass, timed apart | 1.665 | **1.244** |
-| t 20: the frame, wall median | 5.51 | **5.03** (−9 %) |
-| t 6: hits pass / frame | 1.596 / 5.46 | 1.218 / 5.11 |
-| wall row: hits pass / frame | 1.674 / 4.81 | 1.612 / 4.75 |
-| t 2.5 and drive (no hits): hits pass | 0.41, 0.77 | 0.42, 0.79 |
-
-The first matrix run had the drive row (no hits) +0.3 / +5.1 / +9.5 % over its three runs:
-the map was cleared on every step. It is now cleared only on a step with hits (each lane
-reads the count); the rerun passed.
-
-**Proofs.** `fast-check.sh perf=134217728` (one car, t 2.5, 6 and 20; 20 frames): bit for
-bit. The scenario matrix: every row bit for bit (12 rows; with the map cleared on hit steps
-only: drive −4.1 %, tumble −8.8 %, wall −2.4 %, bricks +1.0 %, rocks −1.6 %, PASS). The GPU
-suites (`perf-verify.sh` with the defaults and the map, flags 165117893: the loop-cap census,
-explicit_beams_bitwise, explicit_contact_gpu, explicit_pair_reuse_gpu,
-explicit_beam_order_gpu, debris_retire_gpu, showcase_car_gpu, vv_grid_gpu,
-explicit_vehicles, vehicle_lab_reset, vehicle_lab_piece_windows): all pass. Chrome: all 124
-modules validate (uniformity included); the frame-locked page A/B (`run.sh --probe --locked
---ab 134217728 --abUntil 40`, one car on the mountain ledges): 40 samples, every state word
-the same. `engine-metal` vehicle_parity: 4 of 4 pass. The whole matrix again with the map in the
-defaults (`run.sh perf=134217728`, on against off): every row bit for bit, PASS (wall −2.5 %,
-headon −3.5 %, tumble +4.4 %, the others within ±3 %; tumble had −8.8 % in the run before:
-noise on a row with few hits).
-
-**Whole runs** (one car, the mountain, 40 s; vehicles' GPU ms a World step, median / p95;
-the World's wall ms a step, worst; two rounds each, the map on is today's defaults plus the
-map):
-
-| | map off (main's defaults) | map on |
-|---|---|---|
-| native, vehicles | 4.92–4.96 / 5.16–5.21 | **4.25–4.55 / 4.92** |
-| native, wall worst a step | 6.91–6.93 | **6.44–6.48** |
-| Chrome (frame-locked page probe), vehicles | 4.64, 3.94, 4.62 / 5.96, 5.56, 6.15 | 3.86, 4.88, 3.52 / 4.78, 6.12, 4.30 |
-
-Chrome's whole runs drift by ±20 % from run to run with the same flags (3.5 to 4.9 ms
-median), more than the change; over three pairs the map's runs average 4.09 against 4.40
-(−7 %), faster in two of the three pairs. On by default (`perf_flags_default`; the lab's
-checkbox checked).
-
-**Hits after the map, against the like-for-like floor** (strict). t 20: the dispatch 1.24,
-of which the tyres ≈0.15 and the dispatch boundary with lane 0's start 0.28; the hit
-application itself ≈0.8 against the floor's 0.74–0.78. **The hit application is at its
-strict floor (≈1.05×); the whole dispatch is 1.6× (1.4× without the tyres, which the floor's
-car does not have).** At the wall: 1.61 with 0.49 of tyres (the wheels against the wall) and
-≈0.82 of hits against 0.74: 1.1×. What is left over the floor is the dispatch a substep (the
-floor runs its frame in one) and the wheels.
-
-**What did not pay (hits).** *The items' loads before lane 0's barrier* (a perf flag in a
-time-only build, `hitLoad`, when no beam is pending: the same loads beside lane 0's chain):
-bit for bit, 1.274 → 1.276 at t 20, 1.627 → 1.662 at the wall; not kept. *Device barriers*:
-`sync()` reduced to a workgroup barrier everywhere (time only): no change in any pass.
-
-**The self-collision list and pairs.** §8.34 split the list dispatch (the list's workgroup,
-the coupling's and the wheels' workgroups side by side; the dispatch costs its slowest).
-Measured again (timed apart):
-
-| list dispatch | t 20 | wall |
-|---|---|---|
-| all three workgroups | 1.38 | 1.12 |
-| the list's workgroup alone | 1.42 | 0.95 |
-| the coupling and wheels alone | 0.98 | **1.13** |
-| the list workgroup with the coupling's and wheels' code compiled out of the entry | 1.27 | 0.81 |
-
-At the wall the critical path is the wheels' workgroup (the rays against the wall), which no
-floor has. The list workgroup's four phases cost about 0.3 each (header and state load; the
-tracking and throttles; lane 0's decision; the tests' record and the save), each a short
-chain. The pairs dispatch (a thread a listed pair over the GPU) is 0.52: 0.16 the dispatch,
-0.10 the list's box-of-cells test, 0.15 tryContact's tests before the anti-clip rule and 0.11
-the rule (`selfClip`; its crossing test 0.02).
-
-Against the floor, strict: at the wall 0.95 + 0.52 = 1.47 against 0.91 (**1.6×**); at t 20
-1.42 + 0.54 = 1.96 against the wall wreck's 0.51 (3.8×), but these are not the same wreck:
-t 20 lists 8,254 pairs a build and rebuilds 4 times a frame (the mountain wreck's torn
-parts), the floor's wreck about never.
-
-**What did not pay (list and pairs).** *The list's margin* (lossless: the list is exact at
-any margin), 0.05, 0.07, 0.10 (today's) and 0.14 m: at 0.05 the list falls from 8,254 to
-6,248 pairs and the builds rise from 4.0 to 6.9 a frame, and the pairs pass stays 0.54–0.56,
-the list 1.35–1.44, the frame within noise at every margin: the pairs pass is a fixed chain,
-not work a pair. *The floor's filter (technique 7)*: its ceiling here is the anti-clip
-rule's 0.11 of the pairs pass, under 5 %; not built. *Lane 0's coupling setup in the list
-workgroup* (unused there with the coupling on its own workgroup): −0.055 of the list
-workgroup alone (4 % at t 20; nothing at the wall, where the wheels' workgroup is the
-critical path); not built. *Shared-atomic contention in the tracking* (eight maxima from
-every lane; lane 0's alone): no change. *Device barriers*: no change. Three consecutive
-attempts under 5 % of the phase: stopped.
-
-**Why the list stays over 2× at t 20.** It is four phases of short chains in one workgroup
-plus a dispatch a substep for the pairs. On the floor's layout those chains read workgroup
-memory; production's read device memory because the car's state lives there between
-dispatches, and moving it into the workgroup is #139's solo kernel, measured slower for the
-core in WGSL. The one lever found is the coupling's and wheels' code sharing the list's entry
-(0.15 of the list workgroup), and it is not separable: a second entry is a second dispatch,
-which runs after the first, not beside it.
-
-| phase, one car | before (§8.44 / main) | floor, like for like (#137 strict) | after | ratio after |
-|---|---|---|---|---|
-| hits dispatch, t 20 | 1.63–1.67 | 0.78 (wreck) | **1.24** | 1.6× (hit application ≈1.05×) |
-| hits dispatch, wall | 1.61–1.67 | 0.74 (mid-crush) | 1.61 (0.49 tyres) | 2.2×; 1.1× without the tyres and the dispatch |
-| list workgroup + pairs, wall | 1.47 | 0.91 | 1.47 | 1.6× |
-| list workgroup + pairs, t 20 | 1.96 | 0.51 (another wreck) | 1.96 | 3.8× (a measured reason above) |
-
 ### 8.41 The cars of one model skinned in one pass, and a retired check read once (2026-11-19)
 
 §8.38 left the skin as the drawing's largest lossless part: eight generated cars 6.1 ms a
@@ -4122,7 +3961,7 @@ picture (4.4–6.7 ms for eight cars, 10 on the mountain at its start) follows t
 triangles, not the pixels (§8.38): levels of detail are the lever, a different picture by
 design (the "Car detail: lighter" control already draws about half the vertices).
 
-### 8.39 The floor measured directly: a purpose-built kernel for one sedan (2026-11-19)
+### 8.42 The floor measured directly: a purpose-built kernel for one sedan (2026-11-19)
 
 `engine/experiments/gpu-floor` (a workspace member nothing depends on): a hand-written
 Metal kernel for the lab's generated sedan alone, checked against the CPU reference, to
@@ -4782,6 +4621,10 @@ touch: the car among the scattered bricks is inside it and runs the whole kernel
 filter. A frame handed over part way pays both kernels' start and end (once an
 approach; not measured apart).
 
+### 8.43 The floor kernel with surface contact: the car's skin against the world's shapes (2026-11-19)
+
+(#137's second part, §8.42's kernel with the engine's opt-in surface contact.)
+
 **Surface contact (the car's skin against the world's shapes), added 2026-11-19.**
 Mechanism 3 above is the engine's default rule against a rigid shape, *node contact*: a
 node takes a force once the node itself is strictly inside the shape. Nothing between the
@@ -4964,9 +4807,10 @@ against triangle only); Chrome and WGSL (Metal only, by the brief); a body split
 several cores.
 Production's figures are the matrix's, on its own scenes: the same car and speeds, not the
 same frames.
-### 8.42 Porting the floor kernel's methods into production: what maps, what does not, measured (2026-11-19)
 
-PR #137 (`claude/gpu-floor-kernel-cc397d`, its §8.39) measured the floor of one sedan in a
+### 8.44 Porting the floor kernel's methods into production: what maps, what does not, measured (2026-11-19)
+
+PR #137 (`claude/gpu-floor-kernel-cc397d`, §8.42 and §8.43 here) measured the floor of one sedan in a
 purpose-built Metal kernel: one car at rest 1.1 ms a frame fast, 1.25 strict; two cars head-on
 3.5 / 4.2. This section asks how much of that the production explicit kernels can take, one
 lossless switch at a time, and answers from measurements on `main` (96904a44). Native M3 Max,
@@ -5006,7 +4850,7 @@ the floor's 3.5 ms head-on figure needs the lockstep and is not reachable in Chr
 host could use it (a Metal or CUDA path of its own, where forward progress and memory scopes
 are explicit); that is a separate decision and not built here.
 
-**What each of the floor's ranked techniques is in production today** (#137 §8.39's table,
+**What each of the floor's ranked techniques is in production today** (#137 §8.42's table,
 in its order):
 
 | # | floor technique | floor's gain | in production | port as a switch? |
@@ -5153,24 +4997,32 @@ floor's size (2,166 lines of Metal there, without wheels, coupling or terrain), 
 and it helps a car only while it touches nothing but the World; a car in vehicle contact goes
 back to the per-substep path. That is the next step if the solo car's 4–5 ms matters more than
 the touching cars' 17–20.
-### 8.44 Status against the floor goal: per phase and per car count (2026-11-19)
+
+### 8.45 Status against the floor goal: per phase and per car count (2026-11-19)
+
+**Correction (§8.46, PR #141, merged with this section).** The hits' "14–16×" below set
+production's t 20 (22–25 hits a step) against #137's floor at rest with fast arithmetic
+(0–2 hits). Against #137's kernel run again strict on states with hits, its hit passes
+cost ≈0.75 ms a frame (0.74 mid-crush, 0.78 the wreck); production's hits dispatch after
+#141's slot map is 1.24 ms at t 20: **1.6×**, not 14–16×. The rows below are left as
+measured, with a pointer to §8.46 where this changes them.
 
 No new measurement: this section collects the open PRs' numbers to close the goal's
 criteria 3 and 5, and gives a verdict on all five. The criteria are §8.6's table: (1) one
 car's worst step 1.0 ms, natively and in Chrome; (2) eight cars crashing, worst step 3 ms,
 120 steps a second with none refused; (3) every phase within 2× its floor, or a measured
 reason it cannot be; (4) bit-for-bit proofs for every change; (5) per phase before / floor /
-after, and worst and p95 per car count. Sources are cited by PR and branch, because two
-open PRs both number a section §8.39:
+after, and worst and p95 per car count. Sources are cited by PR and branch (written while the PRs were open; their sections
+are numbered here as merged together):
 
 - main (96904a44): §1.3 (the estimated floor), §8.16 (the first before / floor / after),
   §8.23 (one car's passes), §8.35 (the dependent-ALU microbenchmark), §8.37 (levels once),
   §8.38 (physics first);
-- #137 `claude/gpu-floor-kernel-cc397d` §8.39: the **measured** floor, from a purpose-built
+- #137 `claude/gpu-floor-kernel-cc397d` §8.42, §8.43: the **measured** floor, from a purpose-built
   Metal kernel for the same sedan (no wheels, no World coupling, no terrain proxies);
-- #138 `perf/floor-port` §8.42: production per pass, whole runs on main's defaults, and
+- #138 `perf/floor-port` §8.44: production per pass, whole runs on main's defaults, and
   the decision that lockstep across workgroups is not safe in Chrome;
-- #139 `perf/solo-car-kernel` §8.43: the floor's layout as a WGSL kernel (no-go);
+- #139 `perf/solo-car-kernel` (not merged; its record is PR #139): the floor's layout as a WGSL kernel (no-go);
 - #135 `perf/fast-determinism` §8.40: bit-exact against fast arithmetic, per pass and per
   car count;
 - #134 `perf/keep-with-defaults` §8.39: kept candidates on by default, 8 and 32 cars;
@@ -5234,11 +5086,11 @@ against the floor's same phases at 0.08 + 0.08 + 0.17 + 0.24 + 0.19 = 0.76 (fast
 
 | phase | over by | can it be closed losslessly in Chrome / WGSL? | evidence |
 |---|---|---|---|
-| the core in Chrome (nodes, centred damping, beams) | 2.1× (1.58 against 0.76) | **No, by the known route.** The floor's own layout (positions and velocities in workgroup memory, beams on fixed lanes with their hot words in registers, one scalar a beam end) was built in WGSL and is slower: 2.04 against 1.58 in Chrome, 2.37 against 1.33 natively, with seven variants each measured on the whole frame. Fast arithmetic does not help one car in Chrome (+2 to +12 % at the median, #135) | #139 §8.43; #135 §8.40 |
-| nodes, the coupling's part | 2.9× with it, 1.4× without | The proxy contacts are the World coupling, which the floor's scene does not have. **Open**: no floor was measured for the coupling | #138 §8.42; §8.31 |
-| self-collision list and pairs | 4.8× at rest, 2.6× in a crash | **Open.** The floor's lever here is its filter: the rule's over-the-triangle test and a held side checked before the full rule (at rest 722 candidates a substep → 0–2, −9 % of the frame). Production runs the full rule on every listed pair; the filter was not measured in production (#138). Part of the list dispatch is the next step's coupling and wheels (≈0.5, §8.23), which the floor does not have. §8.34 split the list dispatch's workgroups and stopped under 5 % | #137 §8.39 technique 7; #138 §8.42; §8.23; §8.34 |
-| hits, with the tyres | 14–16× at rest, 3.9× in a crash | **Open; the only known route was measured unfavourable.** Hits already run from workgroup memory (`PERF_HITS_LOCAL`, the floor's technique 4). Of `selfApplyLocal`'s ≈1.0 ms, 0.6 is each item's chain of device loads (record, node, info, incidence, accumulators) before its first barrier. The floor has no such chain because its nodes' state lives in its workgroup for the whole frame. That needs the floor's techniques 1 and 2, and #139 measured that layout slower for the core. Strictness is not the cause: fast arithmetic takes 15 % off the hits (#135). The tyres (≈0.5) have no floor phase (the floor's car has no wheels). The workloads also differ: 13–16 hits a step at t 20 against 0–2 at the floor's rest | #138 §8.42; #139 §8.43; #135 §8.40; §8.23 |
-| two cars in contact (frame level) | 3.1–3.7× (matrix head-on 13.2–15.4 against 4.2 strict; fast 12.3 against 3.5) | **No: it cannot be expressed safely in WebGPU.** The floor's mechanism 2 steps both bodies' workgroups in lockstep across cores (a device counter and a spin) and exchanges state through atomically stored words. WGSL and WebGPU promise neither forward progress across workgroups (a spin can hang, e.g. on SwiftShader) nor a device-scope fence, and technique 8 (one plain vector load of atomically stored words) cannot be bound in WebGPU. So vehicle contact keeps a dispatch a substep, and a dispatch a substep costs what the floor's own first layout cost (+72 %; 172 µs a substep in #137's ledger, against production's 170 µs a car a substep in the eight-car members' step) | #138 §8.42; #137 §8.39 |
+| the core in Chrome (nodes, centred damping, beams) | 2.1× (1.58 against 0.76) | **No, by the known route.** The floor's own layout (positions and velocities in workgroup memory, beams on fixed lanes with their hot words in registers, one scalar a beam end) was built in WGSL and is slower: 2.04 against 1.58 in Chrome, 2.37 against 1.33 natively, with seven variants each measured on the whole frame. Fast arithmetic does not help one car in Chrome (+2 to +12 % at the median, #135) | PR #139; #135 §8.40 |
+| nodes, the coupling's part | 2.9× with it, 1.4× without | The proxy contacts are the World coupling, which the floor's scene does not have. **Open**: no floor was measured for the coupling | #138 §8.44; §8.31 |
+| self-collision list and pairs | 4.8× at rest, 2.6× in a crash | **Open.** The floor's lever here is its filter: the rule's over-the-triangle test and a held side checked before the full rule (at rest 722 candidates a substep → 0–2, −9 % of the frame). Production runs the full rule on every listed pair; the filter was not measured in production (#138). Part of the list dispatch is the next step's coupling and wheels (≈0.5, §8.23), which the floor does not have. §8.34 split the list dispatch's workgroups and stopped under 5 % | #137 §8.42 technique 7; #138 §8.44; §8.23; §8.34 |
+| hits, with the tyres | 14–16× at rest, 3.9× in a crash (**corrected by §8.46**: 1.6× against a strict floor with hits, after #141) | **Open; the only known route was measured unfavourable.** Hits already run from workgroup memory (`PERF_HITS_LOCAL`, the floor's technique 4). Of `selfApplyLocal`'s ≈1.0 ms, 0.6 is each item's chain of device loads (record, node, info, incidence, accumulators) before its first barrier. The floor has no such chain because its nodes' state lives in its workgroup for the whole frame. That needs the floor's techniques 1 and 2, and #139 measured that layout slower for the core. Strictness is not the cause: fast arithmetic takes 15 % off the hits (#135). The tyres (≈0.5) have no floor phase (the floor's car has no wheels). The workloads also differ: 13–16 hits a step at t 20 against 0–2 at the floor's rest | #138 §8.44; PR #139; #135 §8.40; §8.23 |
+| two cars in contact (frame level) | 3.1–3.7× (matrix head-on 13.2–15.4 against 4.2 strict; fast 12.3 against 3.5) | **No: it cannot be expressed safely in WebGPU.** The floor's mechanism 2 steps both bodies' workgroups in lockstep across cores (a device counter and a spin) and exchanges state through atomically stored words. WGSL and WebGPU promise neither forward progress across workgroups (a spin can hang, e.g. on SwiftShader) nor a device-scope fence, and technique 8 (one plain vector load of atomically stored words) cannot be bound in WebGPU. So vehicle contact keeps a dispatch a substep, and a dispatch a substep costs what the floor's own first layout cost (+72 %; 172 µs a substep in #137's ledger, against production's 170 µs a car a substep in the eight-car members' step) | #138 §8.44; #137 §8.42 |
 
 **Frame level, per mechanism.** Production is the scenario matrix's rows: bit-exact (the
 matrix's default), the same car and speeds, but not the same frames. The floor is #137's:
@@ -5272,7 +5124,7 @@ the source's terrain where it does not name one.
 
 | cars | scene | host | configuration | median | p95 | worst | source |
 |---|---|---|---|---|---|---|---|
-| 1 | mountain, 40 s | native | main's defaults, bit-exact | 4.84 | 5.12 | **5.38** | #138 §8.42 (explicit frame alone 4.66 / 4.86 / 5.27) |
+| 1 | mountain, 40 s | native | main's defaults, bit-exact | 4.84 | 5.12 | **5.38** | #138 §8.44 (explicit frame alone 4.66 / 4.86 / 5.27) |
 | 1 | mountain, 40 s | native | bit-exact (#135's round 1) | 4.63 | 4.87 | 5.39 | #135 §8.40 |
 | 1 | mountain, 40 s | native | **fast** (#135) | **3.95** | **4.46** | not measured cleanly (11.57 with another job on the GPU) | #135 §8.40, round 2 |
 | 1 | mountain, 40 s | Chrome | **bit-exact** | **4.27–4.30** | **5.29–5.66** | not reported | #135 §8.40 |
@@ -5282,7 +5134,7 @@ the source's terrain where it does not name one.
 | 4 | derby, 40 s | Chrome | **keep off** | **9.35** | **12.23** | **13.17** | #134 §8.39 (a run before a machine restart) |
 | 4 | derby, 40 s | Chrome | keep on (#134's default) | 11.74 | 13.16 | 14.12 | #134 §8.39 |
 | 4 | derby, 40 s | Chrome | bit-exact | 11.27 | 16.16 | not reported | #135 §8.40 (fast: the first 5 s only, 5.52 / 6.17) |
-| 8 | mountain ledges, 40 s | native | main's defaults, bit-exact | 18.04 | 22.17 | 23.91 | #138 §8.42 |
+| 8 | mountain ledges, 40 s | native | main's defaults, bit-exact | 18.04 | 22.17 | 23.91 | #138 §8.44 |
 | 8 | mountain ledges, 40 s | native | **keep on, bit-exact** | **14.86–14.87** | **17.77–18.00** | 23.46–23.57 | #134 §8.39 |
 | 8 | mountain ledges, 40 s | native | fast, keep off | 15.91–15.97 | 18.76–19.36 | **23.03–23.71** | #135 §8.40 |
 | 8 | mountain ledges | native | keep on and fast together | not measured | | | |
@@ -5291,7 +5143,7 @@ the source's terrain where it does not name one.
 | 8 | mountain, about 20 s simulated | Chrome | main's defaults (levels once) | 16.84–16.87 | 18.45–18.48 | **19.99–20.51** | main §8.37 |
 | 8 | mountain, the first 5 s | Chrome | fast | 14.39 | 17.92 | not reported | #135 §8.40 |
 | 8 | derby, 40 s | Chrome | **keep off** | **13.77** | **15.25** | **17.04** | #134 §8.39 (keep on 14.60 / 16.01 / 19.00; bit-exact 40 s in #135: 16.50 / 20.19) |
-| 8 | derby, parked (no AI) | native | main's defaults | 5.73 | 5.91 | 5.93 | #138 §8.42 (explicit frame; not a crash) |
+| 8 | derby, parked (no AI) | native | main's defaults | 5.73 | 5.91 | 5.93 | #138 §8.44 (explicit frame; not a crash) |
 | 32 | mountain, 40 s | native | **main's defaults (levels once)** | **77.36** | **86.50** | **405.0** | main §8.37 (ledges with keep on: 78.11–78.19 / 87.35–87.72 / 407.2–412.4, #134; bit-exact 79.29 / 88.93 / 436.4, #135; fast stopped at t 20 by the time limit) |
 | 32 | any | Chrome | | not measured (the page runs at most eight cars on the mountain) | | | #134 §8.39 |
 | 32 | derby | native, Chrome | | not measured | | | |
@@ -5308,7 +5160,7 @@ drawn.
 |---|---|---|---|
 | 1 | one car, worst step ≤ 1.0 ms, natively and in Chrome | **proven unreachable on this hardware** | the measured floor for this car is above it even with no wheels or coupling: at rest 1.04–1.10 fast, 1.25 strict; wall crash 1.83 fast, 2.2 strict (#137). Today's worst is 5.38 native (#138); Chrome's p95 is 5.3–5.7 (#135), its worst not reported since §8.16 |
 | 2 | eight cars crashing, worst ≤ 3 ms; 120 steps a second, none refused | **proven unreachable on this hardware** (the 3 ms); 120 steps a second **not met** | one head-on pair alone floors at 3.49 fast / 4.2 strict, and four pairs (eight cars) at ≈3.6 fast, with a lockstep WebGPU cannot do safely (#137, #138). That a pile costs each of its cars no less than a pair does is assumed (#137 did not build piles). Today's worst is 23.0–23.9 native, 20.0–21.2 in Chrome. 120 steps a second needs ≤ 8.3 ms a step against a 14.5–17 median, and Chrome holds 48 of 60 with nothing drawn |
-| 3 | every phase within 2× its floor, or proof it cannot be | **not met**: part proven, part open | Within: aux and dispatch 1.0×; the core natively 1.75–1.8× (like for like, #139); beams fast 1.9×; and at frame level the wall crash 1.9–2.0×, boxes 1.1–1.45×, rocks 1.7–2.2×. Over, with proof: vehicle contact 3.1–3.7× (no lockstep in WebGPU, #138); the core in Chrome 2.1× (the floor's layout in WGSL measured slower, #139). Over and **open**: self-collision list and pairs 4.8× (the floor's filter not tried in production); hits 14–16× at rest, 3.9× in a crash (the load chain needs workgroup-resident state, and the one route built for it lost on the core); the nodes' coupling part (no floor measured); centred damping 2.1× (5 % over) |
+| 3 | every phase within 2× its floor, or proof it cannot be | **not met**: part proven, part open | Within: aux and dispatch 1.0×; the core natively 1.75–1.8× (like for like, #139); beams fast 1.9×; and at frame level the wall crash 1.9–2.0×, boxes 1.1–1.45×, rocks 1.7–2.2×. Over, with proof: vehicle contact 3.1–3.7× (no lockstep in WebGPU, #138); the core in Chrome 2.1× (the floor's layout in WGSL measured slower, #139). Over and **open**: self-collision list and pairs 4.8× (the floor's filter not tried in production); hits 14–16× at rest, 3.9× in a crash (the load chain needs workgroup-resident state, and the one route built for it lost on the core; **corrected by §8.46**: against a strict floor with hits, ≈0.75 ms, production's hits are 1.24 ms at t 20 after #141's slot map, 1.6×); the nodes' coupling part (no floor measured); centred damping 2.1× (5 % over) |
 | 4 | bit-for-bit proofs for every change | **met** | every default change carries fixtures, suites, the matrix and, where it touches Chrome, the frame-locked A/B (§8.23, §8.35, §8.37; #134). With #135 bit-exact becomes a setting, off by default: the suites run with it on and pass, and the fast setting is held to measured tolerance tests (within 4× the spread of starts no one could tell apart) |
 | 5 | per phase before / floor / after; worst and p95 per car count | **met, with gaps marked** | the tables above. Not measured: two cars as a whole run; 32 cars in Chrome or in the derby; one car's worst step in Chrome since §8.16; keep and fast together; 120 steps a second; eight cars per phase against a floor (no pile floor exists) |
 
@@ -5318,3 +5170,164 @@ and a measured floor for the coupling's proxy contacts. Criteria 1 and 2 need a 
 or above the measured floor (one car 1.25 strict at rest, 2.2 in a crash; a head-on pair
 4.2), or a native host with its own lockstep path (Metal or CUDA), which is a separate
 decision (#138).
+
+### 8.46 Hits and the self-collision list against their floor, like for like; the hits' slot map (2026-11-19)
+
+The question (after PR #140's §8.45): the two phases of one car's frame furthest above their
+floor with no proof they could not close, the self-collision hits (1.63 ms a frame at t 20,
+"14–16×") and the self-collision list and pair tests (1.34 + 0.54, "4.8×"). Close them
+toward 2× losslessly, or measure why not. Native M3 Max, `vehicle_lab --profile fast`, every
+GPU run under `with-gpu-lock.py`; the states are `fast-check.sh --make 1` (one car on the
+mountain at t 2.5, 6 and 20 s) and the scenario matrix's rows (`wall`: the crash preset at
+56 km/h, t 0.1). Figures are ms a frame of 34 substeps; "timed apart" is each dispatch in a
+timed pass of its own (`--ab-perf-masks`, 24 frames); wall figures are medians of 60 frames.
+Bit-exact is the default here (#135 is not merged).
+
+**First, the floor was the wrong one.** §8.45 set production's t 20 (the wreck after the
+mountain's tumble, 22–25 hits a step) against #137's floor *at rest* (a pristine car, 0–2
+hits) with fast arithmetic. #137's kernel was run again here, unchanged (`floor --v2
+--profile F`, built from `claude/gpu-floor-kernel-cc397d` outside the workspace), on states
+with hits, strict (bit for bit with the CPU reference, as production is) and fast; the hits a
+step from its emulator:
+
+| floor phase (#137, ms a frame) | at rest (frame 41), strict / fast | wall crash 16 m/s mid-crush (frame 17, up to 20 hits), strict / fast | the wreck against the wall (150 frames after, 4 hits a step), strict / fast |
+|---|---|---|---|
+| self hit passes | 0.0005 / 0.002 | **0.74** / 0.39 | **0.78** / 0.37 |
+| pair rows + candidates' rule + list rebuilds | 0.43 / 0.35 | **0.91** / 0.78 | **0.51** / 0.46 |
+| the whole frame (all groups) | 1.34 / 1.11 | 2.75 / 2.07 | 2.22 / 1.52 |
+
+The floor's hit passes cost about 0.75 ms strict whether a step has 4 hits or 20: like
+production's they are a fixed chain of phases (the round and the residual pass's seven), not
+work per hit. Against a strict floor with hits the comparison is far from §8.45's 0.10.
+
+**Where production's hits pass goes** (t 20, 22–25 hits; the wall row, 4–10 hits; time-only
+cuts, removed after use; a cut that ends a phase early changes the state, so each figure is an
+attribution):
+
+| hits dispatch, timed apart | t 20 | wall |
+|---|---|---|
+| the dispatch alone (return at entry) | 0.19 | 0.20 |
+| + lane 0's start (deferred breaks, the list's record) and its barrier | +0.09 | +0.07 |
+| + the items' loads (record, node, beam sum, accumulators) | +0.22 | +0.20 |
+| + the slots (each item scans every item before it) | **+0.39** | +0.18 |
+| + the round | +0.19 | +0.23 |
+| + the residual pass's phases and the write-back | +0.34 | +0.22 |
+| + the next step's tyres | +0.15 | +0.49 |
+| **all** | **1.62** | **1.61** |
+
+Leaving resolvePending out changed nothing; the beam sum is 0.16 of the loads; selfApply's
+general path and the tyres compiled out of the kernel (not only skipped) gave the same as
+skipping them, so code size and registers are not it.
+
+**The slot map** (perf flag 134217728, `PERF_HIT_SLOT_MAP`). The slot phase was each (hit,
+role) item scanning every item before it for the first one naming its node: a serial chain
+of workgroup loads that grows with the hits squared, 12 µs a substep at 22 hits. Now the
+hits kernel clears a map of the car's nodes in workgroup memory (gsCount's first words, a
+word a node, up to 1,024 nodes) before its first barrier on a step with hits; each item takes
+an atomic maximum of 256 − q at its node's word and reads its slot back after the barrier;
+the slots' copies of the accumulators are written one phase later (the round reads none of
+them, and by then no lane reads the map). The same slots, so the same sums of the same bits.
+
+| one car | off | on |
+|---|---|---|
+| t 20: hits pass, timed apart | 1.665 | **1.244** |
+| t 20: the frame, wall median | 5.51 | **5.03** (−9 %) |
+| t 6: hits pass / frame | 1.596 / 5.46 | 1.218 / 5.11 |
+| wall row: hits pass / frame | 1.674 / 4.81 | 1.612 / 4.75 |
+| t 2.5 and drive (no hits): hits pass | 0.41, 0.77 | 0.42, 0.79 |
+
+The first matrix run had the drive row (no hits) +0.3 / +5.1 / +9.5 % over its three runs:
+the map was cleared on every step. It is now cleared only on a step with hits (each lane
+reads the count); the rerun passed.
+
+**Proofs.** `fast-check.sh perf=134217728` (one car, t 2.5, 6 and 20; 20 frames): bit for
+bit. The scenario matrix: every row bit for bit (12 rows; with the map cleared on hit steps
+only: drive −4.1 %, tumble −8.8 %, wall −2.4 %, bricks +1.0 %, rocks −1.6 %, PASS). The GPU
+suites (`perf-verify.sh` with the defaults and the map, flags 165117893: the loop-cap census,
+explicit_beams_bitwise, explicit_contact_gpu, explicit_pair_reuse_gpu,
+explicit_beam_order_gpu, debris_retire_gpu, showcase_car_gpu, vv_grid_gpu,
+explicit_vehicles, vehicle_lab_reset, vehicle_lab_piece_windows): all pass. Chrome: all 124
+modules validate (uniformity included); the frame-locked page A/B (`run.sh --probe --locked
+--ab 134217728 --abUntil 40`, one car on the mountain ledges): 40 samples, every state word
+the same. `engine-metal` vehicle_parity: 4 of 4 pass. The whole matrix again with the map in the
+defaults (`run.sh perf=134217728`, on against off): every row bit for bit, PASS (wall −2.5 %,
+headon −3.5 %, tumble +4.4 %, the others within ±3 %; tumble had −8.8 % in the run before:
+noise on a row with few hits).
+
+**Whole runs** (one car, the mountain, 40 s; vehicles' GPU ms a World step, median / p95;
+the World's wall ms a step, worst; two rounds each, the map on is today's defaults plus the
+map):
+
+| | map off (main's defaults) | map on |
+|---|---|---|
+| native, vehicles | 4.92–4.96 / 5.16–5.21 | **4.25–4.55 / 4.92** |
+| native, wall worst a step | 6.91–6.93 | **6.44–6.48** |
+| Chrome (frame-locked page probe), vehicles | 4.64, 3.94, 4.62 / 5.96, 5.56, 6.15 | 3.86, 4.88, 3.52 / 4.78, 6.12, 4.30 |
+
+Chrome's whole runs drift by ±20 % from run to run with the same flags (3.5 to 4.9 ms
+median), more than the change; over three pairs the map's runs average 4.09 against 4.40
+(−7 %), faster in two of the three pairs. On by default (`perf_flags_default`; the lab's
+checkbox checked).
+
+**Hits after the map, against the like-for-like floor** (strict). t 20: the dispatch 1.24,
+of which the tyres ≈0.15 and the dispatch boundary with lane 0's start 0.28; the hit
+application itself ≈0.8 against the floor's 0.74–0.78. **The hit application is at its
+strict floor (≈1.05×); the whole dispatch is 1.6× (1.4× without the tyres, which the floor's
+car does not have).** At the wall: 1.61 with 0.49 of tyres (the wheels against the wall) and
+≈0.82 of hits against 0.74: 1.1×. What is left over the floor is the dispatch a substep (the
+floor runs its frame in one) and the wheels.
+
+**What did not pay (hits).** *The items' loads before lane 0's barrier* (a perf flag in a
+time-only build, `hitLoad`, when no beam is pending: the same loads beside lane 0's chain):
+bit for bit, 1.274 → 1.276 at t 20, 1.627 → 1.662 at the wall; not kept. *Device barriers*:
+`sync()` reduced to a workgroup barrier everywhere (time only): no change in any pass.
+
+**The self-collision list and pairs.** §8.34 split the list dispatch (the list's workgroup,
+the coupling's and the wheels' workgroups side by side; the dispatch costs its slowest).
+Measured again (timed apart):
+
+| list dispatch | t 20 | wall |
+|---|---|---|
+| all three workgroups | 1.38 | 1.12 |
+| the list's workgroup alone | 1.42 | 0.95 |
+| the coupling and wheels alone | 0.98 | **1.13** |
+| the list workgroup with the coupling's and wheels' code compiled out of the entry | 1.27 | 0.81 |
+
+At the wall the critical path is the wheels' workgroup (the rays against the wall), which no
+floor has. The list workgroup's four phases cost about 0.3 each (header and state load; the
+tracking and throttles; lane 0's decision; the tests' record and the save), each a short
+chain. The pairs dispatch (a thread a listed pair over the GPU) is 0.52: 0.16 the dispatch,
+0.10 the list's box-of-cells test, 0.15 tryContact's tests before the anti-clip rule and 0.11
+the rule (`selfClip`; its crossing test 0.02).
+
+Against the floor, strict: at the wall 0.95 + 0.52 = 1.47 against 0.91 (**1.6×**); at t 20
+1.42 + 0.54 = 1.96 against the wall wreck's 0.51 (3.8×), but these are not the same wreck:
+t 20 lists 8,254 pairs a build and rebuilds 4 times a frame (the mountain wreck's torn
+parts), the floor's wreck about never.
+
+**What did not pay (list and pairs).** *The list's margin* (lossless: the list is exact at
+any margin), 0.05, 0.07, 0.10 (today's) and 0.14 m: at 0.05 the list falls from 8,254 to
+6,248 pairs and the builds rise from 4.0 to 6.9 a frame, and the pairs pass stays 0.54–0.56,
+the list 1.35–1.44, the frame within noise at every margin: the pairs pass is a fixed chain,
+not work a pair. *The floor's filter (technique 7)*: its ceiling here is the anti-clip
+rule's 0.11 of the pairs pass, under 5 %; not built. *Lane 0's coupling setup in the list
+workgroup* (unused there with the coupling on its own workgroup): −0.055 of the list
+workgroup alone (4 % at t 20; nothing at the wall, where the wheels' workgroup is the
+critical path); not built. *Shared-atomic contention in the tracking* (eight maxima from
+every lane; lane 0's alone): no change. *Device barriers*: no change. Three consecutive
+attempts under 5 % of the phase: stopped.
+
+**Why the list stays over 2× at t 20.** It is four phases of short chains in one workgroup
+plus a dispatch a substep for the pairs. On the floor's layout those chains read workgroup
+memory; production's read device memory because the car's state lives there between
+dispatches, and moving it into the workgroup is #139's solo kernel, measured slower for the
+core in WGSL. The one lever found is the coupling's and wheels' code sharing the list's entry
+(0.15 of the list workgroup), and it is not separable: a second entry is a second dispatch,
+which runs after the first, not beside it.
+
+| phase, one car | before (§8.45 / main) | floor, like for like (#137 strict) | after | ratio after |
+|---|---|---|---|---|
+| hits dispatch, t 20 | 1.63–1.67 | 0.78 (wreck) | **1.24** | 1.6× (hit application ≈1.05×) |
+| hits dispatch, wall | 1.61–1.67 | 0.74 (mid-crush) | 1.61 (0.49 tyres) | 2.2×; 1.1× without the tyres and the dispatch |
+| list workgroup + pairs, wall | 1.47 | 0.91 | 1.47 | 1.6× |
+| list workgroup + pairs, t 20 | 1.96 | 0.51 (another wreck) | 1.96 | 3.8× (a measured reason above) |

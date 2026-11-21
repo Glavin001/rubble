@@ -1663,7 +1663,7 @@ static const uint PERF_SELF_HITS_LOCAL = 33554432u;
 // wide hits kernel, each node's slot (the first item naming it) found through a map of the
 // vehicle's nodes in workgroup memory (an atomic maximum of 256 - q at the node's word)
 // instead of each item scanning every item before it: the same slots, so the same sums of
-// the same bits in the same order. vehicle-perf-first-principles.md §8.45.
+// the same bits in the same order. vehicle-perf-first-principles.md §8.46.
 static const uint PERF_HIT_SLOT_MAP = 134217728u;
 // perfFlags bit 67108864 (explicit_plan::PERF_SPLIT_WHEELS_AHEAD, with PERF_MEMBER_LIST and
 // self-collision split): a contact group member's raycast wheels' rays and bars of step
