@@ -139,7 +139,7 @@ fn options(script: &Value) -> LabOptions {
     if let Some(s) = arg("--bit-exact") {
         o.insert("bitExact".into(), json!(s == "1"));
     }
-    // `--wheels-bodies 0|1`: raycast wheels hit World bodies (on by default).
+    // `--wheels-bodies 0|1`: raycast wheels hit World bodies (off by default).
     if let Some(s) = arg("--wheels-bodies") {
         o.insert("wheelsHitBodies".into(), json!(s == "1"));
     }
@@ -1202,7 +1202,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
         "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"), "groupSplit": arg("--group-split").as_deref() != Some("0"),
         "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [],
-        "wheelsHitBodies": arg("--wheels-bodies").as_deref() != Some("0") });
+        "wheelsHitBodies": arg("--wheels-bodies").as_deref() == Some("1") });
     // `--scenario FILE`: a JSON object whose keys replace the script's (the scenario
     // matrix's rows, engine/tools/scenario-matrix/scenes/: `scene`, `cars`, `parked`,
     // `others`, `events`, `restart` (a start or crash preset, applied after the build as

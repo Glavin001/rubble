@@ -207,7 +207,8 @@ impl Default for LabOptions {
             derby: derby::DerbySpec::default(),
             others: Vec::new(),
             structures: Vec::new(),
-            wheels_hit_bodies: true,
+            // Off by default (explicit-vehicles-in-world.md §13, "Open: Chrome").
+            wheels_hit_bodies: false,
         }
     }
 }

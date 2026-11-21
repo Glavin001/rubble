@@ -32,7 +32,7 @@ one state, the same build), compares every state word and times each frame apart
     matrix.py --compare-end A B [ROW ...]  two builds' end states, every state word:
         PASS only if each row is bit for bit (a host change the A/B cannot see, since
         it changes both halves alike)
-Options (environment): EXTRA (more vehicle_lab options for the replays, e.g. "--wheels-bodies 0"), FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
+Options (environment): EXTRA (more vehicle_lab options for the replays, e.g. "--wheels-bodies 1"), FRAMES (default 10) frames a half, ROUNDS (default 3) the halves in turn, PROFILE_SPLIT=1 (each row's
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
 CAR, STATES (the states' directory), RETRIES (default 2: a row past the threshold runs again,

@@ -40,8 +40,8 @@
 //! differentials; the wheel force acts at the hub, not at the contact patch
 //! (less roll moment, as a roll influence below 1).
 //!
-//! Wheels on bodies ([`DriveConfig::see_bodies`]; the World's `wheels_hit_bodies`, on by
-//! default there): the rays also meet the vehicle's rigid proxies
+//! Wheels on bodies ([`DriveConfig::see_bodies`]; the World's `wheels_hit_bodies`, off by
+//! default until known-bugs F8 is fixed): the rays also meet the vehicle's rigid proxies
 //! ([`crate::explicit_rigid`], at their poses this step) and, in a world of vehicles with
 //! vehicle contact, the other vehicles' live collision triangles as they stand at the
 //! step's start; the nearest surface of all wins (ties: ground, boxes and static shapes,

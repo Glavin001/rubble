@@ -82,7 +82,9 @@ impl Default for ExplicitVehiclesDef {
             vehicle_contact: true,
             sleep: Some(engine_softbody::explicit_sleep::VehicleSleep::default()),
             bit_exact: engine_webgpu::bit_exact_default(),
-            wheels_hit_bodies: true,
+            // Off by default until the browser's non-finite state with it on is fixed
+            // (explicit-vehicles-in-world.md §13, "Open: Chrome").
+            wheels_hit_bodies: false,
         }
     }
 }

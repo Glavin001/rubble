@@ -63,12 +63,19 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
 
 ### F7. Raycast wheels don't see rigid bodies (Fixed 2026-11-18, `fix/wheels-see-bodies`)
 - **Was:** `explicit_drive.rs` `ray_cast` saw the car's own ground plane, boxes and static shapes only. Cars could not drive up onto debris, rigid ramps or another car; a car resting on bricks or on another car's crushed nose had its wheels in the air (the Derby's "stopped moving").
-- **Fix (the user's decision, "Yes, fix wheels"):** `DriveConfig::see_bodies`, the World's `ExplicitVehiclesDef::wheels_hit_bodies` (on by default, live: `World::set_explicit_wheels_hit_bodies`, the lab's "wheels on bodies" checkbox). A wheel's ray also meets:
+- **Fix (the user's decision, "Yes, fix wheels"):** `DriveConfig::see_bodies`, the World's `ExplicitVehiclesDef::wheels_hit_bodies` (off by default since 2026-11-21 because of F8, live: `World::set_explicit_wheels_hit_bodies`, the lab's "wheels on bodies" checkbox). A wheel's ray also meets:
   - the car's rigid proxies (every World body the coupling plan gives the car: boxes, spheres, capsules, hulls, awake or asleep), at their poses this step; the plan's margin grows to the wheels' reach (`explicit_vehicles::wheel_reach`) so a body under a wheel is a proxy whenever the ray can reach it;
   - the other cars' live collision triangles (cars in one contact group), as they stand at the step's start.
   The nearest surface wins. On a body the tyre takes the two-body form (relative velocity at the contact point, reduced mass, the hub force's share; the body's inverse mass split among this car's wheels on it and the cars holding it), and the reaction goes back: onto the proxy shape at the contact point (force and moment, the node contact's path to the World's impulse), or onto the other car's triangle nodes by barycentric weight before the next step (vehicle contact's timing).
 - **Checks:** off is the old frame bit for bit (fast-check `--ab-switch kernel` against the committed kernels, the suites); GPU == CPU: bit for bit on another car (`engine-webgpu/tests/wheels_hit_bodies_gpu.rs`, group on one workgroup and across workgroups), to float noise on a body (the coupling's own tolerance); CPU tests `engine-softbody/tests/wheels_hit_bodies.rs`, World test `engine-world/tests/wheels_hit_bodies_world.rs`.
 - **Still true:** only hub nodes collide with a brick through a wheel's tyre volume (the wheel is a ray, not a cylinder: S2 item 3); a wheel on a light body uses node contact's scalar effective mass along the normal (the same convention, exact for the normal load).
+
+### F8. Wheels on bodies: cars in a pile go non-finite in Chrome (Confirmed 2026-11-21, setting off by default)
+- **Seen:** `vehicle-lab.html?mode=mountain&cars=8&terrain=ledges&wheelsHitBodies=1` in headless Chrome (`tools/vehicle-lab/run.sh --probe`): at the first collisions (t = 3.2 s) every car's position, velocity and energy are non-finite and the page stops with its engine error. Both with `bitExact=1` and without it.
+- **Not seen:** with `wheelsHitBodies=0` (the same page, to t = 8.3 s, finite); natively in the scenario matrix's pile8 and pile32 rows (wheels on, bit-exact, through the same collisions).
+- **Suspects:** the reaction onto another car's triangle nodes (−F·w by barycentric weight) or the two-body tyre's reduced mass with a partner of zero or non-finite inverse mass. The browser's path differs from the native one in the wheels' split module and the group launch layout.
+- **Next:** a CPU-reference run of the same 8-car scene with the setting on; then save the last finite Chrome state as a fixture (`--abSaveAll`), and replay it natively with `fast-check.sh`.
+- **Meanwhile:** `ExplicitVehiclesDef::wheels_hit_bodies` and the lab's checkbox are off by default (F7's fix is still available, one setting away).
 
 ### R1. AVBD rigid solver loses about 5.5 % of momentum in multi-body impacts (Confirmed, on `main` too)
 - **Measured:** a rigid-only World, 1,453 kg block into floating bricks, no car: 20,197 → 19,080 N·s.
