@@ -286,7 +286,7 @@ impl ExplicitVehicles {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = engine_webgpu::explicit_shader_module(device, wgpu::ShaderModuleDescriptor {
             label: Some("vehicle_coupling"),
             source: wgpu::ShaderSource::Wgsl(engine_webgpu::uniformize_workgroup_lanes(VEHICLE_COUPLING_WGSL).into()),
         });

@@ -1355,6 +1355,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let sleeplist_ab = arg("--ab-switch").as_deref() == Some("sleeplist");
     let sleep_cfg = options(&script).vehicle_sleep_cfg;
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
+    // `--ab-switch checks=MASK`: the same kernels compiled without wgpu's injected runtime
+    // checks (1 bounds, 2 loop bounding, 4 integer division; on) against today's checked
+    // modules (off), each on a GPU object of its own from one snapshot, in turn for
+    // AB_ROUNDS rounds: every state word and each frame's time. Native only.
+    let checks_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("checks=").and_then(|m| m.parse().ok()));
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
@@ -2386,11 +2391,68 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out.push((ms, y.state_words(), y.coupling_words()));
                 engine_webgpu::set_explicit_module_override(None);
             }
+            if let Some(mask) = checks_ab {
+                let frames: u32 = arg("--ab-frames").and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
+                let rounds: u32 = std::env::var("AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+                let bytes = x.snapshot_to_bytes(&snap);
+                let retired = lab.bench.debris.retired.clone();
+                engine_webgpu::set_explicit_shader_checks_off(Some(mask));
+                if other.is_none() {
+                    other = Some(Lab::build(GpuContext::Default, template, options(&script), |_| {})?);
+                }
+                let (wb, _) = other.as_mut().expect("lab B");
+                let y = wb.explicit_vehicles_mut().expect("vehicles B");
+                if retired.iter().any(|&r| r) {
+                    y.set_retired(0, &retired).map_err(anyhow::Error::msg)?;
+                }
+                let zeros = vec![0u8; n_nodes];
+                y.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
+                let snap_b = y.snapshot_from_bytes(&bytes);
+                let run = |g: &mut engine_webgpu::ExplicitBeamsGpu, s: &engine_webgpu::GpuSnapshot| -> Vec<f64> {
+                    // One untimed frame first (a lazily created pipeline compiles there).
+                    g.restore(s);
+                    g.wait();
+                    g.frame(34);
+                    g.wait();
+                    g.restore(s);
+                    g.wait();
+                    (0..frames)
+                        .map(|_| {
+                            let t = std::time::Instant::now();
+                            g.frame(34);
+                            g.wait();
+                            t.elapsed().as_secs_f64() * 1e3
+                        })
+                        .collect()
+                };
+                let mut pooled: [Vec<Vec<f64>>; 2] = [Vec::new(), Vec::new()];
+                for _ in 0..rounds {
+                    engine_webgpu::set_explicit_shader_checks_off(Some(mask));
+                    pooled[0].push(run(y, &snap_b));
+                    engine_webgpu::set_explicit_shader_checks_off(Some(0));
+                    pooled[1].push(run(x, &snap));
+                }
+                engine_webgpu::set_explicit_shader_checks_off(None);
+                for (side, name) in ["on", "off"].into_iter().enumerate() {
+                    let runs = &pooled[side];
+                    let best = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).sum::<f64>() / runs[0].len() as f64;
+                    println!("     frames ({name}): best of {rounds} rounds a frame, mean {best:.3} ms");
+                    let mut each: Vec<f64> = runs.concat();
+                    let ms = each.iter().sum::<f64>() / each.len() as f64;
+                    each.sort_by(f64::total_cmp);
+                    println!("     frames ({name}): median {:.3} ms, min {:.3}, max {:.3} ({} frames)", each[each.len() / 2], each[0], each[each.len() - 1], each.len());
+                    if side == 0 {
+                        out.push((ms, y.state_words(), y.coupling_words()));
+                    } else {
+                        out.push((ms, x.state_words(), x.coupling_words()));
+                    }
+                }
+            }
             // (AB_WARM_MS=n: frames from the snapshot for n ms before the timed halves, so a
             // GPU still at its idle clock after the process's start does not slow the
             // first half alone: a small scene's 20 ms of frames is over before it ramps.)
             let warm: f64 = std::env::var("AB_WARM_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-            if warm > 0.0 && !kernel_ab {
+            if warm > 0.0 && !kernel_ab && checks_ab.is_none() {
                 let t = std::time::Instant::now();
                 while t.elapsed().as_secs_f64() * 1e3 < warm {
                     x.restore(&snap);
@@ -2409,7 +2471,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // or a neighbour's load falls on both halves. The state compared is the last
             // round's.)
             let rounds: u32 = std::env::var("AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
-            let sides = if kernel_ab { vec![] } else { vec![true, second] };
+            let sides = if kernel_ab || checks_ab.is_some() { vec![] } else { vec![true, second] };
             let mut pooled: Vec<Vec<Vec<f64>>> = vec![Vec::new(); sides.len()];
             for (round, (side, on)) in (0..rounds).flat_map(|r| sides.clone().into_iter().enumerate().map(move |s| (r, s))) {
                 x.restore(&snap);
@@ -2573,6 +2635,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if checks_ab.is_some() {
+                    "runtime checks left out (on) / wgpu's checks (off)"
                 } else if groupsplit_ab {
                     "group split"
                 } else if sleep_ab {

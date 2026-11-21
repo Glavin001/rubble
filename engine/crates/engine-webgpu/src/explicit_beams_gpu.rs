@@ -503,7 +503,7 @@ impl Split {
             immediate_size: 0,
         });
         let pipe = |module_name: &str, entry: &str| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                 label: Some(module_name),
                 source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(module_name)).into()),
             });
@@ -809,7 +809,7 @@ fn split_pipe(
     entry: &str,
 ) -> wgpu::ComputePipeline {
     let name = split_module(which, aero, lanes);
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+    let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
         label: Some(name),
         source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
     });
@@ -847,7 +847,7 @@ impl ExtraDispatch {
         if n == 0 {
             return None;
         }
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
             label: Some("explicit-beams-extra-dispatch"),
             source: wgpu::ShaderSource::Wgsl(
                 "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
@@ -987,7 +987,7 @@ impl SelfSplit {
     }
 
     fn pipeline(&self, name: &str, entry: &str, layout: &wgpu::PipelineLayout) -> wgpu::ComputePipeline {
-        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
         });
@@ -1102,6 +1102,42 @@ pub fn set_explicit_module_override(dir: Option<std::path::PathBuf>) {
 }
 
 static MODULE_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Measurement only: which of wgpu's injected runtime checks the explicit modules
+/// created after the call are compiled without (a mask: 1 the bounds checks on every
+/// array and buffer access, 2 the forced bound on every loop, 4 the integer-division
+/// guards; 0: all of them, today's). `None`: the environment's
+/// `RUBBLE_SHADER_CHECKS_OFF`, 0 when unset. The checks change no result of a kernel
+/// whose every access is in bounds and whose every loop ends, so one process can run the
+/// same kernels both ways from one snapshot (`vehicle_lab --ab-switch checks=MASK`): bit
+/// for bit and time. Native only: a browser always injects its own. Process-wide.
+#[doc(hidden)]
+pub fn set_explicit_shader_checks_off(mask: Option<u32>) {
+    SHADER_CHECKS_OFF.store(mask.unwrap_or(u32::MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+static SHADER_CHECKS_OFF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// An explicit module, with wgpu's runtime checks as [`set_explicit_shader_checks_off`]
+/// says (all of them unless a measurement asked otherwise).
+#[doc(hidden)]
+pub fn explicit_shader_module(device: &wgpu::Device, desc: wgpu::ShaderModuleDescriptor<'_>) -> wgpu::ShaderModule {
+    let mut off = SHADER_CHECKS_OFF.load(std::sync::atomic::Ordering::Relaxed);
+    if off == u32::MAX {
+        off = std::env::var("RUBBLE_SHADER_CHECKS_OFF").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    }
+    if off == 0 {
+        return device.create_shader_module(desc);
+    }
+    let mut checks = wgpu::ShaderRuntimeChecks::checked();
+    checks.bounds_checks = off & 1 == 0;
+    checks.force_loop_bounding = off & 2 == 0;
+    checks.int_div_checks = off & 4 == 0;
+    // SAFETY: a measurement on the engine's own kernels, whose loops are capped
+    // (explicit_loop_cap) and whose results the caller compares word for word with the
+    // checked build's from the same state.
+    unsafe { device.create_shader_module_trusted(desc, checks) }
+}
 
 fn module_override(name: &str) -> Option<&'static str> {
     type Cache = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, &'static str>>;
@@ -1246,7 +1282,7 @@ impl Contact {
             (pipeline_layout, group)
         };
         let make = |entry: &str, wgsl: &str, layout: &wgpu::PipelineLayout| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                 label: Some(entry),
                 source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
             });
@@ -1873,7 +1909,7 @@ impl ExplicitBeamsGpu {
     fn frame_pipe(&self) -> &(wgpu::ComputePipeline, wgpu::BindGroup) {
         self.frame.get_or_init(|| {
             let device = &self.device;
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                 label: Some("explicit_beams"),
                 source: wgpu::ShaderSource::Wgsl(
                     crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module)).into(),
@@ -1952,7 +1988,7 @@ impl ExplicitBeamsGpu {
 
     fn debug_contact_pipe(&self, src: &str, entry: &str) -> (wgpu::ComputePipeline, wgpu::BindGroup) {
         let device = &self.device;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams_contact (debug)"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
         });
@@ -1997,7 +2033,7 @@ impl ExplicitBeamsGpu {
     #[doc(hidden)]
     pub fn debug_set_frame_wgsl(&mut self, src: &str) {
         let device = &self.device;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams (debug)"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
         });
@@ -3653,7 +3689,7 @@ impl ExplicitBeamsGpu {
             (pipeline_layout, group)
         };
         let make = |entry: &str, wgsl: &str, layout: &wgpu::PipelineLayout| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                 label: Some(entry),
                 source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
             });
@@ -5036,7 +5072,7 @@ impl Wide {
         let passes = plan::WIDE_PASSES
             .iter()
             .map(|&entry| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                     label: Some(entry),
                     source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(entry)).into()),
                 });
