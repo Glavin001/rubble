@@ -42,18 +42,25 @@ Since then, on `claude/port-gpu-floor-lessons-1289bd` (not merged):
   Metal has no such checks and gets strict arithmetic from a compiler pragma, where
   production's WGSL pays an XOR an operation.
 
+And on `claude/jovial-moser-8fc7c2` (not merged; docs only, its measurement build
+8417ad38 reverted), §8.47: this review's §6.2 step 1 measured on production. A module
+without the coupling's code is bit for bit for a vehicle with an empty proxy set (39
+runs), and 1.6 to 2.4 % cheaper on the one-car rows (0.06 to 0.07 ms a frame). Not built
+(§6.2's outcome below).
+
 What this leaves of §6 and §8:
 
-- **Still open, measured by none of the above:** §6.2 (the kernel by what is in reach:
-  no code for the coupling on frames with nothing in reach), §6.1 (d) and the surface
-  half of (b) (no saved state has surface contact on), §6.5's tools.
+- **Still open, measured by none of the above:** §6.1 (d) and the surface half of (b)
+  (no saved state has surface contact on), §6.5's tools, and the two items §8.47 leaves
+  for a decision (§6.2's outcome).
 - **Open as a question, not a recommendation:** whether the experiment's layout pays on
   a native path with no injected checks and strict arithmetic by compile option
   (`engine-metal`, CUDA). #139 gives the hypothesis (the core is arithmetic-bound under
   WGSL's strict path, so a layout that trades memory for arithmetic loses); nobody has
   measured the layout there. That is the only form in which §6.3 still stands.
 - **Closed for the shared kernels:** §6.3 through Slang to WGSL (#139), §6.4 in WebGPU
-  (#138), §6.1 (a), (b) walk and proxies, (c) (§8.40).
+  (#138), §6.1 (a), (b) walk and proxies, (c) (§8.40), §6.2 step 1 as a module choice
+  (§8.47).
 
 ## 0. Read this first
 
@@ -538,6 +545,41 @@ nothing in reach.
   scattered proxies (one box holds everything it could touch; production's per-node lists
   are the finer tool).
 
+**Outcome of step 1, 2026-11-21** (§8.47 of the perf doc on branch
+`claude/jovial-moser-8fc7c2`, main at 96904a44, native Metal only; nothing built, main's
+kernels unchanged). This section's description of production was wrong in two places,
+and its gain does not appear on the path the matrix times:
+
+- *No module without the coupling's node contact exists.* The `_nocpl` twins leave out
+  only the surface pass's proxy paths. And production already chooses a vehicle a step by
+  a branch: a vehicle whose record has no shape runs the uncoupled node function
+  (`cplHas`, `explicit_beams.slang:1182`).
+- *The choice is exact with no guard*, as argued here: with the coupling's code compiled
+  out, every state word and coupling record is the same for a vehicle with an empty
+  proxy set (39 runs, three rows).
+- *On the lab's path it is worth 0.06 to 0.07 ms a frame, 1.6 to 2.4 %* (drive, and
+  tumble and wall with their sets emptied; eight runs a row against a same-against-same
+  control within ±0.2 %). None of that is executed work; it is the node pass's barrier
+  and the size of its code. Under the 5 % rule, and it would cost four more modules for
+  a browser to compile.
+- *The experiment's 0.16 ms is production's on the other path* (a workgroup a vehicle,
+  `--wide 0`, what a World outside the lab runs): an empty set costs 0.16 to 0.22 ms a
+  frame there, 3.6 to 4.4 %, because the coupling's step with its four barriers a substep
+  is on the vehicle's own workgroup, as in the experiment.
+
+Two things it leaves for a decision, neither built:
+
+1. That 0.16 ms without a new module: lane 0 leaves the coupling's uniform word zero at
+   the frame's start when the vehicle's record has no body and no shape, so the step
+   returns before its barriers. Bit for bit in 15 runs. Its gate needs matrix rows on
+   `--wide 0`, which do not exist.
+2. Step 2's territory is larger than step 1's: a car in the air over the mountain has
+   seven ground chunks in its proxy set and pays 0.36 ms a frame (11 %) for them without
+   touching one. A hypothesis that needs no new guard: a vehicle none of whose nodes
+   lists a shape this step takes the uncoupled node function. Shown bit for bit on one
+   state only; it has to be argued from the list's rule and checked on the bricks and
+   rocks rows first.
+
 ### 6.3 A native frame kernel with the experiment's layout
 
 **Already built and measured, and it lost** (PR #139, §8.43; the correction at the top):
@@ -672,7 +714,10 @@ lane. The candidates' rule in two stages. Each is in §8.39 with its figure.
    2026-11-20: none pays (§6.1's outcome).** (c) survives Slang, naga and Tint as a real
    load and still changes nothing, so the experiment's small lessons depend on its
    layout.
-2. §6.2 step 1, the guard-free kernel choice, with its measurement first. Still open.
+2. §6.2 step 1, the guard-free kernel choice, with its measurement first. **Done
+   2026-11-21: exact, 1.6 to 2.4 % on the matrix's path, not built (§6.2's outcome).**
+   The larger figure it found is a car near shapes it does not touch (0.36 ms, 11 %),
+   which is step 2's case.
 3. A matrix row of 32 cars apart, and the microbenchmark on CUDA. Both decide the shape of
    step 4 before it is built.
 4. §6.3, the new frame kernel, native, a body alone and with proxies, wheels included.
