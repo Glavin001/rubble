@@ -138,7 +138,7 @@ Chunks are made 8 ahead of the car's chunk (192 m, beyond the fog) and removed 2
 
 - **Default steepness is 50°.** The rock's contact surface has kinetic friction 0.75 (37°) and static friction 1.2 (50°). On the CPU reference the car stopped after 32 m at 42° and after 36 m at 46°; at 50° it kept going (129 m in 25 s).
 - **Rockslide.** A car at rest for 2 s gets a 3.4 t boulder thrown at it from 8 m up the slope (a dynamic body, on by default, a checkbox). This keeps the fall going by physical means; the run's log counts them.
-- **The car starts just past the lip, in the air, at the launch speed.** Raycast wheels do not see rigid bodies (F7), so the car cannot drive on the plateau; its own ground plane is put 100 km down.
+- **The car starts just past the lip, in the air, at the launch speed.** Its own ground plane is put 100 km down. (Written when raycast wheels did not see rigid bodies, F7; they do now, `wheels_hit_bodies`, so the plateau could be driven on: the start is unchanged.)
 - **Precision.** A chunk's shapes are placed about the chunk's own origin (f64), each as one static body at an f32 World position. The coupling subtracts the car's origin from a body's position, and the car's nodes are relative to that origin (rebased every 100 m), so contact is computed in small numbers. A static body's f32 position rounds once (0.5 mm at 5 km) and stays there: an offset, not jitter. The "start" control begins a run kilometres down the fall line to test this directly.
 
 ## The derby
@@ -153,7 +153,7 @@ Chunks are made 8 ahead of the car's chunk (192 m, beyond the fog) and removed 2
 - **Round** (`DerbyGame`): a car is out on its roof or side for 3 s, with two wheels off its main body, thrown out of the arena, or not having moved 2 m in 12 s. The last car in wins; at 3 minutes the least damaged car still in. If every car left would go out on the same step (a pile that stopped together), the least damaged stays in. Damage is the car's beams bent plus three times its beams broken, over half its beam count. After the round every car brakes; "New round" (or `R`) restarts in place.
 - **Controls** (all on the page, applied as it runs unless noted): cars (rebuild), "you drive car 1" (off: spectator, every car the AI's), AI aggression, obstacles (restart), AI seed (restart). Car 1 drives with the Drive mode's keys (`W` `A` `S` `D` or the arrows, `Space` handbrake); the chase camera follows it, and `V` cycles the followed car.
 - **Surface contact** is off by default in the Derby, as on the mountain: the walls and ramps are the solver's static shapes, and without it the fleet-wide passes keep many cars faster.
-- **Known limit: a car on debris or on another car cannot drive.** Raycast wheels see the ground and the static shapes, not rigid bodies or other cars (F7). A car whose body comes to rest on fallen bricks, or whose crushed nose rides up onto another car, has its driven wheels in the air and stays put whatever its input; the round then knocks it out ("stopped moving"). The AI aims at its target's flank and staggers its start so that four cars rarely meet nose to nose in the middle (the first version's 4-way head-on pile stopped every car at once).
+- **Wheels on debris and on other cars** (known-bugs F7, fixed 2026-11-18; the "wheels on bodies" checkbox, on by default, `?wheelsHitBodies=0` off): the raycast wheels stand on the props (bricks, crates, barrels, blocks, tyre stacks) and on the other cars' bodies, and push them back. Before, a car whose body came to rest on fallen bricks, or whose crushed nose rode up onto another car, had its driven wheels in the air and stayed put whatever its input; the round then knocked it out ("stopped moving"). The probe now reports each car's wheels touching anything (`grounded`), and `tools/vehicle-lab/derby-beached.py` sums the time a car was beached. The AI still aims at its target's flank and staggers its start: kept because they make a better round (side hits, cars arriving one at a time), not only because of the limit.
 
 **Measured** (2026-11-18, M3 Max, headless Chrome, `vehicle-lab-record.mjs --probe --secs 30 --eval tools/vehicle-lab/derby-probe.js`, spectator, the page's own real-time loop, GPU timing per step on, which itself costs a few ms a step). A World step is 1/60 s of physics (33 steps of the 2 kHz solver); real time is 60 steps a second.
 
@@ -164,6 +164,17 @@ Chunks are made 8 ahead of the car's chunk (192 m, beyond the fog) and removed 2
 | 12 | 21.6 (29.0) | 20–24 | not measured |
 | 16 | 25.8 (34.4) | 16–20 | 21.8 (26.8) ms, ~18/s |
 | 32 | 26.2 (37.0) | 11–13 | 24.3 (29.8) ms, ~11/s |
+
+**Wheels on bodies** (2026-11-19, the same probe, 90 s at 4 cars and 60 s at 8, the scripted player on; `tools/vehicle-lab/derby-beached.py` counts a car beached while it is in the round, asked to move, under 2 km/h and with at most one wheel touching anything):
+
+| Cars | Wheels on bodies | GPU ms a World step, median (p95) | Simulated | Beached | Out |
+| --- | --- | --- | --- | --- | --- |
+| 4 | on | 13.6 (18.3) | 53 s | 0 car-s | 1 (the player, "stopped moving" against the wall: W held into it) |
+| 4 | off | 12.1 (15.8) | 58 s | 0.6 car-s | 1 (the same) |
+| 8 | on | 25.9 (31.2) | 24 s | 0 car-s | 0 |
+| 8 | off | 18.4 (22.0) | 30 s | 0 car-s | 4 ("stopped moving", all wheels down: pinned, not beached) |
+
+In these rounds no car was left beached either way: the flank aim and the staggered start keep the 4-way head-on pile from forming, and the cars that stop are pinned against walls or each other on their wheels. The setting costs 12 % of a World step at 4 cars and 41 % at 8 (the wheels' rays against the other cars in a contact group, and the wheels-ahead schedules it turns off; explicit-vehicles-in-world.md §13). Clip and stills of a car driving up a rigid ramp body onto a layer of bricks (`vehicle-lab-scripts/drive-ramp-bricks.json`): `~/Development/rubble-artifacts/derby-wheels/`.
 
 With GPU timing off, 4 cars ran at 59 steps a second until they met and about 30 once in contact: car-to-car contact is what costs. No count holds 60 (or 120) steps a second once cars are in contact; 32 cars are also limited by the page (readbacks and drawing 32 cars). The props (about 100 rigid bodies) cost 1–2 ms of rigid solver a step.
 
@@ -228,8 +239,8 @@ Each is the user's decision; none was made here.
 1. **Penetration response against moving bodies (B1).** Needed for heavy projectiles, loose rocks and brick stacks: the cuboid's corners end 0.44–0.58 m inside the car.
 2. **The window mismatch between proxy and World body** (B1's first mechanism): momentum given differs by 28 points between the CPU reference and the World for the same shot.
 3. **Surface contact as the default for cars that meet small or sharp bodies.** Off, a 0.1 m sphere passes through at 20–60 m/s. On, it costs 2–5 ms more GPU per step in contact.
-4. **Raycast wheels that see rigid bodies (F7).** The mountain's car cannot roll, ramps and kerbs spawned at runtime stop the body instead of lifting the wheels, and the plateau cannot be driven on. The arena's fixed ramp and kerb are in the car's own solver for this reason.
-5. **Static shapes that can change at runtime** in the car's solver (or the F7 fix), so terrain and obstacles get the wheel contact too.
+4. **Raycast wheels that see rigid bodies (F7): done 2026-11-18** (`wheels_hit_bodies`, explicit-vehicles-in-world.md §13). Ramps and kerbs spawned at runtime now lift the wheels; the arena's fixed ramp and kerb stay in the car's own solver.
+5. **Static shapes that can change at runtime** in the car's solver (the F7 fix now gives World bodies the wheel contact).
 6. **A World on an existing device from the wasm host**, so a rebuild does not compile every pipeline again (21 s).
 7. **An energy ledger on the GPU**, to close plate work against energy absorbed in the page.
 8. **The authored sedan's drag (B2)** takes 1.3–2.0 km/h off a crash test's stated speed over a 1 m run-up; the generated sedan arrives at 56.0 of 56 km/h.
@@ -242,6 +253,7 @@ Each is the user's decision; none was made here.
 - **Steps are owed, not lost.** `World::step` is refused while every readback slot is in flight (3 by default). On a late frame the page lost that step: 42 steps/s at 75 FPS and 29 at 48 FPS were seen on a real display. The lab's World now allows 8 steps' results in flight and a refused step is owed to the next frame (up to 3 beyond the pacer's 4 a frame). On the user's display afterwards: 60 steps/s (100 % real time) at 50 FPS.
 - **`FramePacer::advance` takes how many times slower than real time** (4 for ×¼), not the time scale.
 - **Physics first: the drawing gives way** (`rubble::DrawPacer`, `draw_pacer.rs`; the controls "drawing gives way to physics", "at least N pictures a second" and the render scale, live). A picture is never queued behind one still on the GPU or in a frame whose step was refused (down to the floor, 30 pictures a second by default); while steps are refused the drawing drops a level at a time (every display frame, 60, 30 a second, then 75 % and 50 % of the pixels) and comes back when they are not. A frame not drawn still reads back what its steps left (measurements, the derby's AI). The status bar shows the pictures drawn a second and the level.
+- **Skin cars of one model together** (a control, live: together (wide, the default), together (loop), one by one). The cars of one model share the skin's bind buffer (157 MB for the generated car); together, their skin is one dispatch (`showcase-car-render.mjs` `skinBatchWgsl`: the same skin code, each car's buffers a range of a pooled one), so the binds are read from memory once for every car instead of once a car. The skinned vertices are the same bit for bit (`tools/vehicle-lab/skin-batch.sh` compares them with the base commit's kernel on the same paused state). Measurements: `docs/measurements/vehicle-perf-first-principles.md` §8.41.
 - **Steps in flight** (a control, 3 by default; `setStepsInFlight`, pacing only): with explicit vehicles the World takes a step only while fewer than this many are still waiting for their readback. Chrome lands a readback well after the GPU is done, and with 2 the GPU sat idle. Measurements of both (derby at 4 and 8 cars, the mountain at 8, before and after): `vehicle-perf-first-principles.md` §8.38.
 
 Headless Chrome, M3 Max, generated sedan (554 nodes, 4,228 beams, 1,492 kg), surface contact on, per-phase GPU timing on (which adds cost), **before** the 8-slot gate:

@@ -121,9 +121,9 @@ covers:
 None covers the BeamNG profile (JBeam content, §37 contact, exact friction). That is the
 path the ETK takes.
 
-**F7. Raycast wheels do not see rigid bodies.** The ring drive and the World ETK run on
-raycast wheels. Those wheels meet the vehicle's own ground plane only, never a World body.
-Reported by the coordinator's measurements (§0.1), and not yet a test.
+**F7. Raycast wheels do not see rigid bodies.** (Fixed 2026-11-18, `wheels_hit_bodies`;
+known-bugs F7.) The ring drive and the World ETK run on raycast wheels. Those wheels met the
+vehicle's own ground plane only, never a World body.
 
 ### 0.1 Measured evidence (branch `fix/etk-strength`, 49a30f40, 2026-11-07)
 
@@ -164,7 +164,7 @@ each still needs a committed test with a typed tolerance.
 | X1, the drop cross-path (§3.2) | **Measured** at 1 m (E4): 697–720 kN and 10.3 kN·s on every path, `coupling_probe.rs` |
 | §3.3, the Newton III residual | **Measured** (E3): CPU 0.004 N·s; GPU World box 0.0 |
 | F1, rigid proxies ignore the BeamNG-profile surface | **Open**: confirmed, untested, a decision for the user |
-| F7, raycast wheels do not see rigid bodies | **Open** |
+| F7, raycast wheels do not see rigid bodies | **Fixed** (2026-11-18, `wheels_hit_bodies`) |
 | AVBD multi-body momentum loss (5.5 %, rigid only) | **Open, a top gap**: T3.6 |
 | X3, rigid box against a soft block of the same mass | Not measured |
 | R1, a row of bricks against one block | Not measured |
@@ -582,9 +582,10 @@ profile).
     strikes it.
   * The box's velocity after the window and the car's momentum: bit for bit, or within
     the World's sleep-wake tolerance if wake changes the solve order (C).
-* **T5.5 `raycast_wheels_meet_rigid_bodies`** (F7, open). A car on raycast wheels
-  driven onto a static box ramp that is a World body. Today the wheels see only the
-  vehicle's own plane: the test records that, `#[ignore]`d, until the user decides.
+* **T5.5 `raycast_wheels_meet_rigid_bodies`** (F7, done 2026-11-18): a car parked on a
+  dynamic World box platform drives off it, and stays put with the setting off
+  (`engine-world/tests/wheels_hit_bodies_world.rs`); the CPU and GPU tests of
+  `wheels_hit_bodies` cover a free crate (momentum) and a car on another vehicle.
 * **T5.4 `bonds_house_takes_the_vehicles_impulse`** (World, GPU). The house test in
   `StrengthModel::Bonds`. Momentum closed through the joints (ΔP ≤ 2·10⁻⁴·P0, as the
   existing World test), and the bonds loaded.

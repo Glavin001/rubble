@@ -753,6 +753,69 @@ pub mod cuda_layout {
         out
     }
 
+    /// The suffix of [`grid_stride_entry`]'s second entry.
+    pub const GRID_STRIDE_SUFFIX: &str = "_gs";
+
+    /// Slang's CUDA for compute entry `entry` with a second entry, `{entry}_gs(const uint*
+    /// counts)`, for an indirect dispatch: CUDA has no indirect launch, so instead of the
+    /// host reading the workgroup counts back (a wait for the stream), the host launches a
+    /// fixed grid and each block walks the workgroups `(x, y, z)` the GPU wrote at
+    /// `counts[0..3]` (x fastest, as an indirect dispatch numbers them), running the
+    /// entry's body for each with that workgroup id, a barrier between two. The same body
+    /// for the same workgroups: lossless. The entry itself keeps its name and code (its
+    /// body moves to an inlined `{entry}_body(uint3)`, `blockIdx` its argument).
+    ///
+    /// Needs, and checks: one `extern "C" __global__ void entry()`, the only place the
+    /// source names `blockIdx`, and no `gridDim` (a workgroup's id is all a body may know
+    /// of its grid). Barriers in the body are in uniform control flow (Chrome's rule, which
+    /// every module passes), so a block's threads all reach the barrier between two
+    /// workgroups.
+    pub fn grid_stride_entry(cuda: &str, entry: &str) -> Result<String> {
+        let head = format!("extern \"C\" __global__ void {entry}()");
+        anyhow::ensure!(cuda.matches(&head).count() == 1, "{entry}: no single `{head}` in the CUDA source");
+        anyhow::ensure!(cuda.matches("__global__").count() == 1, "{entry}: more than one __global__ in the CUDA source");
+        anyhow::ensure!(!cuda.contains("gridDim"), "{entry}: the CUDA source reads gridDim");
+        let at = cuda.find(&head).expect("checked");
+        anyhow::ensure!(!cuda[..at].contains("blockIdx"), "{entry}: blockIdx outside the entry");
+        let open = at + cuda[at..].find('{').ok_or_else(|| anyhow!("{entry}: entry has no body"))?;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, c) in cuda[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.ok_or_else(|| anyhow!("{entry}: unbalanced entry body"))?;
+        anyhow::ensure!(!cuda[close + 1..].contains("blockIdx"), "{entry}: blockIdx past the entry");
+        let body = cuda[open..=close].replace("blockIdx", "rubble_block");
+        let suffix = GRID_STRIDE_SUFFIX;
+        let pre = &cuda[..at];
+        let post = &cuda[close + 1..];
+        Ok(format!(
+            "{pre}static __device__ __forceinline__ void {entry}_body(uint3 rubble_block)\n{body}\n\n\
+             {head}\n{{\n    {entry}_body(blockIdx);\n}}\n\n\
+             // Indirect dispatch on the GPU (engine-slang-build grid_stride_entry): the\n\
+             // workgroups at counts[0..3], walked by this launch's blocks.\n\
+             extern \"C\" __global__ void {entry}{suffix}(const uint* rubble_counts)\n{{\n\
+             \x20   const uint nx = rubble_counts[0];\n\
+             \x20   const uint ny = rubble_counts[1];\n\
+             \x20   const uint nz = rubble_counts[2];\n\
+             \x20   const unsigned long long plane = (unsigned long long)nx * ny;\n\
+             \x20   const unsigned long long total = plane * nz;\n\
+             \x20   for (unsigned long long v = blockIdx.x; v < total; v += gridDim.x)\n    {{\n\
+             \x20       {entry}_body(make_uint3((uint)(v % nx), (uint)((v / nx) % ny), (uint)(v / plane)));\n\
+             \x20       __syncthreads();\n    }}\n}}\n{post}"
+        ))
+    }
+
     /// CUDA C++ → fatbin: SASS for each `sm` in `sass` (no JIT on those GPUs,
     /// so a single-use GPU container does not spend its seconds compiling)
     /// plus PTX for `ptx_arch` (`compute_75`), which the driver JIT-compiles on
@@ -797,6 +860,12 @@ pub mod cuda_layout {
         // L1 caching (the CUDA default) for measurements.
         let cache = std::env::var("ENGINE_CUDA_LOAD_CACHE").unwrap_or_else(|_| "cg".into());
         cmd.args(["-Xptxas", &format!("-dlcm={cache}")]);
+        // Test setting (strict floats): ENGINE_CUDA_FMAD=0 keeps every a * b + c a
+        // multiply and an add (-fmad=false), so two modules that do the same arithmetic
+        // round alike whatever each one's code around it. Off by default (nvcc fuses).
+        if std::env::var("ENGINE_CUDA_FMAD").as_deref() == Ok("0") {
+            cmd.arg("-fmad=false");
+        }
         for sm in sass {
             cmd.arg(format!("-gencode=arch=compute_{sm},code=sm_{sm}"));
         }
@@ -910,7 +979,22 @@ pub mod cuda_layout {
 
     #[cfg(test)]
     mod tests {
-        use super::deferred_load_hazards;
+        use super::{deferred_load_hazards, grid_stride_entry};
+
+        #[test]
+        fn grid_stride_entry_keeps_the_entry_and_adds_the_walk() {
+            let cu = "typedef unsigned int uint;\nstatic __device__ uint f(uint x) { return x; }\n\
+                extern \"C\" __global__ void k()\n{\n    uint g = blockIdx.x;\n    if (g > 2U) { return; }\n    __syncthreads();\n}\n";
+            let out = grid_stride_entry(cu, "k").unwrap();
+            assert!(out.contains("static __device__ __forceinline__ void k_body(uint3 rubble_block)\n{\n    uint g = rubble_block.x;"));
+            assert!(out.contains("extern \"C\" __global__ void k()\n{\n    k_body(blockIdx);\n}"));
+            assert!(out.contains("extern \"C\" __global__ void k_gs(const uint* rubble_counts)"));
+            assert_eq!(out.matches("__global__").count(), 2);
+            assert!(out.starts_with("typedef unsigned int uint;\nstatic __device__ uint f"));
+            // A body that knows more of its grid than its workgroup id is refused.
+            assert!(grid_stride_entry(&cu.replace("return x;", "return blockIdx.x;"), "k").is_err());
+            assert!(grid_stride_entry(&cu.replace("uint g = blockIdx.x;", "uint g = gridDim.x;"), "k").is_err());
+        }
 
         /// Slang 2026.19's output for prefix_color_tiles_parallel before the fix.
         #[test]
