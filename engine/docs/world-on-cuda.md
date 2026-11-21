@@ -1,7 +1,7 @@
 # The World on CUDA (Modal): plan
 
-Status (2026-11-21): **C0, C1 and C2 done and measured; C6 step 1 measured** (§6). The rest
-is the plan.
+Status (2026-11-21): **C0, C1, C2 and the first part of C3 done and measured; C6 step 1
+measured** (§6). The rest is the plan.
 Goal: every GPU pass of a World step runs on CUDA on Modal the way the explicit soft-body
 frame already does (`tools/scenario-matrix/run.sh --cuda`): kernels built locally by nvcc,
 Modal only runs the binary, a verdict costs cents and needs no cold driver compile. Today
@@ -258,15 +258,42 @@ same way as `prefix_color_tiles_parallel` (the sum before the store), regenerate
 jobs, emulated x86 Docker): all 32 compile, 42 s in all; the slowest are the stress lab's
 `world` / `world_ic` (27 s each), then `blast_motion` 9 s, `fracture` 7 s.
 
-**C3, what it needs first (found while starting it).** `CudaSim` cannot take joints, hulls,
-heightfields or vehicles without copying host logic a fourth time: WgpuSim
-(`gpu.rs` / `gpu_host_state.rs`), MetalWorld (`engine-metal/src/world.rs`), MetalSim and
-CudaSim each keep their own joint slots and free list, hull-arena sync, scene flags
-(`has_convex` and the host words it sets, e.g. `s[29]`; `listed_persist` off for hull
-scenes), torque arms and `StepInputs`. C3 therefore starts by moving that host state into
-`engine-exec` beside `rigid_plan` (one `RigidHost` the four hosts wrap), proved bit for bit
-on wgpu and Metal first, then CudaSim takes it. The convex and joint scenes of
-`engine-scenes` (Convex Pile 10k, Ragdoll Pile 10k, Hinge Chains 10k) are its gate.
+**C3, first part: one rigid host state, joints and convex hulls on CUDA.**
+`engine_exec::rigid_host` now holds what the plan hosts each copied: body motion flags,
+collider flags (convex, height field, filters), joint slots and offsets, the automatic
+broadphase grid; each body's reach and a joint's default torque arm are in
+`engine_schema::joint`, so `HostWorld` (the scene export) shares them too. WgpuSim, CudaSim
+and MetalSim call them. MetalWorld keeps its own hand-encoded step (it never replays the
+plan) and is left as it is.
+
+- *WebGPU unchanged, proven:* `rigid_gate` (11 scenes, sleep off) hashes identically before
+  and after, and two runs of the old build agree with each other.
+- *Two fixes that come with sharing:* CCD counts `BODY_CCD_FAST` on CUDA and MetalSim (only
+  WebGPU did); MetalSim and CudaSim fall back to the hierarchical grid when the uniform
+  grid's large list overflows (they failed the step).
+- *CudaSim* takes joints (`add_joints`, `add_joint_desc`), the hull arena (`set_hulls`;
+  larger than the capacity is an error) and feeds the scene's flags to `StepInputs` and
+  the host words.
+- *One scene gate* (`engine_scenes::invariants::gate`), run by engine-webgpu
+  `scene_gate.rs` and engine-cuda `scenes.rs`: finite state, valid colouring, nothing
+  through the ground, locked joints within bars set from the WebGPU reference (largest gap
+  0.25 m, mean 0.03 m; the reference's Ragdoll Pile opens 0.137 / 0.023 m).
+
+| 10k scene, all pass | WebGPU, M3 Max: ms a step | CUDA, T4: ms a step | joint gap max / mean, M3 / T4 |
+|---|---|---|---|
+| Convex Pile | 5.13 | 14.2 | — |
+| Ragdoll Pile | 4.54 | 6.20 | 0.137 / 0.023, 0.216 / 0.023 |
+| Hinge Chains | 1.35 | 1.77 | 0.020 / 0.013, 0.020 / 0.013 |
+
+Observations from one run each, to check before relying on them: CUDA's ragdolls end with
+more kinetic energy at step 300 (45.5 J against 10.0) and their largest gap is wider; the
+convex pile's lowest body dips to −0.025 m at step 200 on CUDA (0.108 on WebGPU) and is back
+at 0.375 by step 300. The convex pile costs 2.8 times the Mac on a T4 (the explicit rows'
+T4/Mac ratio is 1.0 to 2.0): a CUDA convex profile is a candidate follow-up.
+
+**C3, still to do:** the World's other `StepInputs` on CUDA (height fields and soil,
+vehicles, characters, guidance, explosions, motion locks; the 37 entries they emit), then
+the portable World fixture and `world_replay` for `run.sh --world --cuda`.
 
 ## 5. Open questions to settle while building (not blockers)
 
