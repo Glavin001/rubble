@@ -101,6 +101,13 @@ fn main() -> Result<()> {
                                     hazards.join("\n  ")
                                 );
                             }
+                            // A second entry for indirect dispatches, the workgroup counts
+                            // read on the GPU (`{entry}_gs`, grid_stride_entry): CudaSim
+                            // launches it without waiting for the stream.
+                            std::fs::write(
+                                &cu,
+                                engine_slang_build::cuda_layout::grid_stride_entry(&source, entry)?,
+                            )?;
                             if let Some(nvcc) = &nvcc {
                                 fatbin(nvcc, &cu, &cu.with_extension("fatbin"), &arch, &sass)?;
                             }

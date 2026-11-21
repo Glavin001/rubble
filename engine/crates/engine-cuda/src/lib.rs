@@ -8,9 +8,16 @@
 //! SLANG_globalParams` block; the host fills it once per module with device
 //! pointers and rewrites only the pass-uniform pointer between dispatches.
 //!
-//! CUDA has no indirect dispatch: the host reads the 12-byte work/colour slots
-//! of binding 23 back after a kernel that may have written them, then launches
-//! the counted grid. Every other step input is forwarded on the GPU, as on Metal.
+//! CUDA has no indirect dispatch. Each kernel has a second entry, `{entry}_gs`
+//! (engine-slang-build `grid_stride_entry`), whose blocks walk the workgroups the GPU
+//! wrote in its 12-byte slot of binding 23: an indirect command is that entry over a
+//! fixed grid (the blocks the device keeps resident) with a pointer to the slot, queued
+//! without waiting. No indirect kernel writes binding 23, so every block reads the
+//! counts the slot held at launch, as an indirect dispatch would. With
+//! [`CudaSim::set_device_indirect`] off (`RUBBLE_CUDA_HOST_INDIRECT=1`, measurement), the
+//! host reads binding 23 back after a kernel that may have written it (a wait for the
+//! stream) and launches the counted grid. Every other step input is forwarded on the
+//! GPU, as on Metal.
 //!
 //! Needs only the NVIDIA driver at run time (`libcuda` is loaded dynamically).
 //! Build hosts without nvcc embed no device code; [`CudaSim::available`] is then false.
@@ -72,6 +79,8 @@ struct Kernel {
     writes_indirect: bool,
     /// Pass slot the constant bank currently points at.
     bound_pass: Option<u32>,
+    /// The indirect entry (`{entry}_gs`) and the blocks a launch of it runs.
+    indirect: Option<(sys::CUfunction, u32)>,
 }
 
 pub struct CudaSim {
@@ -102,6 +111,8 @@ pub struct CudaSim {
     indirect_dirty: bool,
     /// Host readbacks of binding 23 (each one waits for the stream).
     pub indirect_syncs: u64,
+    /// Indirect commands read their counts on the GPU (`{entry}_gs`).
+    device_indirect: bool,
     /// `ENGINE_CUDA_SYNC=1`: wait after every launch so a fault names its kernel.
     sync_each: bool,
     /// Last kernel queued (error context: faults surface at the next sync).
@@ -172,12 +183,35 @@ impl CudaSim {
                 .map_err(map)?;
         }
 
+        let sms = unsafe {
+            result::device::get_attribute(
+                dev,
+                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+        }
+        .map_err(map)? as u32;
         let mut kernels = Vec::with_capacity(CUDA_KERNELS.len());
         for k in CUDA_KERNELS {
             let module = unsafe { result::module::load_data(k.image.as_ptr() as *const c_void) }
                 .map_err(|e| anyhow::anyhow!("CUDA: load module {}: {e:?}", k.entry))?;
             let function = unsafe { result::module::get_function(module, CString::new(k.entry)?) }
                 .map_err(|e| anyhow::anyhow!("CUDA: function {}: {e:?}", k.entry))?;
+            let indirect = match unsafe {
+                result::module::get_function(module, CString::new(format!("{}_gs", k.entry))?)
+            } {
+                Ok(f) => {
+                    let per_sm = unsafe {
+                        result::occupancy::max_active_block_per_multiprocessor(
+                            f,
+                            (k.threads[0] * k.threads[1] * k.threads[2]) as i32,
+                            0,
+                        )
+                    }
+                    .map_err(|e| anyhow::anyhow!("CUDA: occupancy {}: {e:?}", k.entry))?;
+                    Some((f, per_sm.max(1) as u32 * sms))
+                }
+                Err(_) => None,
+            };
             let mut globals = 0;
             let mut pass_offset = None;
             if k.params_bytes > 0 {
@@ -215,6 +249,7 @@ impl CudaSim {
                 pass_offset,
                 writes_indirect: k.writes_indirect,
                 bound_pass: pass_offset.map(|_| 0),
+                indirect,
             });
         }
 
@@ -266,11 +301,22 @@ impl CudaSim {
             indirect,
             indirect_dirty: true,
             indirect_syncs: 0,
+            device_indirect: std::env::var("RUBBLE_CUDA_HOST_INDIRECT").as_deref() != Ok("1"),
             sync_each: std::env::var("ENGINE_CUDA_SYNC").as_deref() == Ok("1"),
             last_kernel: "",
             profiling: false,
             phase_events: Vec::new(),
         })
+    }
+
+    /// Indirect commands read their workgroup counts on the GPU (the default), or
+    /// the host reads binding 23 back first (`false`: the old path, for A/Bs).
+    pub fn set_device_indirect(&mut self, on: bool) {
+        self.device_indirect = on;
+    }
+
+    pub fn device_indirect(&self) -> bool {
+        self.device_indirect
     }
 
     pub fn device_name(&self) -> &str {
@@ -455,11 +501,24 @@ impl CudaSim {
         grid: (u32, u32, u32),
         pass: u32,
     ) -> Result<(), ExecError> {
+        self.launch_with(logical, grid, pass, None)
+    }
+
+    /// [`Self::launch`], or with `counts` (a device address of three words) the
+    /// kernel's indirect entry over its resident grid, reading the counts there.
+    fn launch_with(
+        &mut self,
+        logical: &'static str,
+        grid: (u32, u32, u32),
+        pass: u32,
+        counts: Option<sys::CUdeviceptr>,
+    ) -> Result<(), ExecError> {
         let idx = Self::kernel_index(logical)?;
         let threads = CUDA_KERNELS[idx].threads;
         self.last_kernel = logical;
         let stream = self.stream;
         let pass_ptr = self.bufs[PASS_BINDING as usize] + u64::from(pass) * PASS_ALIGN;
+        let body_groups = self.body_count.div_ceil(64);
         let k = &mut self.kernels[idx];
         if let Some(offset) = k.pass_offset {
             if k.bound_pass != Some(pass) {
@@ -475,20 +534,46 @@ impl CudaSim {
                 k.bound_pass = Some(pass);
             }
         }
-        if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
-            return Ok(());
+        if let Some(mut ptr) = counts {
+            let (f, resident) = k.indirect.ok_or_else(|| {
+                ExecError::Backend(format!("CUDA: {logical} has no indirect entry"))
+            })?;
+            // The blocks the device keeps resident, or one per 64 bodies when that is
+            // more (most indirect passes run a workgroup per 64 awake bodies): a block
+            // then rarely walks a second workgroup, and the hardware keeps balancing
+            // blocks across SMs. Measured on a T4 (2026-11-21): resident blocks alone
+            // were 12 % slower at 100k bodies (the static split's tail), and 4x or 16x
+            // the resident blocks at every size 4 % / 46 % slower at 10k (idle blocks).
+            // Any grid gives the same result: each workgroup runs once, whichever block.
+            let blocks = resident.max(body_groups);
+            let mut params = [&mut ptr as *mut sys::CUdeviceptr as *mut c_void];
+            unsafe {
+                result::launch_kernel(
+                    f,
+                    (blocks, 1, 1),
+                    (threads[0], threads[1], threads[2]),
+                    0,
+                    stream,
+                    &mut params,
+                )
+            }
+            .map_err(|e| ExecError::Backend(format!("CUDA: launch {logical}_gs: {e:?}")))?;
+        } else {
+            if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
+                return Ok(());
+            }
+            unsafe {
+                result::launch_kernel(
+                    k.function,
+                    grid,
+                    (threads[0], threads[1], threads[2]),
+                    0,
+                    stream,
+                    &mut [],
+                )
+            }
+            .map_err(|e| ExecError::Backend(format!("CUDA: launch {logical}: {e:?}")))?;
         }
-        unsafe {
-            result::launch_kernel(
-                k.function,
-                grid,
-                (threads[0], threads[1], threads[2]),
-                0,
-                stream,
-                &mut [],
-            )
-        }
-        .map_err(|e| ExecError::Backend(format!("CUDA: launch {logical}: {e:?}")))?;
         if k.writes_indirect {
             self.indirect_dirty = true;
         }
@@ -613,8 +698,13 @@ impl CudaSim {
                     self.launch(kernel, (x, y, 1), pass)?;
                 }
                 Cmd::Indirect { kernel, slot, pass } => {
-                    let g = self.indirect_groups(slot)?;
-                    self.launch(kernel, g, pass)?;
+                    if self.device_indirect {
+                        let at = self.bufs[INDIRECT_BINDING as usize] + u64::from(slot) * 12;
+                        self.launch_with(kernel, (0, 0, 0), pass, Some(at))?;
+                    } else {
+                        let g = self.indirect_groups(slot)?;
+                        self.launch(kernel, g, pass)?;
+                    }
                 }
             }
             // Diagnostics: `ENGINE_CUDA_STOP_AFTER=kernel@step` ends that step
@@ -686,6 +776,11 @@ impl CudaSim {
     pub fn download_words(&mut self, slot: usize, words: usize) -> Vec<u32> {
         let words = words.min((self.sizes[slot] / 4) as usize);
         self.download(slot, words).expect("download binding")
+    }
+
+    /// Words in binding `slot` (for [`Self::download_words`] of the whole buffer).
+    pub fn binding_words(&self, slot: usize) -> usize {
+        (self.sizes[slot] / 4) as usize
     }
 
     pub fn download_bodies(&mut self) -> Vec<BodyState> {
