@@ -1,7 +1,7 @@
 # The World on CUDA (Modal): plan
 
-Status (2026-11-21): **C0, C1, C2 and the first part of C3 done and measured; C6 step 1
-measured** (§6). The rest is the plan.
+Status (2026-11-21): **C0 to C3 done and measured; C6 step 1 measured** (§6). Next: C4
+(the coupling as a shared plan, with the portable World fixture and `run.sh --world --cuda`).
 Goal: every GPU pass of a World step runs on CUDA on Modal the way the explicit soft-body
 frame already does (`tools/scenario-matrix/run.sh --cuda`): kernels built locally by nvcc,
 Modal only runs the binary, a verdict costs cents and needs no cold driver compile. Today
@@ -291,9 +291,26 @@ convex pile's lowest body dips to −0.025 m at step 200 on CUDA (0.108 on WebGP
 at 0.375 by step 300. The convex pile costs 2.8 times the Mac on a T4 (the explicit rows'
 T4/Mac ratio is 1.0 to 2.0): a CUDA convex profile is a candidate follow-up.
 
-**C3, still to do:** the World's other `StepInputs` on CUDA (height fields and soil,
-vehicles, characters, guidance, explosions, motion locks; the 37 entries they emit), then
-the portable World fixture and `world_replay` for `run.sh --world --cuda`.
+**C3, second part: height fields, soil and convex bodies.** `rigid_host` also builds a
+height field's support body and collider, a convex body's cooked state and colliders, and
+finds a soil in the hull arena; WgpuSim and MetalSim use them, CudaSim gains
+`add_height_field` and `add_convex_body`. engine-cuda `tests/heightfield.rs` runs
+engine-webgpu `heightfield.rs`'s two reference checks with its scene; both pass on a T4
+(a sphere rolls 0.9139 m down the 15° field and the 15° plane alike; analytic 0.9068 m).
+
+*Follow-up found on the way (pre-existing, every plan host):* without a hull in the scene
+(the uniform grid) a lying capsule of radius 0.25 m rests at 0.2421 m on a plane and at
+0.2354 m on a flat height field, on CUDA and on MetalSim to 1e-6 m; with a hull (the
+hierarchical grid) it rests at 0.235 on both. Which depth is right, and why the grid
+changes it, is for a rigid-solver session.
+
+**C3 is closed here.** Every rigid input the World gate's rows use (boxes, spheres,
+capsules, convex hulls, height fields, joints) runs on CUDA through the shared host state.
+Not on CUDA yet, and not on those rows: vehicles' raycast wheels, characters and queries,
+guidance, explosions, motion locks, the sleep archive (the 37 entries `encode_step` can
+emit that CUDA does not build). **Decided:** the portable World fixture and `world_replay`
+move into C4. The gate's number is the rigid step, the explicit frame *and* the coupling
+together; a replay without the coupling would print a World that does not exist.
 
 ## 5. Open questions to settle while building (not blockers)
 
