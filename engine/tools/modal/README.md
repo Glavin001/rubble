@@ -181,8 +181,8 @@ Bit for bit is exact within CUDA. A switch that runs other modules (the split pa
 needs `ENGINE_CUDA_FMAD=0` for that: by default nvcc fuses multiply-adds per module, so two
 modules doing the same arithmetic can differ in the last bit. Measured 2026-11-19 (T4):
 `perf=0` every row bit for bit, deltas within 2.4 %; `groupsplit` (strict) every row bit for
-bit, the contact rows 3 to 20 times faster with it. A run: about 4 minutes of local build
-after a kernel edit, then about half a minute on Modal and half a cent for the 12 rows.
+bit, the contact rows 3 to 20 times faster with it. A run: 2.5 to 4 minutes of local build
+after a kernel edit (seconds after a Rust change or an edit undone; "Build speed"), then about half a minute on Modal and half a cent for the 12 rows.
 
 What one verdict costs (2026-11-21, T4, `perf=0` strict, all 12 rows; each row's on and off
 halves always run in the same container, so a verdict never reuses a stored control):
@@ -597,6 +597,77 @@ Measured 2026-11-14/15 (M3 Max host, OrbStack Docker with Rosetta, Modal T4):
 | WebGPU, warmed: `vv_grid_gpu` / `explicit_vehicles` | 39 s / 57 s end to end; 13.5 s / 41 s billed |
 | WebGPU, new kernel version: parallel warm-up, 16 cores | 1,103-1,157 s (the contact module alone ~1,024 s), ~$0.45 |
 | `explicit_loop_cap -- a_runaway` (no explicit kernels) | 34 s (5.6 s billed, $0.0013) |
+
+## Build speed (CUDA route)
+
+Measured 2026-11-21 on the M3 Max (16 cores, OrbStack), `engine-cuda`'s `explicit_replay`
+in release with the matrix's 33 explicit modules and SASS for the T4 (what
+`run.sh --cuda` builds). Every number is the build alone, nvcc and slangc timed per call.
+
+| Step | Before (x86_64 image, Rosetta, no caches) | Now (arm64 host, x86_64 nvcc, caches) |
+|---|---|---|
+| First build (empty target and caches) | 570 s | 324 s |
+| Nothing changed | 1 s | 1 s |
+| A Rust change in engine-cuda | 19 s | **4 s** |
+| A line added to `explicit_beams.slang` | 327 s (305 slangc, 237 nvcc) | 246 s (101 slangc, 34 nvcc) |
+| A line added to `explicit_beams_fleet_levels.slang` | 325 s (305 slangc, 237 nvcc) | 142 s (24 slangc, 4 nvcc) |
+| The edit undone (or any state built before) | 327 s | **5 s** (all from the caches) |
+
+What changed (`gpu_run.sh`, `build_ref.sh`, `build/Dockerfile`, engine-slang-build):
+
+- **Kernels kept by content, shared by every worktree and commit.** nvcc's fatbins
+  (`ENGINE_CUDA_FATBIN_CACHE`, which only CI used before) and slangc's CUDA sources and
+  reflection (`RUBBLE_SLANG_OBJ_CACHE`; the CUDA path now uses the same `compile_key` as
+  the other targets) live in the Docker volume `rubble-cuda-kernels`. Before, any change
+  under `slang/` ran slangc 305 times and nvcc 237 times (126 rigid, 77 terrain, 34
+  explicit), though an explicit-beams edit leaves the rigid and terrain kernels alone.
+  A fatbin is reused only when the CUDA source, nvcc's version and arguments and the
+  compilers' own bytes match (checked byte for byte on a hit). `fatbin_cache.py` keeps
+  the volume to 12 GiB (fatbins) and 4 GiB (slangc), dropping entries unused for a week.
+- **Rust and slangc native, nvcc the x86_64 one.** The CUDA route builds in the arm64
+  image (cross-compiling the host to x86_64, as the other routes already did); nvcc is
+  the x86_64 image's own toolkit run through Rosetta, with the cross toolchain's g++ as
+  its host compiler. `GPU_RUN_X86=1` builds in the old image.
+- **`build_ref.sh`**: one tree for every commit, updated by content (`rsync -c`, so
+  unchanged files keep their times and cargo rebuilds only the crates that changed), and
+  the same kernel caches. Before, each commit rebuilt every workspace crate and all its
+  kernels (491-576 s). Now (the matrix's twelve fixtures): a first commit 349 s, then a
+  commit that changed only a doc 11 s, one that added a line to
+  `explicit_beams_fleet_levels.slang` 149 s.
+
+Device code is unchanged. All 237 modules (rigid, terrain, explicit) were built both ways
+from one tree and compared with `cuobjdump -sass` and `-ptx`: identical, apart from the
+translation unit's name hash (`_INTERNAL_xxxxxxxx_`, nvcc hashes the source's path, which
+differs between the two targets' build directories) and the debug sections that name
+that path. At the same path the fatbins are byte-identical. End to end,
+`run.sh --cuda perf=0` (strict floats) built this way passed on a T4: every row bit for
+bit, $0.0047.
+
+Findings that decided this:
+
+- **NVIDIA's aarch64 nvcc is not the x86_64 one.** Same release (12.8.93), same
+  `--version`, but it writes different SASS for 15 of 237 modules (`SGXT` sign extension
+  where x86_64 has `PRMT`, call offsets moved): on aarch64 `char` is unsigned. It would
+  have been about 3x faster on small modules. Not used; the fatbin cache's key now
+  includes the compilers' bytes so the two can never be mixed.
+- **Rosetta is not what makes nvcc slow.** The largest module (`explicit_beams`, 866 KB
+  of CUDA) took 140 s with the native aarch64 nvcc, 147 s with x86_64 under Rosetta and
+  187 s on a Modal x86_64 CPU container. Rosetta costs about 2.5x on short processes
+  (a small module 0.9 s vs 2.4 s; slangc 1.0 s vs 1.7 s), little on long ones.
+- **Building on Modal CPU containers does not help.** Modal's cores were slower than the
+  Mac's for nvcc (187 s vs 147 s), the wall time is bounded by the slowest single module
+  either way, and a cold kernel build would cost about $0.03 plus upload. Not built.
+- **What is left after a kernel edit is one module's nvcc.** nvcc compiles a module on
+  one core: `explicit_beams_split_member_wide` takes 207-258 s, `split_group_wide` 136-160
+  s, and the edit waits for the slowest module it reaches. An edit to `explicit_beams.slang`
+  reaches every explicit module: everything after the edit moves down a line, and the
+  kernels' loop-cap status words carry `__LINE__` (`SEL R0, RZ, 0x1001319` became
+  `0x100131a` after one blank line), so even a line shift changes the SASS of 24 of 34
+  modules. Keying the cache on the source without `#line` would therefore be lossy, and
+  is not done.
+- Ways to go further (each changes kernels or their output, so not done here): stable
+  status codes instead of `__LINE__`, so an edit leaves the modules it does not touch
+  unchanged; smaller modules, so the slowest compile is shorter.
 
 ## What does not work
 

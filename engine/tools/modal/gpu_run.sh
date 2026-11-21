@@ -189,13 +189,15 @@ fi
 # volume of this worktree's own (two worktrees share /repo as their path inside the
 # container, so a shared target dir could take one's stale outputs for the other's).
 #
-# On Apple silicon (except the CUDA route: nvcc is x86_64-only) the build runs natively:
-# an arm64 Linux image cross-compiling to x86_64 (engine/tools/modal/build), about 3x
-# faster than the x86_64 image under Rosetta (vehicle_lab from empty: 112 s vs 328 s).
+# On Apple silicon the build runs natively: an arm64 Linux image cross-compiling to
+# x86_64 (engine/tools/modal/build), about 3x faster than the x86_64 image under Rosetta
+# (vehicle_lab from empty: 112 s vs 328 s). The CUDA route too: rustc and slangc native,
+# nvcc the x86_64 image's own toolkit through Rosetta, so the device code is the x86_64
+# build's (README, "Build speed"); GPU_RUN_X86=1 builds in the x86_64 image instead.
 wt_key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
 cuda_route=0
 case " $* " in *" engine-cuda "*|*" -p engine-cuda"*) cuda_route=1 ;; esac
-if [ "$(uname -m)" = arm64 ] && [ "$cuda_route" = 0 ]; then
+if [ "$(uname -m)" = arm64 ] && [ "${GPU_RUN_X86:-0}" != 1 ]; then
   platform=linux/arm64
   image="rubble-gpurun-build:arm64-$(shasum -a 256 "$here/build/Dockerfile" | cut -c1-12)"
   image_dir="$here/build"
@@ -248,14 +250,26 @@ if [ "$platform" = linux/arm64 ]; then jobs_default=$(sysctl -n hw.ncpu 2>/dev/n
 # tests' 21 modules took 301 s at 4 jobs, 222 s at 8 and 211 s at 12, peak 6-7 GB, on a
 # 16-core M3 Max with Docker given 16 cores and 25 GB; 2026-11-19.)
 else jobs_default=6; rjobs_default=12; fi
-docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} \
+# The CUDA route keeps nvcc's fatbins (ENGINE_CUDA_FATBIN_CACHE) and slangc's outputs
+# (RUBBLE_SLANG_OBJ_CACHE) by content in a volume every worktree and every build_ref.sh
+# commit shares: a module whose CUDA source and flags were compiled before is copied, not
+# compiled (the rigid and terrain kernels after an explicit-beams edit, the modules an
+# edit did not reach, a commit's unchanged ones, an edit undone).
+cuda_cache=()
+if [ "$cuda_route" = 1 ]; then
+  cuda_cache=(-v rubble-cuda-kernels:/cache/kernels -v "$here/fatbin_cache.py:/opt/rubble/fatbin_cache.py:ro"
+    -e ENGINE_CUDA_FATBIN_CACHE=/cache/kernels/fatbins -e RUBBLE_SLANG_OBJ_CACHE=/cache/kernels/slang
+    -e ENGINE_CUDA_REQUIRE_PTX=1)
+fi
+docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_cache[@]+"${cuda_cache[@]}"} \
   -v "$repo:/repo" \
   -v "$run:/out" \
   -v rubble-cuda-cargo:/cache/cargo \
   -v "$target_vol:/cache/target" \
   -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$jobs_default}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-$rjobs_default}" \
-  "$image" python3 /repo/engine/tools/modal/gpu_run_pack.py /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
+  "$image" bash -c 'if [ -n "${ENGINE_CUDA_FATBIN_CACHE:-}" ]; then python3 /opt/rubble/fatbin_cache.py "$ENGINE_CUDA_FATBIN_CACHE"; python3 /opt/rubble/fatbin_cache.py "$RUBBLE_SLANG_OBJ_CACHE" --max-gib 4; fi
+    exec python3 /repo/engine/tools/modal/gpu_run_pack.py "$@"' gpu_run_pack /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
 t1=$(date +%s)
 echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
 rm -rf "$run/stage"

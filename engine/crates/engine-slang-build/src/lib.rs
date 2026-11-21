@@ -565,7 +565,7 @@ pub mod msl_layout {
 /// pointers from the shared `BIND(slot)` numbering.
 pub mod cuda_layout {
     use anyhow::{anyhow, bail, Context, Result};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// One field of `SLANG_globalParams`: a structured buffer (16 bytes:
     /// pointer, element count) or a uniform block pointer (8 bytes).
@@ -604,6 +604,35 @@ pub mod cuda_layout {
         defines: &[(&str, &str)],
     ) -> Result<CudaKernel> {
         let reflection = dest.with_extension("json");
+        // Kept by what the compile depends on (`compile_key`, as for the other targets;
+        // the source's whole path too, which the CUDA source names in its #line
+        // directives): an edit to one kernel file runs slangc again only for the
+        // entries that include it. Both outputs are kept; a hit needs both.
+        let include_dirs = [root.join("physics"), root.join("kernels")];
+        let cached = super::compile_key(
+            slangc,
+            source,
+            entry,
+            "compute",
+            &format!("cuda+reflection-json {}", source.display()),
+            &include_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            defines,
+        )
+        .and_then(|key| super::compile_cache_dir().map(|dir| dir.join(key)));
+        let kept = |ext: &str| cached.as_ref().map(|c| c.with_extension(ext));
+        if let (Some(cu), Some(json)) = (kept("cu"), kept("json")) {
+            if cu.is_file() && json.is_file() {
+                std::fs::copy(&json, &reflection)?;
+                std::fs::copy(&cu, dest)?;
+                // (A hit is marked used: tools/modal/fatbin_cache.py drops the least
+                // recently used entries of a shared cache.)
+                let now = std::time::SystemTime::now();
+                for p in [&json, &cu] {
+                    let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(now));
+                }
+                return read_kernel(&reflection, entry);
+            }
+        }
         let output = std::process::Command::new(slangc)
             .args(["-target", "cuda", "-stage", "compute", "-entry", entry])
             .args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
@@ -624,7 +653,24 @@ pub mod cuda_layout {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let json = std::fs::read_to_string(&reflection)?;
+        if let (Some(cu), Some(json)) = (kept("cu"), kept("json")) {
+            // (Written beside their names and renamed, the CUDA source last: another
+            // build may store the same key.)
+            if let Some(dir) = cu.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            for (from, to) in [(&reflection, &json), (&dest.to_path_buf(), &cu)] {
+                let tmp = to.with_extension(format!("tmp{}-{entry}-{}", std::process::id(), to.extension().map_or("", |e| e.to_str().unwrap_or(""))));
+                if std::fs::copy(from, &tmp).is_ok() {
+                    let _ = std::fs::rename(&tmp, to);
+                }
+            }
+        }
+        read_kernel(&reflection, entry)
+    }
+
+    fn read_kernel(reflection: &Path, entry: &str) -> Result<CudaKernel> {
+        let json = std::fs::read_to_string(reflection)?;
         Ok(CudaKernel {
             threads: super::msl_layout::reflected_threads(&json, entry)?,
             fields: global_fields(&json, entry)?,
@@ -923,7 +969,25 @@ pub mod cuda_layout {
             if version.is_empty() {
                 return Ok(None);
             }
-            let mut words = format!("{}\n{version}\n", nvcc.display());
+            // The compilers' own bytes too: NVIDIA's aarch64 and x86_64 nvcc print the
+            // same --version but write different SASS for some kernels, so a cache shared
+            // between build images must not take one's fatbin for the other's.
+            static TOOLS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let tools = TOOLS.get_or_init(|| {
+                use std::hash::{Hash, Hasher};
+                let bin = std::fs::canonicalize(nvcc).unwrap_or_else(|_| nvcc.to_path_buf());
+                let dir = bin.parent().map(Path::to_path_buf).unwrap_or_default();
+                let mut out = String::new();
+                for tool in [bin.clone(), dir.join("ptxas"), dir.join("../nvvm/bin/cicc")] {
+                    if let Ok(bytes) = std::fs::read(&tool) {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        bytes.hash(&mut h);
+                        out.push_str(&format!("{} {:016x}\n", tool.display(), h.finish()));
+                    }
+                }
+                out
+            });
+            let mut words = format!("{}\n{version}\n{tools}", nvcc.display());
             for a in cmd.get_args() {
                 words.push_str(&a.to_string_lossy());
                 words.push('\n');
