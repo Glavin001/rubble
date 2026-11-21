@@ -778,6 +778,54 @@ impl CudaSim {
         self.download(slot, words).expect("download binding")
     }
 
+    /// Overwrite bodies `first..` (pose, velocity, mass, flags), current and previous
+    /// rows alike, as [`Self::add_bodies`] writes them; the next step runs even if the
+    /// last one left no body awake.
+    pub fn write_bodies(&mut self, first: u32, bodies: &[BodyState]) {
+        self.bind_ctx().expect("CUDA context");
+        let count = bodies.len() as u32;
+        assert!(
+            first <= self.body_count && count <= self.body_count - first,
+            "write_bodies {first}..{} outside the {} bodies",
+            first + count,
+            self.body_count
+        );
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        let bytes = bytemuck::cast_slice(bodies);
+        self.upload(0, u64::from(first) * stride, bytes).expect("write bodies");
+        self.upload(0, u64::from(self.capacity.max_bodies + first) * stride, bytes)
+            .expect("write previous bodies");
+        self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
+        self.motion.ccd |= bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0);
+        self.motion.kinematic |= bodies.iter().any(|b| b.flags & 3 == 2);
+        // Not the skip of a step whose counters say nothing is awake.
+        self.counted_steps = self.counted_steps.wrapping_sub(1);
+    }
+
+    /// The colliders added so far.
+    pub fn colliders(&self) -> &[Collider] {
+        &self.host_cols
+    }
+
+    /// The parallel solve's precondition on the last step
+    /// ([`rigid_plan::validate_contact_coloring`], the WebGPU host's check).
+    pub fn validate_contact_coloring(&mut self) -> Result<(), String> {
+        let bodies = self.download_bodies();
+        let colors = self.download_words(12, self.body_count as usize);
+        let manifolds: Vec<Manifold> = {
+            let n = self.last_counters.manifold_count as usize;
+            let words = self.download_words(25, n * std::mem::size_of::<Manifold>() / 4);
+            bytemuck::cast_slice(&words).to_vec()
+        };
+        rigid_plan::validate_contact_coloring(
+            &bodies,
+            &colors,
+            &manifolds,
+            &self.host_cols,
+            self.capacity.max_colors,
+        )
+    }
+
     /// Words in binding `slot` (for [`Self::download_words`] of the whole buffer).
     pub fn binding_words(&self, slot: usize) -> usize {
         (self.sizes[slot] / 4) as usize

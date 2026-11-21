@@ -314,6 +314,20 @@ fn cudasim_columns_10k_stay_stable_with_sleep_disabled() {
 }
 
 #[test]
+fn cudasim_columns_25k_hold_height() {
+    if gpu() {
+        columns_hold(50, true);
+    }
+}
+
+#[test]
+fn cudasim_columns_100k_hold_height() {
+    if gpu() {
+        columns_hold(100, true);
+    }
+}
+
+#[test]
 fn cudasim_columns_100k_stay_stable_with_sleep_disabled() {
     if gpu() {
         columns_hold(100, false);

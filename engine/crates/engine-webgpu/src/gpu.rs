@@ -2249,25 +2249,15 @@ impl WgpuSim {
     pub fn validate_contact_coloring(&self) -> Result<(), String> {
         let bodies = self.download_bodies();
         let colors: Vec<u32> = self.read_buffer_range(12, 0, self.body_count as usize);
-        let active = |id: usize| bodies[id].is_dynamic() && !bodies[id].is_sleeping();
-        for id in 0..bodies.len() {
-            if active(id) && colors[id] >= self.capacity.max_colors {
-                return Err(format!("body {id} has unfinished/out-of-range colour {}; assigning unfinished bodies to colour zero introduces concurrent constraint writes", colors[id]));
-            }
-        }
         let manifolds: Vec<Manifold> =
             self.read_buffer_range(25, 0, self.last_counters.manifold_count as usize);
-        for (id, m) in manifolds.iter().enumerate() {
-            if m.contact_count == 0 {
-                continue;
-            }
-            let a = self.host_cols[m.collider_a as usize].body as usize;
-            let b = self.host_cols[m.collider_b as usize].body as usize;
-            if active(a) && active(b) && colors[a] == colors[b] {
-                return Err(format!("manifold {id}: active bodies {a} and {b} share colour {} and would race in the primal solver", colors[a]));
-            }
-        }
-        Ok(())
+        rigid_plan::validate_contact_coloring(
+            &bodies,
+            &colors,
+            &manifolds,
+            &self.host_cols,
+            self.capacity.max_colors,
+        )
     }
 
     /// Run the motion-lock passes each step (World turns them on while any
