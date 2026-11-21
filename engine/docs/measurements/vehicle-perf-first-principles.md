@@ -3525,9 +3525,9 @@ the work left is in the drawing itself, lossless first:
   10–15 %): levels of detail for the generated car (a different picture by design, the
   asset side: §8.30's follow-up).
 
-### 8.40 Three small lessons of the gpu-floor review tried on production's kernels: none pays (2026-11-20)
+### 8.47 Three small lessons of the gpu-floor review tried on production's kernels: none pays (2026-11-20)
 
-(Numbered after §8.39 of the gpu-floor branch, PR #137, which is not on `main` yet.)
+(The gpu-floor experiment itself is §8.42 and §8.43.)
 
 The gpu-floor experiment's review (`gpu-floor-vs-production.md` on PR #137, §6.1) lists
 three small changes to production's kernels as they are: (a) contact words read and
@@ -3732,20 +3732,19 @@ EXTRA="--wide 0" FRAMES=10 AB_ROUNDS=3 AB_WARM_MS=150 tools/explicit-2khz/fast-c
 git checkout HEAD -- slang/kernels
 ```
 
-### 8.46 What the native toolchain adds to every kernel: wgpu's runtime checks, 5 to 12 % of every row (2026-11-21)
+### 8.48 What the native toolchain adds to every kernel: wgpu's runtime checks, 5 to 12 % of every row (2026-11-21)
 
-Numbered after the sections on the open branches (#138 §8.42, #139 §8.43, #140 §8.44,
-#141 §8.45). Native M3 Max, main's kernels (96904a44), every GPU run under
+Native M3 Max, main's kernels (96904a44), every GPU run under
 `with-gpu-lock.py`.
 
-**A correction to §8.40 first.** §8.40 ends by saying the gap to the gpu-floor
+**A correction to §8.47 first.** §8.47 ends by saying the gap to the gpu-floor
 experiment "is in the schedule and the layout", the review's §6.2 to §6.4. Two of those
 were already measured on production, on branches the review does not cite:
 
-- the experiment's layout as a Slang kernel (#139, §8.43): bit for bit with today's
+- the experiment's layout as a Slang kernel (#139, not merged: its own §8.43 on `perf/solo-car-kernel`): bit for bit with today's
   frame kernel and the CPU, and slower (2.37 ms against 1.33 natively, 2.04 against
   1.58 in Chrome);
-- two bodies in lockstep across workgroups (#138, §8.42): not safe in WebGPU, which
+- two bodies in lockstep across workgroups (§8.44): not safe in WebGPU, which
   promises neither forward progress across workgroups nor a device-scope fence.
 
 So the same layout is fast as hand-written Metal and slow through Slang, WGSL and naga.
@@ -3758,7 +3757,7 @@ This section measures what that path itself adds.
 | bounds checks | every index of an array or a buffer clamped to the last element (a buffer's length read from a sizes uniform) | every load and store |
 | forced loop bound | a two-word counter a loop, compared and decremented every turn | every loop, nested ones too |
 | integer-division guard | a divisor of zero replaced | every `/` and `%` on integers |
-| workgroup memory zeroed | one lane zeroes it at a workgroup's start | already off on the wide and split paths (§8.8, `contact-groups-design.md` §4); still on for the frame kernel, where the dispatch alone is 0.47 ms (§8.42) |
+| workgroup memory zeroed | one lane zeroes it at a workgroup's start | already off on the wide and split paths (§8.8, `contact-groups-design.md` §4); still on for the frame kernel, where the dispatch alone is 0.47 ms (§8.44) |
 
 The engine's kernels cap their own loops (`explicit_loop_cap.slang`) and index within
 their own counts, so the first three change no result. They had been timed once, for
@@ -3848,7 +3847,7 @@ which hid the bug as well. Scope, each a measured limit and not a preference:
   Vulkan and DX12 keep every check until they are measured and proven the same way
   (`RUBBLE_SHADER_CHECKS_OFF=7` turns them off there for that measurement).
 - *The explicit vehicles' kernels and the World's coupling only.* The rigid solver's
-  modules are not changed by this default (§8.47 is theirs).
+  modules are not changed by this default (§8.49 is theirs).
 - *Proven in the bit-exact mode.* The kernels' strict helpers hold their rounding with
   and without the checks. Under fast arithmetic (#135's setting) a change of generated
   code can move a rounding (`gpu-determinism-wgsl`), so there the checked and unchecked
@@ -3864,7 +3863,7 @@ pass.
 *Whole runs* (the mountain, 40 s, `--rockslide 0 --self-split 1 --timing step`; the
 vehicles' GPU ms a World step from t 0.5 s, median / p95; the fully checked build is
 `RUBBLE_SHADER_CHECKS_OFF=0 RUBBLE_RIGID_SHADER_CHECKS_OFF=0`, the default is this
-section's and §8.47's; the two in turn):
+section's and §8.49's; the two in turn):
 
 | | fully checked | the default |
 |---|---|---|
@@ -3873,7 +3872,7 @@ section's and §8.47's; the two in turn):
 | 1 car, 4 rounds | 4.22 / 4.57, 4.22 / 4.66, 4.22 / 4.68, 4.23 / 4.58 | **3.78 / 4.14, 3.77 / 4.12, 3.82 / 4.32, 3.81 / 4.31** (−10 % median) |
 | 1 car, the World's wall ms a step, median | 7.31, 7.16, 6.19, 5.73 | 6.72, 6.66, 5.36, 5.17 |
 
-One car's level moves between processes (§8.40): in five other runs of the default it
+One car's level moves between processes (§8.47): in five other runs of the default it
 was 3.74, 3.75, 4.14, 4.16 and 4.18, and in one other of the checked build 4.17. So over
 whole runs the default is 10 % faster in most processes and level in the rest; within
 one process (the matrix) it is faster in every row. A whole run's final state is not
@@ -3891,9 +3890,9 @@ RUBBLE_BENCH_CARS=1,16 cargo run --profile fast -p engine-metal --example explic
 ```
 The first run with a new mask compiles every pipeline again (4 to 6 minutes).
 
-### 8.47 The same checks on the World's own kernels (the rigid solver), and the zeroing that was left (2026-11-21)
+### 8.49 The same checks on the World's own kernels (the rigid solver), and the zeroing that was left (2026-11-21)
 
-The question (§8.46's open rows): the rigid solver's modules (`gpu.rs`, 283 of the build's
+The question (§8.48's open rows): the rigid solver's modules (`gpu.rs`, 283 of the build's
 409) still carried every check and zeroed their workgroup memory at every dispatch, and
 five kinds of explicit pipeline still zeroed theirs. Native M3 Max. Rigid figures are
 `rigid_gate` (`engine-world/examples`): ms a World step (step and wait), median of 240

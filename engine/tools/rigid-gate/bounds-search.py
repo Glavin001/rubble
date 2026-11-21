@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Which of the World's kernels give another result without wgpu's bounds checks
-(vehicle-perf-first-principles.md §8.47).
+(vehicle-perf-first-principles.md §8.49).
 
     python3 tools/rigid-gate/bounds-search.py [SKIP,...]        (from engine/)
 

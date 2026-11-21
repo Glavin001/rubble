@@ -113,7 +113,7 @@ impl LazyKernel {
 /// integer-division guards, 8 the zeroing of workgroup memory at each workgroup's start.
 /// `RUBBLE_RIGID_SHADER_CHECKS_OFF=MASK` sets it for every kernel (0: every check and the
 /// zeroing; a measurement, or the debugging mode). The default keeps what a result
-/// depends on or what is not proven (vehicle-perf-first-principles.md §8.47):
+/// depends on or what is not proven (vehicle-perf-first-principles.md §8.49):
 /// - the loop bound out on native Metal: it changes nothing of a loop that ends, the
 ///   rigid scenes' end states are the same bit for bit, and Metal is where it is measured;
 /// - the zeroing out, natively, for the `solve_primal*` kernels alone: their workgroup

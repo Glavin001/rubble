@@ -1119,7 +1119,7 @@ pub fn set_explicit_shader_checks_off(mask: Option<u32>) {
 static SHADER_CHECKS_OFF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
 /// The default on a native Metal device: all three checks left out. Measured there and
-/// only there (vehicle-perf-first-principles.md §8.46: 5 to 12 % of every scenario row,
+/// only there (vehicle-perf-first-principles.md §8.48: 5 to 12 % of every scenario row,
 /// every state word the same, the GPU == CPU suites passing). The checked build is the
 /// debugging mode: `RUBBLE_SHADER_CHECKS_OFF=0` clamps a suspect index again. Other
 /// native backends keep every check until they are measured and proven the same way;
@@ -1175,7 +1175,7 @@ pub(crate) fn shader_module_without(device: &wgpu::Device, desc: wgpu::ShaderMod
     checks.int_div_checks = off & 4 == 0;
     // SAFETY: the engine's own kernels. Their loops are capped (explicit_loop_cap, held
     // by its census test) and they index within their own counts: with the checks out
-    // every state word of every fixture and scenario row is the checked build's (§8.46).
+    // every state word of every fixture and scenario row is the checked build's (§8.48).
     unsafe { device.create_shader_module_trusted(desc, checks) }
 }
 
