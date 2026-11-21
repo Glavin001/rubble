@@ -13,7 +13,7 @@
 use super::{
     self_split_module_names, split_module_name, wide_list_module_name, Cmd, FramePlanner, Kernel, PARAM_COPIES,
     PARAM_LEVEL_COPIES, PARAM_STRIDE, PERF_AHEAD_APART, PERF_FLEET_ANY, PERF_FLEET_FRONT, PERF_FLEET_FUSE,
-    PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_KEEP_TRACK_REST, PERF_MEMBER_LIST,
+    PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_HIT_SLOT_MAP, PERF_KEEP_TRACK_REST, PERF_MEMBER_LIST,
     PERF_WHEELS_APART, PERF_WIDE_FUSED, PERF_WIDE_LIST, PERF_DRIVE_AHEAD, PERF_SPLIT_WHEELS_AHEAD, PERF_TYRE_AHEAD,
     PERF_TYRE_EARLY, W_PERF_FLAGS, W_SLEEP, W_VV_FLEET, W_VV_FLEET_NEXT,
     W_VV_TRI_PAIRS, WIDE_AUX, WIDE_BEAMS_PASS, WIDE_END, WIDE_TRIS, FLEET_LEVEL_MAX, FLEET_LEVEL_SLOTS_SHIFT,
@@ -492,6 +492,11 @@ pub fn fleet_flags(planner: &FramePlanner, sw: &Switches, vv: bool) -> u32 {
     // host's alone, when the frame has the rest dispatches and the fused scans, and no
     // wheels in the rest's dispatch beside the members; else the scans' dispatch.)
     flags &= !PERF_KEEP_TRACK_REST;
+    // (PERF_HIT_SLOT_MAP is bit 27, which the split group path's copies give to the
+    // level slots ([`FLEET_LEVEL_SLOTS_SHIFT`], the kernel's lvSlots): no bit of the
+    // word is free. The map is the wide hits kernel's alone, which no split module is,
+    // so these copies leave it out (the same results either way).)
+    flags &= !PERF_HIT_SLOT_MAP;
     let rest = PERF_FLEET_FRONT | PERF_FLEET_KEEP | PERF_FLEET_FUSE | PERF_MEMBER_LIST;
     if front
         && sw.group_split_tests
@@ -775,6 +780,17 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         bytes
     } else if group {
         kind.group_split = true;
+        // (The steps' copies without PERF_HIT_SLOT_MAP too: on this path bit 27 is the
+        // level slots' (lvSlots, read by the groups' pass at copy s without the tests
+        // split); the map is the wide hits kernel's alone, the same results either way.)
+        {
+            let stride = PARAM_STRIDE as usize;
+            let at = 4 * W_PERF_FLAGS;
+            for k in 0..=steps as usize {
+                let w = u32::from_le_bytes(bytes[stride * k + at..stride * k + at + 4].try_into().unwrap());
+                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(w & !PERF_HIT_SLOT_MAP).to_le_bytes());
+            }
+        }
         // Copy steps + 1: the groups' frame start (the kernel's SPLIT_BEGIN); with the
         // tests split, copy steps + 2 + s step s's second phase (SPLIT_LEVELS) and copy
         // 2 steps + 2 + s its first group dispatch and walk (SPLIT_TESTS). The
