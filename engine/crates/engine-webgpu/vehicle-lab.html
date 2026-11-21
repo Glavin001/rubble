@@ -166,6 +166,7 @@
         <label title="Copies of the car in the run. On the mountain they leave the lip together, side by side and stacked, closing on the first car, so they crash into each other on the way down; on the flat arena the others stand in a row to one side. The numbers shown are the first car's. Rebuilds the lab in place (no reload).">cars <input type="number" id="cars" data-opt="build" value="1" min="1" max="32" step="1" /></label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
+        <label title="The cars' raycast wheels also stand on rigid bodies (crates, bricks, blocks, ramps that are bodies) and push them back, the nearest surface under each wheel, as BeamNG's wheels meet whatever they touch. Off (the default until known-bugs F8 is fixed: with it on, cars in a pile can go non-finite in the browser): the wheels see the ground and the arena's fixed shapes only (a car on debris hangs on its body). Applies as it runs."><input type="checkbox" id="wheelsHitBodies" data-opt="live" /> wheels on bodies</label>
         <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label>
         <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label>
         <label title="With the torn pieces labelled, the rigid bodies in the car's window are those near some piece, not everything between the car and a piece far away (the same contacts). Applies as it runs."><input type="checkbox" id="pieceWindows" data-opt="live" checked /> a coupling window per piece</label>
@@ -189,15 +190,17 @@
         <label title="Car-to-car contact, with any number of touching cars: a group's hits of one level run on its GPU core's lanes side by side whatever car owns them, and each hit's contact geometry is worked out once for its three correction passes instead of three times (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetHitLat" data-opt="live" checked /> contact hits worked out once</label>
         <label title="Car-to-car contact, with the hits worked out once: each hit's contact geometry, its force and its correction passes' values are worked out once a step before its group's levels, and each level only adds them up; a level's last correction pass runs beside the next level's hits (the same results bit for bit). Applies as it runs."><input type="checkbox" id="levelsOnce" data-opt="live" checked /> contact levels' hits worked out ahead</label>
         <label title="Car-to-car contact, with the tests across the fleet: two of each step's short GPU passes are folded into the passes beside them (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetFuse" data-opt="live" checked /> fewer contact passes</label>
-        <label title="Car-to-car contact, with the tests across the fleet: the list of triangle and point pairs to test is kept from one step to the next and built again only when the cars have moved further than its margin, instead of being searched for every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetKeep" data-opt="live" /> contact candidates kept between steps</label>
+        <label title="Car-to-car contact, with the tests across the fleet: the list of triangle and point pairs to test is kept from one step to the next and built again only when the cars have moved further than its margin, instead of being searched for every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetKeep" data-opt="live" checked /> contact candidates kept between steps</label>
         <label title="Each car's next-step coupling and wheels (rays, anti-roll bars) on a GPU core of their own, beside its self-collision list's work instead of on the same core (the same results bit for bit). Applies as it runs."><input type="checkbox" id="aheadApart" data-opt="live" checked /> wheels apart from the list</label>
         <label title="With the wheels apart from the list: each tyre's work that does not need its hub's forces runs there too, and only the rest after the self-collision hits (the same results bit for bit). Applies as it runs."><input type="checkbox" id="tyreAhead" data-opt="live" checked /> tyres mostly ahead</label>
         <label title="Self-collision's hits (up to 48 a step) applied from the GPU core's own fast memory: each hit's nodes and sums loaded once, worked on there, written back once (the same results bit for bit). Needs hits a node a thread. Applies as it runs."><input type="checkbox" id="hitsLocal" data-opt="live" checked /> hits in core memory</label>
+        <label title="With the hits in fast memory: each hit node's place there found through a map of the car's nodes (one step a hit node) instead of each hit's node comparing itself with every node before it (the same results bit for bit). Applies as it runs."><input type="checkbox" id="hitSlotMap" data-opt="live" checked /> hits' nodes found through a map</label>
         <label title="With the tyres mostly ahead: each tyre's last part loads what it reads (its records, its hubs' masses and beam forces) while the self-collision hits are applied, and after them reads only its hubs' contact sums (the same results bit for bit). Applies as it runs."><input type="checkbox" id="tyreEarly" data-opt="live" /> tyres loaded early</label>
         <label title="With the wheels apart from the list: the next step's coupling and the wheels each on a GPU core of their own instead of sharing one (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wheelsApart" data-opt="live" checked /> coupling and wheels apart</label>
         <label title="Cars touching each other: each car's self-collision hits (up to 48 a step) applied from the GPU core's own fast memory, as for a lone car (the same results bit for bit). Applies as it runs."><input type="checkbox" id="selfHitsLocal" data-opt="live" /> touching cars' hits in core memory</label>
         <label title="Cars touching each other: the next step's wheel rays and anti-roll bars on a GPU core of their own while the cars' hits are applied, instead of at the start of each car's step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="splitWheelsAhead" data-opt="live" /> touching cars' wheels ahead</label>
         <label title="The raycast wheels' rays and anti-roll bars run beside the step before's beam phase and their tyres beside the rigid coupling's first phase, instead of three phases of their own (the same results bit for bit; measured no faster so far). Applies as it runs."><input type="checkbox" id="driveAhead" data-opt="live" /> wheels beside other phases</label></div>
+      <div class="row"><label title="Bit-exact results, for testing and reproducing a run: the solver keeps the CPU reference's exact order of floating-point operations, so every machine gets the same results bit for bit. Off (the default), the same physics with the GPU compiler free to fuse and reorder arithmetic: faster, with differences in the last bits between machines and drivers. Applies as it runs; the solver's kernels are compiled again (a pause the first time)."><input type="checkbox" id="bitExact" data-opt="live" /> bit-exact results (testing)</label></div>
       <div class="row"><label title="A car that stays still is put to sleep: it is not simulated until something wakes it (another car's contact group with an awake car, a moving rigid body near it, a drive input, a grab), and it then continues exactly from its state at sleep. Not lossless against a run that never sleeps: the motion under the thresholds is not simulated while asleep. Still means: no node faster than the speed along an axis at any step, and no node farther than the reach from where its still stretch began, for the dwell (2 kHz steps; 1000 = 0.5 s). Cars touching each other sleep together. Applies as it runs."><input type="checkbox" id="vehicleSleep" data-opt="live" /> vehicle sleep</label>
         when below <input type="number" id="sleepSpeed" data-opt="live" value="0.25" min="0" max="10" step="0.05" /> m/s and within <input type="number" id="sleepReach" data-opt="live" value="0.1" min="0" max="100" step="0.05" /> mm for <input type="number" id="sleepDwell" data-opt="live" value="1000" min="1" max="1000000" step="100" /> steps</div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
@@ -206,6 +209,7 @@
         <span class="muted" title="The quality floor: the fewest pictures a second the drawing gives way to (the picture is never older than this while it gives way). Applies as it runs.">at least</span><select id="drawFloor" data-opt="live"><option value="60">60</option><option value="30" selected>30</option><option value="20">20</option><option value="15">15</option></select><span class="muted">pictures a second</span>
         <span class="muted" id="drawLevel"></span></div>
       <div class="row"><span class="muted" title="World steps the page keeps on the GPU ahead of their readbacks. A step is taken only while fewer than this many are still on their way back; a step not taken is simulated time lost (the run shows slower). The browser lands a readback a while after the GPU has finished the step, so with 2 the GPU sits idle waiting for the page (measured: the derby's four cars in contact took 41 to 45 steps a second with 2 and 49 to 57 with 3); more keeps it busy, and the lab's readings (measurements, the camera, the derby's AI) arrive that many steps later. Pacing only: the steps taken are the same steps. Applies as it runs.">Steps in flight</span><select id="inFlight" data-opt="live"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+      <div class="row"><span class="muted" title="How the cars of one model (the same mesh and skin, another paint) are skinned for the picture. Together: one pass for all of them, which reads the skin's bindings (157 MB for the generated car) once for every car instead of once a car; wide runs a car per invocation, the cars of a block of vertices side by side, loop runs every car in turn in one invocation. One by one: a pass a car. The same picture bit for bit either way. Applies as it runs.">Skin cars of one model</span><select id="skinBatch" data-opt="live"><option value="wide" selected>together (wide)</option><option value="loop">together (loop)</option><option value="off">one by one</option></select></div>
       <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic: all of them, lowered to 75 % and then 50 % only while the drawing gives way to physics at its floor (above). Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
       <div class="row"><button id="perfCopy" title="Copies a text report to the clipboard: this device and display, the page's options, and a row a second for the last three minutes (display frames, steps taken and refused, frames drawn, the page's CPU time in stepping and drawing, GPU time a step when GPU timing is on). Run for a while first, then press it and paste it where the run is being looked at.">Copy perf report</button></div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
@@ -328,7 +332,7 @@
     const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test', derby: 'Derby' };
     // The derby's camera per mode (Derby: the chase camera on the player's car).
     const modeCam = (k) => (k === 'mountain' ? 'overhead' : k === 'drive' || k === 'derby' ? 'chase' : 'orbit');
-    const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks'];
+    const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks', 'drive-ramp-bricks'];
     $('script').add(new Option('none (free play)', ''));
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
     const CAMS = { overhead: 'Overhead chase', orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
@@ -363,7 +367,7 @@
     // time (with it on the mountain ran at half real time, measured 2026-11-15), and the
     // self-collision passes across the GPU run only on frames without it. A control.
     // The kernels' lossless schedule switches (explicit_plan::PERF_*).
-    const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0) | (get('fleetAny') ? 16384 : 0) | (get('fleetPost') ? 65536 : 0) | (get('fleetLevels') ? 524288 : 0) | (get('fleetHitLat') ? 8388608 : 0) | (get('levelsOnce') ? 4 : 0) | (get('fleetFuse') ? 16777216 : 0) | (get('fleetKeep') ? 32768 : 0) | (get('aheadApart') ? 131072 : 0) | (get('tyreAhead') ? 262144 : 0) | (get('hitsLocal') ? 1048576 : 0) | (get('tyreEarly') ? 2097152 : 0) | (get('wheelsApart') ? 4194304 : 0) | (get('selfHitsLocal') ? 33554432 : 0) | (get('splitWheelsAhead') ? 67108864 : 0);
+    const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0) | (get('fleetAny') ? 16384 : 0) | (get('fleetPost') ? 65536 : 0) | (get('fleetLevels') ? 524288 : 0) | (get('fleetHitLat') ? 8388608 : 0) | (get('levelsOnce') ? 4 : 0) | (get('fleetFuse') ? 16777216 : 0) | (get('fleetKeep') ? 32768 : 0) | (get('aheadApart') ? 131072 : 0) | (get('tyreAhead') ? 262144 : 0) | (get('hitsLocal') ? 1048576 : 0) | (get('tyreEarly') ? 2097152 : 0) | (get('wheelsApart') ? 4194304 : 0) | (get('selfHitsLocal') ? 33554432 : 0) | (get('splitWheelsAhead') ? 67108864 : 0) | (get('hitSlotMap') ? 134217728 : 0);
     // (The derby too: its walls and ramps are the cars' own static shapes, and the
     // fleet-wide passes keep many cars in real time without it.)
     const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby';
@@ -420,14 +424,17 @@
         else if (c.id === 'cam' || c.id === 'follow') cam.init = false;
         else if (c.id === 'derbyPlayer' || c.id === 'aggression') { cmd({ derby: derbySpec() }); if (c.id === 'derbyPlayer') { lastDrive = ''; canvas.focus(); } }
         else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
+        else if (c.id === 'bitExact') cmd({ bitExact: get('bitExact') });
+        else if (c.id === 'wheelsHitBodies') cmd({ wheelsHitBodies: get('wheelsHitBodies') });
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
         else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
-        else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront' || c.id === 'fleetAny' || c.id === 'fleetPost' || c.id === 'fleetLevels' || c.id === 'fleetHitLat' || c.id === 'levelsOnce' || c.id === 'fleetFuse' || c.id === 'fleetKeep' || c.id === 'aheadApart' || c.id === 'tyreAhead' || c.id === 'hitsLocal' || c.id === 'tyreEarly' || c.id === 'wheelsApart' || c.id === 'selfHitsLocal' || c.id === 'splitWheelsAhead') cmd({ perfFlags: perfFlags() });
+        else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront' || c.id === 'fleetAny' || c.id === 'fleetPost' || c.id === 'fleetLevels' || c.id === 'fleetHitLat' || c.id === 'levelsOnce' || c.id === 'fleetFuse' || c.id === 'fleetKeep' || c.id === 'aheadApart' || c.id === 'tyreAhead' || c.id === 'hitsLocal' || c.id === 'tyreEarly' || c.id === 'wheelsApart' || c.id === 'selfHitsLocal' || c.id === 'splitWheelsAhead' || c.id === 'hitSlotMap') cmd({ perfFlags: perfFlags() });
         else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         else if (c.id === 'renderScale' || c.id === 'drawYield' || c.id === 'drawFloor') { drawPacerSync(); configure(); }
         else if (c.id === 'inFlight') setStepsInFlight(Number(get('inFlight')) || 3);
+        else if (c.id === 'skinBatch') { if (W) { W.cars.setSkinBatch(get('skinBatch')); W.skinGen++; } }
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
         else if (['vehicleSleep', 'sleepSpeed', 'sleepReach', 'sleepDwell'].includes(c.id)) cmd({ vehicleSleep: sleepSpec() });
         else if (['beams', 'nodes', 'beamColor'].includes(c.id)) structureOpts();
@@ -591,7 +598,7 @@
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), wheelsHitBodies: get('wheelsHitBodies'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), bitExact: get('bitExact'), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
@@ -612,7 +619,7 @@
         // The ground slab (the World's first collider) is left to the renderer's ground.
         const { env, cars } = await gpuPhase(device, `building the ${car.name}'s renderers`, async () => {
           const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
-          const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
+          const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'], skinBatch: get('skinBatch') });
           cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
           if (car.mod) {
             progress('decoding the textures…');
@@ -1489,6 +1496,32 @@
         for (let i = 0; i < n; i += batch) { for (let k = 0; k < batch; k++) draw(0, 0, 0, false); await w.device.queue.onSubmittedWorkDone(); }
         return (performance.now() - t0) / (Math.ceil(n / batch) * batch);
       } finally { drawHold = false; forceSkin = false; }
+    };
+    // Checks: every car's skinned vertices (level 0) as the last draw left them, read
+    // back after one draw (skinned whatever changed): per car its SHA-256 and byte count.
+    // Pause the World first; compare across the "skin cars of one model" settings.
+    // Checks: the one-by-one skin from another build's kernel source (null: this one's).
+    window.__skinCode = (code) => { W.cars.setSkinCode(code); W.skinGen++; };
+    window.__skinOut = async () => {
+      const w = W;
+      await window.__drawCost(1, 1);
+      const enc = w.device.createCommandEncoder(), reads = [];
+      for (const id of w.carIds) {
+        const r = w.cars.outRange(id);
+        const rb = w.device.createBuffer({ size: r.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        enc.copyBufferToBuffer(r.buffer, r.offset, rb, 0, r.size);
+        reads.push(rb);
+      }
+      w.device.queue.submit([enc.finish()]);
+      const out = [];
+      for (const rb of reads) {
+        await rb.mapAsync(GPUMapMode.READ);
+        const bytes = rb.getMappedRange().slice(0);
+        rb.destroy();
+        const h = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+        out.push({ bytes: bytes.byteLength, sha: [...h].map((b) => b.toString(16).padStart(2, '0')).join('') });
+      }
+      return out;
     };
     $('perfCopy').onclick = async () => {
       const b = $('perfCopy'), text = await perfReport();

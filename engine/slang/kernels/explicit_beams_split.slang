@@ -611,7 +611,7 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 // slide nodes, as contactMemberStep runs them after its tests; then the list's state for
 // the next step, or its statistics at the frame's end. Before the groups' pass of the
 // step, which reads what the hits leave. A solo vehicle returns at once.
-void memberRest(uint v, uint lane, uint s)
+void memberRestStep(uint v, uint lane, uint s)
 {
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
@@ -649,6 +649,16 @@ void memberRest(uint v, uint lane, uint s)
 #endif
     sync();
     memberListSave(v, lane, s);
+}
+// … then, with the kept candidates' tracking here (PERF_KEEP_TRACK_REST: the scans fused
+// in the plan's workgroup), every node of the vehicle after its rest: the last writes of
+// its nodes before the contact pass's scans (explicit_beams_fleet_track.slang).
+void memberRest(uint v, uint lane, uint s)
+{
+    memberRestStep(v, lane, s);
+    if (!fkTrackInRest()) return;
+    sync();
+    fkTrackVehicle(v, lane);
 }
 #endif
 
@@ -697,6 +707,28 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
     ebLoopCapFlush();
 }
 #endif
+
+// Raycast wheels on each other (drive header bit 2; explicit_beams_drive.slang
+// wheelsPartners): a workgroup a group before each substep's members' dispatch (parameter
+// copy s: step s's rays after step s - 1's reactions) and after the frame's last pass (the
+// copy SPLIT_BEGIN: the last step's reactions only). contactGroup's calls at its step's
+// start and frame's end: the same function on the same state, so the same bits.
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_wheels(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint lane = lid.x;
+    uint4 G = gMisc[gP.vvGroups + gid.x];
+    uint k = splitUniform(lane, splitAwake(G));
+    if (k == 0u) return ebLoopCapFlush();
+    if (lane == 0u) driveBegin();
+    sync();
+    uint driveOn = gsUniformDrive;
+    sync();
+    bool end = gP.pad2 == SPLIT_BEGIN;
+    if ((driveOn & 2u) != 0u) wheelsPartners(G.x, k, lane, end ? gP.steps : gP.pad2, !end);
+    ebLoopCapFlush();
+}
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]

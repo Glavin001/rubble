@@ -27,7 +27,7 @@ fn a_world_step_past_the_pass_budget_fails_fast() {
         15.0,
         8.0,
         30,
-        &rubble::explicit_scene::town_coupling(),
+        &ExplicitVehiclesDef { bit_exact: true, ..rubble::explicit_scene::town_coupling() },
         Some(1.0 / 60.0),
         None,
     )

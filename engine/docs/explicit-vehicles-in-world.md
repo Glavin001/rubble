@@ -1550,3 +1550,122 @@ So the parked cars that never sleep are RoR-profile sedans whose residual motion
 above the rule's 0.1 mm over 0.5 s; centred damping does not reach them. The step times
 of this run (load 20 to 120 from other agents, a 15-fold slowdown of the baseline's own
 fleet case) are not comparable and are not reported.
+
+
+## 13. Raycast wheels on bodies and other cars (2026-11-18, `fix/wheels-see-bodies`)
+
+Known-bugs F7, the user's decision ("Yes, fix wheels") after the Derby showed cars beached on
+bricks and on each other. An engine-wide setting, `ExplicitVehiclesDef::wheels_hit_bodies`,
+off by default (it was on until 2026-11-21; see "Open: Chrome" below and known-bugs F8) (live: `World::set_explicit_wheels_hit_bodies`; the lab's "wheels
+on bodies" checkbox, `?wheelsHitBodies=1`; `vehicle_lab --wheels-bodies 1`). Underneath it is
+`DriveConfig::see_bodies` per car, off by default outside the World.
+
+**What a wheel's ray meets**, nearest first (ties: the static surfaces, then proxies, then
+other cars, each in order):
+- the car's ground plane, boxes and static shapes, as before;
+- every rigid proxy the coupling plan gave the car this window (box, sphere, capsule, hull:
+  the World's bodies near it, awake or asleep, dynamic, kinematic or static), at the body's
+  pose this step (after the step's integration: the kernel runs the rays after
+  `coupleStep`). The plan's margin grows to the wheels' reach (`wheel_reach`: travel plus
+  radius less the hardpoint height), so a body under a wheel is always a proxy. On the GPU
+  a shape whose grown step sphere the ray's segment misses is skipped (lossless);
+- the other cars' live collision triangles (dead and anti-clip-only ones left out), as they
+  stand at the step's start: in a contact group only, since a ray reaching another car puts
+  the two cars' frame boxes within the contact margin.
+
+**The reaction** (BeamNG's practice: a tyre pushes on whatever it stands on, and it is
+pushed back by what that thing does):
+- the tyre runs in the two-body form against the surface: the hub's velocity relative to the
+  surface's at the contact point (suspension rate and slip), the reduced mass
+  `m_red = 1/(1/m + w_b)` and the share `m_red/m` of the hub's force in the stick and lateral
+  solves; on an infinite-mass body `w_b = 0`, the old rule with the body's velocity;
+- `w_b`: on a body the inverse mass at the point along the normal (node contact's scalar
+  convention, §1), split among this car's wheels on the same body and the cars holding it;
+  on a triangle `Σ w_k² / m_k` (vehicle contact's two-body point mass), split among this car's
+  wheels on that car;
+- the wheel force's opposite goes onto the body at the contact point (force and moment into
+  the proxy shape's step sums, so it reaches the World with the window's impulse), or onto the
+  triangle's three nodes by barycentric weight, applied before the next step (vehicle
+  contact's timing: one 0.5 ms step later than the hub's; momentum is conserved, the impulse
+  is applied once).
+
+The wheel force still acts at the hub (the raycast model's simplification), so the pair
+exchanges force but not exactly moment; the body takes it at the contact point.
+
+**Schedules.** The rays read the proxies after the step's integration, so the schedules
+that run the wheels' rays or tyres before or beside it (`PERF_DRIVE_AHEAD`,
+`PERF_SPLIT_WHEELS_AHEAD`, the wide passes' `PERF_AHEAD_APART`, `PERF_TYRE_AHEAD`,
+`PERF_TYRE_EARLY`, `PERF_WHEELS_APART` and the fused aux work) are left out while the setting
+is on (`ExplicitBeamsGpu::set_perf_flags`; a frame that takes one with the setting on fails
+loudly). Other cars: at each substep's start of a contact group (`contactGroup`'s step
+loop; on the split path a small dispatch of its own, `explicit_beams_split_wheels`, before
+each members' dispatch and after the last) `wheelsPartners` applies the last step's staged
+reactions and casts every member's rays against the other members whose allowed box (the
+frame's bound on their nodes) the ray's segment meets, a (ray, triangle) pair a lane, the
+nearest by two workgroup minima (t, then the triangle's index: the CPU's order). Records:
+five per wheel after the drive regions (`explicit_plan::drive::PARTNER_RECS`, the drive
+header's `.w`).
+
+**Checks.**
+- Off is the frame without it bit for bit: `fast-check.sh kernel` against the committed
+  kernels on fixtures made with `--wheels-bodies 0` (1, 4, 8 cars): 12 of 13 bit for bit; the
+  13th (`cars1_t20`) differs by the same words with this build's own kernels on both sides (a
+  harness artifact of that fixture, not the change). The GPU suites (`perf-verify.sh
+  default`), `engine-metal` `vehicle_parity` and `explicit_drive_parity`, Chrome's validation
+  of all 128 modules pass.
+- GPU == CPU with it on: a car on another (soft) vehicle, bit for bit every node and wheel
+  for 120 frames, the contact group on one workgroup and across workgroups
+  (`engine-webgpu/tests/wheels_hit_bodies_gpu.rs`); on a free crate to float noise (car and
+  crate speeds agree to 4 digits; the coupling's GPU records are relative to the car's
+  origin, the CPU's in the World, as the coupling's own parity).
+- Physics: a car parked on a rigid platform drives off it and stays put with the setting off
+  (CPU, and in the World on a dynamic 4 t box); a car on a free-floating crate pushes it back
+  with horizontal momentum closed to 0.002 N·s of 2,280; a car on another vehicle carries its
+  weight on its wheels (load / weight 1.00), the lower vehicle sinks under it, and it drives
+  (`engine-softbody/tests/wheels_hit_bodies.rs`, `engine-world/tests/wheels_hit_bodies_world.rs`).
+
+**Cost** (M3 Max, native, other agents' jobs queued on the GPU lock; the scenario matrix's
+states with the setting on against off from the same state, `run.sh wheels`; ms a frame of
+34 steps):
+
+| Row | Off | On | Of which the schedules left out (`perf=73793538`, off) |
+|---|---|---|---|
+| drive (one car, 60 km/h) | 3.92 | 4.63 (+18 %) | +12 % |
+| tumble | 3.75 | 5.05 (+35 %) | +25 % |
+| wall | 4.59 | 5.55 (+21 %) | +17 % |
+| bricks (60 rigid bricks) | 4.01 | 5.50 (+37 %) | +20 % |
+| rocks | 3.89 | 4.81 (+24 %) | +16 % |
+| barrier | 7.88 | 8.33 (+6 %) | +3 % |
+| headon (2 cars) | 14.05 | 15.47 (+10 %) | 0 % |
+| side (2 cars) | 9.90 | 11.02 (+11 %) | +3 % |
+| pile2 | 9.05 | 9.58 (+6 %) | +5 % |
+| pile8 | 17.02 | 31.19 (+83 %) | +5 % |
+| pile32 | 40.18 | 127.31 (+217 %) | +5 % |
+| truss (no car) | 1.58 | 1.57 | — |
+
+- One car: most of the cost is the wheels-ahead schedules the setting turns off; the rays
+  against the proxies (sphere-culled) are the rest (2–17 %).
+- Piles: the wheels' rays against the other members, a dispatch and two passes over the
+  (ray, triangle) pairs each substep. In a pile every car's allowed box meets several others'
+  so most pairs survive the box cull. The first version (every member against every other,
+  member by member) cost +178 % at 8 cars and +1,403 % at 32.
+- Follow-ups (lossless): rays culled per triangle by the contact pass's own triangle boxes or
+  grid; the wheels-ahead schedules made to run their rays after the integration; rays that
+  already have a static hit nearer than every partner box skipped.
+
+The Derby in Chrome (`derby-probe.js`, GPU ms a World step, median): 4 cars 12.1 off, 13.6 on
+(+12 %); 8 cars 18.4 off, 25.9 on (+41 %). No car was beached in those rounds either way
+(vehicle-lab.md, "The derby").
+
+**Open: Chrome (2026-11-21, found while integrating PR #145; known-bugs F8).** In Chrome the
+lab's 8-car mountain (`vehicle-lab.html?mode=mountain&cars=8&terrain=ledges`, the authored
+sedan) with the setting on stops with an engine error at t = 3.2 s: at the first collisions
+every car's position and velocity are non-finite. This is the same with bit-exact results on
+(`bitExact=1`) and off, so it is not the fast arithmetic. With the setting off the same page runs
+to the end of the probe (t = 8.3 s, 337 beams broken, finite), at 9 ms of GPU a frame before
+contact against 22 ms with it on. Natively, the scenario matrix's pile8 and pile32 fixtures
+(this setting on, bit-exact) were made through the same collisions and stayed finite, so the
+difference is in the browser's path or in what only the page does. Until it is found and
+fixed the setting is **off by default** everywhere (World, lab, `vehicle_lab`). It is still
+one checkbox or `?wheelsHitBodies=1` away, and all of its tests pass.
+Probe logs: `engine/out/integration/chrome-probe-m8*.log` on the integration worktree.

@@ -12,6 +12,8 @@ mod explicit_beams_gpu;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
 #[cfg(feature = "gpu")]
+mod fast_float;
+#[cfg(feature = "gpu")]
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -27,9 +29,11 @@ mod soft_skin;
 pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
+    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, set_explicit_shader_checks_off, explicit_shader_module, explicit_shader_checks_off, explicit_compilation_options, SHADER_CHECKS_OFF_METAL, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
+#[cfg(feature = "gpu")]
+pub use fast_float::{bit_exact_default, explicit_wgsl, fast_float_wgsl};
 #[cfg(feature = "gpu")]
 pub use features::{
     ContactStorage, EngineFeatures, GpuTiming, GridLayout, KernelGroups, ManifoldPersistence,
@@ -135,9 +139,14 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 /// (`explicit_beams_split_member`), the groups' pass (`explicit_beams_split_group`) and
 /// its triangle tests across workgroups (`explicit_beams_split_tests`); and the pass's
 /// front as fleet-wide dispatches (`explicit_beams_fleet_front`, `explicit_beams_fleet_plan`:
-/// explicit_beams_fleet.slang, contact-groups-design.md §8).
+/// explicit_beams_fleet.slang, contact-groups-design.md §8); and the members' raycast
+/// wheels on each other (`explicit_beams_split_wheels`).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 28] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 32] = [
+    ("explicit_beams_split_wheels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels.wgsl"))),
+    ("explicit_beams_split_wheels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_wide.wgsl"))),
+    ("explicit_beams_split_wheels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_aero.wgsl"))),
+    ("explicit_beams_split_wheels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_aero_wide.wgsl"))),
     ("explicit_beams_split_fleetlevels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels.wgsl"))),
     ("explicit_beams_split_fleetlevels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_wide.wgsl"))),
     ("explicit_beams_split_fleetlevels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero.wgsl"))),

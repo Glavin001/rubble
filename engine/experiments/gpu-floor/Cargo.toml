@@ -1,0 +1,17 @@
+[package]
+name = "gpu-floor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Measuring instrument: the GPU floor of one explicit node-beam car (nothing in the engine depends on it)"
+publish = false
+
+[dependencies]
+engine-softbody.workspace = true
+engine-schema.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+metal.workspace = true
+objc.workspace = true

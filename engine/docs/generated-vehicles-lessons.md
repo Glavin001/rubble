@@ -178,7 +178,7 @@ Our first sedan was an outer shell with panels and placeholder boxes; its struct
 ## 9. Driving and drag (Measurement)
 
 - **Per-node drag (the Rigs of Rods rule, 0.05·|v|·v on every node) scales with node count.** A 987-node car gets 127× real drag and tops out at 41 km/h. Generated cars use triangle aero sized to the design's C_d (0.30); the sedan reaches 213 km/h.
-- **The soft car's raycast wheels** are the rigid vehicle model applied as forces on hub nodes inside the 2 kHz step. Their rays see static geometry only (F7).
+- **The soft car's raycast wheels** are the rigid vehicle model applied as forces on hub nodes inside the 2 kHz step. In the World their rays also see rigid bodies and other cars and push back on them (F7, fixed 2026-11-18: `wheels_hit_bodies`).
 - **Camera jitter** on the drive page is suspected to come from readback pacing, not physics (body shake 0.15–0.25 mm).
 
 ## 10. Process lessons

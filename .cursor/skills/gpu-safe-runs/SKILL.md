@@ -13,6 +13,7 @@ On macOS, Metal cannot abort a kernel that is already running. A runaway loop ke
 - **Size budgets from the work.** The host computes the explicit frame's budget per frame (2^22–2^31); don't hard-code a small one.
 - **The census test enforces this:** `cargo test -p engine-webgpu --test explicit_loop_cap` fails on any uncapped loop. Run it after kernel edits.
 - **Distrust indices read from GPU state** (headers, counts). Validate them in the kernel, and on the CPU before submit where it's cheap (NaN, capacities, header sanity).
+- **On native Metal the explicit vehicle kernels run without wgpu's index clamps and division guards** (3 to 9 % of every frame; the default since `vehicle-perf-first-principles.md` §8.48). An index out of range there reads or writes other memory instead of the last element. When a kernel edit gives garbage or a result that moves between runs, run it once with `RUBBLE_SHADER_CHECKS_OFF=0` (every check back): if the result changes, an index is out of range. The World's own kernels keep the index clamps (`RUBBLE_RIGID_SHADER_CHECKS_OFF=0` is their fully checked build). Chrome and the other backends always have the checks.
 
 ## Where to run: CUDA on Modal
 Modal's target is CUDA (`engine-cuda`): nvcc compiles the kernels locally (free), Modal

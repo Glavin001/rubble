@@ -47,7 +47,7 @@ fn main() {
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_else(|| vec![1, 16, 64]);
     let (_, device, queue) = engine_webgpu::default_device().expect("wgpu device");
-    println!("cars  nodes   beams   wgpu ms/frame  Metal ms/frame  (median GPU time, 60 fps frames)");
+    println!("cars  nodes   beams   wgpu ms/frame  Metal ms/frame  wgpu wall ms  Metal wall ms  (medians, 60 fps frames; wall: a frame submitted and waited for)");
     for n in counts {
         let f = fleet(n);
         let nodes: usize = f.iter().map(|v| v.nodes.len()).sum();
@@ -60,7 +60,19 @@ fn main() {
                 g.frame(clock.next());
             }
             g.wait();
-            if g.enable_frame_timing(TIMED) {
+            // Wall time of a frame submitted and waited for, one at a time (the scenario
+            // matrix's measure; it needs no timestamp queries).
+            let wall = median(
+                (0..TIMED)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        g.frame(clock.next());
+                        g.wait();
+                        t.elapsed().as_secs_f64() * 1e3
+                    })
+                    .collect(),
+            );
+            let gpu = if g.enable_frame_timing(TIMED) {
                 for _ in 0..TIMED {
                     g.frame(clock.next());
                 }
@@ -68,7 +80,8 @@ fn main() {
                 median(g.frame_times_ms())
             } else {
                 f64::NAN
-            }
+            };
+            (gpu, wall)
         };
         // Metal
         let metal_ms = {
@@ -78,12 +91,25 @@ fn main() {
                 g.frame(clock.next());
             }
             g.wait();
+            let wall = median(
+                (0..TIMED)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        g.frame(clock.next());
+                        g.wait();
+                        t.elapsed().as_secs_f64() * 1e3
+                    })
+                    .collect(),
+            );
             g.enable_frame_timing(TIMED);
             for _ in 0..TIMED {
                 g.frame(clock.next());
             }
-            median(g.frame_times_ms())
+            (median(g.frame_times_ms()), wall)
         };
-        println!("{n:>4}  {nodes:>6}  {beams:>6}  {wgpu_ms:>13.3}  {metal_ms:>14.3}");
+        println!(
+            "{n:>4}  {nodes:>6}  {beams:>6}  {:>13.3}  {:>14.3}  {:>12.3}  {:>13.3}",
+            wgpu_ms.0, metal_ms.0, wgpu_ms.1, metal_ms.1
+        );
     }
 }

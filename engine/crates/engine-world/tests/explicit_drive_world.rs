@@ -80,6 +80,7 @@ fn driving_in_the_world_is_the_cpu_reference() -> anyhow::Result<()> {
         std::slice::from_ref(&car),
         &ExplicitVehiclesDef {
             sleep: None,
+            bit_exact: true,
             ..ExplicitVehiclesDef::default()
         },
     )?;
