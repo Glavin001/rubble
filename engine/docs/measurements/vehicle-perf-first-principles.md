@@ -3524,3 +3524,193 @@ the work left is in the drawing itself, lossless first:
 * the cars' opaque picture follows the triangles (a quarter of the pixels takes off only
   10–15 %): levels of detail for the generated car (a different picture by design, the
   asset side: §8.30's follow-up).
+
+### 8.42 Porting the floor kernel's methods into production: what maps, what does not, measured (2026-11-19)
+
+PR #137 (`claude/gpu-floor-kernel-cc397d`, its §8.39) measured the floor of one sedan in a
+purpose-built Metal kernel: one car at rest 1.1 ms a frame fast, 1.25 strict; two cars head-on
+3.5 / 4.2. This section asks how much of that the production explicit kernels can take, one
+lossless switch at a time, and answers from measurements on `main` (96904a44). Native M3 Max,
+`vehicle_lab --profile fast`, every GPU run through `with-gpu-lock.py`; the fixtures are
+`fast-check.sh --make 1 8` on this commit (`out/fixtures`, one car at t 2.5, 6 and 20 s; eight
+cars at t 2, 3.7, 8, 16, 20 and 30 s). Wall figures are `--ab-perf-masks` medians of 60 frames
+unless marked. No kernel or default changes in this section: every switch considered below
+either already exists in production, or its measured ceiling was too small to build, or it
+needs the dedicated kernel described at the end.
+
+**Decision first: two workgroups in lockstep across cores is not safe in Chrome, so vehicle
+contact keeps its per-substep dispatches.** The floor's mechanism 2 (each body on its own
+workgroup, a device counter and a bounded spin as a barrier across cores, every shared word
+stored atomically) is what takes the head-on pair from production's 15.4 ms to 3.5–4.2. It
+rests on two properties WebGPU does not give:
+- *Forward progress across workgroups.* WGSL's only barriers are workgroup-scoped
+  (`workgroupBarrier`, `storageBarrier`); neither the WGSL nor the WebGPU specification promises
+  that two workgroups of one dispatch are resident at once. A spin that waits for another
+  workgroup is correct only on a GPU that happens to schedule both. On Apple's 40 cores with
+  two to forty workgroups it held (#137's `xsync`, 0 missed); a smaller GPU, a busy one, or a
+  software adapter that runs workgroups on a few threads (SwiftShader, which the Cursor Cloud
+  VMs and CI use, `AGENTS.md`) need not, and the bounded spin then ends with a status bit, i.e.
+  a failed frame, every frame.
+- *Visibility of what another workgroup stored.* WGSL atomics are relaxed and there is no
+  device-scope fence, so a workgroup's plain stores are not ordered for another workgroup by
+  anything the language offers. #137 measured the consequence on Metal (plain stores by one
+  workgroup were stale on another core on 4,095,999 of 4,096,000 reads; atomic stores were
+  right on every read). A WGSL port would have to make every exchanged word an `atomic<u32>`
+  scalar (no vector or float atomics), and its technique 8 (reading atomically stored words
+  with one plain vector load) is not expressible: a WebGPU dispatch may not bind one buffer
+  range as both atomic and plain writable storage.
+
+So for cars that touch, production keeps a dispatch a substep (the self-split members' step,
+the fleet front, the levels; §8.25–§8.37), and only the floor's in-workgroup parts can be
+taken over. That also bounds what this port can do for the eight-car mountain and the derby:
+the floor's 3.5 ms head-on figure needs the lockstep and is not reachable in Chrome. A native
+host could use it (a Metal or CUDA path of its own, where forward progress and memory scopes
+are explicit); that is a separate decision and not built here.
+
+**What each of the floor's ranked techniques is in production today** (#137 §8.39's table,
+in its order):
+
+| # | floor technique | floor's gain | in production | port as a switch? |
+|---|---|---|---|---|
+| 1 | all 34 substeps in one dispatch, state in registers and workgroup memory | −42 % (wall crash) | the in-workgroup frame kernel (`explicit_beams_frame`) already steps a car's whole frame in one dispatch, but its state lives in device memory | no: see "one dispatch a frame" below; its gain is #1 and #2 together |
+| 2 | a beam's hot words in registers, one scalar an end through workgroup memory, a gather per node in the reference's order | −56 % at rest | the gather per node in the reference's order is production's (`beamSum` over the node's incidence entries, four a pass); beams write float4 forces to device memory each step | only inside a kernel that keeps the beams on fixed lanes across substeps (#1) |
+| 3 | vehicle contact on both bodies' workgroups in lockstep | head-on 15.4 → 3.5 | — | no: the decision above |
+| 4 | hit passes from workgroup memory | −20 % (head-on) | `PERF_HITS_LOCAL` (§8.33, on), `PERF_SELF_HITS_LOCAL` (§8.36, off) | already ported; what is left is device latency, below |
+| 5 | two pair lists, the working one filtered from a wide one | −7 to −9 % in crashes | the reused pair list (`pairReuse*`, `PERF_WIDE_LIST`), kept candidates across substeps (`PERF_FLEET_KEEP`) | the wreck at rest builds rarely (t 20: the list kernel 1.34 ms a frame timed apart, its builds a small part); not measured in a crash here |
+| 6 | only nodes a contact wrote read and clear their contact words | −8 to −11 % | every node reads and clears its accumulators (on a step with hits), its §37 position step, its two-body count and rolls its anti-clip memory, every step | measured ceiling 1–3 %: not built (below) |
+| 7 | the pair filter applies the rule's over-the-triangle test | −9 % at rest | each listed pair goes through `pairReuseTest` (the full rule) a thread a pair over the GPU | not measured here |
+| 8, 9 | atomic stores read with one vector load; partner's cluster boxes | −7 %, −3 % | — | only with 3 |
+| 10 | no vector indexed by a variable in the row loop | −2 % | | nothing comparable found |
+| 11 | fast math | 10–20 %, not bit for bit | PR #135 (bit-exact as an engine-wide setting) | not this PR's |
+
+**One car today, by pass** (the wide passes, the lab's default; `--ab-wide-profile`, each
+dispatch timed apart, ms a frame of 34 substeps; the walk's figure is the timestamps of
+empty indirect dispatches, §8.23, and is left out):
+
+| pass | t 2.5 (driving) | t 6 | t 20 (wreck at rest, hits every step) | floor's phase (#137, at rest, fast) |
+|---|---|---|---|---|
+| nodes | 0.78 | 1.05 | 0.77 | node pass 0.08 + force gather 0.19 |
+| beams | 0.53 | 0.53 | 0.53 | beams 0.24 |
+| centred damping (two passes) | 0.51 | 0.51 | 0.52 | centred scalars 0.08 + gather 0.17 |
+| list kernel (self-collision's list; the next step's coupling and wheels on two more workgroups) | 0.95 | 1.34 | 1.34 | pair rows 0.27, rebuilds 0.03 |
+| pairs | 0.45 | 0.52 | 0.54 | candidates' rule 0.09 |
+| hits (self-collision hits, tyres) | 0.41 | 1.51 | 1.63 | hit passes 0.10 |
+| aux, begin, end | 0.10 | 0.10 | 0.10 | |
+| **frame (wall, untimed)** | **3.8–4.0** | **5.3** | **5.3** | **1.1** |
+
+The floor's scene has no wheels, no World coupling and no terrain proxies; production's
+one-car figures include them (§8.31: the wheels ≈0.85 ms of wall time before
+`PERF_AHEAD_APART`; the node pass's proxy contacts ≈0.38).
+
+**One dispatch a frame (technique 1), measured.** Production already has it: with
+`--wide 0` a car's frame is one dispatch of one 512-lane workgroup (`explicit_beams_frame`).
+It is slower than the wide passes, bit for bit the same state (`fast-check.sh wide`, 20
+frames): t 2.5 4.64 against 4.02 ms, t 6 6.28 against 5.38, t 20 6.26 against 5.54. Where its
+frame goes (`--ab-ablate` on the ablation kernel, time only, 20 frames; t 2.5 / t 20, against
+4.65 / 6.14 with nothing skipped):
+
+| skipped | t 2.5 | t 20 |
+|---|---|---|
+| everything (the dispatch alone) | 0.47 | 0.47 |
+| all but the frame's start | 0.65 | 0.67 |
+| the whole step loop (the frame's start and end, a barrier a step) | 1.56 | 1.83 |
+| node updates | 4.16 | 5.66 |
+| beam updates | 4.22 | 5.91 |
+| the coupling's step and the wheels ahead | 4.28 | 5.91 |
+| the wheels' step | 4.18 | 5.85 |
+| selfApply | 4.74 | 5.21 |
+| the grid's build | 4.41 | 4.76 |
+| the pair tests | 4.55 | 4.67 |
+
+A step is 118 µs on one core against the floor's 32: no single part carries it. The floor got
+from its first layout (3.0 ms at rest, about this kernel's shape: state in device memory) to
+1.25 by #1 and #2 together: the beams on fixed lanes for the whole frame with their hot words
+in registers, positions and velocities in workgroup memory, one scalar a beam end. Without the
+registers a dispatch a frame saves only the dispatch boundaries (§8.31: ≈2 µs each, 0.4–0.5 ms
+a frame for the wide path's 243), which the wide passes' spread over many cores outweighs.
+And the frame kernel cannot simply be widened: its modules declare 31.6 KB of the 32 KB of
+workgroup memory the device grants (32 KB on this adapter; `wg_mem.py`: `explicit_beams_solo_aero_wide` 31,628 B, the
+grid's buckets and scan, the coupling's spheres, the hit copies), so neither 1,024 lanes nor
+the floor's 30 KB of positions, velocities and beam scalars fit beside what it holds now.
+
+**Hit passes from workgroup memory (technique 4), what is left.** `PERF_HITS_LOCAL` is the
+floor's idea already (each hit's nodes copied into workgroup memory once, the rule's phases on
+the copies, one write back), yet one car's hits still cost about 1 ms a frame with 9 hits a
+substep. Time-only cuts of `selfApplyLocal` (each one returns at a barrier; the frame then
+runs from another state, so these are attributions, not savings), ms a frame:
+
+| `selfApplyLocal` | t 6 | t 20 |
+|---|---|---|
+| left out | 4.41 | 4.30 |
+| to the end of its loads | 4.70 | 4.56–4.58 |
+| and the slots (first item naming a node; the loads' results first used here) | 5.03 | 4.95 |
+| and the round (the first pass, the lead lane's rule) | 5.18–5.20 | 5.11 |
+| and the role and combine phases | 5.34 | 5.31 |
+| all of it | 5.36 | 5.40 |
+
+About 0.6 of the 1.0 ms is the loads: each item's lane walks a chain of device reads (its
+record, its node, the node's info, the incidence entries four at a time, the accumulators by
+atomic loads, which are not reordered) before the first barrier can use them. The floor has no
+such chain because its nodes' state is already in its workgroup's memory. Taking these
+loads out needs the same thing #1 needs.
+
+**Contact words read only by nodes a contact wrote (technique 6), its ceiling.** On the lab
+car every node of every step rolls its anti-clip memory (two atomic loads, four stores), takes
+its §37 position step (three loads, three stores), clears its two-body count, and on a step
+with hits reads and clears its three accumulators: up to 19 device atomics a node. A
+time-only build that skipped all of them (not lossless; ceiling only), one car, median /
+fastest tenth: t 2.5 3.84 / 3.73 → 3.78 / 3.68; t 6 5.34 / 5.23 → 5.28 / 5.17; t 20 5.30 / 4.58 →
+4.49 / 4.43 (the baseline's frames were bimodal there). So 1–3 % at most. Doing it losslessly
+needs a written-bits word a node set by every writer (`accAdd`, three direct-add sites,
+`shiftAdd`, `clipRecord`, the two-body counts) and kept conservative across restores and A/B
+switching; for 1–3 % it was not built. In the floor it was 8–11 % because its frame had little
+else left; here the node pass's own cost is mostly the World coupling's proxy contacts and the
+incidence gather.
+
+**Eight cars on the mountain today** (`--ab-profile`, each dispatch timed apart, ms a frame;
+untimed frame 19.8 ms at t 3.7, 17.2 at t 16):
+
+| dispatch kind | t 3.7 | t 16 |
+|---|---|---|
+| members' step (`explicit self step`, a workgroup a car a substep) | 5.78 | 6.16 |
+| contact levels | 6.21 | 1.16 |
+| fleet walk | 1.39 | 2.60 |
+| members' self-collision hits | 1.68 | 1.70 |
+| the front's other dispatches (triangles and points, owners' parts, grids, pairs, prefixes, throttles) | 3.71 | 4.22 |
+| self pairs, self walk | 1.55 | 1.55 |
+
+The members' step is about 170 µs a car a substep, the floor's first layout with a dispatch a
+substep (5.84 ms a frame in #137's ledger is 172 µs a substep): the same shape and the same
+cost. By the decision above these cars stay on a dispatch a substep, so of the floor's methods
+only #2's layout inside a substep and #4–#7 could apply; each is a few tenths of a millisecond
+of a 17–20 ms frame (§8.36 has the step's split: coupling 1.3, nodes 1.3, beams 0.75).
+
+**Whole runs, before** (native, 40 s, `--self-split 1`, the defaults; vehicle GPU ms a World
+step from t ≥ 0.5 s, median / p95 / worst; this section changes nothing, so after is before):
+
+| | explicit frame | vehicles (frame + coupling passes) | wall ms a World step |
+|---|---|---|---|
+| 1 car, mountain | 4.66 / 4.86 / 5.27 | 4.84 / 5.12 / 5.38 | 5.89 / 6.20 / 6.76 |
+| 8 cars, mountain | 17.28 / 20.84 / 23.65 | 18.04 / 22.17 / 23.91 | 19.36 / 23.51 / 25.16 |
+| 8 cars, derby arena (native: parked, the derby's AI runs in the page) | 5.73 / 5.91 / 5.93 | — | 7.12 / 7.57 / 19.6 |
+
+The derby with its AI is a Chrome scene; §8.38 (physics first) has it: eight cars in contact
+16.4 ms a step. Floor for comparison: one car 1.1–1.25 (at rest) and 1.83–2.2 (wall crash); two
+cars head-on 3.5–4.2 (lockstep, not available in Chrome).
+
+**What would reach the floor for a solo car, and what it needs.** A dedicated solo-car frame
+kernel: one workgroup a car for all 34 substeps, the floor's layout (beams on fixed lanes with
+their hot words in registers, slot loops written out; positions, velocities and beam scalars
+in workgroup memory; hits named into the scalars' array), and production's other work run as
+phases inside it at the points the frame kernel runs them today (the coupling's step and
+proxy contacts, the raycast wheels and drivetrain, sleep, debris retirement, surface
+contact, aero triangles, centred damping, deform and break groups, slides). Its
+prerequisites, each measured above: the workgroup memory budget (32 KB in Chrome) shared in
+time between the beam scalars and the grid and coupling arrays, which today hold it for the
+whole frame; 1,024 lanes requested from the device in Chrome; every count of the car a
+specialisation constant or a compile per car shape (#137: +6 % as uniforms); and the
+emulator's discipline (#137) for checking it on the CPU before the GPU. It is a kernel of the
+floor's size (2,166 lines of Metal there, without wheels, coupling or terrain), not a switch,
+and it helps a car only while it touches nothing but the World; a car in vehicle contact goes
+back to the per-substep path. That is the next step if the solo car's 4–5 ms matters more than
+the touching cars' 17–20.
