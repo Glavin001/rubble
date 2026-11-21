@@ -51,6 +51,10 @@
 #   --matrix             the scenario matrix, one container per row (what
 #                        tools/scenario-matrix/run.sh calls): the arguments after
 #                        `--` are matrix.py's (SWITCH | --baseline | --make, rows)
+#   --base REF           --matrix-cuda: also build explicit_replay from commit REF
+#                        (build_ref.sh, cached by commit) and ship it as the base of
+#                        matrix.py --two-builds (BASE_BIN)
+#   --head REF           the same for the head (default: the working tree's build)
 #   --build-only         build and pack, do not call Modal
 #   --keep               keep the run directory (engine/target/gpu-run/<id>)
 set -euo pipefail
@@ -85,8 +89,10 @@ while [ $# -gt 0 ]; do
     --fanout-tests) fanout=tests; pack_opts=(--list-tests); shift ;;
     --matrix) fanout=matrix; shift ;;
     --matrix-cuda) fanout=matrix; matrix_cuda=1; shift ;;
+    --base) base_ref="$2"; shift 2 ;;
+    --head) head_ref="$2"; shift 2 ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
     *) echo "gpu_run: unknown option $1 (the cargo selection goes after --)" >&2; exit 2 ;;
   esac
 done
@@ -206,6 +212,20 @@ case " $* " in *" engine-cuda "*|*" -p engine-cuda"*)
     if [ "$gpu" = T4 ]; then export ENGINE_CUDA_SASS=75; else export ENGINE_CUDA_SASS=89; fi
   fi ;;
 esac
+# The two-build A/B: the base's (and --head's) explicit_replay built from their commits,
+# shipped beside the selection (gpu_run.py gives them to matrix.py as BASE_BIN, HEAD_BIN).
+if [ -n "${base_ref:-}${head_ref:-}" ]; then
+  [ -n "${matrix_cuda:-}" ] || { echo "gpu_run: --base/--head are for --matrix-cuda" >&2; exit 2; }
+  [ -n "${base_ref:-}" ] || { echo "gpu_run: --head needs --base" >&2; exit 2; }
+  fx=()
+  for r in "${matrix_rows[@]}"; do fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx"); done
+  "$here/build_ref.sh" "$base_ref" "$run/refs/base_replay" "${fx[@]}"
+  pack_opts+=(--exe base_replay=/out/refs/base_replay)
+  if [ -n "${head_ref:-}" ]; then
+    "$here/build_ref.sh" "$head_ref" "$run/refs/head_replay" "${fx[@]}"
+    pack_opts+=(--exe head_replay=/out/refs/head_replay)
+  fi
+fi
 build_env=()
 while IFS='=' read -r k _; do
   case "$k" in ENGINE_*) build_env+=(-e "$k") ;; esac

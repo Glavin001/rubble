@@ -18,6 +18,11 @@
 //! launches read their counts on the GPU, off: the host reads them back).
 //! `--ab-profile`: each half's frame by kernel, gaps and host work, after the A/B. Exit 0 when the halves end bit for bit.
 //!
+//! `--run [--save-state FILE]`: this build alone, no switch: `AB_ROUNDS` rounds of N frames
+//! from the state (the time: each frame's fastest round, their mean), then the end state
+//! (every binding's words by name, the plan's records zeroed) into FILE. matrix.py's
+//! two-build A/B (`BASE_BIN`) runs it for each build in turn and compares the files.
+//!
 //! `--modules FILE ...`: only print the modules a replay of those fixtures may launch.
 
 use engine_cuda::CudaExplicitBeams;
@@ -100,6 +105,57 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let rounds = env_u("AB_ROUNDS", 1).max(1);
+    // The vehicle-contact plan's records are planning state (which vehicle overflowed a
+    // bucket first differs between two runs of one path): outside the verdict, as the lab's.
+    let at = x.planner_mut().words[43] as usize * 4;
+    let plan = at..at + p.header.layout.spans.len() * VV_RECS * 4;
+    let masked = |w: &[(&'static str, Vec<u32>)]| -> Vec<Vec<u32>> {
+        w.iter()
+            .map(|(name, v)| {
+                let mut v = v.clone();
+                if *name == "misc" && plan.end <= v.len() {
+                    v[plan.clone()].fill(0);
+                }
+                v
+            })
+            .collect()
+    };
+    if args.iter().any(|a| a == "--run") {
+        // One build, no switch (matrix.py's two-build A/B runs this binary and another,
+        // process by process): the frames from the state ROUNDS times, then the end state.
+        let mut runs: Vec<Vec<f64>> = Vec::new();
+        for _ in 0..rounds {
+            x.restore(&snap)?;
+            x.frame(steps)?;
+            x.wait()?;
+            x.restore(&snap)?;
+            let mut each = Vec::with_capacity(frames as usize);
+            for _ in 0..frames {
+                let t = Instant::now();
+                x.frame(steps)?;
+                x.wait()?;
+                each.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            runs.push(each);
+        }
+        let best = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).sum::<f64>() / runs[0].len() as f64;
+        let words = x.state_words()?;
+        if let Some(path) = arg("--save-state") {
+            // name, word count (u32 LE), the words; the plan's records zeroed.
+            let mut out = Vec::new();
+            for ((name, _), w) in words.iter().zip(masked(&words)) {
+                out.extend_from_slice(name.as_bytes());
+                out.push(0);
+                out.extend_from_slice(&(w.len() as u32).to_le_bytes());
+                for v in w {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            std::fs::write(&path, out)?;
+        }
+        println!("   run at t {:.1}: {best:.3} ms/frame (each frame's best of {rounds} rounds, mean)", p.header.t);
+        return Ok(());
+    }
     let mut pooled: [Vec<Vec<f64>>; 2] = [Vec::new(), Vec::new()];
     let mut words: [Vec<(&'static str, Vec<u32>)>; 2] = [Vec::new(), Vec::new()];
     for _ in 0..rounds {
@@ -138,21 +194,6 @@ fn main() -> anyhow::Result<()> {
             each.len()
         );
     }
-    // The vehicle-contact plan's records are planning state (which vehicle overflowed a
-    // bucket first differs between two runs of one path): outside the verdict, as the lab's.
-    let at = x.planner_mut().words[43] as usize * 4;
-    let plan = at..at + p.header.layout.spans.len() * VV_RECS * 4;
-    let masked = |w: &[(&'static str, Vec<u32>)]| -> Vec<Vec<u32>> {
-        w.iter()
-            .map(|(name, v)| {
-                let mut v = v.clone();
-                if *name == "misc" && plan.end <= v.len() {
-                    v[plan.clone()].fill(0);
-                }
-                v
-            })
-            .collect()
-    };
     let same = masked(&words[0]) == masked(&words[1]);
     for ((name, a), (_, b)) in words[0].iter().zip(&words[1]) {
         let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();

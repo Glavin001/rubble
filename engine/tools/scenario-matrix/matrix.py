@@ -19,6 +19,12 @@ one state, the same build), compares every state word and times each frame apart
     matrix.py --make-portable [ROW ...] each row's saved state as a portable fixture
         (out/scenario-matrix/portable/ROW.pfx) for the CUDA replay (REPLAY_BIN=explicit_replay
         runs the rows on it: tools/modal/gpu_run.sh --matrix-cuda -- SWITCH [ROW ...])
+    matrix.py --two-builds [ROW ...]    two builds against each other on CUDA (BASE_BIN and
+        REPLAY_BIN, explicit_replay --run): each row's fixture replayed by one build's
+        process, then the other's, PROCS (default 3) times in alternating order; the median
+        process each, the base's spread as the noise, the end states word by word (a changed
+        layout: the bindings both have). ALLOW_DIFF=1 reports state differences without
+        failing (a change that reorders arithmetic). run.sh --cuda --base REF [--head REF].
     matrix.py --end-state DIR [ROW ...] each row's state after END_FRAMES (default 20)
         frames from its moment, into DIR/ROW.fx (one build's; a host refactor's gate)
     matrix.py --compare-end A B [ROW ...]  two builds' end states, every state word:
@@ -46,6 +52,9 @@ BIN = os.environ.get("LAB_BIN", os.path.join(ENGINE, "target", "fast", "examples
 # (STATES/portable/ROW.pfx, `--make-portable`) in place of vehicle_lab (gpu_run.sh
 # --matrix-cuda sets it on Modal).
 REPLAY = os.environ.get("REPLAY_BIN")
+# Two builds (`--two-builds`): the base's explicit_replay, compared with REPLAY_BIN (the
+# head) process by process (gpu_run.sh --base REF builds and ships both).
+BASE = os.environ.get("BASE_BIN")
 CAR = os.environ.get("CAR", os.path.expanduser("~/Development/rubble-artifacts/sedan-live/mods/sedan_new"))
 FRAMES = int(os.environ.get("FRAMES", "10"))
 ROUNDS = int(os.environ.get("ROUNDS", "3"))
@@ -184,6 +193,115 @@ def replay(row, switch):
             "secs": time.time() - t0, "out": out, "ok": verdict is not None}
 
 
+RUN = re.compile(r"run at t [\d.]+: ([\d.]+) ms/frame")
+
+
+def read_state(path):
+    """An end state `explicit_replay --run --save-state` wrote: [(name, words bytes)]."""
+    out, b, i = [], open(path, "rb").read(), 0
+    while i < len(b):
+        j = b.index(0, i)
+        name = b[i:j].decode()
+        n = int.from_bytes(b[j + 1:j + 5], "little")
+        out.append((name, b[j + 5:j + 5 + 4 * n]))
+        i = j + 5 + 4 * n
+    return out
+
+
+def compare_states(a, b):
+    """(bit for bit, note). The same layout: every word. A changed layout (an architecture
+    change): the bindings both builds have by name and size, and which they are."""
+    if [(n, len(w)) for n, w in a] == [(n, len(w)) for n, w in b]:
+        bad = [n for (n, x), (_, y) in zip(a, b) if x != y]
+        return not bad, ("differ: " + ", ".join(bad)) if bad else ""
+    bmap = dict(b)
+    common = [(n, w) for n, w in a if n in bmap and len(bmap[n]) == len(w)]
+    same = [n for n, w in common if bmap[n] == w]
+    return False, (f"layout differs: {len(common)} of {len(a)} bindings comparable, "
+                   f"{len(same)} equal ({', '.join(n for n, _ in common if n not in same) or 'none differ'})")
+
+
+def run_build(binary, row, state_out):
+    """One process of one build on the row's fixture: (ms a frame, end state path or
+    None when that build predates `--run`: then its no-op A/B's mean, no state)."""
+    cmd = [binary, "--fixture", portable_file(row), "--run", "--ab-frames", str(FRAMES), "--save-state", state_out]
+    env = dict(os.environ, AB_WARM_MS=os.environ.get("WARM_MS", "150"), AB_ROUNDS=str(ROUNDS))
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE, env=env)
+    out = p.stdout + p.stderr
+    m = RUN.search(out)
+    if m and p.returncode == 0:
+        return float(m.group(1)), state_out, out
+    best = [float(x.group(2)) for x in BEST.finditer(out)]
+    if best:
+        return sum(best) / len(best), None, out
+    return None, None, out
+
+
+def two_builds(rows):
+    """The A/B of two builds (BASE_BIN against REPLAY_BIN; gpu_run.sh --base REF): each row's
+    fixture replayed by one build's process, then the other's, PROCS times, the order
+    alternating (A B, B A, ...). A build's time is the median of its processes; the base's
+    own spread between processes is printed as that row's noise. The end states: every
+    word, base against head; each build against itself too (a nondeterministic build is
+    no reference)."""
+    import tempfile
+    procs = int(os.environ.get("PROCS", "3"))
+    allow_diff = os.environ.get("ALLOW_DIFF") == "1"
+    tmp = tempfile.mkdtemp(prefix="two-builds-")
+    print(f"scenario matrix: two builds, base against head ({procs} processes each, alternating; {ROUNDS} x {FRAMES} "
+          f"frames of 34 steps a process, each frame's best round, mean ms a frame; the median process; slower fails "
+          f"past {THRESHOLD:g} % and {NOISE_MS:g} ms{'; state differences allowed' if allow_diff else ''})")
+    print(f"{'row':<8} {'bit4bit':>7} {'head ms':>8} {'base ms':>8} {'delta':>8}  {'':<6} {'noise':>6} {'run s':>5}  what")
+    t_all = time.time()
+    bad = []
+    for row in rows:
+        t0 = time.time()
+        times = {"base": [], "head": []}
+        states = {"base": [], "head": []}
+        outs = []
+        for i in range(procs):
+            order = [("base", BASE), ("head", REPLAY)] if i % 2 == 0 else [("head", REPLAY), ("base", BASE)]
+            for side, binary in order:
+                ms, st, out = run_build(binary, row, os.path.join(tmp, f"{row[0]}.{side}{i}.st"))
+                outs.append(f"[{side} #{i}] " + out[-600:])
+                if ms is not None:
+                    times[side].append(ms)
+                if st:
+                    states[side].append(read_state(st))
+        secs = time.time() - t0
+        if not times["base"] or not times["head"]:
+            bad.append(row[0])
+            print(f"{row[0]:<8} FAILED to run ({secs:.1f} s)")
+            print("\n".join("    " + l for l in "\n".join(outs).splitlines()[-12:]))
+            continue
+        med = lambda v: sorted(v)[len(v) // 2]
+        head, base = med(times["head"]), med(times["base"])
+        noise = 100.0 * (max(times["base"]) - min(times["base"])) / base
+        delta = 100.0 * (head - base) / base
+        notes = []
+        if states["base"] and states["head"]:
+            same, why = compare_states(states["base"][0], states["head"][0])
+            for side in ("base", "head"):
+                if any(s != states[side][0] for s in states[side][1:]):
+                    same, why = False, why + f"; {side} differs between its own processes"
+            bfb = "yes" if same else "NO"
+            if why:
+                notes.append(why)
+        else:
+            same, bfb = True, "n/a"
+            notes.append("no end state: the base predates explicit_replay --run")
+        slower = delta > THRESHOLD and head - base > NOISE_MS
+        flag = "SLOWER" if slower else ("faster" if delta < -THRESHOLD and base - head > NOISE_MS else "")
+        if slower or (not same and not allow_diff):
+            bad.append(row[0])
+        print(f"{row[0]:<8} {bfb:>7} {head:>8.3f} {base:>8.3f} {delta:>+7.1f}%  {flag:<6} {noise:>5.1f}% {secs:>5.1f}  {row[5]}")
+        for n in notes:
+            print("    " + n)
+    verdict = "PASS" if not bad else "FAIL (" + ", ".join(bad) + ")"
+    print(f"verdict: {verdict}; {len(rows)} rows in {time.time() - t_all:.1f} s")
+    return 0 if not bad else 1
+
+
 WORLD = re.compile(r"end world: \d+ steps, World step ([\d.]+) ms, frame alone ([\d.]+) ms, the World adds (-?[\d.]+) ms")
 
 
@@ -300,6 +418,15 @@ def main():
         return 0
     if args[0] == "--world":
         return world(pick(args[1:]) if args[1:] else [r for r in ROWS if r[2]])
+    if args[0] == "--two-builds":
+        if not (REPLAY and BASE):
+            sys.exit("--two-builds needs REPLAY_BIN (head) and BASE_BIN (base): "
+                     "run.sh --cuda --base REF [--head REF] [ROW ...]")
+        rows = pick(args[1:])
+        missing = [r[0] for r in rows if not os.path.isfile(portable_file(r))]
+        if missing:
+            sys.exit(f"no portable fixture for {', '.join(missing)} in {STATES}: matrix.py --make-portable")
+        return two_builds(rows)
     baseline = args[0] == "--baseline"
     switch = "perf=0" if baseline else args[0]
     rows = pick(args[1:])

@@ -330,6 +330,10 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
         # The working directory (a test's crate dir, as cargo test uses) exists even
         # when no data file of that crate is shipped.
         Path(e["cwd"]).mkdir(parents=True, exist_ok=True)
+    # Prebuilt executables (the two-build A/B's builds of other commits) by variable.
+    for e in exes:
+        if e["role"] == "extra":
+            base[{"base_replay": "BASE_BIN", "head_replay": "HEAD_BIN"}.get(e["name"], f"EXE_{e['name']}")] = e["exec"]
     probe = next((e for e in exes if e["role"] == "probe"), None)
     if probe:
         code, _ = _run([probe["exec"]], "/work", base, deadline, 0)
@@ -442,7 +446,8 @@ def _matrix_row(spec: dict, shard: dict, runs: list[dict], base: dict, deadline:
     env = {**base, "LAB_BIN": lab["exec"], "STATES": str(states),
            "CAR": base.get("CAR", "/scenarios/sedan_new")}
     if cuda:
-        env["REPLAY_BIN"] = lab["exec"]
+        # (--head REF: that commit's build is the head; else the one built from the tree.)
+        env["REPLAY_BIN"] = base.get("HEAD_BIN", lab["exec"])
     lines: list[str] = []
     # (The rows named on the command line are spread over the containers: this one's
     # are `rows`, run by one matrix.py in turn.)

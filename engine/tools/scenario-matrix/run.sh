@@ -39,6 +39,14 @@ here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 profile="${PROFILE:-fast}"
 cd "$engine" || exit 1
+if [ "$1" = "--cuda" ] && { [ "${2:-}" = "--base" ] || [ "${2:-}" = "--head" ]; }; then
+  # Two builds: --base REF [--head REF] [ROW ...] (head default: the working tree).
+  shift
+  refs=()
+  while [ "${1:-}" = "--base" ] || [ "${1:-}" = "--head" ]; do refs+=("$1" "$2"); shift 2; done
+  # shellcheck disable=SC2086
+  exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} "${refs[@]}" --matrix-cuda -- --two-builds "$@"
+fi
 if [ "$1" = "--cuda" ]; then
   shift
   # shellcheck disable=SC2086
