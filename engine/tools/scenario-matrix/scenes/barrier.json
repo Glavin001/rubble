@@ -1,0 +1,2 @@
+{ "scene": "flat", "restart": { "start": { "kmh": 50 } },
+  "structures": [{ "truckFile": "barrier.truck", "x": 0, "z": 10 }], "events": [] }

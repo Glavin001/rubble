@@ -34,7 +34,26 @@ export async function fetchFile(url) {
   }
 }
 
-export async function loadMod(base, { pc = null } = {}) {
+/**
+ * A vehicle folder's render model files for a detail: `'full'` its art (`<x>.glb`,
+ * `<x>.rskin`), `'lite'` the lighter render beside it (`<x>.lite.glb`, `.lite.rskin`:
+ * the vehicle generator's same design meshed coarser and bound to the same lattice; the
+ * physics files are the same), or the art when the folder has no lighter one.
+ * `{ glbName, skinName, detail (the one found), hasLite }`.
+ */
+export function modModelNames(list, detail = 'full') {
+  const lite = (f) => /\.lite\.(glb|rskin)$/.test(f);
+  const pick = (want) => {
+    const skinName = list.find((f) => f.endsWith('.rskin') && lite(f) === want);
+    const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/') && lite(f) === want);
+    return { glbName, skinName };
+  };
+  const hasLite = !!pick(true).skinName;
+  const useLite = detail === 'lite' && hasLite;
+  return { ...pick(useLite), detail: useLite ? 'lite' : 'full', hasLite };
+}
+
+export async function loadMod(base, { pc = null, detail = 'full' } = {}) {
   base = base.replace(/\/$/, '');
   const r = await fetch(`${base}/files.json`);
   if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}. ${LOCAL_MODS}`);
@@ -42,8 +61,8 @@ export async function loadMod(base, { pc = null } = {}) {
   const text = async (f) => [f, new TextDecoder().decode(await fetchFile(`${base}/${f}`))];
   const bin = async (f) => (f ? await fetchFile(`${base}/${f}`) : null);
   const pcName = pc ?? list.find((f) => f.endsWith('.pc'));
-  const skinName = list.find((f) => f.endsWith('.rskin'));
-  const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
+  const names = modModelNames(list, detail);
+  const { skinName, glbName } = names;
   const [files, pcText, meshes, materials, glb, skin] = await Promise.all([
     Promise.all(list.filter((f) => f.endsWith('.jbeam')).map(text)),
     pcName && list.includes(pcName) ? text(pcName).then((t) => t[1]) : undefined,
@@ -52,7 +71,7 @@ export async function loadMod(base, { pc = null } = {}) {
     bin(glbName),
     bin(skinName),
   ]);
-  return { kind: 'jbeam', files, pc: pcText, pcName, meshes, materials, base, list, label: base.split('/').pop(), glb, skin, glbName, skinName,
+  return { kind: 'jbeam', files, pc: pcText, pcName, meshes, materials, base, list, label: base.split('/').pop(), glb, skin, glbName, skinName, detail: names.detail, hasLite: names.hasLite,
     modelBytes: (glb?.length ?? 0) + (skin?.length ?? 0) };
 }
 
@@ -60,8 +79,10 @@ export async function loadMod(base, { pc = null } = {}) {
 // (engine/docs/measurements/lab-load-memory.md: the generated sedan, 16 MB glb and
 // 124 MB rskin; the authored sedan for the base): the tab's peak physical footprint
 // (JS and wasm heaps, the browser's own), the GPU memory the lab holds, and the skin's
-// bind buffer (64 bytes a vertex and a slot of 4 entries: about twice the rskin).
-const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 6.0, gpuBase: 170e6, gpuPerSkinByte: 2.15, bindPerSkinByte: 2.16 };
+// bind buffer (64 bytes a vertex and a slot of 8 entries, the sidecar's own grid steps:
+// 157 MB for the sedan's 124 MB rskin; it was 267 MB at 4 f32 entries a slot, and the
+// GPU's figure is the measured one less that difference).
+const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 6.0, gpuBase: 170e6, gpuPerSkinByte: 1.26, bindPerSkinByte: 1.28 };
 // The share of a device's memory a tab can count on (a judgement: browsers kill a
 // tab well before it has the device's whole memory).
 const TAB_SHARE = 0.5;
@@ -97,17 +118,18 @@ export function footprintCheck(fp, { deviceMemory, limits, name }) {
   return { fits: true, message: '' };
 }
 
-/** A vehicle folder's model files' sizes (bytes, from HEAD: nothing is downloaded): `{ glb, skin }`. */
-export async function modModelSizes(base) {
+/**
+ * A vehicle folder's model files' sizes for a detail (`modModelNames`; bytes, from HEAD:
+ * nothing is downloaded): `{ glb, skin, detail, hasLite }`.
+ */
+export async function modModelSizes(base, detail = 'full') {
   base = base.replace(/\/$/, '');
   const r = await fetch(`${base}/files.json`);
   if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}. ${LOCAL_MODS}`);
-  const list = await r.json();
-  const skinName = list.find((f) => f.endsWith('.rskin'));
-  const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
+  const names = modModelNames(await r.json(), detail);
   const size = async (f) => (f ? Number((await fetch(`${base}/${f}`, { method: 'HEAD' })).headers.get('Content-Length')) || 0 : 0);
-  const [glb, skin] = await Promise.all([size(glbName), size(skinName)]);
-  return { glb, skin };
+  const [glb, skin] = await Promise.all([size(names.glbName), size(names.skinName)]);
+  return { glb, skin, detail: names.detail, hasLite: names.hasLite };
 }
 
 /**
@@ -138,7 +160,56 @@ export function modVisual(mod, { native = true, raycast = false, paint = null } 
   const spec = { jbeam: mod.files, pc: mod.pc, native, ...(raycast ? { wheels: 'raycast' } : {}), ...(paint ? { paint } : {}), materials: mod.materials ?? [] };
   const r = mod.skin ? jbeamVisualSkinned(spec, mod.meshes, mod.glb, mod.skin) : jbeamVisual(spec, mod.meshes);
   r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : [];
+  r.visual.closedPanels = closedSolids(mod.glb);
   return r;
+}
+
+/**
+ * `modVisual` for a glTF-skinned vehicle, built in a worker of its own
+ * (visual-worker.mjs: the same wasm, the same call) so the wasm heap the build grows
+ * (about 530 MB for the generated sedan) is freed with the worker instead of staying
+ * the page's. The model bytes go to the worker (`mod.glb` and `mod.skin` are released,
+ * as `releaseModels` would; `modModels` fetches them again). Falls back to `modVisual`
+ * on the page where a module worker cannot run.
+ */
+export async function modVisualApart(mod, { native = true, raycast = false, paint = null } = {}) {
+  if (!mod.skin || typeof Worker === 'undefined') return modVisual(mod, { native, raycast, paint });
+  const spec = { jbeam: mod.files, pc: mod.pc, native, ...(raycast ? { wheels: 'raycast' } : {}), ...(paint ? { paint } : {}), materials: mod.materials ?? [] };
+  const closed = closedSolids(mod.glb);
+  const here = (p) => new URL(p, import.meta.url).href;
+  let worker;
+  try { worker = new Worker(here('./visual-worker.mjs'), { type: 'module' }); } catch { return modVisual(mod, { native, raycast, paint }); }
+  const { glb, skin } = mod;
+  mod.glb = mod.skin = null;
+  try {
+    const answer = await new Promise((resolve, reject) => {
+      worker.onmessage = (e) => resolve(e.data);
+      worker.onerror = (e) => reject(new Error(`the visual's worker failed: ${e.message || 'no message'}`));
+      worker.postMessage({ wasm: here('./generated/world-wasm/engine_world_wasm_bg.wasm'), glue: here('./generated/world-wasm/engine_world_wasm.js'), gpuWait: here('./fracture/gpu-wait.mjs'), spec, glb, skin }, [glb.buffer, skin.buffer]);
+    });
+    if (answer.error) throw new Error(answer.error);
+    const r = answer.result;
+    r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : [];
+    r.visual.closedPanels = closed;
+    return r;
+  } finally {
+    worker.terminate();
+  }
+}
+
+/**
+ * Whether a glTF model's parts are closed solids: the vehicle generator tags every
+ * vertex of a solid part outer skin, edge wall or inner face (the `_SURFACE` attribute,
+ * engine-vehiclegen export.rs), and writes no tag for sheet parts. The renderer then
+ * knows a paint face's back is inside a sealed panel (showcase-car-render.mjs).
+ */
+export function closedSolids(glb) {
+  if (!glb || glb.byteLength < 20) return false;
+  const view = new DataView(glb.buffer, glb.byteOffset, glb.byteLength);
+  // Header (magic, version, length), then the JSON chunk (length, type 'JSON').
+  if (view.getUint32(0, true) !== 0x46546c67 || view.getUint32(16, true) !== 0x4e4f534a) return false;
+  const json = JSON.parse(new TextDecoder().decode(glb.subarray(20, 20 + view.getUint32(12, true))));
+  return (json.meshes ?? []).some((m) => (m.primitives ?? []).some((p) => p.attributes && '_SURFACE' in p.attributes));
 }
 
 /**

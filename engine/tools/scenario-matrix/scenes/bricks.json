@@ -1,0 +1,2 @@
+{ "scene": "flat", "restart": { "start": { "kmh": 40 } },
+  "events": [{ "t": 0, "obstacle": { "kind": "bricks", "ahead": 5, "cols": 6, "rows": 5, "deep": 2 } }] }

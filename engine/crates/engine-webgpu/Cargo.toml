@@ -47,6 +47,7 @@ engine-webgpu = { path = ".", features = ["test-kernels"] }
 
 [build-dependencies]
 engine-slang-build.workspace = true
+engine-exec.workspace = true
 anyhow.workspace = true
 
 [[bin]]

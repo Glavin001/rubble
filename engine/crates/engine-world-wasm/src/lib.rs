@@ -33,6 +33,8 @@ mod demo;
 mod explicit;
 mod explicit_world;
 mod frame;
+/// Physics first: which displayed frames a page draws while the World steps.
+mod draw_pacer;
 /// Real-time pacing of the explicit solver's fixed steps on a display.
 mod frame_pacer;
 mod guidance;
@@ -53,6 +55,7 @@ mod vehicle;
 
 pub use city::WebCity;
 pub use frame::WebFrame;
+pub use draw_pacer::DrawPacer;
 pub use frame_pacer::FramePacer;
 pub use lab::{check_lab_chunk_order, LabRun, LabScene, LabSettleJob};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
@@ -154,6 +157,12 @@ pub(crate) async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgp
 /// Set by the device-lost callback; cleared when a new device is opened.
 static DEVICE_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set by the first step taken after a load's kernels were compiled: the page is
+/// running (its renderers built, its first frame owed). The deferred kernels' compiles
+/// start only then: started before, Chrome builds the page's render pipelines behind
+/// them (measured: "Building the renderers" 50 s behind a 50 s fallback kernel).
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// What a load reports to its page (`load-progress.mjs` `loading.progress`), one
 /// line per event:
 /// - `spawn`: the vehicles are being built;
@@ -184,6 +193,18 @@ pub fn device_lost_js() -> bool {
 /// taken is not owed later (the simulation runs slower instead). Pacing only: the
 /// steps taken are the same steps.
 pub const EXPLICIT_STEPS_IN_FLIGHT: usize = 2;
+static STEPS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(EXPLICIT_STEPS_IN_FLIGHT);
+
+/// World steps with explicit vehicles kept in flight (1 to 4; the default is
+/// [`EXPLICIT_STEPS_IN_FLIGHT`]): more lets the GPU start a step while the last one's
+/// readback is still on its way back (the browser lands a map a while after the GPU is
+/// done), at the cost of the host's readings arriving that many steps later. Pacing
+/// only: the steps taken are the same steps.
+#[wasm_bindgen(js_name = setStepsInFlight)]
+pub fn set_steps_in_flight(n: u32) {
+    STEPS_IN_FLIGHT.store((n as usize).clamp(1, 4), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// A page's optional progress function as a [`Hear`].
 pub(crate) fn hear_fn(progress: Option<js_sys::Function>) -> Hear {
@@ -340,12 +361,14 @@ pub(crate) async fn warm_pipelines(
     #[cfg(target_arch = "wasm32")]
     {
         use js_sys::{Promise, Reflect};
+        use wasm_bindgen::JsCast;
         if device.as_webgpu().is_none() {
             return Ok(());
         }
         // Paths that only save time wait for their deferred kernels' compiles
         // (engine_webgpu::pipeline_ready): marked below as each one finishes.
         engine_webgpu::set_pipeline_gate(true);
+        RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
         let names = kernel_names(specs);
         hear(format!(
             "kernels {}",
@@ -441,6 +464,23 @@ pub(crate) async fn warm_pipelines(
             let device = device.clone();
             let hear = hear.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                // Not before the page runs (see RUNNING); a host that never steps
+                // through `step` starts them after two minutes.
+                let started = js_sys::Date::now();
+                while !RUNNING.load(std::sync::atomic::Ordering::Relaxed) && js_sys::Date::now() - started < 120_000.0 {
+                    let wait = Promise::new(&mut |done, _| {
+                        let timer = Reflect::get(&js_sys::global(), &"setTimeout".into()).ok();
+                        if let Some(f) = timer.and_then(|t| t.dyn_into::<js_sys::Function>().ok()) {
+                            let _ = f.call2(&JsValue::NULL, &done, &JsValue::from_f64(100.0));
+                        } else {
+                            let _ = done.call0(&JsValue::NULL);
+                        }
+                    });
+                    let _ = wasm_bindgen_futures::JsFuture::from(wait).await;
+                    if DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                }
                 for (s, name) in later {
                     if DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
@@ -558,7 +598,7 @@ impl WebWorld {
     pub fn can_step(&self) -> bool {
         self.world.can_step_without_waiting()
             && !device_lost()
-            && (self.world.explicit_vehicles().is_none() || self.world.readbacks_in_flight() < EXPLICIT_STEPS_IN_FLIGHT)
+            && (self.world.explicit_vehicles().is_none() || self.world.readbacks_in_flight() < STEPS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The stability check of this world's explicit vehicles (`stability.rs`:
@@ -582,6 +622,7 @@ impl WebWorld {
             return Ok(false);
         }
         res(self.world.step())?;
+        RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(true)
     }
 

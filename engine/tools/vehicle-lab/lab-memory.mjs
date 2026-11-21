@@ -11,6 +11,14 @@
 //       [--query 'mode=mountain&car=gen'] [--settle 8] [--json out.json] [--deviceMemory GB]
 //
 // --deviceMemory: the page sees this navigator.deviceMemory (the lab's footprint guard).
+// --ios: the page sees an iPhone's WebKit as far as the lab can tell: an iPhone user
+//   agent and platform, no navigator.deviceMemory, and an adapter whose maxBufferSize
+//   and maxStorageBufferBindingSize are 256 MiB (the least any iOS device reports,
+//   web3dsurvey; WebKit sets both to max(256 MiB, min(1 GiB, Metal's maxBufferLength
+//   / 3))), which the device is then created with (Chrome enforces them).
+// --gpuBudget MB: past this many MB of live buffers and textures, each new one also
+//   raises an uncaptured GPUOutOfMemoryError with no message on its device (WebKit's
+//   failure as the page sees it; the buffer itself is still made).
 //
 // Serves nothing: --base is a running static server over engine/web-dist.
 import { spawn, execFileSync } from 'node:child_process';
@@ -99,6 +107,27 @@ const evaluate = async (expression) => {
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT });
+if (args.includes('--ios')) {
+  await send('Emulation.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0.7390.96 Mobile/15E148 Safari/604.1', platform: 'iPhone' });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => undefined });
+    const IOS = { maxBufferSize: 268435456, maxStorageBufferBindingSize: 268435456 };
+    const get = Object.getOwnPropertyDescriptor(GPUAdapter.prototype, 'limits').get;
+    Object.defineProperty(GPUAdapter.prototype, 'limits', { get() {
+      const real = get.call(this), out = {};
+      for (let p = Object.getPrototypeOf(real); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) for (const k of Object.getOwnPropertyNames(p)) if (k !== 'constructor' && !(k in out)) out[k] = real[k];
+      return Object.assign(out, IOS);
+    } });
+  })();` });
+}
+if (opt('--gpuBudget')) await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+  const budget = ${Number(opt('--gpuBudget'))} * 2 ** 20, live = new WeakMap(), sizes = new WeakMap();
+  const over = (dev, n) => { const t = (live.get(dev) ?? 0) + n; live.set(dev, t); if (t > budget) queueMicrotask(() => dev.dispatchEvent(new GPUUncapturedErrorEvent('uncapturederror', { error: new GPUOutOfMemoryError('') }))); };
+  const cb = GPUDevice.prototype.createBuffer;
+  GPUDevice.prototype.createBuffer = function (d) { const b = cb.call(this, d); sizes.set(b, [this, d.size]); over(this, d.size); return b; };
+  const ds = GPUBuffer.prototype.destroy;
+  GPUBuffer.prototype.destroy = function () { const z = sizes.get(this); if (z) { live.set(z[0], live.get(z[0]) - z[1]); sizes.delete(this); } return ds.call(this); };
+})();` });
 if (opt('--deviceMemory')) await send('Page.addScriptToEvaluateOnNewDocument', { source: `Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => ${Number(opt('--deviceMemory'))} });` });
 
 // Chrome's processes under this profile: the renderer(s) and the GPU process.
@@ -120,20 +149,25 @@ const url = `${BASE}/vehicle-lab.html?${QUERY}`;
 const t0 = Date.now();
 await send('Page.navigate', { url });
 let ready = false;
+const seenFail = [];
 for (;;) {
   await new Promise((r) => setTimeout(r, 300));
   const s = await evaluate('JSON.stringify({ ready: window.__ready === true, failed: window.__failed || "" })').then(JSON.parse).catch(() => ({}));
-  if (s.failed) { console.error('page failed: ' + s.failed); console.error('banner: ' + await evaluate('document.getElementById("fatal").style.display + " | " + document.getElementById("fatal").textContent')); break; }
+  // (With --gpuBudget the page may fail and then rebuild lighter: it is given its time.)
+  if (s.failed && !opt('--gpuBudget')) { console.error('page failed: ' + s.failed); console.error('banner: ' + await evaluate('document.getElementById("fatal").style.display + " | " + document.getElementById("fatal").textContent')); break; }
+  if (s.failed && !seenFail.includes(s.failed)) { seenFail.push(s.failed); console.log('page error (going on): ' + s.failed); }
   if (s.ready) { ready = true; break; }
   if (Date.now() - t0 > (LIMIT_S - 30) * 1000) { console.error('did not start'); break; }
 }
 const loadS = (Date.now() - t0) / 1000;
+const stepsAtReady = await evaluate('window.__world?.stepCount?.() ?? -1').catch(() => -1);
 const atReady = { ...(await evaluate('JSON.stringify(window.__memProbe.snap("ready"))').then(JSON.parse)), fp: sampleFootprint() };
 const peakAtReady = { ...peak };
 await new Promise((r) => setTimeout(r, SETTLE * 1000));
 await send('HeapProfiler.enable');
 await send('HeapProfiler.collectGarbage');
 await new Promise((r) => setTimeout(r, 500));
+const stepsSettled = await evaluate('window.__world?.stepCount?.() ?? -1').catch(() => -1);
 const settled = { ...(await evaluate('JSON.stringify(window.__memProbe.snap("settled"))').then(JSON.parse)), fp: sampleFootprint() };
 sampling = false;
 await sampler;
@@ -142,6 +176,9 @@ const owners = await evaluate('JSON.stringify(window.__mem ? window.__mem() : nu
 
 const MB = (b) => (b / 2 ** 20).toFixed(1);
 console.log(`${url}: ${ready ? 'ready' : 'NOT ready'} in ${loadS.toFixed(1)} s`);
+console.log(`World steps: ${stepsAtReady} at ready, ${stepsSettled} after ${SETTLE} s more`);
+console.log('status: ' + await evaluate('document.getElementById("status").textContent + " | car detail " + window.__carDetail + " | error line: " + document.getElementById("err").textContent').catch(() => '?'));
+if (args.includes('--ios')) console.log('device limits: ' + await evaluate('(() => { const l = window.__world?.device?.()?.limits; return l ? `maxBufferSize ${l.maxBufferSize}, maxStorageBufferBindingSize ${l.maxStorageBufferBindingSize}` : "?"; })()').catch(() => '?'));
 console.log('phase (snapshot when the step ended)                          JS heap  wasm  GPU buf  GPU tex  (MB)');
 for (const p of probe.phases) console.log(`  ${p.text.slice(0, 60).padEnd(60)} ${MB(p.heap).padStart(7)} ${MB(p.wasm).padStart(6)} ${MB(p.buf).padStart(7)} ${MB(p.tex).padStart(7)}`);
 for (const [k, s] of [['ready', atReady], ['settled (after GC)', settled]]) console.log(`  ${k.padEnd(60)} ${MB(s.heap).padStart(7)} ${MB(s.wasm).padStart(6)} ${MB(s.buf).padStart(7)} ${MB(s.tex).padStart(7)}   footprint renderer ${MB(s.fp.renderer)} gpu ${MB(s.fp.gpu)}`);

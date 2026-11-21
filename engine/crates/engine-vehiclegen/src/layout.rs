@@ -73,7 +73,9 @@ impl Layout {
     pub fn new(tube: Tube, h: f64) -> Layout {
         Layout {
             h,
-            h_max: 0.029,
+            // The longest edge a chord may stretch to: 29 mm at the art's 20 mm target
+            // and below; a coarser mesh (a lighter render) scales it with the target.
+            h_max: if h > 0.02 { 0.029 * h / 0.02 } else { 0.029 },
             tube,
             charts: vec![("tube".into(), Chart::Tube)],
             nodes: FxHashMap::default(),

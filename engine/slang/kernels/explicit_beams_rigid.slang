@@ -442,6 +442,20 @@ bool surfProxyFast(uint v, uint k, out float3 vb);
 
 float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction);
 bool cplListOn();
+
+// Vehicle v's static shape rule against an infinite-mass proxy takes its own surface
+// (jbeam-semantics-spec.md §37.1: on the BeamNG profile the node pass's ground, boxes and
+// shapes are dissipative and their friction law exact, and a World's static body is the
+// same shape): true for a vehicle with either flag. The RoR profile keeps the plain
+// boxSurface() path, bit for bit (its own function: Metal's codegen of it stays).
+bool cplStaticOwnSurface(uint v)
+{
+    return (gStatic[v * 4u + 3u].x & (FLAG_DISSIPATIVE | FLAG_EXACT_FRICTION)) != 0u;
+}
+float3 cplStaticContactV(float3 f, float3 u, float mass, float3 n, uint v, float friction)
+{
+    return contactForce(f, u, mass, n, surfaceV(boxSurface(), v), 0.0, friction);
+}
 float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
     // The candidate list (cplList*, lossless): its own function (Metal's codegen of the
@@ -489,7 +503,8 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
         {
             // Infinite mass: the static shape rule (relative to a kinematic body's motion).
             float3 u = all(vb == float3(0.0, 0.0, 0.0)) ? vel : vel - vb;
-            fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
+            if (cplStaticOwnSurface(v)) fc = cplStaticContactV(f, u, mass, n4.xyz, v, friction);
+            else fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
         }
         else
         {
@@ -1001,7 +1016,8 @@ float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, flo
         {
             // Infinite mass: the static shape rule (relative to a kinematic body's motion).
             float3 u = all(vb == float3(0.0, 0.0, 0.0)) ? vel : vel - vb;
-            fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
+            if (cplStaticOwnSurface(v)) fc = cplStaticContactV(f, u, mass, n4.xyz, v, friction);
+            else fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
         }
         else
         {
@@ -1144,25 +1160,30 @@ void cplShapeFolded(uint v, uint k, uint shapes, bool stepped)
 
 // The folded step of vehicle v (every lane, uniform: cplFoldOn): phases B and C, the
 // barrier between and after.
-void cplStepFolded(uint v, uint lane, uint lanes, uint s)
+// cplStepFolded's two phases as calls (the caller's barrier between and after): B, whose
+// body lane keeps its integrated record in registers for C.
+void cplFoldB(uint v, uint lane, uint lanes, uint s, out bool body, out float4 c0, out float4 q, out float4 c2,
+              out float3 w)
 {
     uint4 hdr = cplVeh(v);
     bool stepped = s > 0u;
-    // B
     for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes) cplShapeFolded(v, k, hdr.y, stepped);
     cplListShapes(v, lane, lanes, s);
-    bool body = stepped && lane < hdr.x;
-    float4 c0 = float4(0.0, 0.0, 0.0, 0.0);
-    float4 q = float4(0.0, 0.0, 0.0, 1.0);
-    float4 c2 = float4(0.0, 0.0, 0.0, 0.0);
-    float3 w = float3(0.0, 0.0, 0.0);
+    body = stepped && lane < hdr.x;
+    c0 = float4(0.0, 0.0, 0.0, 0.0);
+    q = float4(0.0, 0.0, 0.0, 1.0);
+    c2 = float4(0.0, 0.0, 0.0, 0.0);
+    w = float3(0.0, 0.0, 0.0);
     if (body)
     {
         cplBodyStepped(v, lane, hdr.y, c0, q, c2, w);
         gAcc[cplAcc(v) + lane].store(0);
     }
-    sync();
-    // C
+}
+void cplFoldC(uint v, uint lane, uint lanes, uint s, bool body, float4 c0, float4 q, float4 c2, float3 w)
+{
+    uint4 hdr = cplVeh(v);
+    bool stepped = s > 0u;
     if (body)
     {
         uint b = cplBody(v, lane);
@@ -1197,6 +1218,17 @@ void cplStepFolded(uint v, uint lane, uint lanes, uint s)
         }
     }
     cplCountListedGr(v, lane, lanes, s, uint2(0u, 0u));
+}
+void cplStepFolded(uint v, uint lane, uint lanes, uint s)
+{
+    bool body;
+    float4 c0;
+    float4 q;
+    float4 c2;
+    float3 w;
+    cplFoldB(v, lane, lanes, s, body, c0, q, c2, w);
+    sync();
+    cplFoldC(v, lane, lanes, s, body, c0, q, c2, w);
     sync();
 }
 

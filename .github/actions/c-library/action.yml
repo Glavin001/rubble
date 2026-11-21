@@ -1,0 +1,64 @@
+name: C library (build, package, run the C example)
+description: >
+  Builds and packages engine-ffi with engine/scripts/build-ffi.sh, checks its header,
+  links examples/hello.c against the package (and runs it when run_example is 1), and
+  uploads the package as rubble-<name>. Run after actions/checkout. The steps of the
+  "C library (...)" jobs in ci.yml: Linux is a job of its own there, the others a matrix.
+inputs:
+  name:
+    description: macos, linux or windows (the artifact is rubble-<name>)
+    required: true
+  run_example:
+    description: 1 runs examples/hello (needs a GPU adapter), 0 only links it
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/lfs-pull
+    - uses: dtolnay/rust-toolchain@stable
+    # The key the one matrix job's caches had (its job id was part of it).
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: engine
+        key: c-abi-c-abi
+        add-job-id-key: false
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - name: Cache slangc
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/rubble-tools
+        key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
+    # slangc is 5-8 minutes of this job when the kernels have to be compiled.
+    # The key covers every input of cache_key in engine/crates/engine-webgpu/build.rs.
+    - name: Cache compiled Slang kernels (SPIR-V, WGSL)
+      uses: actions/cache@v4
+      with:
+        path: .slang-cache
+        key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+    - name: Mesa lavapipe (Vulkan on the CPU)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+    - name: MSVC developer shell
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: Build, package and run the C example
+      shell: bash
+      env:
+        RUN_EXAMPLE: ${{ inputs.run_example }}
+      run: |
+        bash engine/scripts/build-ffi.sh
+        bash .github/scripts/slang-cache-digest.sh
+    - name: What macOS logged about Metal's compiler
+      # wgpu's error for a pipeline Metal could not build is only "Compilation
+      # failed"; the reason (a compiler crash, a memory kill, the virtual GPU's
+      # timeout) is in the system log.
+      if: failure() && runner.os == 'macOS'
+      shell: bash
+      run: bash engine/scripts/metal-compiler-log.sh 5
+    - name: Upload the package
+      uses: actions/upload-artifact@v4
+      with:
+        name: rubble-${{ inputs.name }}
+        path: engine/ffi-dist
+        retention-days: 30

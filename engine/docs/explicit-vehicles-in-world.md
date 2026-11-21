@@ -684,6 +684,18 @@ default for large worlds and off in the crash lab. Code: `engine_softbody::expli
 on), `ExplicitBeamsGpu::with_sleep` and `ExplicitBeamsWorld::sleep` (off unless set: the crash
 lab's hosts and the CPU fleet step every vehicle as before).
 
+Decision (user, 2026-11-16): sleep is acceptable, not lossless. A woken vehicle continues
+bit for bit from its state at sleep; against a run that never sleeps, what is lost is
+the motion under the thresholds while asleep. That is accepted provided the thresholds
+are configurable at runtime and what each setting loses is measured (§10.7 and
+`measurements/vehicle-perf-first-principles.md` §8.27). The setting is live:
+`World::set_explicit_vehicle_sleep(Some(thresholds) | None)` (on with these thresholds,
+or off; no rebuild; thresholds that are not finite and non-negative are an error),
+`ExplicitBeamsGpu::set_sleep` and `set_sleep_config` under it. Vehicles added with
+`ExplicitVehiclesDef::sleep = None` have no room for it and stay without (bit for bit as
+before). The vehicle lab builds with the room and has the control on its page ("vehicle
+sleep" and its three thresholds, applied as it runs).
+
 **The rule** (every frame's end, for each awake vehicle; one arithmetic on CPU and GPU):
 a vehicle is *moving* if at some step of the frame some node's velocity had a component
 above `speed`; otherwise *displaced* if it has no anchor (its node positions when its still
@@ -725,8 +737,9 @@ lightly damped pressure wheels rock for about 50 s.
 `explicit_beams_sleep_list` (one workgroup, every frame, after the contact plan) writes the
 awake vehicles in vehicle order and the frame's indirect arguments (the frame over the
 awake ones; with vehicle contact the solo and group dispatches, the groups past the awake
-count). A lone vehicle's workgroup returns at once; a contact group of sleepers returns
-at once. With every vehicle asleep (the host reads the asleep bits back) and nothing
+count; on the split paths the vehicles' step dispatches over the awake ones and, with no
+vehicle awake, no group, test or contact-front dispatch at all: §10.7). A lone vehicle's
+workgroup returns at once; a contact group of sleepers returns at once. With every vehicle asleep (the host reads the asleep bits back) and nothing
 written to one, the vehicles stop requesting World steps, so an all-asleep World skips its
 step. In the World, `cpl_bounds` keeps a sleeping vehicle's bounds (its nodes have not
 moved) instead of reading its nodes, and `cpl_share`, `cpl_loads` and `cpl_emit` are
@@ -735,7 +748,8 @@ still runs a workgroup per vehicle and tests every collider (§8.4's O(vehicles 
 colliders), the World-broadphase work, §10.1), and the awake list is O(vehicles) threads
 of one workgroup.
 
-Lossless for awake vehicles: a vehicle's frame is the same whatever workgroup runs it, and
+Lossless for awake vehicles (and not lossless against a run that never sleeps: the
+2026-11-16 decision above): a vehicle's frame is the same whatever workgroup runs it, and
 the coupling passes do nothing for a vehicle without proxies. Checked: the awake vehicles
 of a fleet with sleep on, through the awake list (with and without vehicle contact), bit
 for bit with a fleet without sleep, the sleeping one frozen; the World's coupling tests
@@ -754,6 +768,7 @@ World's step readback; `Frame::explicit_sleep` lists the vehicles that fell asle
 | CPU ↔ GPU (`engine-webgpu/tests/explicit_sleep_gpu.rs`, the JBeam fixture car, bit for bit on both) | every node bit for bit every frame, the same still counts, asleep in the same frame (4.2 s after a 45 s settle); 10 frames asleep: no GPU state word changes, the step counter stands; woken, bit for bit again |
 | Off, and on for awake vehicles | a fleet built without sleep, one with sleep built and off, and one with it on: every frame bit for bit for the driving car (and the settling one until it sleeps) |
 | Another vehicle wakes it | a car at 6 m/s wakes a sleeping one 2.33 m before contact, in the same frame on the CPU and the GPU; against a car that never slept: 0.015 mm at waking, 0.054 mm at contact + 0.1 s |
+| The fast paths (`engine-webgpu/tests/sleep_fast_gpu.rs`, repo sedans; §10.7) | a contact group of two and a car on its own sleep (13 frames), stay frozen word for word 49 frames beside an awake car, and the group is woken by that car's contact group 2.26 m before contact, from its state at sleep word for word; every frame, through 60 frames of the crash, on the split paths (awake-indexed and every vehicle dispatched) equal to the one-workgroup path in every state and sleep word. A lone car: asleep after 17 frames, 10 frames asleep, a host wake: its workgroup, self-collision split and the wide passes with and without the pair list agree |
 | World (`engine-world/tests/explicit_sleep.rs`) | the parked sedan sleeps in 2.73 s; 59 of 60 World steps skipped while asleep, its state unchanged; a falling box wakes it 0.52 m above the roof, 0.023 mm from a never-slept twin; over the strike the box departs from the twin's by 194 mm, as a twin's whose sedan was nudged 0.02 mm does (199 mm): a box between roof nodes is chaotic under node-only contact, not the sleep |
 
 ### 10.1 Fix: every proxy body is integrated (more than a workgroup's lanes)
@@ -1041,6 +1056,273 @@ submission for over an hour, with surface contact off too.
   (the test did not exist on showcase-main).
 - The wgpu counterpart passes.
 - The guard does not change it: the numbers are the same with and without it.
+
+### 10.7 Sleep on the fast vehicle paths; a live setting (2026-11-16)
+
+**Before.** With sleep on, the host kept every path that steps a vehicle a dispatch off
+(`group_split_on`, `self_split_vv_on`, `self_split_on` each required sleep off, and so did
+the fleet-wide contact front and the wide passes). Touching cars then ran one workgroup a
+contact group. Measured from one snapshot each, sleep on both ways (`sleep-check.sh`,
+`vehicle_lab --ab-switch groupsplit`): the lab's eight cars in a pile, 187 and 199 ms a
+frame of 34 steps against 18.4 and 19.0 on the split paths; eight cars parked on the flat
+arena, 73.7 against 7.2.
+
+**Now** an awake vehicle or group takes the path it takes with sleep off, and sleep's
+rule (the top of this section) is the same rule on every path:
+
+| path | how the rule runs there |
+|---|---|
+| a solo vehicle a step a dispatch (`explicitBeamsFrameStep`: self-collision split with or without vehicle contact, the split group path's solo vehicles) | the frame's own code. Each step's dispatch stores its motion mark where it saves the step's state (`sleepMark`), the frame's last dispatch settles (`sleepSettle`) |
+| a contact group across workgroups (`explicit_beams_split.slang`) | the groups' frame start wakes a group with an awake member or returns (`sleepGroupSkip`); every later dispatch of a sleeping group returns (`splitAwake`: after the start every member of a group is awake or every member asleep); each member's step dispatch marks its own motion; the groups' frame end settles the members together (`sleepGroupEnd`) |
+| self-collision's walk and pairs dispatches | never a sleeping vehicle (`selfSplitVehicle`): its listed and walk words are what its last awake step left, and its step dispatches, which clear them, do not run |
+| vehicle contact's front across the fleet (`explicit_beams_fleet.slang`) | a sleeping vehicle is no one's partner (`flVehicleOn`, one line: the only edit in that kernel), so no scan offers it, and nothing after the scans is sized for it |
+| the wide passes (a thread an element) | a lone vehicle only (below). A thread of a sleeping vehicle's element returns; a node's thread marks its motion after its update (`sleepMarkNode`); the frame's closing thread runs the rule (`sleepSettleOne`: `sleepSettle`'s arithmetic on one thread) |
+
+Where a member's motion is marked does not matter: the mark is "some node faster than
+the bound after some step's node phase", and nothing after a step's node phase (and
+centred damping's correction) writes a velocity, so a mark taken at the end of the
+member's step dispatch is `contactGroup`'s `sleepTrackMembers` after its members' steps.
+
+**Not dispatched.** On the split paths the awake list's kernel
+(`explicit_beams_sleep_list`, `sleepPad0 = 2`: the host sets it on frames a split path
+runs) does three things each frame, after the contact plan:
+
+1. a contact group with an awake member wakes its sleeping members there, as its frame
+   start would. The members' steps are dispatched from the list, which must hold them;
+2. the awake vehicles in vehicle order (as before);
+3. the split dispatches' indirect arguments. The vehicles' step dispatches run over the
+   awake vehicles (workgroup g steps the g-th awake vehicle, `sleepPick`; the walk's and
+   pairs' rows likewise, `selfSplitRow`). With no vehicle awake the groups', the tests' and
+   the contact front's dispatches have no workgroups at all. The plan's own values are
+   kept at words 3, 7 and 11 of the arguments (`vvArgs`), since the list rewrites the
+   rest every frame.
+
+Self-collision split's vehicles' dispatch keeps one workgroup when none is awake (it
+returns at once): the dispatch's first workgroup clears the walk's and pairs' arguments.
+`set_sleep_listing(false)` dispatches every vehicle instead, a sleeping one's workgroup
+returning at once: the same results (checked below).
+
+**The wide passes: a lone vehicle only.** They step every vehicle in step (one parity
+for the fleet's group slots), and a sleeping vehicle's step count stands, so a fleet of
+several vehicles with sleep and without vehicle contact keeps a step's dispatches a
+vehicle, as before. A lone vehicle with sleep now stays on the wide passes
+(`FramePlanner::set_wide_sleep`, on in the WebGPU host, `RUBBLE_WIDE_SLEEP=0` off; off in
+the Metal and CUDA hosts, which are unchanged). Natively the wide passes are 9 % faster
+than self-collision split for the lab's car with sleep on (5.47 against 5.99 ms a
+frame). Asleep, the wide passes' threads are still launched and return at once (a frame
+is not awake-indexed for a lone vehicle): over 180 frames of which 120 asleep, 2.23 ms a
+frame against 1.76 on self-collision split. In a World with nothing else awake neither
+is paid: the step is skipped.
+
+**A live setting.** `World::set_explicit_vehicle_sleep`, `ExplicitBeamsGpu::set_sleep` and
+`set_sleep_config` (the header record's three words). A change of thresholds leaves the
+still counts and the sleeping vehicles as they are. Turning sleep on or off, or the
+listing, asks for a new contact plan: the awake list rewrites the plan's indirect
+arguments, and a plan writes them afresh (before this a host that turned sleep off with
+vehicles asleep kept the list's counts until its next plan).
+
+**Proofs** (native, M3 Max, the GPU shared with two other sessions; every comparison is
+of two paths from one snapshot):
+
+- *Sleep on with nobody asleep equals sleep off*, every physics state word:
+  `fast-check.sh sleep`, the 18 fixtures of 1, 2, 4, 8 and 32 cars on the mountain, 4
+  frames each, and the one-car fixtures again at 40 frames: all "state bit for bit:
+  true". A whole 40 s eight-car World run with sleep on (no car ever slept) has the
+  never-sleep run's energy ledger to the joule at every second and its final node
+  positions to 0.0 mm.
+- *Cars asleep, the lab's car, default thresholds* (flat arena, from t 5 s; the solo car
+  sleeps 1.0 s later, the row of seven, one contact group, 2.4 s later): the split paths
+  against a workgroup a vehicle or group, and the awake-indexed dispatch against every
+  vehicle dispatched, 180 frames each: every state word and every sleep word (records,
+  anchors). One car, 120 frames: self-collision split against its workgroup, and the wide
+  passes against self-collision split: the same.
+- *A group asleep, woken by a touch* (`engine-webgpu/tests/sleep_fast_gpu.rs`, repo
+  sedans): two parked cars (one contact group) and a car on its own fall asleep; a third
+  car driven at the group wakes it 2.26 m before contact. Every frame is run on the
+  reference path, the split paths and the split paths with every vehicle dispatched, from
+  one snapshot: every state and sleep word equal, 13 frames to sleep, 49 frames frozen
+  word for word beside the awake car, the woken cars' state at the start of the waking
+  frame equal to their state at sleep word for word, 60 frames of the crash; the fast
+  frames ran split (`split_path_used`). A second test: a lone car through sleep, 10 frames
+  asleep and a host wake on its workgroup, self-collision split and the wide passes with
+  and without the pair list.
+- `tools/explicit-2khz/sleep-check.sh` runs the first two of these in one hold of the
+  GPU lock (24 checks, all "state bit for bit: true").
+- *Suites*, all pass: `explicit_loop_cap` 5, `fleet_contact_gpu` 1, `group_split_gpu` 3,
+  `self_split_gpu` 8, `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12,
+  `explicit_sleep_gpu` 3, `sleep_fast_gpu` 2, `explicit_plan_modules` 1; engine-world
+  `explicit_vehicles` 11, `vehicle_lab_reset` 3, `explicit_sleep` 1,
+  `explicit_vehicle_broadphase` 3; Metal `vehicle_parity` 4. Chrome: "all 116 modules
+  compile in Chrome".
+
+**What it costs awake** (sleep on against off, nobody asleep, ms a frame of 34 steps):
+eight cars 18.6 against 18.4 at t 20 s (a whole run's vehicle GPU ms a World step:
+median 18.13 against 17.91, +1.2 %); 32 cars 270.0 against 269.5; one car on the wide
+passes 5.62 against 5.39 at t 20 s, 5.79 against 5.56 at t 6 s, 5.26 against 4.68 at
+t 2.5 s (4 to 12 %: two dependent loads at the head of every wide thread and two
+barriers in each of the three workgroup-a-vehicle wide kernels; reading the record at
+`header + 2 + v` in one load and taking the asleep bit through those kernels' own first
+barrier would trim it; not built).
+
+**What it saves at rest, and where there is no rest.** Parked on the flat arena at the
+default thresholds the lab's cars sleep 6.1 to 6.8 s after spawn, and the World then
+skips its step: 0.03 ms a World step (wall) against 4.3 for one car, 7.8 for eight and
+51 for 32. On the mountain the eight-car pile never sleeps in 40 s at the default
+thresholds, nor at 1 m/s and 1 mm: the cars are not at rest by the rule (loose parts
+keep moving at metres a second, and the pile is one contact group, which sleeps
+together). At 15 m/s and 400 mm it sleeps at 24.4 s and loses a later slide of 21 m.
+The measurements, the loss tables and the lab's default are in
+`measurements/vehicle-perf-first-principles.md` §8.27; why, by part, and a contact fix
+it found: §10.8.
+
+**The coupling plan for sleeping vehicles: measured, not changed.** `cpl_plan` still runs
+a workgroup a vehicle and writes a sleeping vehicle's proxies. It costs 0.03 to 0.05 ms
+a World step for 1, 8 and 32 cars on the flat arena, 0.13 to 0.33 ms for eight cars on
+the mountain (1,024 shapes of room a car) beside a 15 to 18 ms frame, and 0.09 to 0.10 ms beside a 191 to 302 ms frame for
+32 cars on the mountain: under 2 % of an awake step, and nothing when every vehicle
+sleeps (the World skips the step). Skipping a sleeping vehicle's proxies is not exact as
+it stands: a vehicle woken by its contact group inside the explicit frame (after the
+plan) steps that same frame on the proxies the plan just wrote, and each proxy body's
+mass share counts the sleeping vehicles that hold it. An exact skip needs the group's
+wake before the plan (the vehicle contact plan run ahead of `cpl_plan`) and a sleeping
+vehicle's share counts from its kept records.
+
+**Fixtures.** The lab is built with room for sleep (the setting is live), which changes
+the buffers' layout: fixtures saved before this are of another layout
+(`fast-check.sh --make` again; the eight-car set now also saves the pile at t 20 and
+30 s). `tools/explicit-2khz/sleep-check.sh` is sleep's own first rung.
+
+### 10.8 Why the mountain pile does not rest, by part; a contact fix (2026-11-16)
+
+§10.7 found the lab's eight-car mountain pile never sleeps. Measured by part
+(`vehicle_lab --from-fixture F --rest-parts N`: from a saved state, the solver alone,
+sleep off; per car its main body's rigid motion, each body node's velocity relative to
+it, the loose pieces, what is near the fast nodes, energy by car; ablations
+`--rest-vv 0`, `--rest-coupling 0`). Numbers in
+`measurements/vehicle-perf-first-principles.md` §8.27 ("By part").
+
+* **Whole cars and torn-off parts sliding: correct physics.** The mountain's slopes are
+  50° (the rolling gully's are 38° or more everywhere), past the contact's friction
+  angles: the sedan's nodes have friction 0.7 against the rock's 1.2 static and 0.75
+  kinetic, so a node holds below 40° and slides on above 28°. The scene is built for
+  this ("a sliding car keeps sliding", `vehicle_lab/mountain.rs`); a real car with its
+  wheels locked holds to about 40 to 45° and the lab's sedan has no parking brake. One
+  car of the pile slides off at up to 134 km/h, and torn-off parts too heavy for the
+  debris time to live (10 kg) slide hundreds of metres down, so their car's frame bounds
+  span hundreds of metres.
+* **Loose parts flailing: no.** At rest the cars' loose pieces (3 to 7 a car, 0.3 to
+  25 kg) move under 0.1 m/s; what moves are pieces sliding away (above) and dangling
+  panels (a node holding 2 to 4 of its 6 or 7 beams) swinging 4 to 30 cm in half a second.
+* **Cars against each other: nothing.** With vehicle contact off for the probe every
+  number is the same bit for bit: no vehicle contact force acts in the pile. The eight
+  are one contact group only because their frame bounds overlap.
+* **The bodies' own nodes: a contact bug, fixed.** Every resting car (rigid motion under
+  2 mm in half a second) kept tens of nodes of intact structure above 0.25 m/s, single
+  nodes at 1 to 16 m/s, 0.4 to 32 J of motion relative to its body, for good. With the
+  rigid coupling off (free fall) it decayed in a second; so the rock kept it up. The
+  World's static bodies took RoR's contact surface on BeamNG-profile vehicles, where
+  the node pass's own shapes take §37's (never positive work) and the exact friction
+  law: jbeam-semantics-spec.md §37.1, "Fix (2026-11-16)". Fixed at the source, a
+  separate commit: from the same state the lone car keeps 0 to 2 such nodes (was 7 to
+  30) and 0.2 to 1.4 J (was 2.3 to 6.4).
+* **What is left on ground that holds the cars** (the same mountain at 25°, below the
+  kinetic angle: the eight are at rest by t 14 s, 4 J of kinetic energy in all at t 40 s):
+  a few light skin nodes (0.27 to 0.54 kg; the car's median node is 1.4 kg) ringing at
+  0.7 to 2 m/s with every beam intact, under 1 J a car and under 1 cm of travel, and the
+  dangling panels. Sleep's rule (any node past 0.25 m/s, any node past 0.1 mm) sees both.
+
+**Sleep there** (thresholds as speed m/s, reach mm, dwell steps; the solver alone from
+the 25° pile at t 25 s, 5.1 s each): the default sleeps nothing; 0.5/0.5, 1/1 and 2/2
+sleep the one car on its own (after 0.5 to 1.3 s, 2.9 to 3.0 mm from never sleeping);
+3/5 a second (7.5 mm); the contact group of six never, since one member always has a
+swinging panel. One car alone at rest on the 50° mountain's shelf (fastest node 1.47 m/s,
+7 mm of travel in a dwell) sleeps under none of these settings. The whole 40 s World run at the default never sleeps and ends where the
+never-sleep run does (0.0 mm). So the owner's gate (the pile at rest ≤ 1 ms a step) is
+not met: on the 50° and rolling mountains there is no rest to sleep (the physics is
+right), and where there is rest the per-node rule is held by motion that is real
+(panels) or under a centimetre (ringing). What would sleep it, not built: a car of a
+contact group sleeping on its own when its partners exert nothing on it (the bounds
+overlap but no contact acts: shown above, but the split solver steps a group's members
+together and would need a member frozen inside an awake group); or a stillness test
+that a ringing light node or a swinging panel does not fail (a measured loss either
+way).
+
+**Where the 25° pile's ringing comes from** (2026-11-16, later). Tools:
+`vehicle_lab --measure rest-ledger` (the CPU reference's own car resting, its energy by
+term, `--rest-ablate friction|anticlip|selfcol|ror`), and from a GPU fixture
+`--cpu-ledger V` (car V's positions, velocities, broken flags, rest lengths and, with
+`--cpu-clip 1`, anti-clip memory on the CPU reference), `--gpu-twin` (that CPU state
+uploaded to a standalone GPU fleet, both stepped), `--cpu-world A,B,…` (several such
+cars in one CPU fleet with vehicle contact and the fleet's energy ledger), `--pair-gaps`,
+and `--rest-parts` with the lab's switches off one at a time.
+
+1. *Not the GPU.* Car 7 of the pile (18 nodes past 0.25 m/s, up to 1.9 m/s) carried to
+   the CPU alone calms within a second (0 such nodes, 0.06 to 0.16 m/s, 0.1 J), with or
+   without its anti-clip memory; uploaded from there to a standalone GPU fleet it does
+   the same as the CPU (kinetic energy within 0.03 J, the same fast-node counts). The
+   lab's lossless switches (reused pair list, coupling candidate list and fold, group and
+   self-collision split) change nothing.
+2. *Vehicle contact.* With vehicle contact off the ringing of car 7 stops (0 nodes, 0.11
+   m/s) and cars 0, 1 and 3 collapse into each other (500+ nodes at 5 m/s): those cars rest
+   on each other. The pair gaps agree: cars 0–3, 0–7, 1–3, 3–7 and 6–7 have nodes inside
+   each other's triangle boxes; the pile's contact group of six is one island of five
+   cars that touch, plus car 2 six metres off.
+3. *The ledger* (cars 0, 1, 3, 6, 7 in one CPU fleet, a line a quarter second): about
+   13,100 vehicle-contact hits a quarter (26 a step) all along; vehicle contact's normal
+   force takes 84 to 122 J a quarter out and its §37 position steps put 89 to 135 J back
+   (each step may store up to the approach energy the normal force removed,
+   `shift_depth`'s budget); self-contact +5 to +31 J a quarter; the rock −3 to −5 J; the
+   fleet's mechanical energy −8 to +4 J a quarter. A node held against another car's
+   triangle by its beams and gravity is stopped, stepped out, pulled back and stopped
+   again: a near-lossless cycle that keeps 20 to 29 nodes of car 7 ringing (about 1 J)
+   for good. The final-velocity work guard (`final_guard`, off by default) changes
+   nothing. With the position steps' budget halved (`SHIFT_BUDGET=0.5`, a CPU measurement
+   switch) the cycle still runs; with none (`SHIFT_BUDGET=0`) car 7 calms in 1.5 s (1 to 4
+   nodes, 0.1 J) but the cars sink into each other (−10 to −80 J of potential energy a
+   quarter).
+4. *A car alone on 25°* (the CPU reference's own run, 14 to 30 s): no ringing (0 nodes
+   past 0.25 m/s); a slow sway of the whole body, 0.06 to 1.6 J, decaying over tens of
+   seconds; the rock's contact takes 1.2 J a second out. Its fastest node stays under 0.2
+   m/s, but the sway moves it more than 0.1 mm in half a second.
+
+So the ringing is vehicle contact's rule at rest, not a GPU fault and not a single
+contact doing positive work: §37's normal force and its budgeted position step together
+do no positive work, as specified, but for a node pressed against another vehicle they
+return nearly all of what they take, so the node never settles. That is the contact law
+as specified (`jbeam-semantics-spec.md` §37, §37.1's open floor), not a coding error; a
+change (for example a position step that stores only a part of the budget, or a resting
+contact that holds its depth) changes every BeamNG-profile contact and is for the owner
+to decide, with its own measurements. Not changed here.
+
+**Sleep design (a) against this pile.** A member of a contact group sleeping on its
+own when its partners exert nothing on it would release only car 2 (6 m from the
+others; and car 2 has its own 7 ringing nodes at 1.1 m/s, which vehicle contact does not
+cause). The other five rest on each other with 26 contact hits a step: their partners
+do exert forces on them, so (a) does not apply. (a) was not built; the gate on this pile
+needs the resting contact to settle, or a stillness test that tolerates the cycle
+(design (b)), which is a looser rule with a measured loss.
+
+**The gate, measured on 25°** (90 s World runs, default thresholds): one car comes to
+rest at t 9 s, sways slowly and sleeps at t 73.6 s; the World then skips its step (0.03
+ms wall against 4.9 ms of vehicle GPU awake); at t 90 s it is 2.1 mm from never sleeping.
+The eight never sleep in 90 s (28.6 ms of vehicle GPU a step on the shared GPU).
+
+**The rolling gully's failure at t 36 s** is not this: the debris that fails there has
+left the terrain's window and falls free (nodes at 500 to 720 km/h, no contact), where
+the non-finite state (after the fix) or the shapes-room overflow (before) is reached.
+Left as a follow-up.
+
+**Proofs of the fix** (2026-11-16, the GPU shared with three other sessions): CPU
+`explicit_rigid` 5 (the new BeamNG-contact test fails on the old rule), `energy_ledger` 7;
+GPU suites, all pass: `sleep_fast_gpu` 2, `explicit_sleep_gpu` 3, `group_split_gpu` 3,
+`self_split_gpu` 8, `fleet_contact_gpu` 1, `explicit_beams_bitwise` 12,
+`explicit_loop_cap` 5; engine-world `explicit_vehicles` 11 (the coupling's GPU against
+its CPU reference), `explicit_sleep` 1; Metal `vehicle_parity` 4. `sleep-check.sh`: every
+check "state bit for bit: true". Chrome: all 116 modules compile. Later the same day:
+`explicit_contact_gpu` 13, `showcase_car_gpu` 6, `explicit_pair_reuse_gpu` 2,
+`explicit_beam_order_gpu` 3, `debris_retire_gpu` 1, `vv_grid_gpu` 2, `explicit_rigid_gpu` 6,
+`explicit_surface_proxy_gpu` 4; engine-world `vehicle_lab_reset` 3,
+`vehicle_lab_piece_windows` 1: all pass.
 
 ## 11. The vehicles in the World broadphase (2026-11-06)
 

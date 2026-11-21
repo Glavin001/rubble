@@ -136,6 +136,33 @@ fn static_proxy_is_the_static_shape_bit_for_bit() {
     }
 }
 
+/// The same on the BeamNG profile's contact (jbeam-semantics-spec.md §37.1: exact friction,
+/// dissipative static contact): an infinite-mass proxy takes the vehicle's own static
+/// shape rule, so the World's static rock is the node pass's shape bit for bit (before
+/// 2026-11-16 the proxy kept RoR's rule, whose stick term and normal cancel do positive
+/// work: the mountain's wrecks chattered on it for good). The crash, then the wreck at
+/// rest against the wall.
+#[test]
+fn static_proxy_is_the_static_shape_bit_for_bit_on_the_beamng_contact() {
+    let rot = Quat::from_rotation_y(0.3);
+    let (c, half) = (Vec3::new(0.0, 1.0, 2.0), Vec3::new(2.0, 1.0, 0.4));
+    let mut a = sedan(15.0, 0.0);
+    a.exact_friction = true;
+    a.dissipative_contact = true;
+    let mut b = a.clone();
+    a.shapes.push(StaticShape::oriented_box(c, half, rot));
+    for _ in 0..2000 {
+        a.step();
+    }
+    let set = run_coupled(&mut b, box_proxy(c, half, rot, f32::INFINITY), 2000, |_, _| {});
+    assert!(set.shapes[0].impulse.length() > 1000.0, "the wall was hit: {}", set.shapes[0].impulse);
+    for (na, nb) in a.nodes.iter().zip(&b.nodes) {
+        assert_eq!(na.pos, nb.pos);
+        assert_eq!(na.vel, nb.vel);
+        assert_eq!(na.force, nb.force);
+    }
+}
+
 struct Crash {
     v0: f32,
     vehicle_mass: f32,

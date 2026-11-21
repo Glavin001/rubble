@@ -10,6 +10,16 @@
 //   node vehicle-lab-record.mjs --probe [--secs 10] name[:query] …
 //     the page's own real-time loop: World steps/s, FPS and the GPU split every second,
 //     then the lab's table; console errors fail the run.
+//   node vehicle-lab-record.mjs --probe --ab MASK [--abFrames 20] [--abSteps 34] [--abEvery 1]
+//       [--abUntil 40] [--abOut dir] name:query
+//     Chrome's bit-for-bit A/B of perf flag MASK on the page's own run (the flag's
+//     `vehicle_lab --ab-switch perf=MASK` in the browser; WebWorld.explicitAb): every
+//     --abEvery simulated seconds the World is held, the vehicles run --abFrames frames of
+//     --abSteps steps from the state now with the flag on, then from the same state with it
+//     off, every state word compared, the state put back and the World let go; until
+//     --abUntil s. One line a sample; the first state the paths differ from is saved as a
+//     native fixture (--abOut, default engine/out/chrome-ab/cars<N>_t<T>.fx) to replay with
+//     `tools/explicit-2khz/fast-check.sh perf=MASK FILE`. Exit 1 when a sample differs.
 //   node vehicle-lab-record.mjs --restarts name:query
 //     times the in-place restart (a slider change to running again) and an in-place
 //     rebuild, and checks the page did not reload.
@@ -31,7 +41,7 @@ const OUT = opt('--out', join(homedir(), 'Development', 'rubble-artifacts', 'veh
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
 const PROBE = args.includes('--probe'), RESTARTS = args.includes('--restarts');
 const EXTRA = opt('--query', '');
-const FLAGS = ['--probe', '--restarts', '--segments'];
+const FLAGS = ['--probe', '--restarts', '--segments', '--locked', '--uncapped'];
 const runs = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsWith('--') || FLAGS.includes(args[i - 1])));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -41,8 +51,20 @@ setTimeout(() => { console.error(`time limit (${LIMIT_MIN} min)`); process.exit(
 
 // A static server over this directory (the vehicle folders in __mods may be symlinks).
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm', '.png': 'image/png' };
+const AB = opt('--ab', null);
+// (--abSaveAll TAG: the state saved at every sample, as cars<N>_t<T>TAG.fx; --ab 0: no
+// A/B, the samples only: two page runs' states compared natively, fast-check.sh's --compare.)
+const SAVE_ALL = args.includes('--abSaveAll'), TAG = SAVE_ALL ? opt('--abSaveAll', '') : '';
+const AB_OUT = opt('--abOut', join(ROOT, '..', '..', 'out', 'chrome-ab'));
 const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  // (--ab: the page's saved state, POSTed to /__ab/<name>.fx.)
+  if (AB != null && req.method === 'POST' && /^\/__ab\/[\w.-]+\.fx$/.test(p)) {
+    const parts = [];
+    req.on('data', (c) => parts.push(c));
+    req.on('end', () => { mkdirSync(AB_OUT, { recursive: true }); writeFileSync(join(AB_OUT, p.slice(5)), Buffer.concat(parts)); res.writeHead(200).end(); });
+    return;
+  }
   const path = normalize(join(ROOT, p));
   if (!path.startsWith(ROOT) || !existsSync(path) || statSync(path).isDirectory()) { res.writeHead(404).end(); return; }
   res.writeHead(200, { 'content-type': TYPES[extname(path)] || 'application/octet-stream', 'cache-control': 'no-store' });
@@ -57,7 +79,10 @@ const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', `--window-size=${W},${H}`, '--no-first-run', '--no-default-browser-check',
-  '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
+  '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+  // (--uncapped: frames as fast as Chrome makes them, not headless's 60 a second: a display
+  // faster than the World, as a 120 Hz one is.)
+  ...(args.includes('--uncapped') ? ['--disable-frame-rate-limit', '--disable-gpu-vsync'] : []), 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
 process.on('exit', cleanup);
@@ -139,6 +164,65 @@ if (RESTARTS) {
   process.exit(0);
 }
 
+if (PROBE && AB != null) {
+  const [frames, steps, every, until] = [opt('--abFrames', '20'), opt('--abSteps', '34'), opt('--abEvery', '1'), opt('--abUntil', '40')].map(Number);
+  let bad = 0;
+  for (const run of runs) {
+    const { name, query } = parse(run);
+    // (--locked: the page frame-locked, `record=1`: each step's readback awaited before the
+    // next, so the World's run is the same whatever the GPU's speed; otherwise the page's
+    // own real-time loop, whose readbacks land a speed-dependent number of steps later.)
+    const locked = args.includes('--locked');
+    console.log(`${name}: ready in ${(await open(locked ? `${query}&record=1` : query)).toFixed(1)} s${locked ? ', frame-locked' : ''}; A/B of perf flag ${AB}, ${frames} frames of ${steps} steps every ${every} s to ${until} s`);
+    let saved = null, samples = 0, differ = 0;
+    for (let k = 1; k * every <= until + 1e-9; k++) {
+      // (The page holds itself before its first step at or past the sample's time: two
+      // runs are sampled at the same step.)
+      if (locked) {
+        while (await evaluate('window.__lab.time()') < k * every - 1e-9) {
+          const st = await evaluate('window.__rec.frame(60)');
+          if (st.failed) throw new Error(`${name}: ${st.failed}`);
+        }
+      } else await evaluate(`window.__hold(false, ${k * every})`);
+      let lastT = -1, movedAt = Date.now(), stopped = null;
+      while (!locked && !(await evaluate('window.__held()'))) {
+        await new Promise((r) => setTimeout(r, 50));
+        const t = await evaluate('window.__lab.time()');
+        if (t !== lastT) { lastT = t; movedAt = Date.now(); }
+        if (Date.now() - movedAt > 30_000) { stopped = t; break; }
+      }
+      if (stopped !== null) {
+        console.log(`  the page stopped at t ${stopped.toFixed(2)}: ${await evaluate('JSON.stringify({ failed: window.__failed || null, lost: window.__lost || null, err: document.getElementById("err")?.textContent })')}`);
+        bad = 1;
+        break;
+      }
+      const r = await evaluate(`(async () => {
+        {
+          const t = window.__lab.time();
+          const diff = ${Number(AB)} ? await window.__world.explicitAb(${Number(AB)}, ${frames}, ${steps}) : [];
+          let file = null;
+          if ((diff.length && ${saved === null}) || ${SAVE_ALL}) {
+            file = 'cars' + window.__lab.vehicleCount() + '_t' + t.toFixed(2) + ${JSON.stringify(TAG)} + '.fx';
+            await fetch('/__ab/' + file, { method: 'POST', body: await window.__lab.fixture(window.__world) });
+          }
+          return { t, diff, file, errors: window.__world.explicitErrors() };
+        }
+      })()`);
+      samples++;
+      if (r.file && r.diff.length && saved === null) saved = r.file;
+      if (r.diff.length) differ++;
+      console.log(`  t ${r.t.toFixed(2)}: ${r.diff.length ? `DIFFER (${r.diff.length} runs)` : 'bit for bit'}${r.file ? `; state saved: ${join(AB_OUT, r.file)}` : ''}${r.errors.length ? `; errors ${r.errors.join('; ')}` : ''}`);
+      for (const l of r.diff.slice(0, 8)) console.log(`     ${l}`);
+    }
+    if (!locked) await evaluate('window.__hold(false)');
+    const pose = await evaluate('Array.from(window.__lab.pose())');
+    console.log(`${name}: ${samples} samples, ${differ} differ${saved ? `; first differing state ${join(AB_OUT, saved)}` : ''}; first car at (${pose.slice(0, 3).map((x) => x.toFixed(2)).join(', ')})`);
+    if (differ) bad = 1;
+    failOnErrors(name);
+  }
+  process.exit(bad);
+}
+
 if (PROBE) {
   for (const run of runs.length ? runs : ['shoot-sphere']) {
     const { name, query } = parse(run);
@@ -147,12 +231,14 @@ if (PROBE) {
     if (opt('--eval', null)) console.log(await evaluate(readFileSync(opt('--eval'), 'utf8')));
     for (let s = 1; s <= Number(opt('--secs', '10')); s++) {
       await new Promise((r) => setTimeout(r, 1000));
-      try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
+      try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, camAge, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
+        camAge: camAge && { p50: +camAge.p50.toFixed(3), max: +camAge.max.toFixed(3) },
         gpu: gpu && gpu.total.length ? { total: +gpu.split.total.toFixed(2), rigid: +gpu.split.rigid.toFixed(2), vehicle: +gpu.split.vehicle.toFixed(2) } : null }))(window.__state()))`)}`); } catch (e) { console.log(`  ${s}s (no reading: ${String(e.message).slice(0, 80)})`); }
       if (args.includes('--segments') && s % 5 === 0) console.log(`     segments ${await evaluate(`JSON.stringify(Object.fromEntries(Object.entries(window.__gpu().segments).map(([k, v]) => [k, +v.toFixed(2)]).filter(([, v]) => v >= 0.05)))`)}`);
     }
     await grabTo(join(OUT, 'stills', `probe-${name}.jpg`), 85);
     if (opt('--eval', null)) console.log(await evaluate('(window.__abLog || []).join("\\n")'));
+    console.log(`  gpu run (t >= 0.5 s): ${await evaluate('JSON.stringify(window.__gpuRun(0.5), (k, v) => typeof v === "number" ? +v.toFixed(3) : v)')}`);
     console.log(await evaluate('window.__table()'));
     failOnErrors(name);
   }
@@ -183,7 +269,10 @@ for (const run of runs.length ? runs : ['shoot-box']) {
   }
   await grabTo(join(OUT, 'stills', `${name}-end.jpg`), 85);
   const stats = await evaluate('window.__stats()');
-  writeFileSync(join(OUT, `${name}.stats.json`), JSON.stringify({ name, query, videoSeconds: frameNo / FPS, simulatedSeconds: st.t, stats }, null, 1));
+  // (The derby's round too, when the run is one: Lab::derby_json; with --eval
+  // tools/vehicle-lab/derby-probe.js, its log a second.)
+  const derby = await evaluate('window.__derby?.() ? { ...window.__derby(), log: window.__abLog ?? null } : null');
+  writeFileSync(join(OUT, `${name}.stats.json`), JSON.stringify({ name, query, videoSeconds: frameNo / FPS, simulatedSeconds: st.t, stats, ...(derby ? { derby } : {}) }, null, 1));
   writeFileSync(join(OUT, `${name}.table.txt`), await evaluate('window.__table()'));
   const file = join(OUT, `vehicle-lab-${name}.mp4`);
   const enc = spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-framerate', String(FPS), '-i', join(frameDir, 'f%06d.jpg'),

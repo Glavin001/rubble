@@ -3,7 +3,10 @@
 //! pages run) against the CPU's `flexskin::eval` on the same deformed nodes.
 //! Every vertex of a bound lattice, packed as `showcase-car-render.mjs`
 //! packs them (a 64-byte Bind per vertex, its entries 4 to a 64-byte slot
-//! after the vertices), run on the GPU, read back and compared.
+//! after the vertices), run on the GPU, read back and compared. Then the same
+//! vertices with their entries as the sidecar's grid steps, 8 to a slot (the
+//! renderer's `weightedPacked()`, flags bit 27): bit for bit what the f32
+//! entries give.
 //!
 //! Skips (passes) without a GPU adapter.
 use engine_softbody::flexskin;
@@ -103,41 +106,92 @@ fn weighted_vertex_matches_flexskin_eval() {
             q * (bent + crush) + Vec3::new(1.0, 0.5, -2.0)
         })
         .collect();
-    // Pack as showcase-car-render.mjs: entries by |A|, descending.
+    // Pack as showcase-car-render.mjs: entries by |A|, descending; 4 f32 entries
+    // a slot, or (packed) 8 entries of grid steps a slot.
     let n = verts.len();
-    let mut slots = 0usize;
-    let first: Vec<usize> = skins
+    let sorted: Vec<Vec<(u32, f32, f32, f32)>> = skins
         .iter()
         .map(|s| {
-            let f = n + slots;
-            slots += s.w.len().div_ceil(4);
-            f
+            let mut w = s.w.clone();
+            w.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+            w
         })
         .collect();
-    let mut words = vec![0u32; (n + slots) * 16];
-    let mut sorted = Vec::with_capacity(n);
-    for (i, s) in skins.iter().enumerate() {
-        let mut w = s.w.clone();
-        w.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
-        let o = i * 16;
-        words[o] = w.len() as u32;
-        words[o + 3] = first[i] as u32;
-        for (k, x) in s.off.iter().enumerate() {
-            words[o + 4 + k] = x.to_bits();
+    let pack = |packed: bool| -> Vec<u32> {
+        let per = if packed { 8 } else { 4 };
+        let mut slots = 0usize;
+        let first: Vec<usize> = skins
+            .iter()
+            .map(|s| {
+                let f = n + slots;
+                slots += s.w.len().div_ceil(per);
+                f
+            })
+            .collect();
+        let mut words = vec![0u32; (n + slots) * 16];
+        for (i, s) in skins.iter().enumerate() {
+            let o = i * 16;
+            words[o] = sorted[i].len() as u32;
+            words[o + 3] = first[i] as u32;
+            for (k, x) in s.off.iter().enumerate() {
+                words[o + 4 + k] = x.to_bits();
+            }
+            for (k, x) in s.nrm.iter().enumerate() {
+                words[o + 8 + k] = x.to_bits();
+            }
+            words[o + 15] = 1 << 25 | if packed { 1 << 27 } else { 0 };
+            for (e, &(nd, a, da, db)) in sorted[i].iter().enumerate() {
+                if packed {
+                    let (node, st) = flexskin::steps(nd, [a, da, db])
+                        .expect("flexskin::bind's weights are on the sidecar's grid");
+                    let q = first[i] * 16 + 2 * e;
+                    words[q] = node as u32 | (st[0] as u16 as u32) << 16;
+                    words[q + 1] = st[1] as u16 as u32 | (st[2] as u16 as u32) << 16;
+                } else {
+                    let q = first[i] * 16 + 4 * e;
+                    words[q] = nd;
+                    words[q + 1] = a.to_bits();
+                    words[q + 2] = da.to_bits();
+                    words[q + 3] = db.to_bits();
+                }
+            }
         }
-        for (k, x) in s.nrm.iter().enumerate() {
-            words[o + 8 + k] = x.to_bits();
+        words
+    };
+    let got = run(&device, &queue, &pack(false), &now, n);
+    let got_packed = run(&device, &queue, &pack(true), &now, n);
+    let same = (0..n)
+        .filter(|&i| (0..7).all(|k| k == 3 || got[8 * i + k] == got_packed[8 * i + k]))
+        .count();
+    println!("{n} vertices: {same} the same bits from packed entries (grid steps, 8 a slot) as from f32 entries");
+    assert_eq!(same, n, "packed entries differ from f32 entries");
+    let f = |k: usize| f32::from_bits(got[k]);
+    let (mut dp, mut dn, mut bits) = (0.0f32, 0.0f32, 0usize);
+    for i in 0..n {
+        let (p, nn) = flexskin::eval(&sorted[i], skins[i].off, skins[i].nrm, &now);
+        let gp = Vec3::new(f(8 * i), f(8 * i + 1), f(8 * i + 2));
+        let gn = Vec3::new(f(8 * i + 4), f(8 * i + 5), f(8 * i + 6));
+        dp = dp.max(gp.distance(p));
+        // The difference of the unit normals (acos near 1 loses f32 precision).
+        dn = dn.max(gn.distance(nn));
+        if gp == p && gn == nn {
+            bits += 1;
         }
-        words[o + 15] = 1 << 25;
-        for (e, &(nd, a, da, db)) in w.iter().enumerate() {
-            let q = first[i] * 16 + 4 * e;
-            words[q] = nd;
-            words[q + 1] = a.to_bits();
-            words[q + 2] = da.to_bits();
-            words[q + 3] = db.to_bits();
-        }
-        sorted.push(w);
     }
+    println!("{n} vertices: position {dp:e} m, normal {dn:e} (unit-vector difference) at most; {bits} bit for bit");
+    assert!(dp <= 2e-6, "position {dp}");
+    assert!(dn <= 2e-5, "normal {dn}");
+}
+
+/// The renderer's `weightedVertex()` over `n` packed vertices (`words`: the
+/// bind buffer) on the nodes `now`: per vertex (position, 0, normal, 0) bits.
+fn run(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    words: &[u32],
+    now: &[Vec3],
+    n: usize,
+) -> Vec<u32> {
     let node_words: Vec<f32> = now.iter().flat_map(|p| [p.x, p.y, p.z, 0.0]).collect();
     use wgpu::util::DeviceExt;
     let buf = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
@@ -154,7 +208,7 @@ fn weighted_vertex_matches_flexskin_eval() {
     );
     let binds_b = buf(
         "binds",
-        bytemuck::cast_slice(&words),
+        bytemuck::cast_slice(words),
         wgpu::BufferUsages::STORAGE,
     );
     let out_b = device.create_buffer(&wgpu::BufferDescriptor {
@@ -210,22 +264,5 @@ fn weighted_vertex_matches_flexskin_eval() {
         pass.dispatch_workgroups(n.div_ceil(64) as u32, 1, 1);
     }
     queue.submit([enc.finish()]);
-    let got =
-        engine_webgpu::explicit_coupling::read_words(&device, &queue, &out_b, 0, (n * 32) as u64);
-    let f = |k: usize| f32::from_bits(got[k]);
-    let (mut dp, mut dn, mut bits) = (0.0f32, 0.0f32, 0usize);
-    for i in 0..n {
-        let (p, nn) = flexskin::eval(&sorted[i], skins[i].off, skins[i].nrm, &now);
-        let gp = Vec3::new(f(8 * i), f(8 * i + 1), f(8 * i + 2));
-        let gn = Vec3::new(f(8 * i + 4), f(8 * i + 5), f(8 * i + 6));
-        dp = dp.max(gp.distance(p));
-        // The difference of the unit normals (acos near 1 loses f32 precision).
-        dn = dn.max(gn.distance(nn));
-        if gp == p && gn == nn {
-            bits += 1;
-        }
-    }
-    println!("{n} vertices: position {dp:e} m, normal {dn:e} (unit-vector difference) at most; {bits} bit for bit");
-    assert!(dp <= 2e-6, "position {dp}");
-    assert!(dn <= 2e-5, "normal {dn}");
+    engine_webgpu::explicit_coupling::read_words(device, queue, &out_b, 0, (n * 32) as u64)
 }

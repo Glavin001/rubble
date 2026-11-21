@@ -28,7 +28,7 @@ pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
-    GpuBeam, GpuSnapshot, KernelVariant, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
+    GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
 #[cfg(feature = "gpu")]
 pub use features::{
@@ -133,9 +133,27 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 /// The split group path (`EB_VV_SPLIT`, engine/docs/measurements/contact-groups-design.md):
 /// per frame-module variant (plain, wide, aero, aero wide) the members' step
 /// (`explicit_beams_split_member`), the groups' pass (`explicit_beams_split_group`) and
-/// its triangle tests across workgroups (`explicit_beams_split_tests`).
+/// its triangle tests across workgroups (`explicit_beams_split_tests`); and the pass's
+/// front as fleet-wide dispatches (`explicit_beams_fleet_front`, `explicit_beams_fleet_plan`:
+/// explicit_beams_fleet.slang, contact-groups-design.md §8).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 12] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 28] = [
+    ("explicit_beams_split_fleetlevels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels.wgsl"))),
+    ("explicit_beams_split_fleetlevels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_wide.wgsl"))),
+    ("explicit_beams_split_fleetlevels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero.wgsl"))),
+    ("explicit_beams_split_fleetlevels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero_wide.wgsl"))),
+    ("explicit_beams_split_fleetpost", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost.wgsl"))),
+    ("explicit_beams_split_fleetpost_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_wide.wgsl"))),
+    ("explicit_beams_split_fleetpost_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_aero.wgsl"))),
+    ("explicit_beams_split_fleetpost_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_aero_wide.wgsl"))),
+    ("explicit_beams_split_fleetfront", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront.wgsl"))),
+    ("explicit_beams_split_fleetplan", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan.wgsl"))),
+    ("explicit_beams_split_fleetfront_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_wide.wgsl"))),
+    ("explicit_beams_split_fleetplan_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_wide.wgsl"))),
+    ("explicit_beams_split_fleetfront_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_aero.wgsl"))),
+    ("explicit_beams_split_fleetplan_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_aero.wgsl"))),
+    ("explicit_beams_split_fleetfront_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_aero_wide.wgsl"))),
+    ("explicit_beams_split_fleetplan_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_aero_wide.wgsl"))),
     ("explicit_beams_split_member", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member.wgsl"))),
     ("explicit_beams_split_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group.wgsl"))),
     ("explicit_beams_split_tests", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests.wgsl"))),
@@ -156,6 +174,12 @@ pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 12] = [
 /// with vehicle contact (`_vv`) the vehicles' dispatch of the split group path
 /// (`explicit_beams_split_member`, a solo vehicle's step cut at its tests) and the walk
 /// and pairs that skip a contact group's members. WebGPU only (native wgpu and browsers).
+/// The wide passes' reused pair list (`explicit_beams_wide_list`, the self split's family
+/// and bindings): the list's part of a step, a workgroup a vehicle, at 256 and 512 lanes.
+pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, &str); 2] = [
+    ("explicit_beams_selfsplit_list", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list.wgsl"))),
+    ("explicit_beams_selfsplit_list_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list_wide.wgsl"))),
+];
 pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
     ("explicit_beams_selfsplit_step", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step.wgsl"))),
     ("explicit_beams_selfsplit_walk", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk.wgsl"))),
@@ -203,7 +227,7 @@ pub const EXPLICIT_BEAMS_WGSL_DIR: &str = concat!(env!("OUT_DIR"), "/wgsl");
 
 /// The explicit-beams wide passes (entry, WGSL), one module each: one thread per
 /// element over every vehicle, a dispatch per pass ([`ExplicitBeamsGpu::set_wide`]).
-pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 10] = [
+pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 11] = [
     ("explicit_beams_wide_begin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_begin.wgsl"))),
     ("explicit_beams_wide_rebase", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_rebase.wgsl"))),
     ("explicit_beams_wide_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nodes.wgsl"))),
@@ -214,6 +238,7 @@ pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 10] = [
     ("explicit_beams_wide_hits", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_hits.wgsl"))),
     ("explicit_beams_wide_centred_beams", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_centred_beams.wgsl"))),
     ("explicit_beams_wide_centred_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_centred_nodes.wgsl"))),
+    ("explicit_beams_wide_aux", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_aux.wgsl"))),
 ];
 
 /// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.

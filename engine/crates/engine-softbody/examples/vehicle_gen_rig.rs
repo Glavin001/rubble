@@ -4,8 +4,13 @@
 //! the `.rskin`). Then it prints the car's mass, centre of mass and lattice.
 //!
 //! ```bash
-//! cargo run --release -p engine-softbody --example vehicle_gen_rig -- <design> [--params FILE] [--in DIR] [--out DIR]
+//! cargo run --release -p engine-softbody --example vehicle_gen_rig -- <design> [--params FILE] [--in DIR] [--out DIR] [--lite H]
 //! ```
+//! A Rust-generator design also gets a lighter render (`<design>.lite.glb` and
+//! `.lite.rskin`: its body meshed at edge `--lite` metres, default
+//! `vg_input::LITE_EDGE`, bound to the same lattice; `--lite 0` for none), which the
+//! vehicle lab draws on devices that cannot hold the full art. The physics files
+//! are the same either way.
 //! A design of the Rust generator (`engine-vehiclegen`: the sedan) is built
 //! in memory from its parameters (`--params`, JSON; the designer page's);
 //! the others read a Python build's `.glb` and `rig.json` from `--in`,
@@ -69,7 +74,59 @@ fn main() -> Result<(), String> {
         t0.elapsed().as_secs_f32(),
         ne as f32 / nv.max(1) as f32
     );
-    let files = rig::mod_files(&b);
+    let lite_h: f64 = opt("--lite")
+        .map(|v| v.parse().expect("--lite: an edge length in metres"))
+        .unwrap_or(engine_softbody::authoring::gen2::vg_input::LITE_EDGE);
+    let rust_design =
+        input_dir.is_none() && engine_vehiclegen::default_params_json(&design).is_ok();
+    let lite = if rust_design && lite_h > 0.0 {
+        let t = std::time::Instant::now();
+        let l = engine_softbody::authoring::gen2::vg_input::lite_art(
+            &b,
+            params.as_deref().unwrap_or(""),
+            lite_h,
+        )?;
+        let lv: usize = l.1.meshes.iter().map(|m| m.verts.len()).sum();
+        let le: usize =
+            l.1.meshes
+                .iter()
+                .flat_map(|m| m.verts.iter())
+                .map(|v| v.w.len())
+                .sum();
+        println!(
+            "lighter render (body edge {lite_h} m) bound in {:.1} s: {lv} vertices, {le} entries ({:.1} per vertex)",
+            t.elapsed().as_secs_f32(),
+            le as f32 / lv.max(1) as f32
+        );
+        if std::env::var("VG_LITE_STATS").is_ok() {
+            for (what, sk) in [("art", &b.skin), ("lighter", &l.1)] {
+                let mut m: Vec<(usize, usize, &str)> = sk
+                    .meshes
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.verts.iter().map(|v| v.w.len()).sum(),
+                            m.verts.len(),
+                            m.name.as_str(),
+                        )
+                    })
+                    .collect();
+                m.sort_by(|a, b| b.cmp(a));
+                println!(
+                    "  {what}: the meshes with the most entries: {}",
+                    m.iter()
+                        .take(10)
+                        .map(|(e, v, n)| format!("{n} {v} v {e} e"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        Some(l)
+    } else {
+        None
+    };
+    let files = engine_softbody::authoring::gen2::vg_input::files_with(&b, lite.as_ref());
     let mut bytes = 0usize;
     for (p, data) in &files {
         let path = out.join(p);

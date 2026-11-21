@@ -259,6 +259,8 @@ impl ExplicitVehicles {
             entry(0, wgpu::BufferBindingType::Uniform),
             entry(1, ro),
             entry(2, ro),
+            // (gMisc: the vehicles' group boxes, pieceAccept.)
+            entry(5, rw),
             entry(8, rw),
             entry(9, rw),
             entry(13, ro),
@@ -501,10 +503,11 @@ impl ExplicitVehicles {
     /// cpl_query's bind group ([`Self::bgl_q`]).
     fn bind_query(&self, sim: &engine_webgpu::WgpuSim) -> wgpu::BindGroup {
         let (ids, aabbs) = sim.rest_buffers();
-        let bufs: [(u32, &wgpu::Buffer); 9] = [
+        let bufs: [(u32, &wgpu::Buffer); 10] = [
             (0, &self.params),
             (1, sim.body_buffer()),
             (2, sim.collider_buffer()),
+            (5, self.gpu.misc_buffer()),
             (8, sim.scratch_buffer()),
             (9, &self.work),
             (13, ids),
@@ -921,6 +924,49 @@ impl World {
     /// Mutable access (velocity writes, the grab, vehicle contact settings).
     pub fn explicit_vehicles_mut(&mut self) -> Option<&mut ExplicitBeamsGpu> {
         self.explicit.as_mut().map(|x| &mut x.gpu)
+    }
+
+    /// Vehicle sleep at runtime, from the next step on, with no rebuild: `Some(thresholds)`
+    /// turns it on (or changes the thresholds of a sleep already on: still counts and
+    /// sleeping vehicles stand), `None` turns it off (every vehicle steps every step; a
+    /// sleeping one resumes from its state at sleep). Turning it on from off starts every
+    /// vehicle awake with a still count of 0. Only for vehicles added with room for sleep
+    /// ([`ExplicitVehiclesDef::sleep`] set, the default); thresholds that are not finite
+    /// and non-negative are an error and change nothing.
+    pub fn set_explicit_vehicle_sleep(&mut self, sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>) -> anyhow::Result<()> {
+        let queue = self.sim.queue().clone();
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        anyhow::ensure!(
+            x.gpu.sleep_layout().is_some(),
+            "vehicle sleep: these vehicles were added without room for it (ExplicitVehiclesDef::sleep was None)"
+        );
+        let Some(cfg) = sleep else {
+            x.gpu.set_sleep(false);
+            return Ok(());
+        };
+        anyhow::ensure!(
+            cfg.speed.is_finite() && cfg.speed >= 0.0 && cfg.reach.is_finite() && cfg.reach >= 0.0,
+            "vehicle sleep: speed {} m/s and reach {} m must be finite and not negative",
+            cfg.speed,
+            cfg.reach
+        );
+        x.gpu.set_sleep_config(cfg);
+        x.def.sleep = Some(cfg);
+        if !x.gpu.sleep_on() {
+            x.gpu.set_sleep(true);
+            x.any_awake = true;
+            for m in &mut x.sleep_mask {
+                *m = 0;
+            }
+            queue.write_buffer(&x.work, 4 * x.sleep_mask_word, bytemuck::cast_slice(&x.sleep_mask));
+        }
+        Ok(())
+    }
+
+    /// Vehicle sleep's thresholds when it is on (`None`: off, or no explicit vehicles).
+    pub fn explicit_vehicle_sleep(&self) -> Option<engine_softbody::explicit_sleep::VehicleSleep> {
+        let x = self.explicit.as_ref()?;
+        x.gpu.sleep_on().then(|| x.gpu.sleep_layout().map(|s| s.cfg)).flatten()
     }
 
     /// Blocking read (tests, tools): per explicit vehicle its sleep state (still steps,

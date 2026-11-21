@@ -80,10 +80,17 @@ def main() -> None:
     argv = sys.argv[1:]
     out = Path(argv.pop(0))
     extra: list[str] = []
+    prebuilt: list[tuple[str, str]] = []
+    list_tests = False
     while argv and argv[0] != "--":
         flag = argv.pop(0)
         if flag == "--data":
             extra.append(argv.pop(0))
+        elif flag == "--exe":
+            name, _, path = argv.pop(0).partition("=")
+            prebuilt.append((name, path))
+        elif flag == "--list-tests":
+            list_tests = True
         else:
             raise SystemExit(f"unknown option {flag}")
     if not argv:
@@ -132,6 +139,32 @@ def main() -> None:
     runs = [e for e in exes if e["role"] == "run"]
     if not runs:
         raise SystemExit("the selection built no executables (did you pass --test/--example/--bin?)")
+    # Prebuilt executables shipped beside the selection, not run by it (the two-build
+    # A/B's base and head, built from other commits).
+    for name, path in prebuilt:
+        if not Path(path).is_file():
+            raise SystemExit(f"--exe {name}={path}: no such file")
+        exes.append({"path": path, "name": name, "kind": "example", "cwd": str(ENGINE), "role": "extra"})
+    if list_tests:
+        # `--fanout-tests`: each test harness's test names (libtest lists them without
+        # running anything or opening a device), with the run args' filter applied.
+        filt = [a for a in run_args if not a.startswith("-")][:1]
+        # A cross build (the arm64 image) runs the x86_64 test binary through Rosetta
+        # with the cross toolchain's libraries.
+        list_env = dict(os.environ)
+        if os.environ.get("RUBBLE_X86_LIBS"):
+            list_env["LD_LIBRARY_PATH"] = os.environ["RUBBLE_X86_LIBS"]
+        for e in runs:
+            if e["kind"] != "test":
+                continue
+            p = subprocess.run([str(e["path"]), "--list", "--format", "terse", *filt],
+                               cwd=e["cwd"], capture_output=True, text=True, env=list_env)
+            names = [l[: -len(": test")] for l in p.stdout.splitlines() if l.endswith(": test")]
+            if p.returncode == 0 and names:
+                e["tests"] = names
+            print(f"{e['name']}: {len(names)} test(s) to fan out"
+                  + ("" if p.returncode == 0 else f" (listing failed, exit {p.returncode}: runs whole)"),
+                  file=sys.stderr)
 
     files: dict[str, Path] = {}
 
@@ -188,19 +221,26 @@ def main() -> None:
         h.update(f"{name} {digest}\n".encode())
     manifest = {"run_args": run_args, "cargo": cargo_args, "exes": [], "data_bytes": total,
                 "kernel_hash": "" if cuda else h.hexdigest()[:16], "route": "cuda" if cuda else "vulkan"}
+    # Byte-reproducible (no timestamps or owners): an unchanged build has the same SHA-256,
+    # so gpu_run.py uploads nothing for it.
+    def norm(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+        return info
+
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=6) as gz:
         with tarfile.open(fileobj=gz, mode="w") as tar:
             for e in exes:
                 stripped = out / f"{e['name']}.{e['kind']}"
                 # Debug info off, symbols kept (panics' backtraces name functions).
-                subprocess.run(["strip", "--strip-debug", "-o", str(stripped), str(e["path"])], check=True)
+                subprocess.run([os.environ.get("STRIP", "strip"), "--strip-debug", "-o", str(stripped), str(e["path"])], check=True)
                 arc = f"bin/{stripped.name}"
-                tar.add(stripped, arcname=arc)
+                tar.add(stripped, arcname=arc, filter=norm)
                 stripped.unlink()
-                manifest["exes"].append({k: e[k] for k in ("name", "kind", "cwd", "role")} | {"file": arc})
+                manifest["exes"].append({k: e[k] for k in ("name", "kind", "cwd", "role")}
+                                        | {"file": arc} | ({"tests": e["tests"]} if "tests" in e else {}))
             for key, f in sorted([*files.items(), *staged.items()]):
-                tar.add(f, arcname="data" + key)
+                tar.add(f, arcname="data" + key, filter=norm)
             blob = json.dumps(manifest, indent=1).encode()
             info = tarfile.TarInfo("manifest.json")
             info.size = len(blob)

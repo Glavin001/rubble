@@ -44,6 +44,13 @@ static const uint WALK_X = 1024u;
 static const uint SELF_FROM_WALK = 0xFFFFFFFFu;
 uint selfWalkAt(uint v) { return soloStepAt(v) + SELF_WALK; }
 uint selfWalkArgsAt(uint s) { return 9u + selfArgsAt(s); }
+// The walk's and pairs' dispatches' rows (y): the vehicles, or with vehicle sleep's
+// awake-indexed dispatch the awake ones (row y's vehicle: selfSplitRow).
+bool sleepListedOn();
+uint sleepRows();
+uint sleepRow(uint y);
+uint selfSplitRows() { return sleepListedOn() ? sleepRows() : gP.vehicles; }
+uint selfSplitRow(uint y) { return sleepListedOn() ? sleepRow(y) : y; }
 
 // pairReuseTests in the step dispatch (uniform): the listed pairs left to the pairs
 // dispatch, everything else as pairReuseTests runs it.
@@ -69,7 +76,7 @@ void selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
             uint at = selfArgsAt(gP.pad2);
             // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / SELF_PAIRS_WG workgroups a vehicle.)
             gSelfArgs[at].max(int(min((listed + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG, (TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG)));
-            gSelfArgs[at + 1u].store(int(gP.vehicles));
+            gSelfArgs[at + 1u].store(int(selfSplitRows()));
             gSelfArgs[at + 2u].store(1);
         }
         piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
@@ -115,14 +122,14 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
         uint at = selfWalkArgsAt(gP.pad2);
         // (At most WALK_X workgroups: past them each thread takes every WALK_X · SELF_WALK_WG-th.)
         gSelfArgs[at].max(int(min((triCount * WALK_SUBS + SELF_WALK_WG - 1u) / SELF_WALK_WG, WALK_X)));
-        gSelfArgs[at + 1u].store(int(gP.vehicles));
+        gSelfArgs[at + 1u].store(int(selfSplitRows()));
         gSelfArgs[at + 2u].store(1);
         // The walk's list is tested by the pairs dispatch after it (its count unknown
         // here: the list's room, threads past the count return at once).
         gAcc[selfListedAt(v)].store(int(SELF_FROM_WALK));
         uint pa = selfArgsAt(gP.pad2);
         gSelfArgs[pa].max(int((TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG));
-        gSelfArgs[pa + 1u].store(int(gP.vehicles));
+        gSelfArgs[pa + 1u].store(int(selfSplitRows()));
         gSelfArgs[pa + 2u].store(1);
     }
     bool anti = (gStatic[v * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
@@ -279,13 +286,20 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
 }
 
 // Whether vehicle v takes the split's walk and pairs dispatches this frame: every
-// vehicle, except with vehicle contact (EB_VV_SOLO) a contact group's member, whose step
-// runs its tests in its own dispatch (and whose grid counts fill the words these
-// dispatches read: soloStepAt).
+// vehicle, except with vehicle contact (EB_VV_SOLO) a contact group's member whose step
+// runs its tests in its own dispatch (PERF_MEMBER_LIST off: its solo-step words, which
+// these dispatches read, are then whatever its last solo frame left). With
+// PERF_MEMBER_LIST a member's step is cut at its tests as a solo vehicle's
+// (contactMemberStep), so a member takes them too.
+// Never a sleeping vehicle (vehicle sleep): its step dispatches do not run, and its
+// listed and walk words are what its last awake step left.
+bool sleepAsleep(uint v);
+uint sleepPick(uint g, uint lane);
 bool selfSplitVehicle(uint v)
 {
+    if (sleepAsleep(v)) return false;
 #ifdef EB_VV_SOLO
-    return gMisc[vvRec(v, VV_FLAGS)].y == 0u;
+    return ((gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn()) || gMisc[vvRec(v, VV_FLAGS)].y == 0u;
 #else
     return true;
 #endif
@@ -328,7 +342,10 @@ void explicitBeamsFrameStep(uint3 gid, uint3 lid);
 void explicit_beams_self_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     selfSplitArgsClear(gid.x, lid.x);
-    explicitBeamsFrameStep(gid, lid);
+    // Vehicle sleep's awake-indexed dispatch: the workgroup's awake vehicle.
+    uint3 vid = gid;
+    if (sleepListedOn()) vid.x = sleepPick(gid.x, lid.x);
+    explicitBeamsFrameStep(vid, lid);
 }
 
 // The pairs dispatch of step gP.pad2: workgroup (x, v) tests vehicle v's listed pairs
@@ -337,7 +354,7 @@ void explicit_beams_self_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 [numthreads(SELF_PAIRS_WG, 1, 1)]
 void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint v = gid.y;
+    uint v = selfSplitRow(gid.y);
     uint lane = lid.x;
     uint s = gP.pad2;
     uint listed = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfListedAt(v)].load()) : 0u;
@@ -368,7 +385,7 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
 [numthreads(SELF_WALK_WG, 1, 1)]
 void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint v = gid.y;
+    uint v = selfSplitRow(gid.y);
     uint walk = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfWalkAt(v) + 1u].load()) : 0u;
     uint4 r1 = gStatic[min(v, gP.vehicles - 1u) * 4u + 1u];
     if (walk != 0u)
