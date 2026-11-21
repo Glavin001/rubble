@@ -1,6 +1,7 @@
 # The World on CUDA (Modal): plan
 
-Status: **plan, 2026-11-21. Nothing here is built yet** unless a line says "exists".
+Status (2026-11-21): **C0, C1 and C2 done and measured; C6 step 1 measured** (§6). The rest
+is the plan.
 Goal: every GPU pass of a World step runs on CUDA on Modal the way the explicit soft-body
 frame already does (`tools/scenario-matrix/run.sh --cuda`): kernels built locally by nvcc,
 Modal only runs the binary, a verdict costs cents and needs no cold driver compile. Today
@@ -192,18 +193,80 @@ from the closest measured run, to be replaced by the first real run of each.
 
 | Verdict | Containers | Billed (container s) | Cost | Local build after a kernel edit |
 |---|---|---|---|---|
-| cudasim correctness gates (640 / 10k / 100k columns, coverage) | 1 | ~6 (measured, 2026-10) | ~$0.002 | rigid kernels only: ~70 s when all recompile; the fatbin cache skips unchanged ones |
-| C1: 10k + 100k columns, `_gs` against readback, timed | 1 | 20–40 (est.) | ~$0.01 | as above |
-| C2: 10k scale suite from portable fixtures | 1–4 (fan-out) | 30–90 (est.) | $0.01–0.03 | as above |
+| cudasim correctness gates (640 / 10k / 100k columns, coverage) | 1 | 6.1 (measured, 2026-11-21) | $0.0018 | rigid kernels only: ~70 s when all recompile; the fatbin cache skips unchanged ones |
+| C1: 640 / 10k / 100k bit for bit both ways, plus 10k / 100k timed both ways | 1 | 20 (measured) | $0.006 | as above |
+| C2: 110k ring, both CCD fields, every cudasim gate | 1 | 38.6 (measured) | $0.011 | as above |
 | C3/C4: `run.sh --world --cuda`, 12 rows | 12 | 60–150 (est., from the matrix) | $0.02–0.05 | rigid + explicit + coupling modules the rows load: ~4 min (the matrix's figure) |
 | Explicit matrix `run.sh --cuda SWITCH`, 12 rows (exists) | 12 | 50–120 (measured, 2026-11-19) | $0.02–0.04 | ~4 min |
 | C5: `terrain_parity` | 1 | 10–30 (est.) | <$0.01 | terrain modules |
-| C6: `blast_parity` quick tier digests | 1–N | 60–300 (est.; the tier is minutes on the Mac) | $0.02–0.09 | 43 stress modules: unmeasured; run `tools/cuda/measure_nvcc.py` on them first |
+| C6: `blast_parity` quick tier digests | 1–N | 60–300 (est.; the tier is minutes on the Mac) | $0.02–0.09 | the 32 stress compute modules: 42 s (measured, 3 jobs) |
 | For comparison: any new kernel version on the Vulkan route | 1 warm-up + runs | 1,100–1,800 + runs (measured) | ~$0.45 per kernel version, up to ~$2 when the warm-up hits the cap | none (the driver compiles on Modal) |
 
 Every CUDA verdict above stays under $0.10, and most under $0.05: one Vulkan cold compile
 pays for about ten to twenty of them. Use the T4 for verdicts and ranking (cheapest,
 nearly always available); an L4 for absolute numbers.
+
+## 6. Done and measured (2026-11-21, Modal T4, strict floats)
+
+**C0, baseline.** The 10 CudaSim tests pass on the branch as it was. 10k awake columns:
+1.82 ms a step, 7.1 host waits a step. One run: 6.1 container seconds, $0.0018.
+
+**C1, the rigid step without host waits** (`engine-cuda`: `{entry}_gs` for all 126 rigid
+kernels, `CudaSim::set_device_indirect`, `RUBBLE_CUDA_HOST_INDIRECT=1` for the old path).
+No indirect rigid kernel writes binding 23 (checked on the generated CUDA), so reading the
+counts on the device sees what the slot held at launch.
+
+- *Lossless.* `cudasim_device_indirect_matches_readback`: at 640, 10k and 100k bodies, the
+  bodies, counters, colouring and indirect slots are bit for bit at every checkpoint.
+- *A finding on the old path.* The append-ordered stores (contacts 4, AABBs 9, candidates
+  10, awake list 11, constraint ids 14, manifolds 25, solver points 27 and pairs 28) differ
+  between **two runs of the readback path** as much as between the paths: CUDA does not
+  repeat atomic order, and the solver's ordering makes the bodies come out the same anyway.
+  The test compares those as the control does.
+- *Grid.* Resident blocks alone were 12 % slower at 100k (the static split's tail: primal
+  4.6 → 6.8 ms); 4x / 16x the resident blocks were 1.6 % / 0.5 % faster at 100k but 4 % /
+  46 % slower at 10k (idle blocks). Occupancy of `_gs` equals the direct entry's for all but
+  two kernels. Kept: the resident blocks or one per 64 bodies, whichever is more.
+
+| Columns, every body awake | readback (old) | device (`_gs`) | change |
+|---|---|---|---|
+| 10k bodies, ms a step (3 rounds) | 1.480 / 1.488 / 1.498 | 1.402 / 1.401 / 1.401 | **−6 %** |
+| 100k bodies, ms a step (2 rounds) | 11.75 / 11.78 | 11.17 / 11.17 | **−5 %** |
+| host waits a step | 7.1 | 0 | |
+
+One run of the suite with the A/B and timing: about 20 container seconds, $0.006.
+
+**C2, the scale gates on CUDA** (`engine-cuda/tests/scale.rs`, `cudasim.rs`). All pass:
+
+| Gate (same assertions as the wgpu test) | Result on the T4 |
+|---|---|
+| `ring_hold`: 110k brick ring (`engine-scenes`), sleep off, 480 steps | 1,284,737 contacts at step 0; flanks stand; ball through both walls (z 105 m at 8 s); colours valid at every checkpoint; 32 ms a step waiting every step |
+| `ccd_scale`: 128 CCD balls, 16 walls | 0 phase-throughs (293 without CCD); 5.06 ms a step (4.49 without) |
+| `ccd_scale`: 512 CCD balls, 64 walls (ignored on wgpu as a benchmark) | 0 phase-throughs (2,376 without CCD); 10.18 ms (9.23 without) |
+| `columns_hold` 25k and 100k, sleep on | hold |
+
+The colour check moved to `rigid_plan::validate_contact_coloring` (WgpuSim and CudaSim call
+it; wgpu `gables_hold` passes on the Mac). Both suites in one container: 38.6 s, $0.011.
+
+**C6 step 1, the stress modules on CUDA (measured, not yet built by a crate).** slangc
+2026.19 compiles all 32 compute modules of `stress-gpu/shaders` to CUDA (286 entries, 7 s);
+the 3 render modules have no CUDA form and need none. The hazard scan
+(`cargo run -p engine-slang-build --example cuda_hazards -- *.cu`) found one instance of the
+deferred-load miscompile, in `layout.slang`'s `lay_bond_ranks`; fixed in the source the
+same way as `prefix_color_tiles_parallel` (the sum before the store), regenerated, and
+`resident_gpu` and `threshold_split` pass on the Mac. nvcc (`measure_nvcc.py`, SASS 75, 3
+jobs, emulated x86 Docker): all 32 compile, 42 s in all; the slowest are the stress lab's
+`world` / `world_ic` (27 s each), then `blast_motion` 9 s, `fracture` 7 s.
+
+**C3, what it needs first (found while starting it).** `CudaSim` cannot take joints, hulls,
+heightfields or vehicles without copying host logic a fourth time: WgpuSim
+(`gpu.rs` / `gpu_host_state.rs`), MetalWorld (`engine-metal/src/world.rs`), MetalSim and
+CudaSim each keep their own joint slots and free list, hull-arena sync, scene flags
+(`has_convex` and the host words it sets, e.g. `s[29]`; `listed_persist` off for hull
+scenes), torque arms and `StepInputs`. C3 therefore starts by moving that host state into
+`engine-exec` beside `rigid_plan` (one `RigidHost` the four hosts wrap), proved bit for bit
+on wgpu and Metal first, then CudaSim takes it. The convex and joint scenes of
+`engine-scenes` (Convex Pile 10k, Ragdoll Pile 10k, Hinge Chains 10k) are its gate.
 
 ## 5. Open questions to settle while building (not blockers)
 
