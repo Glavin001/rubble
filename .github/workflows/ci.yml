@@ -169,7 +169,9 @@ jobs:
       - name: Kernel inlined-size budget
         if: matrix.part == 'kernels'
         working-directory: engine
-        run: python3 tools/build-time/inline_budget.py
+        # (The WGSL of the build wgsl_export just ran: the kernels bin with its features
+        # prints that build's directory.)
+        run: python3 tools/build-time/inline_budget.py "$(cargo run -q --release -p engine-webgpu --no-default-features --bin kernels)"
       - name: Upload the part
         uses: actions/upload-artifact@v4
         with:
