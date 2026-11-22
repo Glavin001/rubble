@@ -166,10 +166,9 @@ bool fleetLevelsLatTry(uint k, uint off, uint parity, uint lane, uint tag)
             uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
             uint h = gNext[base + 2u * i + 1u];
             uint which = x & 3u;
-            if (which == 3u)
-                vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
-            else
-                vvSnapNode(which == 0u ? tn.x : (which == 1u ? tn.y : tn.z), tn.w, parity, tag);
+            // (One call site for the node: the compilers inline every call.)
+            vvSnapNode(which == 3u ? h : (which == 0u ? tn.x : (which == 1u ? tn.y : tn.z)),
+                       which == 3u ? gStatic[gP.nodeInfoBase + h].w : tn.w, parity, tag);
         }
         sync();
         gVvTag = tag;
@@ -288,13 +287,11 @@ bool fleetLevelsLatTry(uint k, uint off, uint parity, uint lane, uint tag)
                     if (gNext[flLevelAt(va)] != l) continue;
                     // (The lane's first hit is the one it keeps: x == lane.)
                     bool mine = x == lane;
-                    if (mine)
-                        latResidual(va, vvHitSmall(0u, 0u, a, 0u), x - gsOff[LAT_PRE + j], asfloat(gStatic[va * 4u + 3u].z), parity, a, ph, ph != 0u, true, kept);
-                    else
-                    {
-                        LatKept other = kept;
-                        latResidual(va, vvHitSmall(0u, 0u, a, 0u), x - gsOff[LAT_PRE + j], asfloat(gStatic[va * 4u + 3u].z), parity, a, ph, false, false, other);
-                    }
+                    // (One call site, on a copy kept again only for the lane's own hit; another
+                    // hit's copy is dropped, as before. The compilers inline every call.)
+                    LatKept use = kept;
+                    latResidual(va, vvHitSmall(0u, 0u, a, 0u), x - gsOff[LAT_PRE + j], asfloat(gStatic[va * 4u + 3u].z), parity, a, ph, mine && ph != 0u, mine, use);
+                    if (mine) kept = use;
                 }
                 sync();
             }

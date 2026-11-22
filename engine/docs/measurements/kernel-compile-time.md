@@ -384,3 +384,17 @@ and PERF_SPLIT_WHEELS_AHEAD's tyres alone, one copy of `drvTyre`). Bit for bit, 
 70,924 optimized instructions, but Chrome cold the same (before 25.4 / 25.8 s, after
 25.4 / 25.7 s, alternating): the copy it removed is not where the compile spends its
 time. The profile ranks candidates; only a cold compile decides.
+
+### The levels kernel: one call site for the snapshot's nodes and the lane's residual
+
+Five places snapshot a hit's four nodes (`vvSnapNode`) with four calls, or pick one of
+two calls by the node; each is now one call with the node chosen by index (in a loop
+kept a loop by `opaqueCount`), the same calls in the same order. `latResidual` was called
+twice, for the lane's own hit and for another; it is now one call on a copy, kept again
+only for the lane's own (another's copy was dropped before too).
+`explicit_beams_split_grouplevels_wide`: 65,284 -> 56,910 optimized instructions, Chrome
+cold 12.9 -> 10.3 s (two samples each step). Checked: fast-check (16 of 17 bit for bit,
+the known quirk), the scenario matrix (12 rows bit for bit, none slower), the
+group-split, fleet-contact, contact and vehicle-grid GPU suites in bit-exact mode (19
+tests), `sleep-check.sh` (21), Chrome's validation of all 140 modules. Tried and dropped:
+`opaqueCount` on `vvSumsOf`'s loop (the same instructions and time: not unrolled).

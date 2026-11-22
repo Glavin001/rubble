@@ -463,10 +463,9 @@ void fleetLevelsWide(uint tid, uint word)
         uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
         uint h = gNext[base + 2u * i + 1u];
         uint which = tid & 3u;
-        if (which == 3u)
-            vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
-        else
-            vvSnapNode(which == 0u ? tn.x : (which == 1u ? tn.y : tn.z), tn.w, parity, tag);
+        // (One call site for the node: the compilers inline every call.)
+        vvSnapNode(which == 3u ? h : (which == 0u ? tn.x : (which == 1u ? tn.y : tn.z)),
+                   which == 3u ? gStatic[gP.nodeInfoBase + h].w : tn.w, parity, tag);
         return;
     }
     gVvTag = gP.vvSplit != 0u ? tag : 0u;
