@@ -821,10 +821,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
 fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let version = std::process::Command::new(find_slangc()?)
-        .arg("-version")
-        .output()?;
-    (version.stdout, version.stderr).hash(&mut h);
+    engine_slang_build::slangc_version()?.hash(&mut h);
     let mut files = Vec::new();
     list_files(slang_root, &mut files)?;
     files.sort();

@@ -54,6 +54,20 @@ jobs:
           case "$base" in 0000000000000000000000000000000000000000) base= ;; esac
           bash .github/scripts/check-large-files.sh "$base" HEAD
 
+  # The build-architecture rules (engine/docs/build-architecture.md): crate direction,
+  # kernel compiles through engine-slang-build, source sizes that may only shrink.
+  build-architecture:
+    name: Build architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Check the rules
+        working-directory: engine
+        run: python3 tools/build-time/check.py
+
   # One slangc compile of the kernels for the three web builds and the Linux C library. When the kernels
   # changed, each of them (and each C library job) ran its own: the same 5-8 minutes of
   # all four cores, four times over; "build stress" took 10.4 minutes and the C library

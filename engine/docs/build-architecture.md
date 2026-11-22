@@ -67,6 +67,21 @@ Direction is downward only. In particular:
 - **An environment variable is a rerun trigger only if the output depends on it.**
   (`RUBBLE_SLANG_CACHE` changes where outputs come from, not what they are.)
 
+## Checked in CI
+
+`python3 tools/build-time/check.py` (from `engine/`; the "Build architecture" job):
+
+- `engine-kernel-manifest` depends on nothing; the kernel build scripts build-depend on
+  no engine crate but it and `engine-slang-build`; the runtime (plans, executors,
+  World, FFI) does not depend on `engine-softbody-authoring`.
+- Nothing but `engine-slang-build` spawns slangc or nvcc.
+- Sources stay under 1500 lines (Rust) and 3000 (Slang). The files over it when the
+  rule came in are in `tools/build-time/size-allowlist.txt`, each at most its listed
+  size: they may shrink (`check.py --shrink` lowers the numbers), not grow. Split a
+  file that has to grow, or raise its line in the same change, where review sees it.
+  Large files cost twice: every edit recompiles all of it, and the editor and the
+  reader carry all of it.
+
 ## Measuring
 
 - `python3 tools/build-time/measure.py [--only NAME,...] [--runs N]` (from `engine/`):

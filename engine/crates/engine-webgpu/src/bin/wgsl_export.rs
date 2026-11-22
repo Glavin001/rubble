@@ -56,17 +56,14 @@ fn main() -> anyhow::Result<()> {
     // The fracture lab's draw shader: one module, the Metal viewer's entries.
     let draw =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../slang/render/fracture_draw.slang");
-    let status = std::process::Command::new(engine_slang_build::find_slangc()?)
-        .args(["-target", "wgsl", "-entry", "vs", "-stage", "vertex"])
-        .args([
-            "-entry", "fs", "-stage", "fragment", "-entry", "ground", "-stage", "fragment",
-            "-entry", "wire", "-stage", "fragment",
-        ])
-        .arg("-o")
-        .arg(out.join("fracture_draw.wgsl"))
-        .arg(&draw)
-        .status()?;
-    anyhow::ensure!(status.success(), "slangc failed for {}", draw.display());
+    engine_slang_build::compile_entries_to(
+        &draw,
+        &[("vs", "vertex"), ("fs", "fragment"), ("ground", "fragment"), ("wire", "fragment")],
+        engine_slang_build::SlangTarget::Wgsl,
+        &out.join("fracture_draw.wgsl"),
+        &[],
+        &[],
+    )?;
     // The playground's render layers (slang/render/*.slang, engine/docs/playground-plan.md
     // phase 4): each page draws through these, not shaders of its own.
     for (name, entries) in [
@@ -79,13 +76,14 @@ fn main() -> anyhow::Result<()> {
     ] {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../slang/render/{name}.slang"));
-        let mut cmd = std::process::Command::new(engine_slang_build::find_slangc()?);
-        cmd.args(["-target", "wgsl"]);
-        for (entry, stage) in entries {
-            cmd.args(["-entry", entry, "-stage", stage]);
-        }
-        let status = cmd.arg("-o").arg(out.join(format!("{name}.wgsl"))).arg(&src).status()?;
-        anyhow::ensure!(status.success(), "slangc failed for {}", src.display());
+        engine_slang_build::compile_entries_to(
+            &src,
+            entries,
+            engine_slang_build::SlangTarget::Wgsl,
+            &out.join(format!("{name}.wgsl")),
+            &[],
+            &[],
+        )?;
     }
     // Soft-body skinning (standalone, run after the step): the same module the
     // native SoftSkinner embeds.
