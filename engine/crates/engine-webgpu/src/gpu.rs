@@ -560,8 +560,8 @@ pub struct WgpuSim {
     pose_output: bool,
     /// Deformable-terrain MPM pool (`terrain_enable`).
     terrain: Option<terrain::TerrainState>,
-    /// The terrain's coupled frame appended impulse records for this step.
-    terrain_impulses_pending: bool,
+    /// A host's GPU pass (terrain, explicit vehicles) appended impulse records for this step.
+    pub(crate) gpu_impulses: engine_exec::rigid_host::GpuImpulses,
     /// A heightfield is watched by the terrain look-ahead.
     terrain_watch_on: bool,
     /// Run `contact_events` each step (`set_contact_events`).
@@ -1290,7 +1290,7 @@ impl WgpuSim {
             commands_move_poses: false,
             pose_output,
             terrain: None,
-            terrain_impulses_pending: false,
+            gpu_impulses: Default::default(),
             terrain_watch_on: false,
             contact_events: false,
             explosion_count: 0,
@@ -1491,7 +1491,7 @@ impl WgpuSim {
     /// (as the terrain coupling does, `IMPULSE_COUNT` atomics, then `IMPULSE_FIRST` set
     /// to the count): the step schedules `apply_impulses` and wakes.
     pub fn mark_gpu_impulses(&mut self) {
-        self.terrain_impulses_pending = true;
+        self.gpu_impulses.mark();
         self.wake_pending = true;
     }
 
@@ -1500,7 +1500,7 @@ impl WgpuSim {
     /// can only have appended records while some body is awake: explicit vehicles with
     /// every one asleep).
     pub fn schedule_gpu_impulses(&mut self) {
-        self.terrain_impulses_pending = true;
+        self.gpu_impulses.mark();
     }
 
     /// The scratch atomics buffer (binding 21: the impulse records at `IMPULSE_BASE`).
@@ -1532,7 +1532,7 @@ impl WgpuSim {
     fn upload_impulses(&mut self) {
         let n = self.impulse_queue.len() as u32;
         // Terrain coupling appended its reaction records on the GPU after these.
-        self.impulses_this_step = n > 0 || self.terrain_impulses_pending;
+        self.impulses_this_step = self.gpu_impulses.this_step(n as usize);
         if n > 0 {
             // Mode word: mode | queue index << 8 (the per-body sum order).
             let keyed: Vec<ImpulseRecord> = self
@@ -3541,7 +3541,7 @@ impl WgpuSim {
             v.dirty = false;
         }
         self.impulses_this_step = false;
-        self.terrain_impulses_pending = false;
+        self.gpu_impulses.applied();
         if !read {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);

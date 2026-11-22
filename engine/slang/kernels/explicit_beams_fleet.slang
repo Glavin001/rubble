@@ -165,6 +165,41 @@ void flOwnerPlan(uint v, uint parity)
     gBeams[flBoxAt(v) + 3u] = float4(phi, 0.0);
 }
 
+// The walk with each candidate's position tested first and its big triangles shared out
+// (explicit_plan::PERF_FLEET_WALK_BOX; the host keeps the switch in bit 30 of the word
+// after beamOrder: the fleet copies' perfFlags have no free bit).
+// vehicle-perf-first-principles.md §8.56.
+bool flWalkBox() { return (gP.beamOrderPad0 & 0x40000000u) != 0u; }
+// A listed triangle whose box covers more cells than the walk takes by cell tests every
+// candidate of its owner (a torn panel's triangle, metres long: a pile of 20 cars has 16
+// to 42 a pass, 5,000 candidates each), which was three threads' chains of thousands of
+// loads: the dispatch waited for them (20 of a 65 ms frame). With the switch such a
+// triangle is listed by the throttles' dispatch (flBigHint: its mark in fkListed's bit 1,
+// its place in the fleet's list, flListAt) and the walk's dispatch has FL_BIG_PARTS more
+// threads for each, a part of the owner's candidates a thread (flWalkBoxed's `helper`).
+// The stored mark alone decides who tests a triangle, never a value two threads work out
+// apart: a marked triangle is tested against every candidate of its owner by its own
+// threads and skipped by the walk's (whatever the walk's own count of cells, which also
+// takes the owner's fastest candidate, would say: the cells only leave out candidates
+// that fail the box test), an unmarked one is the walk's as before. The same (triangle,
+// candidate) pairs, each once; which triangles are marked is a choice of schedule.
+static const uint FL_CTL_BIG = 4u; // gAcc, flCtl: the pass's big triangles so far
+static const uint FL_NEXT_BIG = 2u; // gNext, flCtlNext: their count as the walk's plan sized it
+static const uint FL_BIG_PARTS = 128u;
+bool flBigHint(uint gt, uint va)
+{
+    uint4 tn = gStatic[gP.triBase + gt];
+    float3 oa = vvRel(va, va);
+    float3 p0 = nf3(oa + gNodes[tn.x * 3u].xyz);
+    float3 p1 = nf3(oa + gNodes[tn.y * 3u].xyz);
+    float3 p2 = nf3(oa + gNodes[tn.z * 3u].xyz);
+    float pad = asfloat(gStatic[va * 4u + 3u].z) + CLIP_DEPTH + 0.05;
+    float cell = vvGridCell(va);
+    float3 f0 = floor((min(min(p0, p1), p2) - float3(pad, pad, pad)) / cell);
+    float3 fs = floor((max(max(p0, p1), p2) + float3(pad, pad, pad)) / cell) - f0 + float3(1.0, 1.0, 1.0);
+    return !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)) || !(all(abs(f0) < 1.0e8));
+}
+
 // (P) Triangle gt of owner va: its throttle step (vvPassSmallFront's), listed in the
 // owner's tested list when it may have candidates.
 void flTriangle(uint va, uint gt, uint parity)
@@ -177,7 +212,8 @@ void flTriangle(uint va, uint gt, uint parity)
     int cwait = ownerReset ? 0 : asint(c.x);
     int cidle = asint(c.y);
     // (The kept candidates' tests read whether this pass listed the triangle: fkPairTry.)
-    bool keep = fkOn();
+    // (And the walk's shared-out triangles: flWalkBox.)
+    bool keep = fkOn() || flWalkBox();
     if (keep) gNext[fkListed(gt)] = 0u;
     if (offered == 0u)
     {
@@ -309,6 +345,114 @@ uint flCands(uint va)
     return min(uint(gAcc[own + FL_CANDS].load()), uint(gAcc[own + FL_OFFERED].load()));
 }
 
+// vvTriangleCandsList for an owner of the fleet-wide passes (gFl 1, gFlV va), the same
+// pairs listed. A candidate's box test (vvInBox) loads its vehicle and its velocity, two
+// loads that depend on the candidate's own; in a pile a triangle's cells' buckets hold
+// thousands of candidates of other cells (9.2 million visited a frame of 20 cars for 700
+// inside a box). Here a candidate is first tested against the triangle's box grown by the
+// largest pad any candidate of the owner can have (the walk's own `pad`, from the owner's
+// fastest candidate: vvInBox's pad of a candidate is the same expression of its own speed,
+// which is at most that one, and each operation is monotone), so a candidate outside it
+// fails vvInBox: the same candidates pass, without the two loads for the others. The
+// first test's box is 0.1 mm and a millionth of the coordinates larger still: with fast
+// arithmetic the two pads may round apart in their last place (a fused multiply-add in
+// one), which that room is a thousand times; vvInBox alone decides inside it.
+// `helper`: a thread of a marked triangle's own (part `sub` of FL_BIG_PARTS of the owner's
+// candidates); the walk's threads leave a marked triangle to them.
+void flWalkBoxed(uint va, uint gt, uint sub, uint subs, uint cands, float r, bool helper)
+{
+    if (!helper && (gNext[fkListed(gt)] & 2u) != 0u) return;
+    float cell = vvGridCell(va);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
+    if (any(t.lo > t.hi)) return;
+    float vmax = vvSpeedAt(0u);
+    float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
+    float3 lo = ssub3(t.lo, float3(pad, pad, pad));
+    float3 hi = sadd3(t.hi, float3(pad, pad, pad));
+    float3 room = float3(1.0e-4, 1.0e-4, 1.0e-4) + 1.0e-6 * max(abs(lo), abs(hi));
+    float3 blo = lo - room;
+    float3 bhi = hi + room;
+    float3 f0 = floor(lo / cell);
+    float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = helper || !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
+                 || !(all(abs(f0) < 1.0e8));
+    uint at = vvTriPairsAt(va);
+    bool cand = false;
+    if (every)
+    {
+        uint run = vvRunSmall(0u, 0u, 0u);
+        vvVisit(sub < cands ? (cands - sub + subs - 1u) / subs : 0u);
+        for (uint e = sub, eStop = EB_END(640, e, cands, subs); e < eStop; e += subs)
+        {
+            float4 E = gBeams[run + e];
+            if (any(E.xyz < blo) || any(E.xyz > bhi)) continue;
+            uint h = asuint(E.w);
+            if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
+            cand = true;
+            uint n = vvPairAdd(0u);
+            if (n < TRI_PAIR_CAP)
+            {
+                gNext[at + 2u * n] = gt;
+                gNext[at + 2u * n + 1u] = e | VV_PAIR_RUN;
+            }
+        }
+        vvMark(gt, cand, false);
+        return;
+    }
+    int3 c0 = int3(f0);
+    int3 span = int3(fs);
+    uint yz = uint(span.y * span.z);
+    uint cells = uint(span.x) * yz;
+    uint sorted = vvSortAt(0u);
+    uint seen = 0u;
+    for (uint i = sub, iStop = EB_END(641, i, cells, subs); i < iStop; i += subs)
+    {
+        uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+        bool dup = false;
+        int3 cj = int3(0, 0, 0);
+        for (uint j = 0u, jStop = EB_END(642, j, i, 1u); j < jStop; j++)
+        {
+            if (gridBucket(c0 + cj) == b)
+            {
+                dup = true;
+                break;
+            }
+            cj.z += 1;
+            if (cj.z == span.z)
+            {
+                cj.z = 0;
+                cj.y += 1;
+                if (cj.y == span.y)
+                {
+                    cj.y = 0;
+                    cj.x += 1;
+                }
+            }
+        }
+        if (dup) continue;
+        uint e0 = vvOffAt(b);
+        uint e1 = vvOffAt(b + 1u);
+        seen += e1 - e0;
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        {
+            EB_PASS(643, eGuard);
+            float4 E = gBeams[sorted + e];
+            if (any(E.xyz < blo) || any(E.xyz > bhi)) continue;
+            uint h = asuint(E.w);
+            if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
+            cand = true;
+            uint n = vvPairAdd(0u);
+            if (n < TRI_PAIR_CAP)
+            {
+                gNext[at + 2u * n] = gt;
+                gNext[at + 2u * n + 1u] = e;
+            }
+        }
+    }
+    vvVisit(seen);
+    vvMark(gt, cand, false);
+}
+
 // (T) Part `sub` of `subs` of owner va's listed triangle q: its box's cells, its pairs
 // listed (vvTriangleCandsList).
 void flWalk(uint va, uint q, uint sub, uint subs)
@@ -317,8 +461,19 @@ void flWalk(uint va, uint q, uint sub, uint subs)
     gFlV = va;
     uint triOff = gStatic[va * 4u + 1u].x;
     uint t = gNext[vvTestedAt(triOff + q)];
-    vvTriangleCandsList(0u, va, triOff + t, sub, subs, 0u, uint(gAcc[flOwn(va) + FL_OFFERED].load()), flCands(va),
-                        asfloat(gStatic[va * 4u + 3u].z));
+    if (flWalkBox()) flWalkBoxed(va, triOff + t, sub, subs, flCands(va), asfloat(gStatic[va * 4u + 3u].z), false);
+    else
+        vvTriangleCandsList(0u, va, triOff + t, sub, subs, 0u, uint(gAcc[flOwn(va) + FL_OFFERED].load()), flCands(va),
+                            asfloat(gStatic[va * 4u + 3u].z));
+    gFl = 0u;
+}
+// Part `part` of big triangle gt's test of every candidate of its owner (flBigHint).
+void flWalkBig(uint gt, uint part)
+{
+    uint va = gStatic[gP.triBase + gt].w;
+    gFl = 1u;
+    gFlV = va;
+    flWalkBoxed(va, gt, part, FL_BIG_PARTS, flCands(va), asfloat(gStatic[va * 4u + 3u].z), true);
     gFl = 0u;
 }
 // The same tested inline (an owner past its pair list's room: vvTriangleCandsGrid).
@@ -1607,7 +1762,21 @@ void fleetFront(uint tid, uint word)
         if (tid < gP.totalTris)
         {
             uint va = gStatic[gP.triBase + tid].w;
-            if (flVehicleOn(va)) flTriangle(va, tid, flParity(va, s));
+            if (flVehicleOn(va))
+            {
+                flTriangle(va, tid, flParity(va, s));
+                // (A listed triangle over the cells, in a pass that walks: marked and into
+                // the fleet's list of big triangles, flWalkBig's threads.)
+                if (flWalkBox() && mode == FK_OFF && gNext[fkListed(tid)] != 0u && flBigHint(tid, va))
+                {
+                    uint k = uint(gAcc[flCtl(FL_CTL_BIG)].add(1));
+                    if (k < gP.totalTris)
+                    {
+                        gNext[flListAt(k)] = tid;
+                        gNext[fkListed(tid)] = 3u;
+                    }
+                }
+            }
         }
         // (A build's record of node tid.)
         if (mode == FK_BUILD && tid < gP.totalNodes) gBeams[fkRef(tid)] = fkRefNow(tid, gStatic[gP.nodeInfoBase + tid].w);
@@ -1666,6 +1835,7 @@ void fleetPlan(uint lane, uint word)
         // (Whether the members' rest tracked this pass's nodes: fkTrackIdle reads the last
         // pass's offered total, which the prefix below replaces.)
         bool untracked = fkTrackInRest() && fkTrackIdle();
+        if (lane == 0u) gAcc[flCtl(FL_CTL_BIG)].store(0);
         flPrefix(0u, FL_OFFERED, lane);
         uint total = splitUniform(lane, gNext[flPrefixAt(0u, nv)]);
         if (total > vvRoomCp())
@@ -1816,7 +1986,10 @@ void fleetPlan(uint lane, uint word)
             uint listed = gNext[flPrefixAt(1u, nv)];
             uint subs = clamp(FL_WALK_THREADS / max(listed, 1u), 1u, 64u);
             gNext[flCtlNext(0u)] = subs;
-            gArgs2[FL_ARGS2_WALK] = flWorkgroups(listed * subs);
+            // (The big triangles' threads after the listed ones': flWalkBig.)
+            uint big = flWalkBox() ? min(uint(gAcc[flCtl(FL_CTL_BIG)].load()), gP.totalTris) : 0u;
+            gNext[flCtlNext(FL_NEXT_BIG)] = big;
+            gArgs2[FL_ARGS2_WALK] = flWorkgroups(listed * subs + big * FL_BIG_PARTS);
             gArgs2[FL_ARGS2_WALK + 1u] = 1u;
             gArgs2[FL_ARGS2_WALK + 2u] = 1u;
         }
@@ -1915,7 +2088,13 @@ void fleetWideTests(uint g, uint lane, uint word)
     if ((word & SPLIT_LEVELS) == 0u)
     {
         uint subs = gNext[flCtlNext(0u)];
-        if (subs == 0u || tid >= listed * subs) return;
+        if (subs == 0u) return;
+        if (tid >= listed * subs)
+        {
+            uint j = tid - listed * subs;
+            if (j < gNext[flCtlNext(FL_NEXT_BIG)] * FL_BIG_PARTS) flWalkBig(gNext[flListAt(j / FL_BIG_PARTS)], j % FL_BIG_PARTS);
+            return;
+        }
         uint q = tid / subs;
         uint va = flFind(1u, q);
         flWalk(va, q - gNext[flPrefixAt(1u, va)], tid % subs, subs);

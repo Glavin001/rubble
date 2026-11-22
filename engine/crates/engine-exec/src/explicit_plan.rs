@@ -30,6 +30,10 @@ pub mod coupling;
 pub mod drive;
 pub mod portable;
 pub mod schedule;
+mod loop_cap;
+pub use loop_cap::{explicit_loop_cap_hit, EXPLICIT_LOOP_CAP, EXPLICIT_LOOP_CAP_TAG};
+mod surface_fast;
+pub mod vv_wide;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
@@ -473,6 +477,10 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// item before it, a chain that grew with the step's hits (the kernel's PERF_HIT_SLOT_MAP,
 /// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.46.
 pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
+/// For [`FramePlanner::set_perf_flags`]'s callers; kept as bit 30 of the word after [`W_BEAM_ORDER`] (the fleet
+/// copies' perf word has no free bit): the fleet-wide walk tests a candidate's position before it loads its records,
+/// its big triangles on threads of their own (flWalkBox; §8.56). On by default but in a browser (rung 3 not run).
+pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
@@ -505,7 +513,8 @@ pub fn perf_flags_default() -> u32 {
             | PERF_HITS_LOCAL
             | PERF_WHEELS_APART
             | PERF_FLEET_KEEP
-            | PERF_HIT_SLOT_MAP,
+            | PERF_HIT_SLOT_MAP
+            | if cfg!(target_arch = "wasm32") { 0 } else { PERF_FLEET_WALK_BOX },
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.
@@ -2724,7 +2733,7 @@ impl ExplicitUpload {
             beam_order_base,
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
-        words[W_PERF_FLAGS] = perf_flags_default();
+        (words[W_PERF_FLAGS], words[W_BEAM_ORDER + 1]) = (perf_flags_default() & !PERF_FLEET_WALK_BOX, (perf_flags_default() & PERF_FLEET_WALK_BOX) << 1);
         words[W_VV_SCRATCH] = vv_scratch;
         words[W_VV_SCRATCH_OFF] = vv_scratch_off;
         words[W_VV_TRI_PAIRS] = vv_tri_pairs;
@@ -2928,8 +2937,16 @@ pub struct FramePlanner {
     surface: bool,
     /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
     surface_split: bool,
+    /// [`Self::set_surface_fast`]: 0 off, 1 a wide frame's alone, 2 with vehicle contact too.
+    surface_fast: u8,
+    /// The wide passes could run this fleet but for its surface contact (at most
+    /// [`WIDE_MAX_VEHICLES`] vehicles, no wings): [`ExplicitLayout::wide_ok`] without
+    /// its surface term.
+    wide_capable: bool,
     /// [`ExplicitLayout::loop_unit`].
     loop_unit: u64,
+    vv_wide: bool,
+    vv_seen: Option<u32>,
 }
 
 impl FramePlanner {
@@ -2952,31 +2969,12 @@ impl FramePlanner {
             wide_sleep: false,
             surface: layout.surface,
             surface_split: false,
+            surface_fast: 0,
+            wide_capable: layout.wide_capable(),
             loop_unit: layout.loop_unit,
+            vv_wide: false,
+            vv_seen: None,
         }
-    }
-
-    /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
-    pub fn has_surface(&self) -> bool {
-        self.surface
-    }
-
-    /// A host with the split modules ([`Kernel::FrameSeg`], [`Kernel::Surf`]): frames of
-    /// a fleet with surface contact on the frame modules (no contact groups, not wide)
-    /// run in segments, a step each, with the surface pass's pipelines between them.
-    /// The same results bit for bit; more dispatches, much smaller kernels.
-    pub fn set_surface_split(&mut self, on: bool) {
-        self.surface_split = on;
-    }
-
-    /// This frame runs split (after [`Self::write_params`]), `wide_allowed` as
-    /// [`Self::commands`] takes it.
-    pub fn split_frames(&self, wide_allowed: bool) -> bool {
-        self.surface_split
-            && self.surface
-            && wide_allowed
-            && !self.contact_active()
-            && !self.is_wide()
     }
 
     /// Measurement only: the awake list's dispatch on (the default) or off (every vehicle
@@ -3064,7 +3062,7 @@ impl FramePlanner {
     /// sleeping vehicle's step count stands, so a fleet with sleep keeps a workgroup (or
     /// a step's dispatches) a vehicle.
     pub fn is_wide(&self) -> bool {
-        self.wide_ok && self.wide_on && !self.contact_active() && (!self.sleep_on() || (self.wide_sleep && self.nv == 1))
+        self.wide_ok() && self.wide_on && !self.contact_active() && (!self.sleep_on() || (self.wide_sleep && self.nv == 1))
     }
 
     /// A host whose wide passes run vehicle sleep for a lone vehicle (the kernel's
@@ -3076,7 +3074,9 @@ impl FramePlanner {
     /// Run frames as the wide passes or one workgroup per vehicle; returns
     /// [`Self::is_wide`].
     pub fn set_wide(&mut self, on: bool) -> bool {
-        if self.wide_ok {
+        // (A fleet with surface contact keeps the choice for when its pass runs as
+        // pipelines, [`Self::set_surface_fast`]; until then its frames are not wide.)
+        if self.wide_capable {
             self.wide_on = on;
         }
         self.is_wide()
@@ -3093,15 +3093,16 @@ impl FramePlanner {
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
         // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
-        self.words[W_PERF_FLAGS] = flags & !PERF_KEEP_TRACK_REST;
+        self.words[W_PERF_FLAGS] = flags & !(PERF_KEEP_TRACK_REST | PERF_FLEET_WALK_BOX);
+        self.words[W_BEAM_ORDER + 1] = (self.words[W_BEAM_ORDER + 1] & !(PERF_FLEET_WALK_BOX << 1)) | (flags & PERF_FLEET_WALK_BOX) << 1;
     }
 
     pub fn perf_flags(&self) -> u32 {
-        self.words[W_PERF_FLAGS]
+        self.words[W_PERF_FLAGS] | (self.words[W_BEAM_ORDER + 1] >> 1 & PERF_FLEET_WALK_BOX)
     }
 
     pub fn set_ablation2(&mut self, mask: u32) {
-        self.words[W_BEAM_ORDER + 1] = mask;
+        self.words[W_BEAM_ORDER + 1] = mask | (self.words[W_BEAM_ORDER + 1] & PERF_FLEET_WALK_BOX << 1);
     }
 
     /// The parameters for a frame of `steps` steps, from byte 0 of binding 0: copy k
@@ -3207,10 +3208,16 @@ impl FramePlanner {
             out
         } else if self.is_wide() && wide_allowed {
             let plan = self.wide_plan(steps);
-            let mut out: Vec<Cmd> = plan
-                .iter()
-                .map(|&(k, kind, x)| d(Kernel::Wide(kind), x, k))
-                .collect();
+            let mut out: Vec<Cmd> = Vec::with_capacity(plan.len() + 1);
+            for &(k, kind, x) in &plan {
+                out.push(d(Kernel::Wide(kind), x, k));
+                // Surface contact (the fleet's pass as pipelines, [`Self::surface_piped`]):
+                // step k's surface pass after its hits are applied, a workgroup a
+                // vehicle, as the frame runs it after selfApply.
+                if kind == WIDE_HITS && self.surface {
+                    out.extend((0..SURF_PASSES.len()).map(|i| d(Kernel::Surf(i), nv, k)));
+                }
+            }
             // Begin and rebase, then the vehicles' origins and steps into the
             // table, then the steps.
             out.insert(
@@ -3579,42 +3586,6 @@ impl ExplicitLayout {
             .map_err(|e| format!("explicit beams kernel: {e}"))?;
         self.contact_status(acc)
     }
-}
-
-/// The explicit kernels' loop cap (`EB_LOOP_CAP` in `explicit_beams.slang`, every
-/// target): a loop whose bound is not a constant runs at most this many passes.
-/// Far above any legitimate count (a few loops run on one lane over a whole
-/// vehicle's beams: tens of thousands for a large vehicle), so a capped loop
-/// computes what an uncapped one does.
-pub const EXPLICIT_LOOP_CAP: u32 = 1 << 20;
-
-/// The kernel's tag on a loop-cap flag (`EB_LOOP_CAP_TAG`): the flag is the tag
-/// | the stopped loop's id (its `EB_END(ID, ..)` / `EB_PASS(ID, ..)`). Untagged, the flag is the loop's number in
-/// its WGSL module (counting from 1): the frozen test modules
-/// (`explicit_beams_baseline.slang`, `explicit_beams_ref.slang`), capped by
-/// engine-webgpu's WGSL post-process.
-pub const EXPLICIT_LOOP_CAP_TAG: i32 = 1 << 24;
-
-/// The error for a loop-cap flag read back from gAcc ([`ExplicitLayout::loop_cap_flag`];
-/// 0: none).
-pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
-    if flag == 0 {
-        return Ok(());
-    }
-    let place = if flag & EXPLICIT_LOOP_CAP_TAG != 0 {
-        let id = flag & !EXPLICIT_LOOP_CAP_TAG;
-        format!("the loop with id {id} (`rg -n 'EB_[A-Z_]*\\({id},|ebLoopCapHit\\({id}\\)' engine/slang/kernels`)")
-    } else {
-        format!("a kernel loop (number {flag} in its WGSL module, counting from 1)")
-    };
-    // The flag names the highest stopped loop: past its own cap (EXPLICIT_LOOP_CAP passes,
-    // or a barrier loop's real maximum), or the first to find the frame's pass budget
-    // spent (the passes were taken by all the loops before it).
-    Err(format!(
-        "{place} was stopped: at its cap ({EXPLICIT_LOOP_CAP} passes, or a barrier loop's \
-         maximum) or when the frame's pass budget ran out; that frame's results are invalid \
-         (a runaway loop: a corrupt count or bound)"
-    ))
 }
 
 /// Fleets of at most this many vehicles run 512 lanes per vehicle (about one

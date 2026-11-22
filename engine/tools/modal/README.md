@@ -250,13 +250,67 @@ Where CUDA stands against the Mac (2026-11-19, `run.sh --cuda perf=0`, ms a fram
   always available); an L4 for absolute numbers (Modal had none for some rows at times:
   `NO RESULT (NO GPU)`).
 
+## The World's own cost on CUDA (`run.sh --world --cuda`)
+
+The World step around the explicit frame runs on CUDA too: `CudaWorld` (engine-cuda) owns
+the rigid step (`CudaSim`), the explicit frame (`CudaExplicitBeams`) and the explicit
+vehicles' coupling (`vehicle_coupling.slang`, built for CUDA) in one context on one
+stream, and replays the same plans as the wgpu World
+(`engine_exec::explicit_plan::coupling::world`). So the scenario matrix's `--world` gate
+has a CUDA form, with nothing compiled on Modal:
+
+```bash
+# Once, on the Mac (under the GPU lock; about a minute): each --world row's scene run to
+# its moment and saved as a portable World, out/scenario-matrix/world/ROW.wfx. Needs no
+# saved .fx state. Again after a change of the buffers' layout or of the scenes.
+tools/scenario-matrix/run.sh --make-world
+# Any number of times, on Modal (a T4, one container, 1 core): engine-cuda's world_replay.
+ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --world --cuda [ROW ...]
+```
+
+For each row it prints every step's GPU ms (three rounds of 20 steps), the median, p95
+and worst step and which one it was, the split by part (emit, rigid step, plan, explicit
+frame, loads), the gate's line (`World step`, `frame alone`, `the World adds`; wall
+medians, as on the Mac), a hash of the end state and whether a second replay from the
+file ends bit for bit; then one table and a verdict (PASS: every row ran, its status
+words stayed zero, its repeat was bit for bit). `WORLD_MS=2.5` also fails a row whose
+World adds more than that; unset, a T4's timing is reported, not judged. Measured
+2026-11-22: 8 rows in 16.4 s of replay, 20.8 container seconds, $0.0038; the World adds
+0.30 to 1.05 ms on a T4 (0.49 to 1.43 ms on the Mac the same day, wall). Numbers by row:
+`engine/docs/world-on-cuda.md` §6, "C4".
+
+What to know before reading a number from it:
+
+- **A portable World holds the scene, not the solver's caches** (bodies, colliders, hull
+  arena, joints, materials, parameters; the coupling's clock, pending emit and work
+  buffer; the vehicles' whole explicit state; 30 steps of drive inputs). The replay
+  starts its rigid contacts cold, so it runs 5 warm-up steps before it times
+  (`--warm N`), and its bodies follow the saved World's only as closely as that allows.
+  The vehicles' state is exact.
+- **The plan is the scan on CUDA.** The candidates from the World broadphase's resting
+  table (`cpl_query`) do not run there (the rigid host keeps no such table yet); the
+  proxies are the same. The matrix's rows are planned by the scan on the Mac too.
+- **The first replay of a container is not reported.** A T4 runs its first seconds of
+  work slower (the first row read 14 to 25 ms a step in its first round against 10.5
+  later, with bit-identical results), so `world_replay` replays the first file once
+  before it times anything.
+- **It reports one build.** There is no on/off switch and no two-build mode for the
+  World step yet: to compare two commits, run it for each (both in the same half hour)
+  and look at rows whose difference is well past the run-to-run spread, or use the
+  explicit frame's A/B (`run.sh --cuda --base`) for what a change does to the frame.
+- The correctness of the coupling on CUDA is held by `engine-cuda/tests/world.rs`
+  (momentum closure through the World's impulse path, the CPU reference coupling, the
+  wgpu World's numbers for one scene, two runs bit for bit):
+  `tools/modal/gpu_run.sh -- -p engine-cuda --test world` with the modules
+  `cargo test -p engine-cuda --release --test world world_test_modules -- --nocapture`
+  prints (7.9 container seconds, $0.0023).
+
 ## The rest of the World on CUDA
 
-The rigid step already runs on CUDA (`CudaSim`, the columns gates at 640 / 10k / 100k), and
-the explicit frame does (above). The coupling's World side, terrain, the stress solver and
-fracture do not yet, so they still need the Vulkan route and its cold compiles. The plan,
-the inventory of passes, the host work each needs and the cost per verdict:
-`engine/docs/world-on-cuda.md`.
+Terrain, the stress solver and fracture are not on CUDA yet, so they still need the
+Vulkan route and its cold compiles; so do the rigid step's riders the matrix does not use
+(raycast wheels, characters, queries, the sleep archive). The plan, the inventory of
+passes, the host work each needs and the cost per verdict: `engine/docs/world-on-cuda.md`.
 
 ## Two builds, head to head (commit against commit)
 

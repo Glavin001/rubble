@@ -216,6 +216,16 @@ pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
 pub const SELF_PAIRS_ENTRY: &str = "explicit_beams_self_pairs";
 pub const WIDE_LIST_ENTRY: &str = "explicit_beams_wide_list";
+/// Surface contact on the self split paths: a solo vehicle's self-collision hits of a step
+/// applied in a dispatch of its own, before the surface pass's pipelines (the kernel's
+/// soloRest).
+pub const SOLO_REST_ENTRY: &str = "explicit_beams_solo_rest";
+
+/// The module of [`SOLO_REST_ENTRY`] at the frame variant with `aero` and `lanes`, with
+/// vehicle contact (`vv`) or not: the self split's step module's defines, another entry.
+pub fn solo_rest_module_name(aero: bool, lanes: u32, vv: bool) -> String {
+    format!("explicit_beams_selfsplit_rest{}{}", if vv { "_vv" } else { "" }, variant_tag(aero, lanes))
+}
 
 /// The split group path's modules by `which` (`split_module_name`), each at the frame
 /// module's four variants (`split_modules`).
@@ -304,6 +314,8 @@ pub fn split_modules() -> Vec<SplitModule> {
         member.push(("EB_VV_SPLIT", "1"));
         push(format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, member);
         push(format!("explicit_beams_selfsplit_walk_vv{tag}"), SELF_WALK_ENTRY, base.clone());
+        // Surface contact on this path (the pass as pipelines): the solo vehicles' rest.
+        push(format!("explicit_beams_selfsplit_rest_vv{tag}"), SOLO_REST_ENTRY, base.clone());
         push(format!("explicit_beams_selfsplit_pairs_vv{tag}"), SELF_PAIRS_ENTRY, base);
     }
     out
@@ -439,6 +451,110 @@ pub fn test_modules() -> Vec<TestModule> {
                 d.push(GROUPS);
                 out.push(TestModule { source, name: format!("{prefix}contact{tag}"), entry, defines: d });
             }
+        }
+    }
+    out
+}
+
+/// The surface pass's pipelines of the fast schedules, in dispatch order: (module,
+/// entry). The prep sizes the others' dispatches (`EB_SURF_ARGS`: binding 10, the
+/// surface arguments), each of which runs a thread an element (`EB_SURF_SPREAD`).
+pub const SURF_FAST_PASSES: [(&str, &str); 11] = [
+    ("explicit_surface_prep_args", "explicit_surface_prep"),
+    // The pair path's listing, a thread an element, then its decision, a workgroup a
+    // vehicle (binding 10 as the prep).
+    ("explicit_surface_cull_x", "explicit_surface_cull"),
+    ("explicit_surface_plan", "explicit_surface_plan"),
+    ("explicit_surface_find_tri_x", "explicit_surface_find"),
+    ("explicit_surface_find_seg_x", "explicit_surface_find"),
+    ("explicit_surface_find_point_x", "explicit_surface_find"),
+    ("explicit_surface_find_pair_x", "explicit_surface_find"),
+    ("explicit_surface_apply_tri_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_seg_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_point_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_pair_x", "explicit_surface_apply"),
+];
+
+/// [`SURF_FAST_PASSES`] with their defines, for every host's build.
+pub fn surface_fast_modules() -> Vec<SplitModule> {
+    let mut out = vec![
+        SplitModule {
+            name: SURF_FAST_PASSES[0].0.to_string(),
+            entry: SURF_FAST_PASSES[0].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_ARGS", "1")],
+        },
+        SplitModule {
+            name: SURF_FAST_PASSES[1].0.to_string(),
+            entry: SURF_FAST_PASSES[1].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", "5"), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+        },
+        SplitModule {
+            name: SURF_FAST_PASSES[2].0.to_string(),
+            entry: SURF_FAST_PASSES[2].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", "6"), ("EB_SURF_ARGS", "1")],
+        },
+    ];
+    for (i, kind) in ["1", "2", "3", "4", "1", "2", "3", "4"].into_iter().enumerate() {
+        out.push(SplitModule {
+            name: SURF_FAST_PASSES[3 + i].0.to_string(),
+            entry: SURF_FAST_PASSES[3 + i].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+        });
+    }
+    out
+}
+
+/// A fleet with vehicle contact on the wide passes while the contact plan holds no
+/// group (`slang/kernels/explicit_beams_vvwide.slang`, `EB_VV_WIDE`;
+/// `engine_exec::explicit_plan::vv_wide`): (module, entry) of the gate that sizes the
+/// frame's two schedules on the GPU, and of the node and close passes with the solo
+/// vehicles' frame-bounds check.
+pub const VV_GATE: (&str, &str) = ("explicit_vv_gate", "explicit_vv_gate");
+pub const VV_WIDE_NODES: (&str, &str) = ("explicit_beams_wide_nodes_vv", "explicit_beams_wide_nodes_vv");
+pub const VV_WIDE_CLOSE: (&str, &str) = ("explicit_beams_wide_close_vv", "explicit_beams_wide_close_vv");
+
+/// [`VV_GATE`], [`VV_WIDE_NODES`] and [`VV_WIDE_CLOSE`] with their defines, for every
+/// host's build.
+pub fn vv_wide_modules() -> Vec<SplitModule> {
+    [VV_GATE, VV_WIDE_NODES, VV_WIDE_CLOSE]
+        .into_iter()
+        .map(|(name, entry)| SplitModule { name: name.to_string(), entry, defines: vec![W, ("EB_VV_WIDE", "1")] })
+        .collect()
+}
+
+/// [`surface_fast_modules`] then [`vv_wide_modules`]: the fast schedules' small modules.
+pub fn fast_schedule_modules() -> Vec<SplitModule> {
+    surface_fast_modules().into_iter().chain(vv_wide_modules()).collect()
+}
+
+/// The modules of a fleet with surface contact on the frame modules, split
+/// (`Kernel::FrameSeg`, `Kernel::Surf`): the frame in segments at its four variants
+/// (`EB_FRAME_SEG`), then the surface pass's pipelines (`EB_SURF_PIPE`: the prep, then
+/// per kind its find and its apply). The same list engine-webgpu's build compiles.
+pub fn surface_split_modules() -> Vec<SplitModule> {
+    let mut out = Vec::new();
+    for (name, defines) in [
+        ("explicit_beams_seg", vec![W]),
+        ("explicit_beams_wide_seg", vec![W, L512]),
+        ("explicit_beams_aero_seg", vec![W, L256, AERO]),
+        ("explicit_beams_aero_wide_seg", vec![W, L512, AERO]),
+    ] {
+        let mut defines = defines;
+        defines.push(("EB_FRAME_SEG", "1"));
+        out.push(SplitModule { name: name.to_string(), entry: FRAME_ENTRY, defines });
+    }
+    out.push(SplitModule {
+        name: "explicit_surface_prep".to_string(),
+        entry: "explicit_surface_prep",
+        defines: vec![W, ("EB_SURF_PIPE", "1")],
+    });
+    for (kind, tag) in [("1", "tri"), ("2", "seg"), ("3", "point"), ("4", "pair")] {
+        for (phase, entry) in [("find", "explicit_surface_find"), ("apply", "explicit_surface_apply")] {
+            out.push(SplitModule {
+                name: format!("explicit_surface_{phase}_{tag}"),
+                entry,
+                defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind)],
+            });
         }
     }
     out

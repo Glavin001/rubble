@@ -439,7 +439,7 @@ impl WgpuSim {
             "kernel replay needs timestamp queries (Features::TIMESTAMP_QUERY)"
         );
         anyhow::ensure!(
-            self.pending_commands.is_empty() && self.impulse_queue.is_empty() && !self.terrain_impulses_pending,
+            self.pending_commands.is_empty() && self.impulse_queue.is_empty() && !self.gpu_impulses.pending(),
             "kernel replay runs between steps: host commands or impulses are pending"
         );
         anyhow::ensure!(opts.reps >= 1 && opts.reps <= 256, "reps must be 1..=256");

@@ -3,6 +3,7 @@
 pub mod explicit_plan;
 pub mod rigid_host;
 pub mod rigid_plan;
+pub mod world_portable;
 
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 use serde::{Deserialize, Serialize};

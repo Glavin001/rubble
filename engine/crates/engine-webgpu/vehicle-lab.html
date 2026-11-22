@@ -146,7 +146,7 @@
       </div>
       <div class="mode derby">
         <h2>Demolition derby</h2>
-        <div class="row"><label class="muted" for="derbyCars" title="Cars in the arena (yours and the AI's). Rebuilds the arena in place.">cars</label><select id="derbyCars" data-opt="build"><option>4</option><option>6</option><option>8</option><option>12</option><option>16</option><option>32</option></select>
+        <div class="row"><label class="muted" for="derbyCars" title="Cars in the arena (yours and the AI's). Rebuilds the arena in place.">cars</label><select id="derbyCars" data-opt="build"><option>4</option><option>6</option><option>8</option><option>12</option><option>16</option><option>20</option><option>32</option></select>
           <label title="Car 1 is yours (WASD or arrows, space handbrake). Off: every car is the AI's, and you watch. Applies as it runs."><input type="checkbox" id="derbyPlayer" data-opt="live" checked /> you drive car 1</label>
           <label title="Ramps, two brick walls that break apart, tyre stacks, barrels, crates and concrete blocks. Restarts the round."><input type="checkbox" id="derbyObstacles" data-opt="restart" checked /> obstacles</label></div>
         <div class="row"><span class="muted">AI aggression</span><input type="range" id="aggression" data-opt="live" min="0" max="1" step="0.05" value="0.6" /><b id="aggressionOut"></b></div>
@@ -595,7 +595,7 @@
         // A device the auto detail found short of memory runs SMALL_DEVICE_CARS (the status says so).
         // (The derby: its own cars control, up to 32 cars; no parked car.)
         const derby = mode === 'derby';
-        const asked = derby ? Math.min(32, Math.max(2, Number(get('derbyCars')) || 4)) : Math.min(8, Math.max(1, Math.round(get('cars') || 1)));
+        const asked = derby ? Math.min(32, Math.max(2, Number(get('derbyCars')) || 4)) : Math.min(32, Math.max(1, Math.round(get('cars') || 1)));
         const nCars = smallDevice ? Math.min(derby ? 2 : SMALL_DEVICE_CARS, asked) : asked, n = nCars + (get('parked') && !derby ? 1 : 0);
         // The second car's paint: built when first asked for (kept, like the first).
         while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
