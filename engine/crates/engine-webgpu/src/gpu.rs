@@ -605,6 +605,9 @@ pub struct WgpuSim {
     uniform_cell: Option<(f32, u32)>,
     /// Colliders were added after step 0; see `build_all_bounds`.
     bounds_dirty: bool,
+    /// Bumped on every collider write (add, replace, adopt): renderers rebuild their
+    /// draw groups when it changes (`collider_epoch`).
+    collider_epoch: u64,
     /// Diagnostic GPU timing marks at the plan's phases (`set_marks`, `RUBBLE_GPU_TIMING`).
     marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
     /// The sleep archive's blocks (`enable_sleep_archive`; 0: off).
@@ -1301,6 +1304,7 @@ impl WgpuSim {
             grid_cache: None,
             uniform_cell: None,
             bounds_dirty: false,
+            collider_epoch: 0,
             marks: None,
             sleep_archive_blocks: 0,
             sleep_archive_compact: false,
@@ -1558,6 +1562,7 @@ impl WgpuSim {
     /// Append collider records in one contiguous upload, preserving body indices.
     pub fn add_colliders(&mut self, colliders: &[Collider]) -> std::ops::Range<u32> {
         self.mark_rest_stale();
+        self.collider_epoch += 1;
         self.bounds_dirty |= self.steps_done > 0 && !colliders.is_empty();
         let start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
@@ -1674,6 +1679,7 @@ impl WgpuSim {
         bodies: &[BodyState],
         colliders: &[Collider],
     ) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
+        self.collider_epoch += 1;
         let body_start = self.body_count;
         let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
         assert!(
@@ -1914,6 +1920,7 @@ impl WgpuSim {
     /// Replace the contiguous colliders `first..first + cols.len()` in one upload.
     pub fn set_colliders(&mut self, first: u32, cols: &[Collider]) {
         self.mark_rest_stale();
+        self.collider_epoch += 1;
         let end = first as usize + cols.len();
         assert!(
             end <= self.collider_count as usize,

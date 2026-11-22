@@ -741,6 +741,11 @@ impl World {
 
     /// The MPM substeps the last step ran over the open areas (0: no area
     /// was coupled): every area's frame at the busiest one's CFL bound.
+    /// The terrain's counters as the last polled frame reported them (none before one).
+    pub fn terrain_last_report(&self) -> Option<&TerrainStepReport> {
+        self.last_terrain_report.as_ref()
+    }
+
     pub fn terrain_last_substeps(&self) -> u32 {
         self.terrain.as_ref().map_or(0, |t| t.last_substeps)
     }

@@ -1,6 +1,11 @@
+// @ts-check
 // The pages' physics: rubble's Rust World (engine-world-wasm) on the browser's WebGPU,
 // the same host native and Unreal run. This file only loads it and keeps per-frame
 // bookkeeping the pages share; all physics logic is in Rust.
+//
+// Types: the wasm module's own declarations (generated/world-wasm/*.d.ts, by wasm-bindgen),
+// with the data every binding shares generated from the Rust types (types/rubble-play.d.ts;
+// C reads the same JSON). `npm run typecheck` checks this file against them.
 //
 // Pages need an import map for the wasm's GPU-wait import:
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
@@ -8,7 +13,7 @@ import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer, DrawPacer, setStepsInFlight,
   showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
-  sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
+  sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene, presetList as wasmPresetList,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -24,6 +29,16 @@ import init, {
 export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer, DrawPacer, setStepsInFlight };
 let ready = null;
 
+/**
+ * `world` with the solver's flag bits (`solverFlags()`) as `world.flags`.
+ * @template {object} T
+ * @param {T} world
+ * @returns {T & { flags: Record<string, number> }}
+ */
+function withFlags(world) {
+  return Object.assign(world, { flags: solverFlags() });
+}
+
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */
 export async function worldWasm() {
   ready ??= init();
@@ -36,8 +51,7 @@ export async function createWorld(def = {}) {
   ready ??= init();
   await ready;
   const world = await WebWorld.create(def);
-  world.flags = solverFlags();
-  return world;
+  return withFlags(world);
 }
 
 /**
@@ -45,23 +59,44 @@ export async function createWorld(def = {}) {
  * `sceneFromQuery(family, location.search)` or `presetScene(name)`), its world on its own
  * device with `settings` (`WorldDef` fields, as `createWorld` takes them) over the scene's
  * own; place it with `world.placeScene(def)`.
+ * @param {import('./types/rubble-play').SceneDef} def
+ * @param {object} [settings]
+ * @returns {Promise<WebWorld & { flags: Record<string, number> }>}
  */
 export async function createScene(def, settings = undefined) {
   ready ??= init();
   await ready;
   const world = await WebWorld.createScene(def, settings);
-  world.flags = solverFlags();
-  return world;
+  return withFlags(world);
 }
 
-/** The scene a family's page builds from its URL query (`rubble::play::SceneDef::from_query`). */
+/**
+ * The scene a family's page builds from its URL query (`rubble::play::api::scene_from_query`).
+ * @param {string} family
+ * @param {string} query
+ * @returns {Promise<import('./types/rubble-play').SceneDef>}
+ */
 export async function sceneFromQuery(family, query) {
   ready ??= init();
   await ready;
   return wasmSceneFromQuery(family, query);
 }
 
-/** Preset `name`'s scene (`rubble::play::Preset::scene_def`). */
+/**
+ * Every preset (`rubble::play::api::preset_list`).
+ * @returns {Promise<import('./types/rubble-play').PresetInfo[]>}
+ */
+export async function presetList() {
+  ready ??= init();
+  await ready;
+  return wasmPresetList();
+}
+
+/**
+ * Preset `name`'s scene (`rubble::play::api::preset_scene`).
+ * @param {string} name
+ * @returns {Promise<import('./types/rubble-play').SceneDef>}
+ */
 export async function presetScene(name) {
   ready ??= init();
   await ready;
@@ -79,7 +114,7 @@ export async function createCity(opts, page = {}) {
   await ready;
   const city = new WebCity(opts);
   const world = await WebWorld.createCity(city, page);
-  world.flags = solverFlags();
+  withFlags(world);
   return { city, world };
 }
 
@@ -93,7 +128,7 @@ export async function createVehicleTown(spec, progress) {
   ready ??= init();
   await ready;
   const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) }, progress);
-  world.flags = solverFlags();
+  withFlags(world);
   return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
 }
 
@@ -111,7 +146,7 @@ export async function createShowcase(spec, progress) {
   const { truck, vehicles, ...rest } = spec;
   const layout = showcaseLayout(rest);
   const world = await WebWorld.createShowcase(spec, progress);
-  world.flags = solverFlags();
+  withFlags(world);
   return { world, layout };
 }
 
@@ -126,7 +161,7 @@ export async function createBrickRingDrive(spec, progress) {
   const { vehicles, ...rest } = spec;
   const layout = brickRingLayout(rest);
   const world = await WebWorld.createBrickRingDrive(spec, progress);
-  world.flags = solverFlags();
+  withFlags(world);
   return { world, layout };
 }
 
@@ -139,7 +174,7 @@ export async function createVehicleLab(spec, progress) {
   ready ??= init();
   await ready;
   const [world, lab] = await createVehicleLabWasm(spec, progress);
-  world.flags = solverFlags();
+  withFlags(world);
   return { world, lab, materials: vehicleLabMaterials() };
 }
 

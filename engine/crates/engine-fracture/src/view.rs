@@ -185,9 +185,14 @@ impl Orbit {
         add(self.target, scale([sy * cp, sp, cy * cp], fitted))
     }
 
+    /// The far plane `view_proj` uses.
+    pub fn far(&self) -> f64 {
+        (self.extent * 50.0).max(500.0)
+    }
+
     /// Column-major view-projection (right-handed, depth 0..1).
     pub fn view_proj(&self, aspect: f64) -> [f32; 16] {
-        let (eye, far) = (self.eye(aspect), (self.extent * 50.0).max(500.0));
+        let (eye, far) = (self.eye(aspect), self.far());
         let z = scale(self.forward(aspect), -1.0);
         let x = norm(cross([0.0, 1.0, 0.0], z));
         let y = cross(z, x);

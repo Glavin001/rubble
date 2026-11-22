@@ -42,6 +42,8 @@ echo "==> cargo build -p engine-ffi --release"
 cargo build -p engine-ffi --release
 echo "==> The committed header matches the ABI"
 cargo test -p engine-ffi --release --test header
+echo "==> The scene API: generated TypeScript types current, every operation bound on the web"
+cargo test -p engine-world --release --test api_types
 # The system libraries a host must add when it links the static library.
 NATIVE_LIBS="$(cargo rustc -p engine-ffi --release --lib -- --print native-static-libs 2>&1 \
   | sed -n 's/.*native-static-libs: //p' | tail -n 1)"

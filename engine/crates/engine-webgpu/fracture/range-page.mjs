@@ -18,7 +18,9 @@ import init,{broadside_init,broadside_set_scene,broadside_set_asset,broadside_se
 // of the same Rust does, driven by gpu-wait.mjs (as the lab's stress mode).
 import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
 import {parseFractureGlb,buildScene} from './wasm.mjs';
-import {createRenderer} from './render.mjs';
+// three.js draws the lab (render-three.mjs); ?renderer=slang: the Slang draw shader it
+// replaces (render.mjs), kept for A/B measurements.
+const {createRenderer}=await import(new URLSearchParams(location.search).get('renderer')==='slang'?'./render.mjs':'./render-three.mjs');
 
 export async function rangePage(cfg){
  const $=id=>document.getElementById(id);

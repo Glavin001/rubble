@@ -62,7 +62,7 @@ pub const SCENES: [(&str, &str); 14] = [
 ];
 
 /// A facade block or building core of a street layout.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct LayoutBlock {
     pub p: [f64; 3],
     pub half: [f64; 3],
@@ -70,14 +70,14 @@ pub struct LayoutBlock {
 }
 
 /// A parked car at the kerb.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct LayoutParked {
     pub p: [f64; 3],
     pub yaw: f64,
 }
 
 /// The meteor run's meteors.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct LayoutMeteor {
     pub count: u32,
     pub radius: f64,
@@ -89,7 +89,7 @@ pub struct LayoutMeteor {
 ///
 /// A street (the gauntlet's, the meteor run's): engine-vehicle-wasm `gauntlet::Layout`,
 /// and the run's finish line and meteors.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct StreetLayout {
     pub spawn: [f64; 3],
     pub blocks: Vec<LayoutBlock>,
@@ -102,7 +102,7 @@ pub struct StreetLayout {
 }
 
 /// A target pad of the meteor range.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct RangePad {
     pub p: [f64; 3],
     pub half: [f64; 3],
@@ -110,7 +110,7 @@ pub struct RangePad {
 }
 
 /// The meteor range (engine-vehicle-wasm `MeteorRange::range`).
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 pub struct RangeLayout {
     pub pads: Vec<RangePad>,
     pub radius: f64,
@@ -185,7 +185,7 @@ impl RangeLayout {
 }
 
 /// A vehicle scene: the scene and the page's switches.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VehicleSceneDef {
     pub scene: String,
@@ -215,6 +215,14 @@ pub struct VehicleSceneDef {
     pub street: Option<StreetLayout>,
     /// The meteor range's pads and meteors.
     pub range: Option<RangeLayout>,
+    /// Directed debris on (`?guide=0`: off) and its strength (`?strength=` 0, 1, 2 as
+    /// the page's menu reads it; default 1).
+    pub guide: bool,
+    pub guide_strength: u32,
+    /// The range's carts move (`?targets=moving`); steering knows their routes
+    /// (`?routes=0`: not).
+    pub targets_moving: bool,
+    pub routes: bool,
 }
 
 impl Default for VehicleSceneDef {
@@ -234,6 +242,10 @@ impl Default for VehicleSceneDef {
             cannon_ccd: true,
             street: None,
             range: None,
+            guide: true,
+            guide_strength: 1,
+            targets_moving: false,
+            routes: true,
         }
     }
 }

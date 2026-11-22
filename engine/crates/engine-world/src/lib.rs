@@ -20,6 +20,7 @@
 
 mod assembly;
 mod blast;
+mod body_read;
 /// The large-maps benchmark city: one builder for the native benchmark and `city.html`.
 #[cfg(feature = "stress")]
 pub mod city;
@@ -52,6 +53,7 @@ mod math;
 mod motion;
 mod queries;
 mod readback;
+mod render_manifest;
 mod rig;
 mod snapshot_import;
 mod support_loss;
@@ -62,6 +64,7 @@ pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
     PartRef, VehicleBuild, VehicleDef, VehicleModel,
 };
+pub use body_read::{BodyRead, BodyRecordRead};
 pub use blast::{
     BlastDef, ChunkBlastLoad, LoadCause, RadialImpulse, BLAST_CAP, MIN_SCALED_DISTANCE,
 };
@@ -110,6 +113,7 @@ pub use motion::{
 };
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
+pub use render_manifest::{RenderGroup, RenderManifest, RenderPlane, RenderTag};
 pub use rig::{SoftBeam, VehicleDamage};
 pub use snapshot_import::SnapshotImport;
 pub use terrain::{
@@ -127,6 +131,9 @@ pub use engine_schema::{
 pub use engine_softbody::{
     SoftCapacity, SoftDamage, SoftHandle, SoftSettings, SoftVehicleDesc, SpawnOptions,
 };
+/// The rim material a wheel's collider carries (renderers skip it: the wheel is drawn
+/// from the vehicle pool).
+pub use engine_vehicle::pack::WHEEL_RIM_MATERIAL;
 pub use engine_vehicle::{
     FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle,
     VehicleInput, VehicleState, WheelState,
@@ -487,6 +494,9 @@ pub struct World {
     sim: WgpuSim,
     pose_exports: Option<PoseExports>,
     hulls: HullArena,
+    /// Bumped by edits a renderer's draw groups depend on beyond collider records
+    /// (heightfield heights and soil): see `render_version`.
+    render_epoch: u64,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
     /// Bodies that may carry damping or a gravity scale (`push_damping` walks these,
@@ -556,6 +566,8 @@ pub struct World {
     /// Bodies found outside `kill_bounds` while frames were built, destroyed at
     /// the end of that poll: `(handle, position)`.
     leaving: Vec<(BodyId, [f32; 3])>,
+    /// The terrain's counters as the last polled frame reported them.
+    last_terrain_report: Option<engine_webgpu::TerrainStepReport>,
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
@@ -645,6 +657,7 @@ impl World {
             sim,
             pose_exports: None,
             hulls: HullArena::new(),
+            render_epoch: 0,
             bodies: Vec::new(),
             free_bodies: Vec::new(),
             tuned: std::collections::BTreeSet::new(),
@@ -679,6 +692,7 @@ impl World {
             sleep_archive_rows: def.sleep_archive_rows,
             kill_bounds: def.kill_bounds,
             leaving: Vec::new(),
+            last_terrain_report: None,
             contact_storage: contacts,
             motion: Default::default(),
             resync: false,
@@ -1553,6 +1567,7 @@ impl World {
             .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
         // The collider's filter bits live in `generation`: keep them.
         self.shapes[s].geometry = Geometry::HeightField { field, transform };
+        self.render_epoch += 1;
         self.dirty = true;
         Ok(())
     }
@@ -1654,6 +1669,7 @@ impl World {
         // The old block is freed once no step in flight can read it.
         self.retired_height_fields.push((old, self.step));
         self.shapes[s].geometry = Geometry::HeightField { field, transform };
+        self.render_epoch += 1;
         self.dirty = true;
         Ok(())
     }
@@ -3001,7 +3017,11 @@ impl World {
                         s.face_strain = xyzw(bytes).map(|v| v[3]).collect();
                     }
                 }
-                Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
+                Extra::TerrainCounters => {
+                    let r = self.terrain_counters(step, bytes)?;
+                    self.last_terrain_report = Some(r.clone());
+                    terrain = Some(r)
+                }
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
                 Extra::TerrainWatch => self.terrain_strike(step, bytes),
                 Extra::ExplicitSleep => {

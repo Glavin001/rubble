@@ -37,3 +37,16 @@ fn every_export_is_in_the_header() {
         .collect();
     assert!(missing.is_empty(), "not in rubble.h: {missing:?}");
 }
+
+/// Every scene operation (`rubble::play::api::HOST_API`) has its C function in the header,
+/// by the name the list gives, as the web module has its method.
+#[test]
+fn every_scene_operation_is_in_the_header() {
+    let header = include_str!("../include/rubble.h");
+    let missing: Vec<&str> = rubble::play::api::HOST_API
+        .iter()
+        .map(|op| op.c)
+        .filter(|c| !header.contains(&format!(" {c}(")))
+        .collect();
+    assert!(missing.is_empty(), "scene operations missing from rubble.h: {missing:?}");
+}
