@@ -38,6 +38,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_SASS");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_LOAD_CACHE");
+    println!("cargo:rerun-if-env-changed=ENGINE_CUDA_FMAD");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_REQUIRE_PTX");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_EXPLICIT_MODULES");
 
@@ -100,6 +101,13 @@ fn main() -> Result<()> {
                                     hazards.join("\n  ")
                                 );
                             }
+                            // A second entry for indirect dispatches, the workgroup counts
+                            // read on the GPU (`{entry}_gs`, grid_stride_entry): CudaSim
+                            // launches it without waiting for the stream.
+                            std::fs::write(
+                                &cu,
+                                engine_slang_build::cuda_layout::grid_stride_entry(&source, entry)?,
+                            )?;
                             if let Some(nvcc) = &nvcc {
                                 fatbin(nvcc, &cu, &cu.with_extension("fatbin"), &arch, &sass)?;
                             }
@@ -179,13 +187,29 @@ fn explicit_kernels(
     root: &std::path::Path,
     out_dir: &std::path::Path,
 ) -> Result<()> {
-    use engine_exec::explicit_plan::MODULES;
+    use engine_exec::explicit_plan::{split_modules, MODULES};
     use engine_slang_build::cuda_layout::compile_kernel_with_defines;
     use engine_slang_build::msl_layout::vk_binding_slots;
+    // The plan's modules and the split paths' (one list for every host's build).
+    let modules: Vec<(String, &str, Vec<(&str, &str)>)> = MODULES
+        .iter()
+        .map(|m| (m.name.to_string(), m.entry, m.defines.to_vec()))
+        .chain(split_modules().into_iter().map(|m| (m.name, m.entry, m.defines)))
+        .collect();
     let dir = out_dir.join("cuda_explicit");
     std::fs::create_dir_all(&dir)?;
     let source = root.join("kernels/explicit_beams.slang");
-    let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+    // The bindings of the solver and of the split paths' files it includes (the fleet's
+    // second arguments, gArgs2 at binding 11, are declared in explicit_beams_fleet.slang).
+    let slots = vk_binding_slots(
+        &std::fs::read_dir(root.join("kernels"))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                n.starts_with("explicit_beams") && n.ends_with(".slang") && !n.contains("baseline") && !n.contains("_ref")
+            })
+            .collect::<Vec<_>>(),
+    )?;
     // `ENGINE_CUDA_EXPLICIT_MODULES=a,b*,...`: device code only for the modules named (a
     // trailing `*` is a prefix). nvcc takes minutes per explicit module, and a scenario
     // needs a handful; CI builds the ones its tests load (ci_explicit_modules.txt). Every
@@ -204,17 +228,17 @@ fn explicit_kernels(
             })
         })
     };
-    let compiled = engine_slang_build::par_map(MODULES, |m| -> Compiled {
+    let compiled = engine_slang_build::par_map(&modules, |(name, entry, defines)| -> Compiled {
         // Every module is generated and checked; only the device code is filtered.
-        let cu = dir.join(format!("{}.cu", m.name));
-        let kernel = compile_kernel_with_defines(slangc, root, &source, m.entry, &cu, m.defines)?;
+        let cu = dir.join(format!("{name}.cu"));
+        let kernel = compile_kernel_with_defines(slangc, root, &source, entry, &cu, defines)?;
         let text = std::fs::read_to_string(&cu)?;
         let hazards = deferred_load_hazards(&text);
         if !hazards.is_empty() {
             anyhow::bail!(
                 "{}: Slang's CUDA output reads a buffer element after storing to it \
                  (use the value before the store in the .slang source):\n  {}",
-                m.name,
+                name,
                 hazards.join("\n  ")
             );
         }
@@ -225,9 +249,12 @@ fn explicit_kernels(
         anyhow::ensure!(
             code.contains("ebLoopCapHit") || code.contains("ebLoopHit") || only_constant_loops(code),
             "{}: the CUDA source has no loop caps (explicit_loop_cap.slang)",
-            m.name
+            name
         );
-        let nvcc = nvcc.filter(|_| wanted(m.name));
+        // A second entry for indirect dispatches, the workgroup counts read on the GPU
+        // (`{entry}_gs`, grid_stride_entry): the host launches it without waiting.
+        std::fs::write(&cu, engine_slang_build::cuda_layout::grid_stride_entry(&text, entry)?)?;
+        let nvcc = nvcc.filter(|_| wanted(name));
         if let Some(nvcc) = nvcc {
             let threads = kernel.threads.iter().product();
             engine_slang_build::cuda_layout::fatbin_threads(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass, threads)?;
@@ -238,21 +265,21 @@ fn explicit_kernels(
         "/// Explicit-beams modules: plan module, entry, CUDA source bytes, fatbin, threads, globals.\n\
          pub static CUDA_EXPLICIT_KERNELS: &[ExplicitCudaKernel] = &[\n",
     );
-    for (m, r) in MODULES.iter().zip(compiled) {
+    for ((name, entry, _), r) in modules.iter().zip(compiled) {
         let (kernel, cu_bytes, has_image, _) = r?;
         let mut binds = String::new();
         let mut params_bytes = 0;
         for f in &kernel.fields {
             let slot = slots
                 .get(&f.name)
-                .ok_or_else(|| anyhow!("{}: global {} has no vk::binding", m.name, f.name))?;
+                .ok_or_else(|| anyhow!("{}: global {} has no vk::binding", name, f.name))?;
             write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
             params_bytes = params_bytes.max(f.offset + f.size);
         }
         let image = if has_image {
             format!(
                 "include_bytes!({:?})",
-                dir.join(format!("{}.fatbin", m.name)).display().to_string()
+                dir.join(format!("{name}.fatbin")).display().to_string()
             )
         } else {
             "&[]".into()
@@ -260,7 +287,7 @@ fn explicit_kernels(
         writeln!(
             table,
             "    ExplicitCudaKernel {{ name: {:?}, entry: {:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, binds: &[{binds}] }},",
-            m.name, m.entry, kernel.threads
+            name, entry, kernel.threads
         )?;
     }
     table.push_str("];\n");

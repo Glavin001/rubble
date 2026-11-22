@@ -314,6 +314,20 @@ fn cudasim_columns_10k_stay_stable_with_sleep_disabled() {
 }
 
 #[test]
+fn cudasim_columns_25k_hold_height() {
+    if gpu() {
+        columns_hold(50, true);
+    }
+}
+
+#[test]
+fn cudasim_columns_100k_hold_height() {
+    if gpu() {
+        columns_hold(100, true);
+    }
+}
+
+#[test]
 fn cudasim_columns_100k_stay_stable_with_sleep_disabled() {
     if gpu() {
         columns_hold(100, false);
@@ -347,6 +361,72 @@ fn cudasim_pipelined_matches_waiting() {
     }
 }
 
+/// Indirect commands with their counts read on the GPU (`{entry}_gs`, the default)
+/// against the host reading them back: the same columns stepped both ways. Every word
+/// of the bodies, counters, colouring and indirect slots is equal at each checkpoint
+/// (lossless, not within a tolerance). The append-ordered stores ([`ORDERED`]) are
+/// filled in atomic order, which CUDA does not repeat run to run: they differ between
+/// two runs of the readback path as much as between the paths (measured 2026-11-21, T4),
+/// so they are compared only as the control does, and printed.
+#[test]
+fn cudasim_device_indirect_matches_readback() {
+    /// Contacts, AABBs, candidates, awake list, constraint ids, manifolds, solver
+    /// points and pairs: rows appended by atomic counters.
+    const ORDERED: [usize; 8] = [4, 9, 10, 11, 14, 25, 27, 28];
+    if !gpu() {
+        return;
+    }
+    // Bindings that differ between two sims: (binding, first word, words differing).
+    fn diff(a: &mut CudaSim, b: &mut CudaSim) -> Vec<(usize, usize, usize)> {
+        let mut out = Vec::new();
+        for slot in 0..engine_exec::rigid_plan::BIND_COUNT {
+            let words = a.binding_words(slot);
+            let (x, y) = (a.download_words(slot, words), b.download_words(slot, words));
+            let n = x.iter().zip(&y).filter(|(p, q)| p != q).count();
+            if n > 0 {
+                out.push((slot, x.iter().zip(&y).position(|(p, q)| p != q).unwrap(), n));
+            }
+        }
+        out
+    }
+    let mut bad = Vec::new();
+    for (n, steps) in [(8u32, 120u32), (32, 90), (100, 30)] {
+        let (mut dev, _) = columns(n, false);
+        let (mut host, _) = columns(n, false);
+        // Control: the readback path against itself (what CUDA repeats run to run).
+        let (mut host2, _) = columns(n, false);
+        assert!(dev.device_indirect(), "device-side indirect is the default");
+        host.set_device_indirect(false);
+        host2.set_device_indirect(false);
+        for step in 1..=steps {
+            dev.step().expect("device-indirect step");
+            host.step().expect("readback step");
+            host2.step().expect("readback step");
+            if step % 30 != 0 && step != steps {
+                continue;
+            }
+            let (ab, control) = (diff(&mut dev, &mut host), diff(&mut host2, &mut host));
+            eprintln!(
+                "{} bodies, step {step}: device vs readback {ab:?}; readback vs readback {control:?}",
+                n * n * 10
+            );
+            let state = |d: &[(usize, usize, usize)]| -> Vec<(usize, usize, usize)> {
+                d.iter().copied().filter(|x| !ORDERED.contains(&x.0)).collect()
+            };
+            if !state(&ab).is_empty() || !state(&control).is_empty() {
+                bad.push((n, step, ab, control));
+            }
+        }
+        assert_eq!(dev.indirect_syncs, 0, "device-side indirect read binding 23 back");
+        eprintln!(
+            "{} bodies, {steps} steps: readback path waited {:.1} times a step",
+            n * n * 10,
+            host.indirect_syncs as f64 / f64::from(steps)
+        );
+    }
+    assert!(bad.is_empty(), "state bindings differ: {bad:?}");
+}
+
 /// Steady-state step time on the 10k-body columns with sleep off (every body
 /// awake), as one JSON line (`ENGINE_CUDA_PERF=1`).
 #[test]
@@ -354,7 +434,19 @@ fn cudasim_perf_columns_10k() {
     if std::env::var("ENGINE_CUDA_PERF").as_deref() != Ok("1") || !gpu() {
         return;
     }
-    let (mut sim, _) = columns(32, false);
+    // Both indirect paths, interleaved, three rounds at 10k and two at 100k.
+    for (n, rounds) in [(32, 3), (100, 2)] {
+        for _ in 0..rounds {
+            for device_indirect in [false, true] {
+                perf_columns(n, device_indirect);
+            }
+        }
+    }
+}
+
+fn perf_columns(n: u32, device_indirect: bool) {
+    let (mut sim, _) = columns(n, false);
+    sim.set_device_indirect(device_indirect);
     for _ in 0..30 {
         sim.step().expect("warm-up step");
     }
@@ -371,7 +463,9 @@ fn cudasim_perf_columns_10k() {
         .map(|(n, ms)| format!("\"{n}\":{ms:.4}"))
         .collect();
     println!(
-        "{{\"engine\":\"rubble-cuda\",\"scene\":\"columns_10k_awake\",\"device\":{:?},\"bodies\":{},\"steps\":{steps},\"wall_ms_per_step\":{wall_ms:.4},\"indirect_syncs_per_step\":{:.1},\"contacts\":{},\"colors\":{},\"phase_ms\":{{{}}}}}",
+        "{{\"engine\":\"rubble-cuda\",\"scene\":\"columns_{}_awake\",\"indirect\":\"{}\",\"device\":{:?},\"bodies\":{},\"steps\":{steps},\"wall_ms_per_step\":{wall_ms:.4},\"indirect_syncs_per_step\":{:.1},\"contacts\":{},\"colors\":{},\"phase_ms\":{{{}}}}}",
+        if n == 32 { "10k" } else { "100k" },
+        if device_indirect { "device" } else { "readback" },
         sim.device_name(),
         c.body_count,
         (sim.indirect_syncs - syncs0) as f64 / f64::from(steps),

@@ -14,7 +14,12 @@
 # Options:
 #   --gpu T4|L4|L40S     GPU (default T4; L40S only for a reason, ~3x the price)
 #   --cpus N             CPU cores for the container (default 8: the driver compiles
-#                        pipelines on the CPU, one core each, several at once)
+#                        pipelines on the CPU, one core each, several at once; 1 for
+#                        --matrix-cuda, where nothing compiles; may be fractional)
+#   --mem GIB            memory for the container (default 8; 2 for --matrix-cuda)
+#   --pack N             matrix: the rows in N containers, in turn within each
+#                        (default: one per row; 1 for --matrix-cuda, which bills one
+#                        container start instead of twelve)
 #   --allow-cold-compile run even when this kernel version is new on the host's
 #                        driver (minutes of compiling; without it the run stops
 #                        at once with the estimate, exit 3)
@@ -36,20 +41,37 @@
 #                        ~/Development/rubble-artifacts/sedan-live/mods/sedan_new);
 #                        shipped when an argument says @sedan, which becomes its
 #                        path in the container (/scenarios/sedan_new)
+#   --fanout             one container per executable of the selection (each test
+#                        binary), all at once; one summary and exit code
+#   --fanout-tests       one container per test (names listed at build time), all
+#                        at once: the shortest wall time for a suite
+#   --matrix-cuda        the same on CUDA: engine-cuda's explicit_replay from each row's
+#                        portable fixture (engine/out/scenario-matrix/portable/ROW.pfx,
+#                        matrix.py --make-portable); the modules the fixtures need only
+#   --matrix             the scenario matrix, one container per row (what
+#                        tools/scenario-matrix/run.sh calls): the arguments after
+#                        `--` are matrix.py's (SWITCH | --baseline | --make, rows)
+#   --base REF           --matrix-cuda: also build explicit_replay from commit REF
+#                        (build_ref.sh, cached by commit) and ship it as the base of
+#                        matrix.py --two-builds (BASE_BIN)
+#   --head REF           the same for the head (default: the working tree's build)
 #   --build-only         build and pack, do not call Modal
 #   --keep               keep the run directory (engine/target/gpu-run/<id>)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 
-gpu=T4 cpus=8 allow_cold=0 warm=1 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
+gpu=T4 cpus="" mem="" pack="" allow_cold=0 warm=1 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
+fanout=""
 sedan="$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new"
-envs=() variants=() data=()
+envs=() variants=() data=() pack_opts=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) gpu="$2"; shift 2 ;;
     --timeout) cap="$2"; shift 2 ;;
     --cpus) cpus="$2"; shift 2 ;;
+    --mem) mem="$2"; shift 2 ;;
+    --pack) pack="$2"; shift 2 ;;
     --allow-cold-compile) allow_cold=1; shift ;;
     --no-warm) warm=0; shift ;;
     --queue) queue="$2"; shift 2 ;;
@@ -63,12 +85,67 @@ while [ $# -gt 0 ]; do
     --sedan) sedan="$2"; shift 2 ;;
     --build-only) build_only=1; shift ;;
     --keep) keep=1; shift ;;
+    --fanout) fanout=exe; shift ;;
+    --fanout-tests) fanout=tests; pack_opts=(--list-tests); shift ;;
+    --matrix) fanout=matrix; shift ;;
+    --matrix-cuda) fanout=matrix; matrix_cuda=1; shift ;;
+    --base) base_ref="$2"; shift 2 ;;
+    --head) head_ref="$2"; shift 2 ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
     *) echo "gpu_run: unknown option $1 (the cargo selection goes after --)" >&2; exit 2 ;;
   esac
 done
+# The CUDA matrix only runs a binary (no driver compile): one container, one core, 2 GiB.
+# Measured 2026-11-21 (T4, 12 rows, perf=0): 12 containers with 8 cores and 8 GiB billed
+# 58 s ($0.0167); one container with 1 core and 2 GiB 26 s ($0.0048), wall 29 s.
+if [ -n "${matrix_cuda:-}" ]; then
+  # COUNTERS=1: Nsight Compute replays every launch, saving and restoring the GPU's memory
+  # on the CPU. On 1 core the GPU sat at 0-1 % and two rows passed the 600 s cap
+  # (2026-11-21): 8 cores, 8 GiB and the 1800 s cap.
+  if [ "${COUNTERS:-}" = 1 ]; then
+    : "${cpus:=8}" "${mem:=8}"
+    [ "$cap" = 600 ] && cap=1800
+  fi
+  : "${cpus:=1}" "${mem:=2}" "${pack:=1}"
+fi
+: "${cpus:=8}" "${mem:=8}" "${pack:=0}"
 [ $# -gt 0 ] || { echo "gpu_run: nothing to run; see --help" >&2; exit 2; }
+
+# The scenario matrix: its own selection (the lab), data (matrix.py and the scenes),
+# car and knobs; the arguments are matrix.py's. Its rows are picked here (matrix.py
+# --rows) and each runs in a container of its own.
+matrix_args=() matrix_rows=()
+if [ "$fanout" = matrix ]; then
+  matrix_args=("$@")
+  matrix_py="$repo/engine/tools/scenario-matrix/matrix.py"
+  rows_out="$(python3 "$matrix_py" --rows "$@")" || exit 2
+  # shellcheck disable=SC2206
+  matrix_rows=($rows_out)
+  data+=(--data engine/tools/scenario-matrix)
+  if [ -n "${CAR:-}" ]; then sedan="$CAR"; fi
+  envs+=("CAR=@sedan")
+  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP; do
+    v="$(printenv "$k" || true)"
+    if [ -n "$v" ]; then envs+=("$k=$v"); fi
+  done
+  mkdir -p "$repo/engine/out/scenario-matrix"
+  if [ -n "${matrix_cuda:-}" ]; then
+    envs+=("MATRIX_CUDA=1")
+    # The device code the rows' fixtures may launch (their layouts' modules, listed by
+    # explicit_replay --modules on this machine: no device needed), unless given.
+    if [ -z "${ENGINE_CUDA_EXPLICIT_MODULES:-}" ]; then
+      pfx=()
+      for r in "${matrix_rows[@]}"; do pfx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx"); done
+      ENGINE_CUDA_EXPLICIT_MODULES="$(cd "$repo/engine" && ENGINE_CUDA_EXPLICIT_MODULES=none cargo run -q --profile fast -p engine-cuda --example explicit_replay -- --modules "${pfx[@]}")" || {
+        echo "gpu_run: --matrix-cuda: no portable fixtures for the rows (matrix.py --make-portable)" >&2; exit 2; }
+      export ENGINE_CUDA_EXPLICIT_MODULES
+    fi
+    set -- -p engine-cuda --example explicit_replay
+  else
+    set -- -p engine-world --example vehicle_lab
+  fi
+fi
 case "$gpu" in T4|L4|L40S) ;; *) echo "gpu_run: --gpu must be T4, L4 or L40S" >&2; exit 2 ;; esac
 case "$cap" in ''|*[!0-9]*) echo "gpu_run: --timeout takes seconds" >&2; exit 2 ;; esac
 if [ "$cap" -lt 30 ] || [ "$cap" -gt 1800 ]; then echo "gpu_run: --timeout must be 30..1800 s" >&2; exit 2; fi
@@ -111,14 +188,32 @@ fi
 # Build: x86_64 Ubuntu 22.04 (the CUDA build image: Rust + slangc), cargo's target in a
 # volume of this worktree's own (two worktrees share /repo as their path inside the
 # container, so a shared target dir could take one's stale outputs for the other's).
-image=rubble-cuda-build:slang-2026.19-cuda-12.8
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-  echo "gpu_run: building $image (once; a few minutes)" >&2
-  docker build --platform linux/amd64 -q -t "$image" "$repo/engine/tools/cuda" >/dev/null
-fi
+#
+# On Apple silicon the build runs natively: an arm64 Linux image cross-compiling to
+# x86_64 (engine/tools/modal/build), about 3x faster than the x86_64 image under Rosetta
+# (vehicle_lab from empty: 112 s vs 328 s). The CUDA route too: rustc and slangc native,
+# nvcc the x86_64 image's own toolkit through Rosetta, so the device code is the x86_64
+# build's (README, "Build speed"); GPU_RUN_X86=1 builds in the x86_64 image instead.
 wt_key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
+cuda_route=0
+case " $* " in *" engine-cuda "*|*" -p engine-cuda"*) cuda_route=1 ;; esac
+if [ "$(uname -m)" = arm64 ] && [ "${GPU_RUN_X86:-0}" != 1 ]; then
+  platform=linux/arm64
+  image="rubble-gpurun-build:arm64-$(shasum -a 256 "$here/build/Dockerfile" | cut -c1-12)"
+  image_dir="$here/build"
+  target_vol="rubble-gpurun-arm-target-$wt_key"
+else
+  platform=linux/amd64
+  image=rubble-cuda-build:slang-2026.19-cuda-12.8
+  image_dir="$repo/engine/tools/cuda"
+  target_vol="rubble-gpurun-target-$wt_key"
+fi
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  echo "gpu_run: building $image (once; a minute or a few)" >&2
+  docker build --platform "$platform" -q -t "$image" "$image_dir" >/dev/null
+fi
 t0=$(date +%s)
-echo "gpu_run: building in Docker (target volume rubble-gpurun-target-$wt_key)" >&2
+echo "gpu_run: building in Docker ($platform, target volume $target_vol)" >&2
 # ENGINE_* variables reach the build (engine-cuda: ENGINE_CUDA_EXPLICIT_MODULES,
 # ENGINE_CUDA_SASS, ...). The CUDA route embeds SASS for the GPU it runs on only.
 case " $* " in *" engine-cuda "*|*" -p engine-cuda"*)
@@ -126,18 +221,55 @@ case " $* " in *" engine-cuda "*|*" -p engine-cuda"*)
     if [ "$gpu" = T4 ]; then export ENGINE_CUDA_SASS=75; else export ENGINE_CUDA_SASS=89; fi
   fi ;;
 esac
+# The two-build A/B: the base's (and --head's) explicit_replay built from their commits,
+# shipped beside the selection (gpu_run.py gives them to matrix.py as BASE_BIN, HEAD_BIN).
+if [ -n "${base_ref:-}${head_ref:-}" ]; then
+  [ -n "${matrix_cuda:-}" ] || { echo "gpu_run: --base/--head are for --matrix-cuda" >&2; exit 2; }
+  [ -n "${base_ref:-}" ] || { echo "gpu_run: --head needs --base" >&2; exit 2; }
+  # Every row's fixture, in the matrix's order, whichever rows run: the library's key
+  # covers the fixtures, so a build serves any selection of rows.
+  fx=()
+  for r in $(python3 "$matrix_py" --rows --two-builds); do
+    [ -f "$repo/engine/out/scenario-matrix/portable/$r.pfx" ] && fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx")
+  done
+  "$here/build_ref.sh" "$base_ref" "$run/refs/base_replay" "${fx[@]}"
+  pack_opts+=(--exe base_replay=/out/refs/base_replay)
+  if [ -n "${head_ref:-}" ]; then
+    "$here/build_ref.sh" "$head_ref" "$run/refs/head_replay" "${fx[@]}"
+    pack_opts+=(--exe head_replay=/out/refs/head_replay)
+  fi
+fi
 build_env=()
 while IFS='=' read -r k _; do
   case "$k" in ENGINE_*) build_env+=(-e "$k") ;; esac
 done < <(env)
-docker run --rm --platform linux/amd64 ${build_env[@]+"${build_env[@]}"} \
+# Native builds use every core (the OS shares them with whatever else runs); the
+# emulated one keeps its old default.
+if [ "$platform" = linux/arm64 ]; then jobs_default=$(sysctl -n hw.ncpu 2>/dev/null || echo 8); rjobs_default=8
+# (The CUDA route's build script runs nvcc a module a job: a kernel edit of the parity
+# tests' 21 modules took 301 s at 4 jobs, 222 s at 8 and 211 s at 12, peak 6-7 GB, on a
+# 16-core M3 Max with Docker given 16 cores and 25 GB; 2026-11-19.)
+else jobs_default=6; rjobs_default=12; fi
+# The CUDA route keeps nvcc's fatbins (ENGINE_CUDA_FATBIN_CACHE) and slangc's outputs
+# (RUBBLE_SLANG_OBJ_CACHE) by content in a volume every worktree and every build_ref.sh
+# commit shares: a module whose CUDA source and flags were compiled before is copied, not
+# compiled (the rigid and terrain kernels after an explicit-beams edit, the modules an
+# edit did not reach, a commit's unchanged ones, an edit undone).
+cuda_cache=()
+if [ "$cuda_route" = 1 ]; then
+  cuda_cache=(-v rubble-cuda-kernels:/cache/kernels -v "$here/fatbin_cache.py:/opt/rubble/fatbin_cache.py:ro"
+    -e ENGINE_CUDA_FATBIN_CACHE=/cache/kernels/fatbins -e RUBBLE_SLANG_OBJ_CACHE=/cache/kernels/slang
+    -e ENGINE_CUDA_REQUIRE_PTX=1)
+fi
+docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_cache[@]+"${cuda_cache[@]}"} \
   -v "$repo:/repo" \
   -v "$run:/out" \
   -v rubble-cuda-cargo:/cache/cargo \
-  -v "rubble-gpurun-target-$wt_key:/cache/target" \
+  -v "$target_vol:/cache/target" \
   -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
-  -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-4}" \
-  "$image" python3 /repo/engine/tools/modal/gpu_run_pack.py /out ${data[@]+"${data[@]}"} -- "${args[@]}"
+  -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$jobs_default}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-$rjobs_default}" \
+  "$image" bash -c 'if [ -n "${ENGINE_CUDA_FATBIN_CACHE:-}" ]; then python3 /opt/rubble/fatbin_cache.py "$ENGINE_CUDA_FATBIN_CACHE"; python3 /opt/rubble/fatbin_cache.py "$RUBBLE_SLANG_OBJ_CACHE" --max-gib 4; fi
+    exec python3 /repo/engine/tools/modal/gpu_run_pack.py "$@"' gpu_run_pack /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
 t1=$(date +%s)
 echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
 rm -rf "$run/stage"
@@ -148,11 +280,14 @@ if [ "$build_only" = 1 ]; then
 fi
 
 # The run's spec (JSON) for gpu_run.py.
-python3 - "$run/spec.json" "$gpu" "$cap" "$repeat" "$timing" "$monitor" "$queue" "$shader_cache" "$id" "$cpus" "$allow_cold" "$warm" \
+python3 - "$run/spec.json" "$gpu" "$cap" "$repeat" "$timing" "$monitor" "$queue" "$shader_cache" "$id" "$cpus" "$allow_cold" "$warm" "$mem" "$pack" \
+  "$fanout" "${#matrix_args[@]}" ${matrix_args[@]+"${matrix_args[@]}"} "${#matrix_rows[@]}" ${matrix_rows[@]+"${matrix_rows[@]}"} \
   "${#envs[@]}" ${envs[@]+"${envs[@]}"} ${variants[@]+"${variants[@]}"} <<'PY'
 import json, sys
-out, gpu, cap, repeat, timing, monitor, queue, shader_cache, run_id, cpus, allow_cold, warm, n, *rest = sys.argv[1:]
-n = int(n)
+out, gpu, cap, repeat, timing, monitor, queue, shader_cache, run_id, cpus, allow_cold, warm, mem, pack, fanout, *rest = sys.argv[1:]
+na = int(rest.pop(0)); matrix_args, rest = rest[:na], rest[na:]
+nr = int(rest.pop(0)); matrix_rows, rest = rest[:nr], rest[nr:]
+n = int(rest.pop(0))
 def kv(spec):
     # K=V,K2=V2; a comma part without `=` belongs to the value before it (EV_AB_MASKS=1,2).
     parts = []
@@ -178,9 +313,10 @@ for v in rest[n:]:
         raise SystemExit(f"gpu_run: --variant {v!r} is not NAME:K=V,...")
     variants.append({"name": name, "env": kv(spec)})
 json.dump({"gpu": gpu, "cap": int(cap), "repeat": int(repeat), "timing": timing == "1", "monitor": int(monitor), "queue": int(queue),
-           "shader_cache": shader_cache == "1", "id": run_id, "cpus": int(cpus),
+           "shader_cache": shader_cache == "1", "id": run_id, "cpus": float(cpus), "mem": float(mem), "pack": int(pack),
            "allow_cold": allow_cold == "1", "warm": warm == "1",
-           "env": env, "variants": variants}, open(out, "w"))
+           "env": env, "variants": variants,
+           "fanout": fanout, "matrix_args": matrix_args, "matrix_rows": matrix_rows}, open(out, "w"))
 PY
 
 # The Modal CLI in Docker with only this run's directory and the runner script
@@ -203,11 +339,21 @@ stop_cli() {
     docker rm -f "$cli_name" >/dev/null 2>&1 || true
   fi
 }
+# Heartbeat for the Modal client (gpu_run.py's watcher): touched while this shell
+# lives; the loop ends with it, even when the shell is SIGKILLed (no trap runs then),
+# and the client then stops its app and containers within about a minute.
+touch "$run/heartbeat"
+( while kill -0 $$ 2>/dev/null; do touch "$run/heartbeat" 2>/dev/null; sleep 5; done ) &
 trap 'stop_cli; cleanup' EXIT
 trap 'exit 130' INT TERM
+# The matrix's saved states (read to upload by hash; --make writes the new ones back).
+states_mount=()
+if [ "$fanout" = matrix ]; then
+  states_mount=(-v "$repo/engine/out/scenario-matrix:/run-dir/states")
+fi
 set +e
 docker run --rm --name "$cli_name" \
-  -v "$run:/run-dir" \
+  -v "$run:/run-dir" ${states_mount[@]+"${states_mount[@]}"} \
   -v "$here/gpu_run.py:/app/gpu_run.py:ro" \
   -v rubble-modal-config:/config:ro \
   -e MODAL_CONFIG_PATH=/config/modal.toml \

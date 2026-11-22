@@ -46,7 +46,7 @@ pub const WHEEL_RECS: u32 = 23;
 pub const TYRE_PRE_RECS: u32 = 8;
 
 /// Where the drive records live in gMisc.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DriveLayout {
     /// gMisc record of the header.
     pub header: u32,

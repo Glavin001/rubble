@@ -32,6 +32,22 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
+- Modal's GPU target is CUDA (`engine-cuda`): kernels compile to GPU code locally with
+  nvcc (free), and Modal only runs the binary, seconds a container.
+  `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`
+  runs each test binary or each test in a container of its own, all at once (built in
+  local Docker). Vulkan on Modal (wgpu, the World, the matrix's `run.sh --modal`) is
+  opt-in only and not for kernel edits: NVIDIA compiles each new kernel version on
+  Modal's hosts, and one explicit-beams pipeline took over 28 minutes, past the cap.
+  The scenario matrix runs on CUDA there too: `tools/scenario-matrix/run.sh --cuda
+  SWITCH` (from `engine/`; each row's portable fixture, `matrix.py --make-portable` once
+  after `--make`; `ENGINE_CUDA_FMAD=0` for strict floats when a switch runs other
+  modules). Modal timing is
+  directional; bit-for-bit verdicts are exact. `engine/tools/modal/README.md`.
+  A performance experiment is judged commit against commit there:
+  `tools/scenario-matrix/run.sh --cuda --base REF [--head REF]` (two builds, kept in a
+  library by commit; `COUNTERS=1` adds each kernel's hardware counters). Read the
+  `gpu-ab-on-modal` skill first.
 - Checking a kernel change: climb a ladder, cheapest rung first, and do not go up a
   rung until the one below passes. Never wait minutes for an answer a rung of seconds
   gives. The bar does not move: what must be bit for bit is checked bit for bit.
@@ -64,8 +80,9 @@
      before rung 2. `run.sh --baseline` prints each row's ms a frame against its target
      (one soft body 1 ms, eight in contact 3 ms); `run.sh --make` saves the states (once,
      and after a change of the buffers' layout); `PROFILE_SPLIT=1` adds each row's frame
-     by dispatch kind. 20 to 30 s warm; the first run after a kernel edit also pays the
-     pipelines' compiles (1.5 to 2.5 minutes).
+     by dispatch kind. It runs on the Mac's GPU under the lock; `--cuda` runs it on
+     Modal on CUDA (no lock, no queue; see above); `--modal` through Vulkan is opt-in,
+     never after a kernel edit.
   2. **A minute.** The same with `FRAMES=20`, `EXTRA="--ab-profile"` for the frame by
      dispatch kind, `explicit_loop_cap`, and Chrome's validation of every module
      (`EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
