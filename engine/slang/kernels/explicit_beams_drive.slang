@@ -49,7 +49,7 @@ float drvCurve(uint at, uint count, float x)
     if (count == 0u) return 1.0;
     float2 p0 = drvPoint(at, 0u);
     if (x <= p0.x) return p0.y;
-    for (uint i = 1u, iStop = EB_END(i, count, 1u); i < iStop; i++)
+    for (uint i = 1u, iStop = EB_END(288, i, count, 1u); i < iStop; i++)
     {
         float2 a = drvPoint(at, i - 1u);
         float2 b = drvPoint(at, i);
@@ -228,7 +228,7 @@ float4 drvRay(float3 p, float3 ow, float3 d, float tMax, float worldGround, uint
     float ground = nf(worldGround - ow.y);
     if (d.y < -DRV_PARALLEL && p.y >= ground) best = float4(0.0, 1.0, 0.0, sdiv(nf(ground - p.y), d.y));
     float3 pw = sadd3(ow, p);
-    for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++) best = drvCloser(best, drvSlot(boxOff + b, pw, d));
+    for (uint b = 0u, bStop = EB_END(289, b, boxCount, 1u); b < bStop; b++) best = drvCloser(best, drvSlot(boxOff + b, pw, d));
     if (best.w > tMax) return drvNone();
     return best;
 }
@@ -370,7 +370,7 @@ bool drvCtx(uint v, out DrvCtx c)
     c.left = scross(c.up, c.fw);
     float msum = 0.0;
     float3 psum = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u, kStop = EB_END(k, nw, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(290, k, nw, 1u); k < kStop; k++)
     {
         float m;
         float3 x, vel;
@@ -415,7 +415,7 @@ bool drvCtx(uint v, out DrvCtx c)
     {
         float vReg = sdiv(sp, max(sp, 3.0));
         float kMax = 0.0;
-        for (uint k = 0u, kStop = EB_END(k, nw, 1u); k < kStop; k++)
+        for (uint k = 0u, kStop = EB_END(291, k, nw, 1u); k < kStop; k++)
         {
             uint wr = drvWheel(c, k);
             if ((gMisc[wr].z & 1u) != 0u && DF(wr + 16u).w != 0.0)
@@ -497,7 +497,7 @@ float4 drvHullRay(uint v, uint off, uint count, float4 r, float3 c, float3 p, fl
     float tIn = -DRV_FLT_MAX;
     float tOut = DRV_FLT_MAX;
     float3 n = float3(0.0, 0.0, 0.0);
-    for (uint i = 0u, iStop = EB_END(i, count, 1u); i < iStop; i++)
+    for (uint i = 0u, iStop = EB_END(292, i, count, 1u); i < iStop; i++)
     {
         float4 pl = asfloat(gMisc[cplPlane(v, off + i)]);
         float3 wn = cplRot(r, pl.xyz);
@@ -587,7 +587,7 @@ void drvRaysBodies(DrvCtx c, uint k)
     uint shape = 0u;
     uint4 hdr = gsCpl[0] != 0u ? cplVeh(c.v) : uint4(0u, 0u, 0u, 0u);
     bool cull = cplCullOn();
-    for (uint s = 0u, sStop = EB_END(s, hdr.y, 1u); s < sStop; s++)
+    for (uint s = 0u, sStop = EB_END(293, s, hdr.y, 1u); s < sStop; s++)
     {
         // The shape's grown bounding sphere this step (cplSpheresBy): a segment that
         // misses it misses the shape (lossless).
@@ -663,7 +663,7 @@ float2 drvPartnerSurface(DrvCtx c, uint k, float m, out float3 vb)
     vb = p4.xyz;
     uint pv = gMisc[pa + 2u].y;
     uint same = 0u;
-    for (uint j = 0u, jStop = EB_END(j, c.nw, 1u); j < jStop; j++)
+    for (uint j = 0u, jStop = EB_END(294, j, c.nw, 1u); j < jStop; j++)
     {
         if (gMisc[drvWheel(c, j) + DRV_SCRATCH].z == DRV_PARTNER_HIT && gMisc[drvPartnerAt(c.v, j) + 2u].y == pv) same++;
     }
@@ -685,7 +685,7 @@ float2 drvSurface(DrvCtx c, uint k, uint shape, float3 n, float3 at, float m, ou
     vb = sadd3(c2.xyz, scross(asfloat(gMisc[b + 3u].xyz), rr));
     if (c0.w == 0.0) return float2(m, 1.0);
     uint same = 0u;
-    for (uint j = 0u, jStop = EB_END(j, c.nw, 1u); j < jStop; j++)
+    for (uint j = 0u, jStop = EB_END(295, j, c.nw, 1u); j < jStop; j++)
     {
         uint sj = gMisc[drvWheel(c, j) + DRV_SCRATCH].z;
         if (sj != 0u && gMisc[cplShape(c.v, sj - 1u)].y == body) same++;
@@ -765,7 +765,7 @@ void drvRays(DrvCtx c, uint k)
 // The anti-roll bars, in order, on the wheels' scratch loads.
 void drvBars(DrvCtx c)
 {
-    for (uint i = 0u, iStop = EB_END(i, c.arCount, 1u); i < iStop; i++)
+    for (uint i = 0u, iStop = EB_END(296, i, c.arCount, 1u); i < iStop; i++)
     {
         uint4 ar = gMisc[c.vr + 12u + i];
         uint l = ar.x, r = ar.y;
@@ -1137,10 +1137,10 @@ void drvEnd(DrvCtx c)
 bool drvWheelsApart(DrvCtx c)
 {
     bool apart = true;
-    for (uint a = 0u, aStop = EB_END(a, c.nw, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(297, a, c.nw, 1u); a < aStop; a++)
     {
         uint4 wa = gMisc[drvWheel(c, a)];
-        for (uint b = a + 1u, bStop = EB_END(b, c.nw, 1u); b < bStop; b++)
+        for (uint b = a + 1u, bStop = EB_END(298, b, c.nw, 1u); b < bStop; b++)
         {
             uint4 wb = gMisc[drvWheel(c, b)];
             if (wa.x == wb.x || wa.x == wb.y || wa.y == wb.x || wa.y == wb.y) apart = false;
@@ -1168,11 +1168,11 @@ void driveWheelsSplit(uint v, uint w, bool live, uint step)
     bool apart = has && drvWheelsApart(c);
     uint k0 = apart ? w : 0u;
     uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvRays(c, k);
+    for (uint k = k0, kStop = EB_END(299, k, k1, 1u); k < kStop; k++) drvRays(c, k);
     sync();
     if (has && w == 0u) drvBars(c);
     sync();
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvTyre(c, k, step);
+    for (uint k = k0, kStop = EB_END(300, k, k1, 1u); k < kStop; k++) drvTyre(c, k, step);
     if (has && w == 0u) drvEnd(c);
 }
 
@@ -1197,7 +1197,7 @@ void driveAheadPart(DrvCtx c, bool has, bool apart, uint w, uint part, uint step
     // The ahead schedules read the proxies before the step's integration: a host turns
     // them off while wheels see bodies (ExplicitBeamsGpu); a frame that still takes them
     // fails loudly, never with stale bodies.
-    if (has && w == 0u && part == 0u && drvBodiesFlag(c)) ebLoopCapHit(__LINE__);
+    if (has && w == 0u && part == 0u && drvBodiesFlag(c)) ebLoopCapHit(301);
     uint k0 = apart ? w : 0u;
     uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
     if (part == 1u)
@@ -1206,7 +1206,7 @@ void driveAheadPart(DrvCtx c, bool has, bool apart, uint w, uint part, uint step
         return;
     }
     // (One call site for the rays and one for the tyres, as driveWheelsSplit.)
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    for (uint k = k0, kStop = EB_END(302, k, k1, 1u); k < kStop; k++)
     {
         if (part == 0u) drvRays(c, k);
         else drvTyre(c, k, step);
@@ -1235,7 +1235,7 @@ uint drvPreAt(uint vr, uint k)
 }
 void drvTyrePre(DrvCtx c, uint k, bool apart)
 {
-    if (drvBodiesFlag(c)) ebLoopCapHit(__LINE__);
+    if (drvBodiesFlag(c)) ebLoopCapHit(303);
     float h = STEP;
     float wb = c.c4.x;
     float track = c.c4.y;
@@ -1445,7 +1445,7 @@ void driveTyresPre(DrvCtx c, bool has, bool apart, uint w)
 {
     uint k0 = apart ? w : 0u;
     uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvTyrePre(c, k, apart);
+    for (uint k = k0, kStop = EB_END(304, k, k1, 1u); k < kStop; k++) drvTyrePre(c, k, apart);
     if (has && w == 0u) drvEnd(c);
 }
 // The tyres' second part (wheel lane w; drvTyrePost) for vehicle v's wheels as
@@ -1461,7 +1461,7 @@ void driveTyresPost(uint v, uint w, uint step)
     bool apart = DF(drvPreAt(vr, w) + 7u).w != 0.0;
     uint k0 = apart ? w : 0u;
     uint k1 = apart ? w + 1u : (w == 0u ? nw : 0u);
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvTyrePost(v, vr, k, step);
+    for (uint k = k0, kStop = EB_END(305, k, k1, 1u); k < kStop; k++) drvTyrePost(v, vr, k, step);
 }
 
 // --- perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): a
@@ -1680,7 +1680,7 @@ bool wpRay(uint off, uint k, uint r0, uint q, out uint pa, out float4 ray, out f
 
 void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
 {
-    for (uint i = lane, iStop = EB_END(i, k * DRV_MAX_WHEELS, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(306, i, k * DRV_MAX_WHEELS, LANES); i < iStop; i += LANES)
     {
         uint v = vvMember(off, i / DRV_MAX_WHEELS);
         uint w = i % DRV_MAX_WHEELS;
@@ -1702,7 +1702,7 @@ void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
         return;
     }
     // Every member's rays (World): start and reach in record 0, direction in record 4.
-    for (uint i = lane, iStop = EB_END(i, k * DRV_MAX_WHEELS, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(307, i, k * DRV_MAX_WHEELS, LANES); i < iStop; i += LANES)
     {
         uint va = vvMember(off, i / DRV_MAX_WHEELS);
         uint w = i % DRV_MAX_WHEELS;
@@ -1721,13 +1721,13 @@ void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
         DSet(pa + 4u, float4(-c.up, 0.0));
     }
     sync();
-    for (uint r0 = 0u, r0Stop = EB_END_UNIFORM(r0, k, WP_ROUND, EB_MAX_MEMBERS); r0 < r0Stop; r0 += WP_ROUND)
+    for (uint r0 = 0u, r0Stop = EB_END_UNIFORM(308, r0, k, WP_ROUND, EB_MAX_MEMBERS); r0 < r0Stop; r0 += WP_ROUND)
     {
         if (lane < WP_COUNT) gsCount[lane].store(0xFFFFFFFFu);
         if (lane == 0u) gsCount[WP_COUNT].store(0u);
         sync();
         // The pairs: (slot, member) whose boxes meet.
-        for (uint i = lane, iStop = EB_END(i, WP_SLOTS * k, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(309, i, WP_SLOTS * k, LANES); i < iStop; i += LANES)
         {
             uint q = i / k;
             uint j = i % k;
@@ -1742,7 +1742,7 @@ void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
             if (any(hi < asfloat(gMisc[vvRec(vb, VV_ALLOWED_LO)].xyz)) || any(lo > asfloat(gMisc[vvRec(vb, VV_ALLOWED_HI)].xyz))) continue;
             uint n = gsCount[WP_COUNT].add(1u);
             if (n < WP_PAIRS) gsCount[WP_LIST + n].store(q << 7 | j);
-            else ebLoopCapHit(__LINE__);
+            else ebLoopCapHit(310);
         }
         sync();
         // Their triangles' prefix (lane 0, in list order: the sums matter, not the order).
@@ -1750,7 +1750,7 @@ void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
         if (lane == 0u)
         {
             uint run = 0u;
-            for (uint p = 0u, pStop = EB_END(p, pairs, 1u); p < pStop; p++)
+            for (uint p = 0u, pStop = EB_END(311, p, pairs, 1u); p < pStop; p++)
             {
                 uint e = gsCount[WP_LIST + p].load();
                 gsCount[WP_LIST + p].store(run << 13 | (e & 0x1FFFu));
@@ -1763,7 +1763,7 @@ void wheelsPartners(uint off, uint k, uint lane, uint s, bool rays)
         // The least t of each slot, then the first triangle at it.
         for (uint pass = 0u; pass < 2u; pass++)
         {
-            for (uint i = lane, iStop = EB_END(i, total, LANES); i < iStop; i += LANES)
+            for (uint i = lane, iStop = EB_END(312, i, total, LANES); i < iStop; i += LANES)
             {
                 // The pair holding item i: the last whose prefix is at most i.
                 uint lo = 0u;
@@ -1858,7 +1858,7 @@ void driveStepMembers(uint off, uint k, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
     uint per = LANES / DRV_MAX_WHEELS;
-    for (uint p = 0u, pStop = EB_END_UNIFORM(p, k, per, EB_MAX_MEMBERS); p < pStop; p += per)
+    for (uint p = 0u, pStop = EB_END_UNIFORM(313, p, k, per, EB_MAX_MEMBERS); p < pStop; p += per)
     {
         uint m = p + lane / DRV_MAX_WHEELS;
         bool live = m < k;

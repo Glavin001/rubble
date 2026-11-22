@@ -242,13 +242,35 @@ fn for_capped(header: &str, body: &str, before: &str) -> bool {
         let prev_stmt = prev[..prev.len().saturating_sub(1)].rsplit(';').next().unwrap_or("");
         // EB_END_UNIFORM: the same clamp, for a loop that reaches a barrier (not budgeted).
         return ["EB_END", "EB_END_UNIFORM"].iter().any(|m| {
-            let def = format!("{stop} = {m}({var}, ");
-            init.contains(&def) || (init.is_empty() && prev.ends_with(';') && prev_stmt.contains(&def))
+            let is_def = |text: &str| end_of(text, &stop, m).is_some_and(|args| args.get(1) == Some(&var));
+            is_def(init) || (init.is_empty() && prev.ends_with(';') && is_def(prev_stmt))
         });
     }
     // A constant loop: constant bound and step, the counter assigned only by the step.
     let lit_step = step_ok(&|s| constant(s));
     constant_bound(bound) && lit_step && !assigns(body, var)
+}
+
+/// The arguments of `STOP = MACRO(ID, X, ..)` in `text` (None: no such definition).
+fn end_of<'t>(text: &'t str, stop: &str, mac: &str) -> Option<Vec<&'t str>> {
+    let def = format!("{stop} = {mac}(");
+    let at = text.find(&def)? + def.len();
+    let args = &text[at..at + close_paren(&text[at..])?];
+    Some(args.split(',').map(str::trim).collect())
+}
+
+/// The index of the `)` closing an argument list that starts at `s`'s beginning.
+fn close_paren(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The value of `static const uint NAME = 1u << N;` in a Slang source.
@@ -298,9 +320,9 @@ fn every_explicit_slang_loop_is_capped() {
     // The scan rejects what it should.
     let bad = uncapped_slang_loops(
         "for (uint i = 0u; i < n; i++) x++;\nwhile (j > 0u) { j--; }\nfor (uint k = 0u; k < 4u; k++) k = 0u;\n\
-         for (uint i = 0u, iStop = EB_END(i, n, 1u); i < iStop; i++) {}\nwhile (a) { EB_PASS(g); }\n\
+         for (uint i = 0u, iStop = EB_END(1, i, n, 1u); i < iStop; i++) {}\nwhile (a) { EB_PASS(2, g); }\n\
          for (uint k = 0u; k < KEYS; k += 2u) {}\nfor (int x = 0; x < min(s.x, int(VV_MAX_SPAN)); x++) {}\n\
-         uint kStop = EB_END(k, n, 1u);\nfor (; k < kStop; k++) {}\n",
+         uint kStop = EB_END(3, k, n, 1u);\nfor (; k < kStop; k++) {}\n",
     );
     assert_eq!(bad.iter().map(|b| b.0).collect::<Vec<_>>(), vec![1, 2, 3]);
     // The Slang constants are the host's.
@@ -308,6 +330,47 @@ fn every_explicit_slang_loop_is_capped() {
     assert_eq!(shift_const(&caps, "EB_LOOP_CAP"), EXPLICIT_LOOP_CAP);
     assert_eq!(shift_const(&caps, "EB_LOOP_CAP_TAG") as i32, EXPLICIT_LOOP_CAP_TAG);
     assert_eq!(engine_webgpu::EXPLICIT_LOOP_CAP, EXPLICIT_LOOP_CAP, "the WGSL post-process's cap");
+}
+
+/// Every loop cap names its loop by an id of its own (`EB_END(ID, ..)`, `EB_PASS(ID, ..)`,
+/// `ebLoopCapHit(ID)`; explicit_loop_cap.slang): the flag's id finds the loop, and an
+/// edit elsewhere changes no other module. Each id is a number, used once.
+#[test]
+fn every_loop_cap_has_an_id_of_its_own() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang/kernels");
+    let mut seen: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut bad = Vec::new();
+    let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    names.sort();
+    for path in names {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !name.ends_with(".slang") || name == "explicit_loop_cap.slang" {
+            continue;
+        }
+        let text = strip_comments(&std::fs::read_to_string(&path).unwrap());
+        for mac in ["EB_END_UNIFORM(", "EB_END(", "EB_PASS_UNIFORM(", "EB_PASS(", "ebLoopCapHit("] {
+            for (at, _) in text.match_indices(mac) {
+                // (EB_END( inside EB_END_UNIFORM( is not a match: a letter or _ before.)
+                if text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                let line = text[..at].matches('\n').count() + 1;
+                let rest = &text[at + mac.len()..];
+                let arg = rest[..rest.find([',', ')']).unwrap_or(rest.len())].trim();
+                match arg.parse::<u32>() {
+                    Ok(id) if id > 0 => {
+                        if let Some(first) = seen.insert(id, format!("{name}:{line}")) {
+                            bad.push(format!("{name}:{line}: id {id} is also {first}'s"));
+                        }
+                    }
+                    _ => bad.push(format!("{name}:{line}: {mac}{arg}, ..): no id (a number, the loop's own)")),
+                }
+            }
+        }
+    }
+    let next = seen.keys().max().copied().unwrap_or(0) + 1;
+    assert!(bad.is_empty(), "loop-cap ids (the next free one: {next}):\n{}", bad.join("\n"));
+    assert!(seen.len() > 500, "the scan found the kernels' caps ({})", seen.len());
 }
 
 /// Whether a module carries the Slang caps (explicit_loop_cap.slang): its cap functions
@@ -459,14 +522,19 @@ fn run_module(wgsl: &str, entry: &str, init: &[u32]) -> Option<(Vec<u32>, Vec<u3
     Some((read(&out), read(&acc)))
 }
 
-/// The source line of the test kernel's loop marked `loop-cap-test: <tag>`.
-fn line_of(tag: &str) -> u32 {
+/// The id of the test kernel's loop marked `loop-cap-test: <tag>` (its
+/// `EB_END(ID, ..)` / `EB_PASS(ID, ..)`).
+fn id_of(tag: &str) -> u32 {
     let src = include_str!("../../../slang/kernels/explicit_loop_cap_test.slang");
-    let at = src
+    let line = src
         .lines()
-        .position(|l| l.contains(&format!("loop-cap-test: {tag}")))
+        .find(|l| l.contains(&format!("loop-cap-test: {tag}")))
         .unwrap_or_else(|| panic!("no loop marked {tag}"));
-    at as u32 + 1
+    let at = line.find("EB_END(").or_else(|| line.find("EB_PASS(")).expect("a capped loop");
+    let args = &line[at..];
+    let open = args.find('(').unwrap() + 1;
+    let id = &args[open..open + args[open..].find(',').unwrap()];
+    id.trim().parse().unwrap_or_else(|_| panic!("loop {tag}: no id in {line}"))
 }
 
 #[test]
@@ -478,7 +546,7 @@ fn a_runaway_loop_stops_at_the_slang_cap_and_raises_the_flag() {
     let wgsl = std::fs::read_to_string(path).unwrap();
     let cap = EXPLICIT_LOOP_CAP;
     let tag = EXPLICIT_LOOP_CAP_TAG as u32;
-    let (pass, end, step) = (line_of("pass"), line_of("end"), line_of("step"));
+    let (pass, end, step) = (id_of("pass"), id_of("end"), id_of("step"));
     let run = |init: [u32; 8]| run_module(&wgsl, "explicit_loop_cap_test", &init);
     let Some((o, a)) = run([0, 1, 0, 5, 12, 4, 0, 0]) else {
         eprintln!("no GPU: skipped");
@@ -500,13 +568,13 @@ fn a_runaway_loop_stops_at_the_slang_cap_and_raises_the_flag() {
     let (o, a) = run([0, 1, 0, 5, 12, 0, 0, 0]).unwrap();
     assert_eq!((o[3], o[6]), (5, 0));
     assert_eq!(a, vec![0, 0, 0, tag | step]);
-    // All three: the flag holds the highest line (atomic max), the error names it.
+    // All three: the flag holds the highest id (atomic max), the error names it.
     let (o, a) = run([0, 0, 0, u32::MAX, 12, 0, 0, 0]).unwrap();
     assert_eq!((o[0], o[3], o[6]), (cap, cap, 0));
     let top = pass.max(end).max(step);
     assert_eq!(a[3], tag | top);
     let e = explicit_loop_cap_hit(a[3] as i32).unwrap_err();
-    assert!(e.contains(&format!("line {top}")), "{e}");
+    assert!(e.contains(&format!("id {top}")), "{e}");
 }
 
 #[test]

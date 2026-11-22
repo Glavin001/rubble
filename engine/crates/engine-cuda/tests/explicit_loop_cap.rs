@@ -26,14 +26,19 @@ fn gpu() -> bool {
     true
 }
 
-/// The source line of the test kernel's loop marked `loop-cap-test: <tag>`.
-fn line_of(tag: &str) -> i32 {
+/// The id of the test kernel's loop marked `loop-cap-test: <tag>` (its
+/// `EB_END(ID, ..)` / `EB_PASS(ID, ..)`).
+fn id_of(tag: &str) -> i32 {
     let src = include_str!("../../../slang/kernels/explicit_loop_cap_test.slang");
-    let at = src
+    let line = src
         .lines()
-        .position(|l| l.contains(&format!("loop-cap-test: {tag}")))
+        .find(|l| l.contains(&format!("loop-cap-test: {tag}")))
         .unwrap_or_else(|| panic!("no loop marked {tag}"));
-    at as i32 + 1
+    let at = line.find("EB_END(").or_else(|| line.find("EB_PASS(")).expect("a capped loop");
+    let args = &line[at..];
+    let open = args.find('(').unwrap() + 1;
+    let id = &args[open..open + args[open..].find(',').unwrap()];
+    id.trim().parse().unwrap_or_else(|_| panic!("loop {tag}: no id in {line}"))
 }
 
 #[test]
@@ -99,7 +104,7 @@ fn a_runaway_loop_stops_at_the_cap_and_raises_the_flag_on_cuda() {
     }
     let cap = EXPLICIT_LOOP_CAP;
     let tag = EXPLICIT_LOOP_CAP_TAG;
-    let (pass, end, step) = (line_of("pass"), line_of("end"), line_of("step"));
+    let (pass, end, step) = (id_of("pass"), id_of("end"), id_of("step"));
     let (o, a) = run([0, 1, 0, 5, 12, 4, 0, 0]);
     assert_eq!((o[0], o[2], o[3], o[6]), (0, 3, 5, 3));
     assert_eq!(a, [0; 4]);
@@ -115,5 +120,5 @@ fn a_runaway_loop_stops_at_the_cap_and_raises_the_flag_on_cuda() {
     let (_, a) = run([0, 0, 0, u32::MAX, 12, 0, 0, 0]);
     assert_eq!(a[3], tag | pass.max(end).max(step));
     let e = explicit_loop_cap_hit(a[3]).unwrap_err();
-    assert!(e.contains(&format!("line {}", pass.max(end).max(step))), "{e}");
+    assert!(e.contains(&format!("id {}", pass.max(end).max(step))), "{e}");
 }

@@ -4,14 +4,19 @@
 // * a loop with a constant bound (a literal or a static const, a constant step)
 //   is finite as written;
 // * a counted loop `for (uint i = a; i < n; i += s)` with n and s loop-invariant
-//   takes its end once: `for (uint i = a, iStop = EB_END(i, n, s); i < iStop;
+//   takes its end once: `for (uint i = a, iStop = EB_END(ID, i, n, s); i < iStop;
 //   i += s)`, n clamped to at most EB_LOOP_CAP passes from a and below the
 //   counter's wrap (a zero step: no pass);
-// * any other loop counts its passes, `EB_PASS(guard)` first in its body.
+// * any other loop counts its passes, `EB_PASS(ID, guard)` first in its body.
+// ID is the loop's own number, written in the source once and never reused (not
+// __LINE__: a line added anywhere above would change every module below it, and
+// with it Chrome's and nvcc's caches of modules whose code did not change).
+// engine-webgpu's tests/explicit_loop_cap.rs checks every id is there and used once,
+// and names the next free one.
 // EB_LOOP_CAP is far above any legitimate count, so a capped loop computes what
 // an uncapped one does. A loop held to its cap (a clamped end, or a counter past
 // the cap) raises the sticky flag gAcc[EB_LOOP_CAP_WORD] (atomic max of
-// EB_LOOP_CAP_TAG | its source line, where the entry point ends: ebLoopCapFlush)
+// EB_LOOP_CAP_TAG | its id, where the entry point ends: ebLoopCapFlush)
 // and the host reports the frame as an error
 // (engine_exec::explicit_plan::explicit_loop_cap_hit). engine-webgpu's
 // tests/explicit_loop_cap.rs checks every loop of explicit_beams.slang and its
@@ -23,13 +28,13 @@
 // gAcc's last word).
 static const uint EB_LOOP_CAP = 1u << 20;
 static const uint EB_LOOP_CAP_TAG = 1u << 24;
-// The stopped loop (the highest line), kept per invocation and written to gAcc
+// The stopped loop (the highest id), kept per invocation and written to gAcc
 // once, where the entry point ends (a flag write at each loop changes the
 // kernels' codegen: Metal's fast math then rounds differently).
 static uint ebLoopHit = 0u;
-void ebLoopCapHit(uint line)
+void ebLoopCapHit(uint id)
 {
-    ebLoopHit = max(ebLoopHit, EB_LOOP_CAP_TAG | line);
+    ebLoopHit = max(ebLoopHit, EB_LOOP_CAP_TAG | id);
 }
 // Every entry point with a capped loop ends with this: `ebLoopCapFlush();` last
 // and `return ebLoopCapFlush();` for each return.
@@ -60,7 +65,7 @@ static uint ebSpent = 0u;
 // (Branch-free, selects in place of the ifs: the same ends and counts. Every capped loop
 // inlines it (~220 copies in a frame module), and its branches cost the GPU drivers'
 // compilers ~20% of the frame's compile; engine/docs/measurements/kernel-compile-time.md.)
-uint ebEnd(uint start, uint bound, uint step, uint line, bool budgeted)
+uint ebEnd(uint start, uint bound, uint step, uint id, bool budgeted)
 {
     uint end = min(bound, max(start + min(step, 0xFFFFFFFFu / EB_LOOP_CAP) * EB_LOOP_CAP, start));
     end = min(end, 0xFFFFFFFFu - max(step, 1u) + 1u);
@@ -75,7 +80,7 @@ uint ebEnd(uint start, uint bound, uint step, uint line, bool budgeted)
     end = select(over, start + left * s, end);
     ebSpent = select(budget == 0u, ebSpent, select(over, budget, ebSpent + passes));
 #endif
-    ebLoopHit = max(ebLoopHit, select(end < bound, EB_LOOP_CAP_TAG | line, 0u));
+    ebLoopHit = max(ebLoopHit, select(end < bound, EB_LOOP_CAP_TAG | id, 0u));
     return end;
 }
 // One pass of a counted loop from the budget (false: none left).
@@ -91,21 +96,21 @@ bool ebSpend()
 #endif
     return true;
 }
-#define EB_END(start, bound, step) ebEnd(start, bound, step, __LINE__, true)
+#define EB_END(id, start, bound, step) ebEnd(start, bound, step, id, true)
 // A barrier loop also stops at `most` passes, its real maximum (steps a frame, members a
 // group, ...), uniform across the workgroup like its bound.
 // The end from the cap and `most` alone (never the budget's per-invocation count: Tint's
 // uniformity analysis must see the bound uniform, so the barriers inside stay legal).
-uint ebEndMost(uint start, uint bound, uint step, uint line, uint most)
+uint ebEndMost(uint start, uint bound, uint step, uint id, uint most)
 {
     uint s = max(step, 1u);
     uint passes = max(min(EB_LOOP_CAP, most), 1u);
     uint end = min(bound, max(start + min(s, 0xFFFFFFFFu / passes) * passes, start));
     end = min(end, 0xFFFFFFFFu - s + 1u);
     end = select(step == 0u, min(end, start), end);
-    ebLoopHit = max(ebLoopHit, select(end < bound, EB_LOOP_CAP_TAG | line, 0u));
+    ebLoopHit = max(ebLoopHit, select(end < bound, EB_LOOP_CAP_TAG | id, 0u));
     return end;
 }
-#define EB_END_UNIFORM(start, bound, step, most) ebEndMost(start, bound, step, __LINE__, most)
-#define EB_PASS(guard) if (++guard > EB_LOOP_CAP || !ebSpend()) { ebLoopCapHit(__LINE__); break; }
-#define EB_PASS_UNIFORM(guard, most) if (++guard > min(EB_LOOP_CAP, most)) { ebLoopCapHit(__LINE__); break; }
+#define EB_END_UNIFORM(id, start, bound, step, most) ebEndMost(start, bound, step, id, most)
+#define EB_PASS(id, guard) if (++guard > EB_LOOP_CAP || !ebSpend()) { ebLoopCapHit(id); break; }
+#define EB_PASS_UNIFORM(id, guard, most) if (++guard > min(EB_LOOP_CAP, most)) { ebLoopCapHit(id); break; }

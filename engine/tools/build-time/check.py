@@ -14,6 +14,9 @@ Exits 1 with one line per broken rule:
   engine-softbody-authoring (dev-dependencies may).
 - No build script or build tool spawns slangc or nvcc itself: engine-slang-build does
   (`Command::new(find_slangc` / `find_nvcc` anywhere else).
+- Every loop cap in slang/kernels names its loop by an id of its own
+  (`EB_END(ID, ..)`, `EB_PASS(ID, ..)`, `ebLoopCapHit(ID)`; explicit_loop_cap.slang),
+  each used once (engine-webgpu's tests/explicit_loop_cap.rs checks the same).
 - Size: no Rust or Slang source over its limit (Rust 1500 lines, Slang 3000), except
   the files in size-allowlist.txt, each at most its listed size (they may shrink, not
   grow). A file that must grow past its line is split, or its line raised in the same
@@ -77,6 +80,29 @@ def check_spawns(problems):
                 if pattern.search(line):
                     rel = os.path.relpath(path, ENGINE)
                     problems.append(f"{rel}:{n} spawns {pattern.search(line).group(1)} itself: compile through engine-slang-build (cached, batched)")
+
+
+def check_loop_ids(all_problems):
+    problems = []
+    kernels = os.path.join(ENGINE, "slang", "kernels")
+    seen = {}
+    call = re.compile(r"(?<![A-Za-z0-9_])(EB_END_UNIFORM|EB_END|EB_PASS_UNIFORM|EB_PASS|ebLoopCapHit)\(\s*([^,)]*)")
+    for name in sorted(os.listdir(kernels)):
+        if not name.endswith(".slang") or name == "explicit_loop_cap.slang":
+            continue
+        for n, line in enumerate(open(os.path.join(kernels, name)), 1):
+            code = line.split("//", 1)[0]
+            for m in call.finditer(code):
+                arg = m.group(2).strip()
+                if not arg.isdigit() or int(arg) == 0:
+                    problems.append(f"slang/kernels/{name}:{n}: {m.group(1)}({arg}, ..) has no id (the loop's own number)")
+                elif arg in seen:
+                    problems.append(f"slang/kernels/{name}:{n}: loop-cap id {arg} is also {seen[arg]}'s")
+                else:
+                    seen[arg] = f"{name}:{n}"
+    if problems and seen:
+        problems.append(f"(the next free loop-cap id: {max(int(k) for k in seen) + 1})")
+    all_problems.extend(problems)
 
 
 def sizes():
@@ -146,6 +172,7 @@ def main():
     problems = []
     check_crates(problems)
     check_spawns(problems)
+    check_loop_ids(problems)
     check_sizes(problems, shrink)
     for p in problems:
         print(p)

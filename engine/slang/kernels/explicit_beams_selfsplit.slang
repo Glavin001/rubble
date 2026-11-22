@@ -84,7 +84,7 @@ void selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
     else
     {
         uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(477, p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
             triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
@@ -114,7 +114,7 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
                     float r, float cell, uint candOff, uint candCount, uint parity)
 {
     uint offBase = gP.gridOffBase + v * (GRID_BUCKETS + 1u);
-    for (uint b = lane, bStop = EB_END(b, GRID_BUCKETS + 1u, LANES); b < bStop; b += LANES) gNext[offBase + b] = gsOff[b];
+    for (uint b = lane, bStop = EB_END(478, b, GRID_BUCKETS + 1u, LANES); b < bStop; b += LANES) gNext[offBase + b] = gsOff[b];
     if (lane == 0u)
     {
         gAcc[selfWalkAt(v)].store(0);
@@ -137,7 +137,7 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
     {
         // piecesBuild without its triangles' lists.
         float margin = asfloat(gP.pairReuse);
-        for (uint p = lane, pStop = EB_END(p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(479, p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
         {
             uint t = triOff + p / LIST_SUBS;
             if (!pieceVolatile(t)) continue;
@@ -148,7 +148,7 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
         float vall = gsCount[GRID_BUCKETS + RU_VALL].load() != 0u ? pieceKey(RU_VALL) : 3.4e38;
         float pb = anti ? r + (vall + clipVmax(v, parity)) * STEP + CLIP_DEPTH : r;
         pb = pb + 1.0e-4 + 1.0e-5 * pb;
-        for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+        for (uint c = lane, cStop = EB_END(480, c, candCount, LANES); c < cStop; c += LANES)
         {
             uint h = gLists[candOff + c];
             uint g = pieceLabel(h);
@@ -167,7 +167,7 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
             }
         }
     }
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(481, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         float3 P = gNodes[(nodeOff + i) * 3u].xyz;
         float3 V = gNodes[(nodeOff + i) * 3u + 1u].xyz;
@@ -214,7 +214,7 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
         cells = uint(span.x) * yz;
     }
     uint outer = every ? candCount : cells;
-    for (uint i = sub, iStop = EB_END(i, outer, WALK_SUBS); i < iStop; i += WALK_SUBS)
+    for (uint i = sub, iStop = EB_END(482, i, outer, WALK_SUBS); i < iStop; i += WALK_SUBS)
     {
         uint e0 = 0u;
         uint e1 = 1u;
@@ -223,7 +223,7 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
             uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
             bool dup = false;
             int3 cj = int3(0, 0, 0);
-            for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+            for (uint j = 0u, jStop = EB_END(483, j, i, 1u); j < jStop; j++)
             {
                 if (gridBucket(c0 + cj) == b)
                 {
@@ -248,7 +248,7 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
         }
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(484, eGuard);
             uint h;
             float3 p;
             if (every)
@@ -400,7 +400,7 @@ void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint parity = (misc.w + gP.pad2) & 1u;
         // The dispatch has WALK_X workgroups whenever some vehicle needs more (the args'
         // clamp): then this stride covers every share.
-        for (uint p = gid.x * SELF_WALK_WG + lid.x, pStop = EB_END(p, r1.y * WALK_SUBS, WALK_X * SELF_WALK_WG); p < pStop;
+        for (uint p = gid.x * SELF_WALK_WG + lid.x, pStop = EB_END(485, p, r1.y * WALK_SUBS, WALK_X * SELF_WALK_WG); p < pStop;
              p += WALK_X * SELF_WALK_WG)
         {
             uint t = r1.x + p / WALK_SUBS;

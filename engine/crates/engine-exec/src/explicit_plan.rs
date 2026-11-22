@@ -3589,7 +3589,7 @@ impl ExplicitLayout {
 pub const EXPLICIT_LOOP_CAP: u32 = 1 << 20;
 
 /// The kernel's tag on a loop-cap flag (`EB_LOOP_CAP_TAG`): the flag is the tag
-/// | the stopped loop's source line. Untagged, the flag is the loop's number in
+/// | the stopped loop's id (its `EB_END(ID, ..)` / `EB_PASS(ID, ..)`). Untagged, the flag is the loop's number in
 /// its WGSL module (counting from 1): the frozen test modules
 /// (`explicit_beams_baseline.slang`, `explicit_beams_ref.slang`), capped by
 /// engine-webgpu's WGSL post-process.
@@ -3602,10 +3602,8 @@ pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
         return Ok(());
     }
     let place = if flag & EXPLICIT_LOOP_CAP_TAG != 0 {
-        format!(
-            "the loop at line {} of explicit_beams.slang (or of an explicit_beams_*.slang file it includes)",
-            flag & !EXPLICIT_LOOP_CAP_TAG
-        )
+        let id = flag & !EXPLICIT_LOOP_CAP_TAG;
+        format!("the loop with id {id} (`rg -n 'EB_[A-Z_]*\\({id},|ebLoopCapHit\\({id}\\)' engine/slang/kernels`)")
     } else {
         format!("a kernel loop (number {flag} in its WGSL module, counting from 1)")
     };

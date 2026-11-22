@@ -729,7 +729,7 @@ float3 frictionLimit(float3 c, float3 f, float3 v, float m, float3 n, float p)
 float3 groundBoxContacts(float3 f, float3 vel, float mass, float3 x, uint4 info, uint vehicle, float ground,
                          uint boxOff, uint boxCount, float friction)
 {
-    for (uint b = 0u, bStop = EB_END(b, boxCount + 1u, 1u); b < bStop; b++)
+    for (uint b = 0u, bStop = EB_END(1, b, boxCount + 1u, 1u); b < bStop; b++)
     {
         float3 n = float3(0.0, 1.0, 0.0);
         float depth = ground - x.y;
@@ -1088,7 +1088,7 @@ float3 beamSum(float3 f, uint4 info, uint beamOff, uint groupOff, uint groupCoun
         uint k = 0u;
         for (uint kGuard = 0u; k + 4u <= info.z; k += 4u)
         {
-            EB_PASS(kGuard);
+            EB_PASS(2, kGuard);
             float3 a = gBeams[base + k].xyz;
             float3 b = gBeams[base + k + 1u].xyz;
             float3 c = gBeams[base + k + 2u].xyz;
@@ -1098,11 +1098,11 @@ float3 beamSum(float3 f, uint4 info, uint beamOff, uint groupOff, uint groupCoun
             f = sadd3(f, c);
             f = sadd3(f, d);
         }
-        uint kStop = EB_END(k, info.z, 1u);
+        uint kStop = EB_END(3, k, info.z, 1u);
         for (; k < kStop; k++) f = sadd3(f, gBeams[base + k].xyz);
         return f;
     }
-    for (uint k = 0u, kStop = EB_END(k, info.z, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(4, k, info.z, 1u); k < kStop; k++)
     {
         float3 push = gBeams[base + k].xyz;
         if (!groupDrops(gLists[info.y + k] >> 1, beamOff, groupOff, parity, mark)) f = sadd3(f, push);
@@ -1480,7 +1480,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
             cfAdd(gi, c);
             f += c;
         }
-        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
+        for (uint b = 0u, bStop = EB_END(5, b, boxCount, 1u); b < bStop; b++)
         {
             uint4 lo4 = gStatic[gP.boxBase + (boxOff + b) * 2u];
             uint4 hi4 = gStatic[gP.boxBase + (boxOff + b) * 2u + 1u];
@@ -1697,7 +1697,7 @@ uint liveAt(uint node, uint j, uint beamOff, uint groupOff, uint parity)
 {
     uint4 info = gStatic[gP.nodeInfoBase + node];
     uint live = 0u;
-    for (uint k = 0u, kStop = EB_END(k, info.z, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(6, k, info.z, 1u); k < kStop; k++)
     {
         uint b = gLists[info.y + k] >> 1;
         uint4 bn = gStatic[gP.beamBase + b * 3u];
@@ -2191,7 +2191,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         uint first = asuint(e1.x);
         uint count = asuint(e1.y);
         float v = 0.0;
-        for (uint t = 0u, tStop = EB_END(t, count, 1u); t < tStop; t++)
+        for (uint t = 0u, tStop = EB_END(7, t, count, 1u); t < tStop; t++)
         {
             uint r = first + 2u * t;
             uint4 ra = gStatic[gP.beamBase + r * 3u];
@@ -2729,13 +2729,13 @@ void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint 
     if (on)
     {
         bool objective = (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u;
-        for (uint j = lane, jStop = EB_END(j, beamCount, lanes); j < jStop; j += lanes) centredBeam(beamOff + j, objective);
+        for (uint j = lane, jStop = EB_END(8, j, beamCount, lanes); j < jStop; j += lanes) centredBeam(beamOff + j, objective);
     }
     sync();
     if (on)
     {
         uint parity = (step + 1u) & 1u;
-        for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
+        for (uint i = lane, iStop = EB_END(9, i, nodeCount, lanes); i < iStop; i += lanes)
             centredNode(nodeOff + i, beamOff, groupOff, groupCount, parity);
     }
     // No barrier here: what follows reads a node only after its own barrier, or
@@ -3225,13 +3225,13 @@ void beamPhaseSorted(uint v, uint lane, uint lanes, uint4 head, bool on, uint no
     uint at = gP.beamOrder + gP.vehicles + 2u * beamOff;
     uint hot = min(head.y, entries);
     uint k = lane;
-    for (uint kStop = EB_END(k, hot, lanes); k < kStop; k += lanes)
+    for (uint kStop = EB_END(10, k, hot, lanes); k < kStop; k += lanes)
     {
         uint4 a = gStatic[at + 2u * k];
         jbeamHot(beamOff + a.x, a, gStatic[at + 2u * k + 1u], hotLoad(beamOff + a.x, a, nodeOff), head.z, groupOff,
                  parity, centred, keep);
     }
-    for (uint kStop = EB_END(k, entries, lanes); k < kStop; k += lanes)
+    for (uint kStop = EB_END(11, k, entries, lanes); k < kStop; k += lanes)
     {
         uint4 a = sorted ? gStatic[at + 2u * k] : uint4(k, BEAM_ORDER_SINGLE, 0u, 0u);
         uint cls = a.y & 3u;
@@ -3403,7 +3403,7 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
     // site (opaqueCount), the same strict sums in the same order.
     float3 a3 = float3(0.0, 0.0, 0.0);
     float3 ah = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(12, k, opaqueCount(4u), 1u); k < kStop; k++)
     {
         float3 acc = selfAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)),
                              fb == 0u ? 0u : fb + (k == 0u ? 6u : (k == 1u ? 9u : (k == 2u ? 3u : 0u))), beamOff, groupOff,
@@ -3884,7 +3884,7 @@ void triangleTest(uint gt, uint sub, uint lanes, float3 origin, float r, uint ca
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     TriGeo t = triangleGeo(gt, origin, r, parity);
-    for (uint k = sub, kStop = EB_END(k, candCount, lanes); k < kStop; k += lanes)
+    for (uint k = sub, kStop = EB_END(13, k, candCount, lanes); k < kStop; k += lanes)
         tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
 }
 
@@ -3968,7 +3968,7 @@ void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uin
         cells = uint(span.x) * yz;
     }
     uint outer = every ? candCount : cells;
-    for (uint i = sub, iStop = EB_END(i, outer, subs); i < iStop; i += subs)
+    for (uint i = sub, iStop = EB_END(14, i, outer, subs); i < iStop; i += subs)
     {
         uint e0 = 0u;
         uint e1 = 1u;
@@ -3985,7 +3985,7 @@ void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uin
                 // Cell j's offset (j / yz, j / span.z % span.y, j % span.z) stepped
                 // from j = 0 (z fastest) instead of divided out for every j.
                 int3 cj = int3(0, 0, 0);
-                for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+                for (uint j = 0u, jStop = EB_END(15, j, i, 1u); j < jStop; j++)
                 {
                     if (gridBucket(c0 + cj) == b)
                     {
@@ -4011,7 +4011,7 @@ void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uin
         }
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(16, eGuard);
             uint h;
             if (every)
                 h = gLists[candOff + i];
@@ -4077,7 +4077,7 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
         yz = uint(span.y * span.z);
         cells = uint(span.x) * yz;
     }
-    for (uint k = sub, kStop = EB_END(k, candCount, subs); k < kStop; k += subs)
+    for (uint k = sub, kStop = EB_END(17, k, candCount, subs); k < kStop; k += subs)
     {
         uint h = gLists[candOff + k];
         if (!every)
@@ -4092,7 +4092,7 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
                 // cell's (a hash collision the grid walk would visit).
                 uint b = gridBucket(c);
                 bool covered = false;
-                for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                for (uint i = 0u, iStop = EB_END(18, i, cells, 1u); i < iStop; i++)
                     covered = covered
                         || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
                 if (!covered) continue;
@@ -4156,7 +4156,7 @@ void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r,
     }
     uint yz = uint(span.y * span.z);
     uint cells = uint(span.x) * yz;
-    for (uint k = sub, kStop = EB_END(k, candCount, subs); k < kStop; k += subs)
+    for (uint k = sub, kStop = EB_END(19, k, candCount, subs); k < kStop; k += subs)
     {
         uint h = gLists[candOff + k];
         if (h == tn.x || h == tn.y || h == tn.z) continue;
@@ -4171,7 +4171,7 @@ void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r,
             {
                 uint b = gridBucket(c);
                 bool covered = false;
-                for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                for (uint i = 0u, iStop = EB_END(20, i, cells, 1u); i < iStop; i++)
                     covered = covered
                         || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
                 if (!covered) continue;
@@ -4338,7 +4338,7 @@ bool piecesTrack(uint nodeOff, uint nodeCount, uint lane)
     float size = 0.0;
     float vall = 0.0;
     uint bad = 0u;
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(21, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         if ((gStatic[gP.nodeInfoBase + nodeOff + i].x & NODE_PAIR_TRACKED) == 0u) continue;
         uint gi = nodeOff + i;
@@ -4488,7 +4488,7 @@ bool piecesBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, ui
     if (!piecesOn(v)) return false;
     float margin = asfloat(gP.pairReuse);
     uint at = triPairsAt(v);
-    for (uint p = lane, pStop = EB_END(p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
+    for (uint p = lane, pStop = EB_END(22, p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
     {
         uint t = triOff + p / LIST_SUBS;
         if (pieceVolatile(t))
@@ -4508,7 +4508,7 @@ bool piecesBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, ui
     float vall = gsCount[GRID_BUCKETS + RU_VALL].load() != 0u ? pieceKey(RU_VALL) : 3.4e38;
     float pb = anti ? r + (vall + clipVmax(v, parity)) * STEP + CLIP_DEPTH : r;
     pb = pb + 1.0e-4 + 1.0e-5 * pb;
-    for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+    for (uint c = lane, cStop = EB_END(23, c, candCount, LANES); c < cStop; c += LANES)
     {
         uint h = gLists[candOff + c];
         uint g = pieceLabel(h);
@@ -4527,7 +4527,7 @@ bool piecesBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, ui
                 gNext[pieceSigmaAt(h, a)] = asuint(s);
         }
     }
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(24, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         float3 P = gNodes[(nodeOff + i) * 3u].xyz;
         float3 V = gNodes[(nodeOff + i) * 3u + 1u].xyz;
@@ -4553,7 +4553,7 @@ void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float c
     if (lane == 0u) gsCount[GRID_BUCKETS + RU_VSUM].add(vol);
     // Few triangles: more lanes each (the same tests, spread wider).
     uint subs = max(PIECE_SUBS, min(64u, LANES / max(vol, 1u)));
-    for (uint p = lane, pStop = EB_END(p, vol * subs, LANES); p < pStop; p += LANES)
+    for (uint p = lane, pStop = EB_END(25, p, vol * subs, LANES); p < pStop; p += LANES)
         piecesTestTriangle(gNext[pieceVolAt(triOff + p / subs)], p % subs, subs, origin, r, cell, candOff, candCount,
                            beamOff, groupOff, groupCount, parity);
 }
@@ -4580,7 +4580,7 @@ void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, fl
         span = int3(fs);
     }
     TriGeo t = triGeoLoad(gt);
-    for (uint c = sub, cStop = EB_END(c, candCount, subs); c < cStop; c += subs)
+    for (uint c = sub, cStop = EB_END(26, c, candCount, subs); c < cStop; c += subs)
     {
         uint h = gLists[candOff + c];
         if (!every)
@@ -4595,7 +4595,7 @@ void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, fl
                 uint cells = uint(span.x) * yz;
                 uint b = gridBucket(cc);
                 bool covered = false;
-                for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                for (uint i = 0u, iStop = EB_END(27, i, cells, 1u); i < iStop; i++)
                     covered = covered
                         || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
                 if (!covered) continue;
@@ -4618,7 +4618,7 @@ void pairReuseTrack(uint nodeOff, uint nodeCount, uint lane)
     float grow = -3.0e38;
     float size = 0.0;
     uint bad = 0u;
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(28, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         if ((gStatic[gP.nodeInfoBase + nodeOff + i].x & NODE_PAIR_TRACKED) == 0u) continue;
         float4 B = gBeams[gP.pairBuild + nodeOff + i];
@@ -4773,7 +4773,7 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
         cells = uint(span.x) * yz;
     }
     uint outer = every ? candCount : cells;
-    for (uint i = sub, iStop = EB_END(i, outer, LIST_SUBS); i < iStop; i += LIST_SUBS)
+    for (uint i = sub, iStop = EB_END(29, i, outer, LIST_SUBS); i < iStop; i += LIST_SUBS)
     {
         uint e0 = 0u;
         uint e1 = 1u;
@@ -4782,7 +4782,7 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
             uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
             bool dup = false;
             int3 cj = int3(0, 0, 0);
-            for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+            for (uint j = 0u, jStop = EB_END(30, j, i, 1u); j < jStop; j++)
             {
                 if (gridBucket(c0 + cj) == b)
                 {
@@ -4807,7 +4807,7 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
         }
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(31, eGuard);
             uint h;
             float3 p;
             if (every)
@@ -4849,9 +4849,9 @@ void pairReuseBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
     if (piecesBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, r, cell, candOff, candCount, parity)) return;
     float margin = asfloat(gP.pairReuse);
     uint at = triPairsAt(v);
-    for (uint p = lane, pStop = EB_END(p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
+    for (uint p = lane, pStop = EB_END(32, p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
         pairReuseList(triOff + p / LIST_SUBS, p % LIST_SUBS, origin, r, cell, candOff, candCount, parity, at, margin);
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(33, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         float3 P = gNodes[(nodeOff + i) * 3u].xyz;
         float3 V = gNodes[(nodeOff + i) * 3u + 1u].xyz;
@@ -4897,7 +4897,7 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
             uint cells = uint(span.x) * yz;
             uint b = gridBucket(c);
             bool covered = false;
-            for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+            for (uint i = 0u, iStop = EB_END(34, i, cells, 1u); i < iStop; i++)
                 covered = covered
                     || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
             if (!covered) return;
@@ -4921,7 +4921,7 @@ void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
     if (listed <= TRI_PAIR_CAP)
     {
         uint at = triPairsAt(v);
-        for (uint i = lane, iStop = EB_END(i, listed, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(35, i, listed, LANES); i < iStop; i += LANES)
             pairReuseTest(gNext[at + 2u * i], gNext[at + 2u * i + 1u], origin, r, cell, beamOff, groupOff, groupCount,
                           parity);
         piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
@@ -4929,7 +4929,7 @@ void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
     else
     {
         uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(36, p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
             triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
@@ -5112,7 +5112,7 @@ void addForce(uint node, float3 f)
 // One lane adds a vehicle's wing forces in file order, slot by slot, as the CPU.
 void wingApply(uint wingOff, uint wingCount)
 {
-    for (uint k = 0u, kStop = EB_END(k, wingCount, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(37, k, wingCount, 1u); k < kStop; k++)
     {
         uint gw = wingOff + k;
         uint ws = wingState(gw);
@@ -5139,7 +5139,7 @@ void wingGather(uint wn)
     uint4 rec = gStatic[wingNodeBase() + wn];
     float4 F = gNodes[rec.x * 3u + 2u];
     float3 f = F.xyz;
-    for (uint k = 0u, kStop = EB_END(k, rec.z, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(38, k, rec.z, 1u); k < kStop; k++)
     {
         uint e = gLists[rec.y + k];
         uint ws = wingState(e >> 2);
@@ -5199,7 +5199,7 @@ void brakeOne(uint gb)
     float3 vc = sscale(sadd3(v1, v2), 0.5);
     float l = 0.0;
     float iw = 0.0;
-    for (uint k = 0u, kStop = EB_END(k, B.x, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(39, k, B.x, 1u); k < kStop; k++)
     {
         uint i = A.w + k;
         float4 P = gNodes[i * 3u];
@@ -5218,7 +5218,7 @@ void brakeOne(uint gb)
     float tau = wr > 0.0 ? -mag : mag;
     float g = sdiv(tau, iw);
     float3 s = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u, kStop = EB_END(k, B.x, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(40, k, B.x, 1u); k < kStop; k++)
     {
         uint i = A.w + k;
         float4 P = gNodes[i * 3u];
@@ -5235,7 +5235,7 @@ void brakeOne(uint gb)
 
 void brakeApply(uint off, uint count)
 {
-    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++) brakeOne(off + k);
+    for (uint k = 0u, kStop = EB_END(41, k, count, 1u); k < kStop; k++) brakeOne(off + k);
 }
 
 // The fuselage drag D from the front node's velocity and height, for the next step.
@@ -5552,20 +5552,20 @@ float3 slidePending(float3 s, uint slot, uint n)
 {
     uint4 rec = gStatic[slotRecBase() + slot];
     uint m = min(n, rec.y);
-    for (uint i = 1u, iStop = EB_END(i, m, 1u); i < iStop; i++)
+    for (uint i = 1u, iStop = EB_END(42, i, m, 1u); i < iStop; i++)
     {
         uint key = gNext[gP.slotListBase + rec.x + i];
         uint j = i;
         uint jGuard = 0u;
         while (j > 0u && gNext[gP.slotListBase + rec.x + j - 1u] > key)
         {
-            EB_PASS(jGuard);
+            EB_PASS(43, jGuard);
             gNext[gP.slotListBase + rec.x + j] = gNext[gP.slotListBase + rec.x + j - 1u];
             j--;
         }
         gNext[gP.slotListBase + rec.x + j] = key;
     }
-    for (uint i = 0u, iStop = EB_END(i, m, 1u); i < iStop; i++) s = sadd3(s, gBeams[slideContribBase() + gNext[gP.slotListBase + rec.x + i]].xyz);
+    for (uint i = 0u, iStop = EB_END(44, i, m, 1u); i < iStop; i++) s = sadd3(s, gBeams[slideContribBase() + gNext[gP.slotListBase + rec.x + i]].xyz);
     gAcc[gP.slotCntBase + slot].store(0);
     return s;
 }
@@ -5638,7 +5638,7 @@ uint clampSeg(uint gs) { return min(gs, max(gP.segTotal, 1u) - 1u); }
 void slidePass(uint slideOff, uint slideCount, float3 origin, uint groupOff, uint parity)
 {
     uint count = min(slideCount, gP.slideTotal - min(slideOff, gP.slideTotal));
-    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(45, k, count, 1u); k < kStop; k++)
     {
         uint gs = slideOff + k;
         float4 st = gBeams[gP.slideState + gs];
@@ -6065,7 +6065,7 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
     uint base = hitList(v);
     uint nodeOff = gStatic[v * 4u].x;
     uint open = 0u;
-    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    for (uint i = sub, iStop = EB_END(46, i, count, lanes); i < iStop; i += lanes)
     {
         uint at = base + i * HIT_WORDS;
         if (gNext[at + 6u] != 0u) continue;
@@ -6086,7 +6086,7 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
         }
         int3 sum = int3(0, 0, 0);
         bool ready = true;
-        for (uint j = 0u, jStop = EB_END(j, count, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(47, j, count, 1u); j < jStop; j++)
         {
             uint bj = base + j * HIT_WORDS;
             uint kj = gNext[bj];
@@ -6166,7 +6166,7 @@ bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float 
     // the same strict sums in the same order.
     float3 at = float3(0.0, 0.0, 0.0);
     float3 ah = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(48, k, opaqueCount(4u), 1u); k < kStop; k++)
     {
         float3 acc = resAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)),
                             fb == 0u ? 0u : fb + (k == 0u ? 6u : (k == 1u ? 9u : (k == 2u ? 3u : 0u))), beamOff, groupOff,
@@ -6229,7 +6229,7 @@ bool guardOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float g
     // (opaqueCount), h first as written, the same strict sums in the same order.
     float3 ah = float3(0.0, 0.0, 0.0);
     float3 aw = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(49, k, opaqueCount(4u), 1u); k < kStop; k++)
     {
         float3 acc = resAccNow(k == 0u ? h : (k == 1u ? t1 : (k == 2u ? t2 : t0)),
                                fb == 0u ? 0u : fb + (k == 0u ? 0u : (k == 1u ? 6u : (k == 2u ? 9u : 3u))), beamOff, groupOff,
@@ -6313,7 +6313,7 @@ void selfResidualPhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, u
     if (count > HIT_CAP || !selfResidual(v)) return;
     uint base = hitList(v);
     uint nodeOff = gStatic[v * 4u].x;
-    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    for (uint i = sub, iStop = EB_END(50, i, count, lanes); i < iStop; i += lanes)
     {
         uint at = base + i * HIT_WORDS;
         uint h = nodeOff + (gNext[at] & 0xFFFFu);
@@ -6376,7 +6376,7 @@ void hitRolePhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, uint g
     if (count > HIT_CAP || !hitRolesOn(v)) return;
     uint base = hitList(v);
     uint nodeOff = gStatic[v * 4u].x;
-    for (uint q = sub, qStop = EB_END(q, count * 4u, lanes); q < qStop; q += lanes)
+    for (uint q = sub, qStop = EB_END(51, q, count * 4u, lanes); q < qStop; q += lanes)
     {
         uint i = q >> 2;
         uint role = q & 3u;
@@ -6443,7 +6443,7 @@ void hitCombinePhase(uint v, uint sub, uint lanes, uint phase)
     uint count = uint(gAcc[hitAcc(v)].load());
     if (count > HIT_CAP || !hitRolesOn(v)) return;
     uint base = hitList(v);
-    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    for (uint i = sub, iStop = EB_END(52, i, count, lanes); i < iStop; i += lanes)
     {
         uint at = base + i * HIT_WORDS;
         uint rec = hitRoleAt(v, i);
@@ -6535,7 +6535,7 @@ void hitFbFill(uint v, uint sub, uint lanes, uint beamOff, uint groupOff, uint g
     if (count > HIT_CAP || !selfTwoBody(v)) return;
     uint base = hitList(v);
     uint nodeOff = gStatic[v * 4u].x;
-    for (uint q = sub, qStop = EB_END(q, count * 4u, lanes); q < qStop; q += lanes)
+    for (uint q = sub, qStop = EB_END(53, q, count * 4u, lanes); q < qStop; q += lanes)
     {
         uint at = base + (q >> 2) * HIT_WORDS;
         uint role = q & 3u;
@@ -6634,7 +6634,7 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
     // The hits (mode 0), then (§37.1) the residual's modes 1 and 2, from one call site:
     // the compilers inline every call, so each site is a copy of the whole pass
     // (opaqueCount: the loop stays one; kernel-compile-time.md).
-    for (uint mode = 0u, modeStop = EB_END(mode, opaqueCount(3u), 1u); mode < modeStop; mode++)
+    for (uint mode = 0u, modeStop = EB_END(54, mode, opaqueCount(3u), 1u); mode < modeStop; mode++)
     {
         if (mode == 1u && (gP.selfSplit == 0u || !selfResidual(v))) return;
         selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, mode);
@@ -6652,13 +6652,13 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
 {
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
-    for (uint t = 0u, tStop = EB_END(t, r1.y, 1u); t < tStop; t++)
+    for (uint t = 0u, tStop = EB_END(55, t, r1.y, 1u); t < tStop; t++)
     {
         uint gt = r1.x + t;
         if (asint(gMisc[gP.vehicles + gt].x) > 0) continue;
         TriGeo T = triangleGeo(gt, origin, r, parity);
         uint4 tn = T.tn;
-        for (uint k = 0u, kStop = EB_END(k, r2.y, 1u); k < kStop; k++)
+        for (uint k = 0u, kStop = EB_END(56, k, r2.y, 1u); k < kStop; k++)
         {
             uint h = gLists[r2.x + k];
             if (h == tn.x || h == tn.y || h == tn.z) continue;
@@ -6746,7 +6746,7 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
 void selfSerialMerge(uint v)
 {
     uint4 r0 = gStatic[v * 4u];
-    for (uint i = 0u, iStop = EB_END(i, r0.y, 1u); i < iStop; i++) resMergeNode(r0.x + i);
+    for (uint i = 0u, iStop = EB_END(57, i, r0.y, 1u); i < iStop; i++) resMergeNode(r0.x + i);
 }
 
 // Vehicle v's pending beams of this step's beam phase (breakException), on one lane
@@ -6766,14 +6766,14 @@ void resolvePending(uint v, uint parity)
     uint base = pendList(v);
     if (listed)
     {
-        for (uint i = 1u, iStop = EB_END(i, n, 1u); i < iStop; i++)
+        for (uint i = 1u, iStop = EB_END(58, i, n, 1u); i < iStop; i++)
         {
             uint x = gNext[base + i];
             uint j = i;
             uint jGuard = 0u;
             while (j > 0u && gNext[base + j - 1u] > x)
             {
-                EB_PASS(jGuard);
+                EB_PASS(59, jGuard);
                 gNext[base + j] = gNext[base + j - 1u];
                 j--;
             }
@@ -6781,7 +6781,7 @@ void resolvePending(uint v, uint parity)
         }
     }
     uint count = listed ? n : r0.w;
-    for (uint i = 0u, iStop = EB_END(i, count, 1u); i < iStop; i++)
+    for (uint i = 0u, iStop = EB_END(60, i, count, 1u); i < iStop; i++)
     {
         uint j = listed ? gNext[base + i] : i;
         if (!listed && gBeams[(r0.z + j) * 2u + 1u].w != 2.0) continue;
@@ -6911,7 +6911,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     {
         float3 o = asfloat(gMisc[v].xyz);
-        for (uint w = lane, wStop = EB_END(w, aero0.y, LANES); w < wStop; w += LANES) wingCheck(aero0.x + w, o);
+        for (uint w = lane, wStop = EB_END(61, w, aero0.y, LANES); w < wStop; w += LANES) wingCheck(aero0.x + w, o);
     }
 #endif
 
@@ -6925,7 +6925,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (length(first) > REBASE_RADIUS)
 #endif
     {
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(62, i, nodeCount, LANES); i < iStop; i += LANES)
         {
             float4 P = gNodes[(nodeOff + i) * 3u];
             gNodes[(nodeOff + i) * 3u] = float4(P.xyz - first, P.w);
@@ -7041,7 +7041,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if ((flagsV & FLAG_SLIDES) != 0u)
         {
             uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
-            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, SLIDE_FRAME, groupOff, parityR);
+            for (uint k = lane, kStop = EB_END(63, k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, SLIDE_FRAME, groupOff, parityR);
         }
 #endif
         sync();
@@ -7059,16 +7059,16 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             uint parity = (stepBase + gP.pad2 - 1u) & 1u;
             uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
-            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, origin, groupOff, parity);
+            for (uint k = lane, kStop = EB_END(64, k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, origin, groupOff, parity);
         }
 #endif
         sync();
     }
-    for (uint s = gP.pad2, sStop = EB_END_UNIFORM(s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
+    for (uint s = gP.pad2, sStop = EB_END_UNIFORM(65, s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
 #elif defined(EB_SOLO_STEP)
-    for (uint s = gP.pad2, sStop = EB_END_UNIFORM(s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
+    for (uint s = gP.pad2, sStop = EB_END_UNIFORM(66, s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
 #else
-    for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
+    for (uint s = 0u, sStop = EB_END_UNIFORM(67, s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
 #endif
     {
 #ifdef EB_ABLATE
@@ -7107,7 +7107,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool hits = gsHit != 0u;
 #ifdef EB_VV_SOLO
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(68, i, nodeCount, LANES); i < iStop; i += LANES)
         {
             if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
@@ -7122,7 +7122,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint nodeEnd = nodeCount;
 #endif
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
-        for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(69, i, nodeEnd, LANES); i < iStop; i += LANES)
         {
             if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
@@ -7141,14 +7141,14 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
         if (!EB_A2(256u))
 #endif
-        for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
+        for (uint g = lane, gStop = EB_END(70, g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
 #ifdef EB_ABLATE
         if (candCount > 0u && !EB_A2(2u))
 #else
         if (candCount > 0u)
 #endif
         {
-            for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+            for (uint t = lane, tStop = EB_END(71, t, triCount, LANES); t < tStop; t += LANES)
             {
                 int w = s > 0u ? triangleFinish(triOff + t) : asint(gMisc[gP.vehicles + triOff + t].x);
                 if (triCount <= TRI_LIST && w <= 0) gsTested[gsTestedCount[parity].add(1u)] = t;
@@ -7197,7 +7197,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if (cell > 0.0)
 #endif
         {
-            for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+            for (uint c = lane, cStop = EB_END(72, c, candCount, LANES); c < cStop; c += LANES)
             {
                 float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
                 uint b = gridBucket(int3(floor(p / cell)));
@@ -7211,15 +7211,15 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // Wings (forces from this step's integrated state), the fuselage drag for
         // the next step, and the commands' rest lengths; then one lane adds the
         // wings' forces in file order while the others start the beams.
-        for (uint w = lane, wStop = EB_END(w, aero0.y, LANES); w < wStop; w += LANES) wingForces(aero0.x + w, origin);
+        for (uint w = lane, wStop = EB_END(73, w, aero0.y, LANES); w < wStop; w += LANES) wingForces(aero0.x + w, origin);
         if (lane == LANES - 1u && (flagsV & FLAG_FUSEDRAG) != 0u) fuseDrag(aero1, origin, v);
         if ((flagsV & FLAG_KEYS) != 0u)
         {
-            for (uint c = lane, cStop = EB_END(c, aero0.w, LANES); c < cStop; c += LANES) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
+            for (uint c = lane, cStop = EB_END(74, c, aero0.w, LANES); c < cStop; c += LANES) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
         }
         else
         {
-            for (uint c = lane, cStop = EB_END(c, aero0.w, LANES); c < cStop; c += LANES) commandUpdate(aero0.z + c);
+            for (uint c = lane, cStop = EB_END(75, c, aero0.w, LANES); c < cStop; c += LANES) commandUpdate(aero0.z + c);
         }
         sync();
         {
@@ -7227,7 +7227,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
             if ((gP.ablate & 8u) != 0u) ext.w = 0u;
 #endif
-            for (uint k = lane, kStop = EB_END(k, ext.w, LANES); k < kStop; k += LANES) wingGather(ext.z + k);
+            for (uint k = lane, kStop = EB_END(76, k, ext.w, LANES); k < kStop; k += LANES) wingGather(ext.z + k);
         }
         // The last step's trigger inputs, read by this step's commands: cleared for
         // the next step's beam phase.
@@ -7262,7 +7262,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             uint lanes = clamp(LANES / max(listedB, 1u), 1u, candCount);
             uint stride = (LANES / lanes) * lanes;
             uint rl = LANES - 1u - lane;
-            for (uint p = rl, pStop = EB_END(p, listedB * lanes, stride); p < pStop && rl < stride; p += stride)
+            for (uint p = rl, pStop = EB_END(77, p, listedB * lanes, stride); p < pStop && rl < stride; p += stride)
             {
                 uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
                 trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
@@ -7276,7 +7276,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             // The grid this step: each tested triangle's geometry once, for its walk
             // (triGeoFill; lanes in reverse).
-            for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedB, LANES); q < qStop; q += LANES)
+            for (uint q = LANES - 1u - lane, qStop = EB_END(78, q, listedB, LANES); q < qStop; q += LANES)
                 triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);
         }
         sync();
@@ -7303,13 +7303,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             uint per = GRID_BUCKETS / LANES;
             uint block = LANES / GRID_BLOCKS;
             uint sum = 0u;
-            for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
+            for (uint k = 0u, kStop = EB_END(79, k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
             gsPart[lane] = sum;
             sync();
             if (lane < GRID_BLOCKS)
             {
                 uint run = 0u;
-                for (uint k = 0u, kStop = EB_END(k, block, 1u); k < kStop; k++)
+                for (uint k = 0u, kStop = EB_END(80, k, block, 1u); k < kStop; k++)
                 {
                     uint x = gsPart[lane * block + k];
                     gsPart[lane * block + k] = run;
@@ -7331,7 +7331,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             sync();
             uint run = gsPart[lane] + gsBlk[lane / block];
-            for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++)
+            for (uint k = 0u, kStop = EB_END(81, k, per, 1u); k < kStop; k++)
             {
                 gsOff[lane * per + k] = run;
                 run += gsCount[lane * per + k].load();
@@ -7339,7 +7339,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             sync();
             if (cell > 0.0)
             {
-                for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+                for (uint c = lane, cStop = EB_END(82, c, candCount, LANES); c < cStop; c += LANES)
                 {
                     uint br = gNext[candOff + c];
                     uint h = gLists[candOff + c];
@@ -7355,7 +7355,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         if (early && pairs <= PAIR_LIST)
         {
-            for (uint i = lane, iStop = EB_END(i, pairs, LANES); i < iStop; i += LANES)
+            for (uint i = lane, iStop = EB_END(83, i, pairs, LANES); i < iStop; i += LANES)
             {
                 uint e = gsPairs[i];
                 tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin,
@@ -7378,7 +7378,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
             uint subs = gP.triPairs != 0u ? LIST_SUBS : GRID_SUBS;
-            for (uint p = lane, pStop = EB_END(p, listed * subs, LANES); p < pStop; p += LANES)
+            for (uint p = lane, pStop = EB_END(84, p, listed * subs, LANES); p < pStop; p += LANES)
             {
                 uint t = triCount <= TRI_LIST ? gsTested[p / subs] : p / subs;
                 triangleGrid(triOff + t, p % subs, origin, range, cell, candOff, candCount, beamOff,
@@ -7390,7 +7390,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
             uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
             uint stride = (LANES / lanes) * lanes;
-            for (uint p = lane, pStop = EB_END(p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
+            for (uint p = lane, pStop = EB_END(85, p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
             {
                 uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
                 triangleGridBrute(triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
@@ -7403,7 +7403,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             // they fit.
             uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
             uint stride = (LANES / lanes) * lanes;
-            for (uint p = lane, pStop = EB_END(p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
+            for (uint p = lane, pStop = EB_END(86, p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
         }
@@ -7427,14 +7427,14 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (listedPairs <= TRI_PAIR_CAP)
             {
                 uint at = triPairsAt(v);
-                for (uint i = lane, iStop = EB_END(i, listedPairs, LANES); i < iStop; i += LANES)
+                for (uint i = lane, iStop = EB_END(87, i, listedPairs, LANES); i < iStop; i += LANES)
                     tryContact(triGeoLoad(gNext[at + 2u * i]), gNext[at + 2u * i + 1u], origin, range, beamOff,
                                groupOff, groupCount, parity);
             }
             else
             {
                 uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-                for (uint p = lane, pStop = EB_END(p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
+                for (uint p = lane, pStop = EB_END(88, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
                 {
                     uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
                     triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff,
@@ -7466,7 +7466,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if ((flagsV & FLAG_SLIDES) != 0u)
         {
             uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
-            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, SLIDE_FRAME, groupOff, parity);
+            for (uint k = lane, kStop = EB_END(89, k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, SLIDE_FRAME, groupOff, parity);
         }
 #endif
         sync();
@@ -7502,13 +7502,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     pairReuseEnd(v, lane);
     if (gP.steps > 0u && candCount > 0u)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES) triangleFinish(triOff + t);
+        for (uint t = lane, tStop = EB_END(90, t, triCount, LANES); t < tStop; t += LANES) triangleFinish(triOff + t);
     }
 #ifdef EB_AERO
     if ((flagsV & FLAG_SLIDES) != 0u)
     {
         uint4 ext = gStatic[gP.vehExtBase + v];
-        for (uint k = lane, kStop = EB_END(k, ext.y, LANES); k < kStop; k += LANES) slideSettle(ext.x + k);
+        for (uint k = lane, kStop = EB_END(91, k, ext.y, LANES); k < kStop; k += LANES) slideSettle(ext.x + k);
     }
 #endif
     // The last step's group breaks, for a read-back (the next node phase applies
@@ -7516,7 +7516,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.steps > 0u && groupCount > 0u)
     {
         uint last = (stepBase + gP.steps - 1u) & 1u;
-        for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
+        for (uint j = lane, jStop = EB_END(92, j, beamCount, LANES); j < jStop; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
     }
     if (sleepOn)
     {
@@ -7527,7 +7527,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_VV_SOLO
     // The last step's positions (each earlier step's were checked at the start of
     // the next step's node phase).
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(93, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         float3 p = gNodes[(nodeOff + i) * 3u].xyz;
         if (any(abs(p - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(v);
@@ -7850,7 +7850,7 @@ void triangleGridWide(uint gt, uint sub, uint v, float3 origin, float r, float c
     float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
     if (!(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS)))
     {
-        for (uint k = sub, kStop = EB_END(k, candCount, GRID_SUBS); k < kStop; k += GRID_SUBS)
+        for (uint k = sub, kStop = EB_END(94, k, candCount, GRID_SUBS); k < kStop; k += GRID_SUBS)
             tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
         return;
     }
@@ -7858,16 +7858,16 @@ void triangleGridWide(uint gt, uint sub, uint v, float3 origin, float r, float c
     int3 span = int3(fs);
     uint yz = uint(span.y * span.z);
     uint cells = uint(span.x) * yz;
-    for (uint i = sub, iStop = EB_END(i, cells, GRID_SUBS); i < iStop; i += GRID_SUBS)
+    for (uint i = sub, iStop = EB_END(95, i, cells, GRID_SUBS); i < iStop; i += GRID_SUBS)
     {
         uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
         bool dup = false;
-        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(96, j, i, 1u); j < jStop; j++)
             dup = dup || gridBucket(c0 + int3(int(j / yz), int((j / uint(span.z)) % uint(span.y)), int(j % uint(span.z)))) == b;
         if (dup) continue;
         uint n = min(uint(gAcc[gP.gridCountBase + v * GRID_BUCKETS + b].load()), WIDE_SLOTS);
         uint base = gP.slotBase16 + (v * GRID_BUCKETS + b) * WIDE_SLOTS;
-        for (uint e = 0u, eStop = EB_END(e, n, 1u); e < eStop; e++)
+        for (uint e = 0u, eStop = EB_END(97, e, n, 1u); e < eStop; e++)
         {
             float4 E = gBeams[base + e];
             float3 p = origin + E.xyz;
@@ -7877,7 +7877,7 @@ void triangleGridWide(uint gt, uint sub, uint v, float3 origin, float r, float c
     }
     // Candidates past a full bucket: every triangle tests them (its share of lanes).
     uint over = uint(gAcc[gP.overflowBase + v].load());
-    for (uint k = sub, kStop = EB_END(k, over, GRID_SUBS); k < kStop; k += GRID_SUBS)
+    for (uint k = sub, kStop = EB_END(98, k, over, GRID_SUBS); k < kStop; k += GRID_SUBS)
         tryContact(t, gNext[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
 }
 
@@ -8125,7 +8125,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
             slot = 256u - gsCount[mapAt].load();
         else
         {
-            for (uint k = 0u, kStop = EB_END(k, q, 1u); k < kStop; k++)
+            for (uint k = 0u, kStop = EB_END(99, k, q, 1u); k < kStop; k++)
             {
                 if (gsTested[k * LQ] == x)
                 {
@@ -8400,7 +8400,7 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     // (each lane reads the count lane 0 decides from; a step without hits clears nothing).
     uint mapNodes = hitSlotMapNodes(v);
     uint mapClear = mapNodes > 0u && gAcc[hitAcc(v)].load() > 0 ? mapNodes : 0u;
-    for (uint k = lane, kStop = EB_END(k, mapClear, 256u); k < kStop; k += 256u) gsCount[k].store(0u);
+    for (uint k = lane, kStop = EB_END(100, k, mapClear, 256u); k < kStop; k += 256u) gsCount[k].store(0u);
     sync();
     uint on = gsUniformHits;
     uint driveOn = gsUniformDrive;
@@ -8745,7 +8745,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     pairReuseTrack(nodeOff, nodeCount, lane);
     if (candCount > 0u)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(101, t, triCount, LANES); t < tStop; t += LANES)
         {
             int w = s > 0u ? triangleFinish(triOff + t) : asint(gMisc[gP.vehicles + triOff + t].x);
             if (triCount <= TRI_LIST && w <= 0) gsTested[gsTestedCount[parity].add(1u)] = t;
@@ -8777,7 +8777,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint lanes = clamp(LANES / max(listedB, 1u), 1u, candCount);
         uint stride = (LANES / lanes) * lanes;
         uint rl = LANES - 1u - lane;
-        for (uint p = rl, pStop = EB_END(p, listedB * lanes, stride); p < pStop && rl < stride; p += stride)
+        for (uint p = rl, pStop = EB_END(102, p, listedB * lanes, stride); p < pStop && rl < stride; p += stride)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
             trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
@@ -8785,7 +8785,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     }
     else if (candCount > 0u && gP.triGeo != 0u && (gP.perfFlags & PERF_WIDE_GEO) == 0u)
     {
-        for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedB, LANES); q < qStop; q += LANES)
+        for (uint q = LANES - 1u - lane, qStop = EB_END(103, q, listedB, LANES); q < qStop; q += LANES)
             triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);
     }
     sync();
@@ -8797,7 +8797,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         // reuses its list (reuse 2) or has no grid never reads the counts or the ranks.
         if (cell > 0.0)
         {
-            for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+            for (uint c = lane, cStop = EB_END(104, c, candCount, LANES); c < cStop; c += LANES)
             {
                 float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
                 uint b = gridBucket(int3(floor(p / cell)));
@@ -8808,13 +8808,13 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint per = GRID_BUCKETS / LANES;
         uint block = LANES / GRID_BLOCKS;
         uint sum = 0u;
-        for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
+        for (uint k = 0u, kStop = EB_END(105, k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
         gsPart[lane] = sum;
         sync();
         if (lane < GRID_BLOCKS)
         {
             uint run = 0u;
-            for (uint k = 0u, kStop = EB_END(k, block, 1u); k < kStop; k++)
+            for (uint k = 0u, kStop = EB_END(106, k, block, 1u); k < kStop; k++)
             {
                 uint x = gsPart[lane * block + k];
                 gsPart[lane * block + k] = run;
@@ -8836,7 +8836,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         }
         sync();
         uint run = gsPart[lane] + gsBlk[lane / block];
-        for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++)
+        for (uint k = 0u, kStop = EB_END(107, k, per, 1u); k < kStop; k++)
         {
             gsOff[lane * per + k] = run;
             run += gsCount[lane * per + k].load();
@@ -8844,7 +8844,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         sync();
         if (cell > 0.0)
         {
-            for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+            for (uint c = lane, cStop = EB_END(108, c, candCount, LANES); c < cStop; c += LANES)
             {
                 uint br = gNext[candOff + c];
                 uint h = gLists[candOff + c];
@@ -8857,7 +8857,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     uint pairs = gsPairCount.load();
     if (early && pairs <= PAIR_LIST)
     {
-        for (uint i = lane, iStop = EB_END(i, pairs, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(109, i, pairs, LANES); i < iStop; i += LANES)
         {
             uint e = gsPairs[i];
             tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin,
@@ -8874,7 +8874,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
         uint subs = gP.triPairs != 0u ? LIST_SUBS : GRID_SUBS;
-        for (uint p = lane, pStop = EB_END(p, listed * subs, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(110, p, listed * subs, LANES); p < pStop; p += LANES)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / subs] : p / subs;
             triangleGrid(triOff + t, p % subs, origin, range, cell, candOff, candCount, beamOff,
@@ -8886,7 +8886,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
         uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
         uint stride = (LANES / lanes) * lanes;
-        for (uint p = lane, pStop = EB_END(p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
+        for (uint p = lane, pStop = EB_END(111, p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
             triangleGridBrute(triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
@@ -8897,7 +8897,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     {
         uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
         uint stride = (LANES / lanes) * lanes;
-        for (uint p = lane, pStop = EB_END(p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
+        for (uint p = lane, pStop = EB_END(112, p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                          groupOff, groupCount, parity);
     }
@@ -8911,14 +8911,14 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         if (listedPairs <= TRI_PAIR_CAP)
         {
             uint at = triPairsAt(v);
-            for (uint i = lane, iStop = EB_END(i, listedPairs, LANES); i < iStop; i += LANES)
+            for (uint i = lane, iStop = EB_END(113, i, listedPairs, LANES); i < iStop; i += LANES)
                 tryContact(triGeoLoad(gNext[at + 2u * i]), gNext[at + 2u * i + 1u], origin, range, beamOff,
                            groupOff, groupCount, parity);
         }
         else
         {
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-            for (uint p = lane, pStop = EB_END(p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
+            for (uint p = lane, pStop = EB_END(114, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
             {
                 uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
                 triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff,
@@ -9084,7 +9084,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     float3 vlo = float3(0.0, 0.0, 0.0);
     float3 vhi = float3(0.0, 0.0, 0.0);
     bool has = false;
-    for (uint i = lane, iStop = EB_END(i, r0.y, 256u); i < iStop; i += 256u)
+    for (uint i = lane, iStop = EB_END(115, i, r0.y, 256u); i < iStop; i += 256u)
     {
         uint gi = r0.x + i;
         float3 x = nf3(origin + gNodes[gi * 3u].xyz);
@@ -9268,7 +9268,7 @@ void vvFindPairs(uint v)
     if (kind == 1u)
     {
         // Against every vehicle (two big ones once).
-        for (uint w = 0u, wStop = EB_END(w, gP.vehicles, 1u); w < wStop; w++)
+        for (uint w = 0u, wStop = EB_END(116, w, gP.vehicles, 1u); w < wStop; w++)
         {
             if (w == v) continue;
             uint kw = gMisc[vvRec(w, VV_FLAGS)].x;
@@ -9288,7 +9288,7 @@ void vvFindPairs(uint v)
                 int3 c = c0 + int3(x, y, z);
                 uint b = vvHash(c);
                 uint n = min(uint(gAcc[gP.vvGridCount + b].load()), VV_SLOTS);
-                for (uint e = 0u, eStop = EB_END(e, n, 1u); e < eStop; e++)
+                for (uint e = 0u, eStop = EB_END(117, e, n, 1u); e < eStop; e++)
                 {
                     uint w = gNext[gP.vvGrid + b * VV_SLOTS + e];
                     // Each pair once: the higher index in the lower's thread, in
@@ -9314,9 +9314,9 @@ uint vvLabel(uint v) { return uint(gAcc[gP.vvLabel + v].load()); }
 // nothing read from them depends on it (boxes' unions, counts, a slot's number).
 void vvAdjBuild(uint lane, uint nv, uint pairs)
 {
-    for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u) gAcc[flAdjCount(v)].store(0);
+    for (uint v = lane, vStop = EB_END(118, v, nv, 256u); v < vStop; v += 256u) gAcc[flAdjCount(v)].store(0);
     sync();
-    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    for (uint p = lane, pStop = EB_END(119, p, pairs, 256u); p < pStop; p += 256u)
     {
         gAcc[flAdjCount(gNext[gP.vvPairs + 2u * p])].add(1);
         gAcc[flAdjCount(gNext[gP.vvPairs + 2u * p + 1u])].add(1);
@@ -9325,7 +9325,7 @@ void vvAdjBuild(uint lane, uint nv, uint pairs)
     if (lane == 0u)
     {
         uint run = 0u;
-        for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++)
+        for (uint v = 0u, vStop = EB_END(120, v, nv, 1u); v < vStop; v++)
         {
             gNext[flAdjFirst(v)] = run;
             run += uint(gAcc[flAdjCount(v)].load());
@@ -9334,7 +9334,7 @@ void vvAdjBuild(uint lane, uint nv, uint pairs)
         gNext[flAdjFirst(nv)] = run;
     }
     sync();
-    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    for (uint p = lane, pStop = EB_END(121, p, pairs, 256u); p < pStop; p += 256u)
     {
         uint x = gNext[gP.vvPairs + 2u * p];
         uint y = gNext[gP.vvPairs + 2u * p + 1u];
@@ -9347,13 +9347,13 @@ void vvAdjBuild(uint lane, uint nv, uint pairs)
     // grouping does not mind; the owners' partners must be each once, or a partner's
     // contact points would be candidates twice and its hits applied twice. A later copy
     // of a pair is marked in its bits words (4: flScanPair leaves it, never a partner).
-    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    for (uint p = lane, pStop = EB_END(122, p, pairs, 256u); p < pStop; p += 256u)
     {
         uint x = gNext[gP.vvPairs + 2u * p];
         uint y = gNext[gP.vvPairs + 2u * p + 1u];
         uint dup = 0u;
         uint e1 = gNext[flAdjFirst(x + 1u)];
-        for (uint e = gNext[flAdjFirst(x)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+        for (uint e = gNext[flAdjFirst(x)], eStop = EB_END(123, e, e1, 1u); e < eStop; e++)
         {
             uint d = gNext[flAdjAt(e)];
             if ((d >> 1u) < p && flPartner(d) == y) dup = 4u;
@@ -9372,7 +9372,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     uint nv = gP.vehicles;
     if (gP.vvFusedPairs != 0u)
     {
-        for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u) vvFindPairs(v);
+        for (uint v = lane, vStop = EB_END(124, v, nv, 256u); v < vStop; v += 256u) vvFindPairs(v);
         sync();
     }
     uint pairs = min(uint(gAcc[vvCtl(VV_PAIRS)].load()), gP.vvPairCap);
@@ -9385,7 +9385,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     {
         for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
         {
-            EB_PASS(bGuard);
+            EB_PASS(125, bGuard);
             gAcc[gP.vvGridCount + b].store(0);
         }
         if (lane == 0u)
@@ -9395,7 +9395,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         }
         return ebLoopCapFlush();
     }
-    for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u)
+    for (uint v = lane, vStop = EB_END(126, v, nv, 256u); v < vStop; v += 256u)
     {
         gAcc[gP.vvLabel + v].store(int(v));
         gMisc[vvRec(v, VV_FLAGS)].y = 0u;
@@ -9403,7 +9403,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     sync();
     // The pairs by vehicle (the owners' state by vehicle reads its partners from them).
     if (gP.vvFleet != 0u) vvAdjBuild(lane, nv, pairs);
-    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    for (uint p = lane, pStop = EB_END(127, p, pairs, 256u); p < pStop; p += 256u)
     {
         gMisc[vvRec(gNext[gP.vvPairs + 2u * p], VV_FLAGS)].y = 1u;
         gMisc[vvRec(gNext[gP.vvPairs + 2u * p + 1u], VV_FLAGS)].y = 1u;
@@ -9415,7 +9415,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         if (lane == 0u) gsUniformLanes = 0u;
         sync();
         bool changed = false;
-        for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+        for (uint p = lane, pStop = EB_END(128, p, pairs, 256u); p < pStop; p += 256u)
         {
             uint a = gNext[gP.vvPairs + 2u * p];
             uint b = gNext[gP.vvPairs + 2u * p + 1u];
@@ -9431,7 +9431,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
                 changed = true;
             }
         }
-        for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u)
+        for (uint v = lane, vStop = EB_END(129, v, nv, 256u); v < vStop; v += 256u)
         {
             uint l = vvLabel(v);
             uint ll = vvLabel(l);
@@ -9446,13 +9446,13 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     if (lane == 0u && go != 0u) gAcc[vvCtl(VV_UNCONVERGED)].store(1);
     // Groups (numbered by their smallest vehicle, in no particular order) and the
     // solo list.
-    for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u)
+    for (uint v = lane, vStop = EB_END(130, v, nv, 256u); v < vStop; v += 256u)
     {
         if (gMisc[vvRec(v, VV_FLAGS)].y != 0u && vvLabel(v) == v)
             gMisc[vvRec(v, VV_FLAGS)].z = uint(gAcc[vvCtl(VV_GROUPS)].add(1));
     }
     sync();
-    for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u)
+    for (uint v = lane, vStop = EB_END(131, v, nv, 256u); v < vStop; v += 256u)
     {
         if (gMisc[vvRec(v, VV_FLAGS)].y != 0u)
         {
@@ -9471,7 +9471,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     uint g1 = min(g0 + chunk, groups);
     uint sm = 0u;
     uint sp = 0u;
-    for (uint g = g0, gStop = EB_END(g, g1, 1u); g < gStop; g++)
+    for (uint g = g0, gStop = EB_END(132, g, g1, 1u); g < gStop; g++)
     {
         sm += uint(gAcc[vvSum(g, 0u)].load());
         sp += uint(gAcc[vvSum(g, 2u)].load());
@@ -9496,7 +9496,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     sync();
     uint ra = gsVvA[lane];
     uint rb = gsVvB[lane];
-    for (uint g = g0, gStop = EB_END(g, g1, 1u); g < gStop; g++)
+    for (uint g = g0, gStop = EB_END(133, g, g1, 1u); g < gStop; g++)
     {
         uint m = uint(gAcc[vvSum(g, 0u)].load());
         uint pts = uint(gAcc[vvSum(g, 2u)].load());
@@ -9506,7 +9506,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         rb += pts;
     }
     sync();
-    for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u)
+    for (uint v = lane, vStop = EB_END(134, v, nv, 256u); v < vStop; v += 256u)
     {
         if (gMisc[vvRec(v, VV_FLAGS)].y != 0u)
         {
@@ -9529,7 +9529,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         // vehicles run alone, its member count 0).
         bool big = false;
         bool larger = false;
-        for (uint g = 0u, gStop = EB_END(g, groups, 1u); g < gStop; g++)
+        for (uint g = 0u, gStop = EB_END(135, g, groups, 1u); g < gStop; g++)
         {
             if (gMisc[gP.vvGroups + g].y > VV_SIDE) big = true;
             if (gMisc[gP.vvGroups + g].y > VV_PART) larger = true;
@@ -9539,10 +9539,10 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
     {
-        EB_PASS(bGuard);
+        EB_PASS(136, bGuard);
         gAcc[gP.vvGridCount + b].store(0);
     }
-    for (uint g = lane, gStop = EB_END(g, groups, 256u); g < gStop; g += 256u)
+    for (uint g = lane, gStop = EB_END(137, g, groups, 256u); g < gStop; g += 256u)
     {
         gAcc[vvSum(g, 0u)].store(0);
         gAcc[vvSum(g, 1u)].store(0);
@@ -9589,7 +9589,7 @@ void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity,
     float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
     float3 hi = -lo;
     bool has = false;
-    for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
+    for (uint i = lane, iStop = EB_END(138, i, nodeCount, lanes); i < iStop; i += lanes)
     {
         float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
         lo = min(lo, x);
@@ -9707,7 +9707,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     sync();
     {
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(139, i, nodeCount, LANES); i < iStop; i += LANES)
         {
             if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
@@ -9728,10 +9728,10 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 #ifdef EB_SOLO_STEP
     if (keep) pairReuseTrack(nodeOff, nodeCount, lane);
 #endif
-    for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
+    for (uint g = lane, gStop = EB_END(140, g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(141, t, triCount, LANES); t < tStop; t += LANES)
         {
             int w = s > 0u ? triangleFinish(triOff + t) : asint(gMisc[gP.vehicles + triOff + t].x);
             if (s > 0u && pending)
@@ -9778,7 +9778,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     }
     if (cell > 0.0)
     {
-        for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+        for (uint c = lane, cStop = EB_END(142, c, candCount, LANES); c < cStop; c += LANES)
         {
             float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
             uint b = gridBucket(int3(floor(p / cell)));
@@ -9786,15 +9786,15 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         }
     }
 #ifdef EB_AERO
-    for (uint w = lane, wStop = EB_END(w, aero0.y, LANES); w < wStop; w += LANES) wingForces(aero0.x + w, origin);
+    for (uint w = lane, wStop = EB_END(143, w, aero0.y, LANES); w < wStop; w += LANES) wingForces(aero0.x + w, origin);
     if (lane == LANES - 1u && (flagsV & FLAG_FUSEDRAG) != 0u) fuseDrag(aero1, origin, v);
     if ((flagsV & FLAG_KEYS) != 0u)
     {
-        for (uint c = lane, cStop = EB_END(c, aero0.w, LANES); c < cStop; c += LANES) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
+        for (uint c = lane, cStop = EB_END(144, c, aero0.w, LANES); c < cStop; c += LANES) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
     }
     else
     {
-        for (uint c = lane, cStop = EB_END(c, aero0.w, LANES); c < cStop; c += LANES) commandUpdate(aero0.z + c);
+        for (uint c = lane, cStop = EB_END(145, c, aero0.w, LANES); c < cStop; c += LANES) commandUpdate(aero0.z + c);
     }
     sync();
     if (lane == 0u) wingApply(aero0.x, aero0.y);
@@ -9803,7 +9803,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         for (uint k = lane; k < KEYS; k += LANES) gNext[keySlot(v, parity ^ 1u, k)] = 0u;
     }
 #endif
-    for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+    for (uint j = lane, jStop = EB_END(146, j, beamCount, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
     // The grid this step (lane 0's decision above, from the same counts): each tested
     // triangle's geometry of this step for its walk, which loads it (triangleGridWalk,
     // triGeoLoad). Without this fill the walk read whatever the last solo or wide frame
@@ -9813,7 +9813,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         uint listedG = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
         if (listedG * candCount > BRUTE_PAIRS_PER_LANE * LANES)
         {
-            for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedG, LANES); q < qStop; q += LANES)
+            for (uint q = LANES - 1u - lane, qStop = EB_END(147, q, listedG, LANES); q < qStop; q += LANES)
                 triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);
         }
     }
@@ -9831,13 +9831,13 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         uint per = GRID_BUCKETS / LANES;
         uint block = LANES / GRID_BLOCKS;
         uint sum = 0u;
-        for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
+        for (uint k = 0u, kStop = EB_END(148, k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
         gsPart[lane] = sum;
         sync();
         if (lane < GRID_BLOCKS)
         {
             uint run = 0u;
-            for (uint k = 0u, kStop = EB_END(k, block, 1u); k < kStop; k++)
+            for (uint k = 0u, kStop = EB_END(149, k, block, 1u); k < kStop; k++)
             {
                 uint x = gsPart[lane * block + k];
                 gsPart[lane * block + k] = run;
@@ -9859,7 +9859,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         }
         sync();
         uint run = gsPart[lane] + gsBlk[lane / block];
-        for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++)
+        for (uint k = 0u, kStop = EB_END(150, k, per, 1u); k < kStop; k++)
         {
             gsOff[lane * per + k] = run;
             run += gsCount[lane * per + k].load();
@@ -9867,7 +9867,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         sync();
         if (cell > 0.0)
         {
-            for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+            for (uint c = lane, cStop = EB_END(151, c, candCount, LANES); c < cStop; c += LANES)
             {
                 uint br = gNext[candOff + c];
                 uint h = gLists[candOff + c];
@@ -9897,7 +9897,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     if (candCount > 0u && cell > 0.0 && gridOn != 0u)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(152, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
             triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff, groupOff,
@@ -9909,7 +9909,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
         uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
         uint stride = (LANES / lanes) * lanes;
-        for (uint p = lane, pStop = EB_END(p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
+        for (uint p = lane, pStop = EB_END(153, p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
             triangleGridBrute(triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
@@ -9920,7 +9920,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     {
         uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
         uint stride = (LANES / lanes) * lanes;
-        for (uint p = lane, pStop = EB_END(p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
+        for (uint p = lane, pStop = EB_END(154, p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
                          groupCount, parity);
     }
@@ -9971,7 +9971,7 @@ uint vvPartLanes(uint k)
     uint pGuard = 0u;
     while (p * k > LANES && p > 1u)
     {
-        EB_PASS(pGuard);
+        EB_PASS(155, pGuard);
         p = p >> 1u;
     }
     return p;
@@ -10013,7 +10013,7 @@ void trianglePairsM(uint m, uint t, uint gt, uint sub, uint subs, float3 origin,
     }
     uint yz = uint(span.y * span.z);
     uint cells = uint(span.x) * yz;
-    for (uint k = sub, kStop = EB_END(k, candCount, subs); k < kStop; k += subs)
+    for (uint k = sub, kStop = EB_END(156, k, candCount, subs); k < kStop; k += subs)
     {
         uint h = gLists[candOff + k];
         if (h == tn.x || h == tn.y || h == tn.z) continue;
@@ -10027,7 +10027,7 @@ void trianglePairsM(uint m, uint t, uint gt, uint sub, uint subs, float3 origin,
             {
                 uint b = gridBucket(c);
                 bool covered = false;
-                for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                for (uint i = 0u, iStop = EB_END(157, i, cells, 1u); i < iStop; i++)
                     covered = covered
                         || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
                 if (!covered) continue;
@@ -10122,7 +10122,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     sync();
     {
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
-        for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P)
+        for (uint i = pl, iStop = EB_END(158, i, nodeCount, P); i < iStop; i += P)
         {
             if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
@@ -10138,10 +10138,10 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, pl, P);
         if (on && (flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, pl, P);
     }
-    for (uint g = pl, gStop = EB_END(g, groupCount, P); g < gStop; g += P) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
+    for (uint g = pl, gStop = EB_END(159, g, groupCount, P); g < gStop; g += P) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
     {
-        for (uint t = pl, tStop = EB_END(t, triCount, P); t < tStop; t += P)
+        for (uint t = pl, tStop = EB_END(160, t, triCount, P); t < tStop; t += P)
         {
             int w = s > 0u ? triangleFinish(triOff + t) : asint(gMisc[gP.vehicles + triOff + t].x);
             if (s > 0u && pending)
@@ -10168,7 +10168,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     if (lane == 0u)
     {
         uint any = 0u;
-        for (uint j = 0u, jStop = EB_END(j, k, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(161, j, k, 1u); j < jStop; j++)
         {
             uint vj = vvMember(off, j);
             uint4 q1 = gStatic[vj * 4u + 1u];
@@ -10183,7 +10183,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     }
     if (gridM)
     {
-        for (uint c = pl, cStop = EB_END(c, candCount, P); c < cStop; c += P)
+        for (uint c = pl, cStop = EB_END(162, c, candCount, P); c < cStop; c += P)
         {
             float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
             uint b = gridBucket(int3(floor(p / cell)));
@@ -10191,35 +10191,35 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
         }
     }
 #ifdef EB_AERO
-    for (uint w = pl, wStop = EB_END(w, aero0.y, P); w < wStop; w += P) wingForces(aero0.x + w, origin);
+    for (uint w = pl, wStop = EB_END(163, w, aero0.y, P); w < wStop; w += P) wingForces(aero0.x + w, origin);
     if (on && pl == P - 1u && (flagsV & FLAG_FUSEDRAG) != 0u) fuseDrag(aero1, origin, v);
     if ((flagsV & FLAG_KEYS) != 0u)
     {
-        for (uint c = pl, cStop = EB_END(c, aero0.w, P); c < cStop; c += P) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
+        for (uint c = pl, cStop = EB_END(164, c, aero0.w, P); c < cStop; c += P) commandUpdateKeys(aero0.z + c, v, parity ^ 1u);
     }
     else
     {
-        for (uint c = pl, cStop = EB_END(c, aero0.w, P); c < cStop; c += P) commandUpdate(aero0.z + c);
+        for (uint c = pl, cStop = EB_END(165, c, aero0.w, P); c < cStop; c += P) commandUpdate(aero0.z + c);
     }
     sync();
     {
         uint4 ext = gStatic[gP.vehExtBase + v];
         if (!on) ext.w = 0u;
-        for (uint q = pl, qStop = EB_END(q, ext.w, P); q < qStop; q += P) wingGather(ext.z + q);
+        for (uint q = pl, qStop = EB_END(166, q, ext.w, P); q < qStop; q += P) wingGather(ext.z + q);
     }
     if ((flagsV & FLAG_KEYS) != 0u)
     {
         for (uint q = pl; q < KEYS; q += P) gNext[keySlot(v, parity ^ 1u, q)] = 0u;
     }
 #endif
-    for (uint j = pl, jStop = EB_END(j, beamCount, P); j < jStop; j += P) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+    for (uint j = pl, jStop = EB_END(167, j, beamCount, P); j < jStop; j += P) beamUpdate(beamOff + j, j, fast, groupOff, parity);
     bool early = candCount > 0u && !gridM;
     if (early)
     {
         uint lanes = clamp(P / max(listed, 1u), 1u, candCount);
         uint stride = (P / lanes) * lanes;
         uint rl = P - 1u - pl;
-        for (uint q = rl, qStop = EB_END(q, listed * lanes, stride); q < qStop && rl < stride; q += stride)
+        for (uint q = rl, qStop = EB_END(168, q, listed * lanes, stride); q < qStop && rl < stride; q += stride)
         {
             uint t = gNext[listBase + q / lanes];
             trianglePairsM(m, t, triOff + t, q % lanes, lanes, origin, range, cell, candOff, candCount, parity);
@@ -10236,14 +10236,14 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
         uint sum = 0u;
         if (gridM)
         {
-            for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++) sum += uint(gAcc[countBase + pl * per + q].load());
+            for (uint q = 0u, qStop = EB_END(169, q, per, 1u); q < qStop; q++) sum += uint(gAcc[countBase + pl * per + q].load());
         }
         gsPart[lane] = sum;
         sync();
         if (gridM && pl < GRID_BLOCKS)
         {
             uint run = 0u;
-            for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+            for (uint q = 0u, qStop = EB_END(170, q, block, 1u); q < qStop; q++)
             {
                 uint x = gsPart[m * P + pl * block + q];
                 gsPart[m * P + pl * block + q] = run;
@@ -10267,7 +10267,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
         if (gridM)
         {
             uint run = gsPart[lane] + gsBlkM[m * GRID_BLOCKS + pl / block];
-            for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++)
+            for (uint q = 0u, qStop = EB_END(171, q, per, 1u); q < qStop; q++)
             {
                 gNext[offBase + pl * per + q] = run;
                 run += uint(gAcc[countBase + pl * per + q].load());
@@ -10276,7 +10276,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
         sync();
         if (gridM)
         {
-            for (uint c = pl, cStop = EB_END(c, candCount, P); c < cStop; c += P)
+            for (uint c = pl, cStop = EB_END(172, c, candCount, P); c < cStop; c += P)
             {
                 uint br = gNext[candOff + c];
                 uint h = gLists[candOff + c];
@@ -10293,7 +10293,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
 #endif
     if (early && pairs <= PAIR_PART)
     {
-        for (uint i = pl, iStop = EB_END(i, pairs, P); i < iStop; i += P)
+        for (uint i = pl, iStop = EB_END(173, i, pairs, P); i < iStop; i += P)
         {
             uint e = gsPairs[m * PAIR_PART + i];
             tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin, range,
@@ -10302,7 +10302,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     }
     else if (candCount > 0u && cell > 0.0 && gridM)
     {
-        for (uint q = pl, qStop = EB_END(q, listed * GRID_SUBS, P); q < qStop; q += P)
+        for (uint q = pl, qStop = EB_END(174, q, listed * GRID_SUBS, P); q < qStop; q += P)
         {
             uint t = gNext[listBase + q / GRID_SUBS];
             triangleGridAt(triOff + t, q % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff, groupOff,
@@ -10313,7 +10313,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     {
         uint lanes = clamp(P / max(listed, 1u), 1u, candCount);
         uint stride = (P / lanes) * lanes;
-        for (uint q = pl, qStop = EB_END(q, listed * lanes, stride); q < qStop && pl < stride; q += stride)
+        for (uint q = pl, qStop = EB_END(175, q, listed * lanes, stride); q < qStop && pl < stride; q += stride)
         {
             uint t = gNext[listBase + q / lanes];
             triangleGridBrute(triOff + t, q % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
@@ -10324,7 +10324,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     {
         uint lanes = clamp(P / max(listed, 1u), 1u, candCount);
         uint stride = (P / lanes) * lanes;
-        for (uint q = pl, qStop = EB_END(q, listed * lanes, stride); q < qStop && pl < stride; q += stride)
+        for (uint q = pl, qStop = EB_END(176, q, listed * lanes, stride); q < qStop && pl < stride; q += stride)
         {
             uint t = gNext[listBase + q / lanes];
             triangleTest(triOff + t, q % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
@@ -10350,14 +10350,14 @@ void contactMemberBegin(uint v, uint lane)
     uint4 aero0 = gStatic[gP.aeroBase + v * 3u];
     {
         float3 o = asfloat(gMisc[v].xyz);
-        for (uint w = lane, wStop = EB_END(w, aero0.y, LANES); w < wStop; w += LANES) wingCheck(aero0.x + w, o);
+        for (uint w = lane, wStop = EB_END(177, w, aero0.y, LANES); w < wStop; w += LANES) wingCheck(aero0.x + w, o);
     }
 #endif
     float3 first = gNodes[r0.x * 3u].xyz;
     sync();
     if (length(first) > REBASE_RADIUS)
     {
-        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(178, i, r0.y, LANES); i < iStop; i += LANES)
         {
             float4 P = gNodes[(r0.x + i) * 3u];
             gNodes[(r0.x + i) * 3u] = float4(P.xyz - first, P.w);
@@ -10383,7 +10383,7 @@ void contactMemberEnd(uint v, uint lane)
     bool pending = gMisc[vvRec(v, VV_FLAGS)].w != 0u;
     if (gP.steps > 0u && r2.y > 0u)
     {
-        for (uint t = lane, tStop = EB_END(t, r1.y, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(179, t, r1.y, LANES); t < tStop; t += LANES)
         {
             triangleFinish(r1.x + t);
             if (pending) gMisc[gP.vehicles + r1.x + t].x = 0u;
@@ -10392,7 +10392,7 @@ void contactMemberEnd(uint v, uint lane)
     if (gP.steps > 0u && r2.w > 0u)
     {
         uint last = (misc.w + gP.steps - 1u) & 1u;
-        for (uint j = lane, jStop = EB_END(j, r0.w, LANES); j < jStop; j += LANES) groupDrops(r0.z + j, r0.z, r2.z, last, true);
+        for (uint j = lane, jStop = EB_END(180, j, r0.w, LANES); j < jStop; j += LANES) groupDrops(r0.z + j, r0.z, r2.z, last, true);
     }
     if (lane < 12u) gAcc[gP.vvAcc + v * 12u + lane].store((lane % 6u) < 3u ? VV_INT_MAX : VV_INT_MIN);
     sync();
@@ -10498,7 +10498,7 @@ uint flSlot(uint va, uint vh)
     if (gFlSlotVa == va && gFlSlotVh == vh) return gFlSlotVal;
     uint slot = 0u;
     uint e1 = gNext[flAdjFirst(va + 1u)];
-    for (uint e = gNext[flAdjFirst(va)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+    for (uint e = gNext[flAdjFirst(va)], eStop = EB_END(181, e, e1, 1u); e < eStop; e++)
     {
         uint d = gNext[flAdjAt(e)];
         if (flPartner(d) == vh)
@@ -10557,11 +10557,11 @@ float3 vvAccel(float3 f, uint n, float m, float w)
 // Every member's node force at the contact pass's start (two-body contact).
 void vvSnapshot(uint off, uint k, uint parity, uint lane)
 {
-    for (uint mi = 0u, miStop = EB_END(mi, k, 1u); mi < miStop; mi++)
+    for (uint mi = 0u, miStop = EB_END(182, mi, k, 1u); mi < miStop; mi++)
     {
         uint v = vvMember(off, mi);
         uint4 r0 = gStatic[v * 4u];
-        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(183, i, r0.y, LANES); i < iStop; i += LANES)
             gBeams[gP.vvSnap + r0.x + i] = float4(vvPointForce(r0.x + i, v, parity), 0.0);
     }
 }
@@ -10571,13 +10571,13 @@ void vvSnapshot(uint off, uint k, uint parity, uint lane)
 void vvSplitClear(uint off, uint k, uint slots, uint lane)
 {
     if (gP.vvSplit == 0u) return;
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END(184, m, k, 1u); m < mStop; m++)
     {
         uint4 r0 = gStatic[vvMember(off, m) * 4u];
-        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(185, i, r0.y, LANES); i < iStop; i += LANES)
         {
             gAcc[vvSplitTri(r0.x + i)].store(0);
-            for (uint sl = 0u, slStop = EB_END(sl, min(slots, EB_MAX_MEMBERS), 1u); sl < slStop; sl++)
+            for (uint sl = 0u, slStop = EB_END(186, sl, min(slots, EB_MAX_MEMBERS), 1u); sl < slStop; sl++)
             {
                 // (The slot's own word, whatever the owners' addressing.)
                 if (sl < slots) gAcc[gP.vvSplit + (1u + sl) * gP.totalNodes + r0.x + i].store(0);
@@ -10645,7 +10645,7 @@ bool vvVote(VvTri t, uint h, uint vh, float delta)
         uint k = 0u;
         for (uint kGuard = 0u; k + 4u <= info.z; k += 4u)
         {
-            EB_PASS(kGuard);
+            EB_PASS(187, kGuard);
             float3 y0 = gNodes[gLists[base + k] * 3u].xyz;
             float3 y1 = gNodes[gLists[base + k + 1u] * 3u].xyz;
             float3 y2 = gNodes[gLists[base + k + 2u] * 3u].xyz;
@@ -10655,7 +10655,7 @@ bool vvVote(VvTri t, uint h, uint vh, float delta)
             score += sdot(t.n, ssub3(nf3(ob + y2), t.p0)) >= 0.0 ? 1 : -1;
             score += sdot(t.n, ssub3(nf3(ob + y3), t.p0)) >= 0.0 ? 1 : -1;
         }
-        uint kStop = EB_END(k, info.z, 1u);
+        uint kStop = EB_END(188, k, info.z, 1u);
         for (; k < kStop; k++)
             score += sdot(t.n, ssub3(nf3(ob + gNodes[gLists[base + k] * 3u].xyz), t.p0)) >= 0.0 ? 1 : -1;
     }
@@ -10987,7 +10987,7 @@ void vvResidualPhase(uint va, uint base, uint n, float r, uint parity, uint lane
 {
     if (gP.selfSplit == 0u || gP.vvSplit == 0u) return;
     float3 oa = asfloat(gMisc[va].xyz);
-    for (uint i = lane, iStop = EB_END(i, n, lanes); i < iStop; i += lanes)
+    for (uint i = lane, iStop = EB_END(189, i, n, lanes); i < iStop; i += lanes)
     {
         uint gt = gNext[base + 2u * i];
         uint h = gNext[base + 2u * i + 1u];
@@ -11110,7 +11110,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
     // (With the grid the sort records hold the sorted candidates: no stream.)
     bool stream = (gP.perfFlags & (PERF_VV_STREAM | PERF_VV_BIG_GRID)) == PERF_VV_STREAM;
     uint info = vvSortAt(runOff);
-    for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
+    for (uint e = sub, eStop = EB_END(190, e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[gP.vvRun + runOff + e];
         uint h = asuint(E.w);
@@ -11160,7 +11160,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
 void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot)
 {
     float3 oa = vvRel(va, va);
-    for (uint i = lane, iStop = EB_END(i, n, lanes); i < iStop; i += lanes)
+    for (uint i = lane, iStop = EB_END(191, i, n, lanes); i < iStop; i += lanes)
     {
         uint gt = gNext[base + 2u * i];
         uint h = gNext[base + 2u * i + 1u];
@@ -11174,7 +11174,7 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
             continue;
         }
 #endif
-        for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(192, j, n, 1u); j < jStop; j++)
         {
             if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
             {
@@ -11184,13 +11184,13 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         }
         if (!first) continue;
         uint vh = gStatic[gP.nodeInfoBase + h].w;
-        for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
+        for (uint it = 0u, itStop = EB_END(193, it, n, 1u); it < itStop; it++)
         {
             VvTri t = vvTriangle(gt, oa, r);
             vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, slot);
             // The point's next hit: the smallest later triangle.
             uint next = 0xFFFFFFFFu;
-            for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
+            for (uint j = 0u, jStop = EB_END(194, j, n, 1u); j < jStop; j++)
             {
                 uint gj = gNext[base + 2u * j];
                 if (gNext[base + 2u * j + 1u] == h && gj > gt && gj < next) next = gj;
@@ -11278,7 +11278,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
     uint prevListed = 0u;
     uint prevVa = 0u;
     float prevRange = 0.0;
-    for (uint a = 0u, aStop = EB_END_UNIFORM(a, k, 1u, EB_MAX_MEMBERS); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END_UNIFORM(195, a, k, 1u, EB_MAX_MEMBERS); a < aStop; a++)
     {
         uint q = a & 1u;
         uint va = vvMember(off, a);
@@ -11289,7 +11289,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         float3 ahi = sadd3(bhi, m3);
         float3 va0 = gNodes[gStatic[va * 4u].x * 3u + 1u].xyz;
         // Phase S (with the previous owner's hits).
-        for (uint i = lane, iStop = EB_END(i, prevListed, LANES); i < iStop; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
+        for (uint i = lane, iStop = EB_END(196, i, prevListed, LANES); i < iStop; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
 #ifdef EB_ABLATE
         if ((gP.ablate & 1024u) == 0u)
 #endif
@@ -11305,7 +11305,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                     vvResidualPhase(prevVa, vvHitAt(runOff, 0u), prevHits, prevRange, parity, lane, LANES, 0u, ph);
             }
         }
-        for (uint b = lane, bStop = EB_END(b, k, LANES); b < bStop; b += LANES)
+        for (uint b = lane, bStop = EB_END(197, b, k, LANES); b < bStop; b += LANES)
         {
             uint vb = vvMember(off, b);
             uint kb = vvBoxKey(vb, parity);
@@ -11340,11 +11340,11 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             gsVvHits[q ^ 1u].store(0u);
             gsVvReset[q ^ 1u] = 0u;
         }
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(198, m, k, 1u); m < mStop; m++)
         {
             if (m == a || gNext[vvResetAt(off, m)] == 0u) continue;
             uint4 r1 = gStatic[vvMember(off, m) * 4u + 1u];
-            for (uint t = lane, tStop = EB_END(t, r1.y, LANES); t < tStop; t += LANES) gMisc[gP.vvTri + r1.x + t].x = 0u;
+            for (uint t = lane, tStop = EB_END(199, t, r1.y, LANES); t < tStop; t += LANES) gMisc[gP.vvTri + r1.x + t].x = 0u;
         }
         // The previous owner's two-body counts (its hits were applied in phase S).
         if (prevHits > 0u) vvSplitClear(off, k, 1u, lane);
@@ -11354,7 +11354,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         float3 plo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 phi = -plo;
         float vmaxB = 0.0;
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(200, m, k, 1u); m < mStop; m++)
         {
             if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
             uint kb = vvBoxKey(vvMember(off, m), parity);
@@ -11363,7 +11363,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             if (gP.clipMem != 0u) vmaxB = max(vmaxB, clipVmax(vvMember(off, m), parity));
         }
         float extra = vvClipExtra(va, vmaxB, parity);
-        for (uint t = lane, tStop = EB_END(t, ra1.y, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(201, t, ra1.y, LANES); t < tStop; t += LANES)
         {
             uint4 c = gMisc[gP.vvTri + ra1.x + t];
             int cwait = ownerReset ? 0 : asint(c.x);
@@ -11400,14 +11400,14 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             float3 chi = sadd3(bhi, r3);
             // Anti-clip: the point's own travel (per point) on top of the bound.
             float ownerReach = gP.clipMem != 0u ? CLIP_DEPTH + clipVmax(va, parity) * STEP + 0.001 : 0.0;
-            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(202, m, k, 1u); m < mStop; m++)
             {
                 if (m == a || gNext[vvPartnerAt(off, m)] == 0u) continue;
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
                 float3 orel = vvRel(v, va);
-                for (uint i = lane, iStop = EB_END(i, cp.y, LANES); i < iStop; i += LANES)
+                for (uint i = lane, iStop = EB_END(203, i, cp.y, LANES); i < iStop; i += LANES)
                 {
                     uint h = gLists[cp.x + i];
                     float3 x = nf3(o + gNodes[h * 3u].xyz);
@@ -11444,7 +11444,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 #endif
         bool bigGrid = (gP.perfFlags & PERF_VV_BIG_GRID) != 0u;
         if (bigGrid) vvBigGridBuild(va, runOff, cands, lane);
-        for (uint p = lane, pStop = EB_END(p, listed * subs, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(204, p, listed * subs, LANES); p < pStop; p += LANES)
         {
             uint t = gNext[vvTestedAt(ra1.x + p / subs)];
             if (bigGrid)
@@ -11458,7 +11458,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         prevVa = va;
         prevRange = range;
     }
-    for (uint i = lane, iStop = EB_END(i, prevListed, LANES); i < iStop; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
+    for (uint i = lane, iStop = EB_END(205, i, prevListed, LANES); i < iStop; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
     uint lastHits = k > 0u ? gsVvHits[(k - 1u) & 1u].load() : 0u;
     if (k > 0u) vvApplyHits(prevVa, runOff, points, lastHits, prevRange, parity, lane);
     if (gP.vvSplit != 0u)
@@ -11567,7 +11567,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
     bool hit = false;
     uint run = vvRunSmall(runOff, points, a);
     vvVisit(sub < cands ? (cands - sub + subs - 1u) / subs : 0u);
-    for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
+    for (uint e = sub, eStop = EB_END(206, e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
         uint h = asuint(E.w);
@@ -11592,7 +11592,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
 void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint cands, float r, uint parity, uint slot)
 {
     VvTri t = vvTriangle(gt, vvRel(va, va), r);
-    for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
+    for (uint e = sub, eStop = EB_END(207, e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
         uint h = asuint(E.w);
@@ -11611,18 +11611,18 @@ uint vvLevel(uint a, uint k, uint points)
 {
     uint lv[VV_PART];
     uint mine = 0u;
-    for (uint b = 0u, bStop = EB_END(b, k, 1u); b < bStop; b++)
+    for (uint b = 0u, bStop = EB_END(208, b, k, 1u); b < bStop; b++)
     {
         lv[b] = 0u;
         if (gsVvHit4[b].load() == 0u) continue;
         uint l = 1u;
-        for (uint c = 0u, cStop = EB_END(c, b, 1u); c < cStop; c++)
+        for (uint c = 0u, cStop = EB_END(209, c, b, 1u); c < cStop; c++)
         {
             if (lv[c] == 0u) continue;
             // Touched vehicle sets of b and c meet: b == c's partner, or a common
             // partner (bit 1 of gsVvPair: partners).
             bool meet = (gsVvPair[b * VV_PART + c] & 1u) != 0u;
-            for (uint d = 0u, dStop = EB_END(d, k, 1u); d < dStop; d++)
+            for (uint d = 0u, dStop = EB_END(210, d, k, 1u); d < dStop; d++)
                 meet = meet || ((gsVvPair[b * VV_PART + d] & 1u) != 0u && (gsVvPair[c * VV_PART + d] & 1u) != 0u);
             if (meet) l = max(l, lv[c] + 1u);
         }
@@ -11643,17 +11643,17 @@ void vvLevelsSet(uint k, uint lane)
     if (lane != 0u) return;
     uint lv[VV_PART];
     uint packed = 0u;
-    for (uint b = 0u, bStop = EB_END(b, k, 1u); b < bStop; b++)
+    for (uint b = 0u, bStop = EB_END(211, b, k, 1u); b < bStop; b++)
     {
         uint l = 0u;
         if (gsVvHit4[b].load() != 0u)
         {
             l = 1u;
-            for (uint c = 0u, cStop = EB_END(c, b, 1u); c < cStop; c++)
+            for (uint c = 0u, cStop = EB_END(212, c, b, 1u); c < cStop; c++)
             {
                 if (lv[c] == 0u) continue;
                 bool meet = (gsVvPair[b * VV_PART + c] & 1u) != 0u;
-                for (uint d = 0u, dStop = EB_END(d, k, 1u); d < dStop; d++)
+                for (uint d = 0u, dStop = EB_END(213, d, k, 1u); d < dStop; d++)
                     meet = meet || ((gsVvPair[b * VV_PART + d] & 1u) != 0u && (gsVvPair[c * VV_PART + d] & 1u) != 0u);
                 if (meet) l = max(l, lv[c] + 1u);
             }
@@ -11711,13 +11711,13 @@ void vvGridBuild(uint k, uint off, uint runOff, uint points, uint lane)
     for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
     if (lane < VV_PART) gsCount[GRID_BUCKETS + lane].store(0u);
     sync();
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(214, a, k, 1u); a < aStop; a++)
     {
         uint va = vvMember(off, a);
         float cell = vvGridCell(va);
         uint cands = gsVvOff4[a].load() != 0u ? gsVvCand4[a].load() : 0u;
         uint run = vvRunSmall(runOff, points, a);
-        for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+        for (uint e = lane, eStop = EB_END(215, e, cands, LANES); e < eStop; e += LANES)
         {
             float4 E = gBeams[run + e];
             uint h = asuint(E.w);
@@ -11733,13 +11733,13 @@ void vvGridBuild(uint k, uint off, uint runOff, uint points, uint lane)
     uint per = GRID_BUCKETS / LANES;
     uint block = LANES / GRID_BLOCKS;
     uint sum = 0u;
-    for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++) sum += gsCount[lane * per + q].load();
+    for (uint q = 0u, qStop = EB_END(216, q, per, 1u); q < qStop; q++) sum += gsCount[lane * per + q].load();
     gsPart[lane] = sum;
     sync();
     if (lane < GRID_BLOCKS)
     {
         uint run = 0u;
-        for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(217, q, block, 1u); q < qStop; q++)
         {
             uint x = gsPart[lane * block + q];
             gsPart[lane * block + q] = run;
@@ -11762,7 +11762,7 @@ void vvGridBuild(uint k, uint off, uint runOff, uint points, uint lane)
     sync();
     {
         uint run = gsPart[lane] + gsBlk[lane / block];
-        for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(218, q, per, 1u); q < qStop; q++)
         {
             gsOff[lane * per + q] = run;
             run += gsCount[lane * per + q].load();
@@ -11770,13 +11770,13 @@ void vvGridBuild(uint k, uint off, uint runOff, uint points, uint lane)
     }
     sync();
     uint sorted = vvSortAt(runOff);
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(219, a, k, 1u); a < aStop; a++)
     {
         uint va = vvMember(off, a);
         float cell = vvGridCell(va);
         uint cands = gsVvOff4[a].load() != 0u ? gsVvCand4[a].load() : 0u;
         uint run = vvRunSmall(runOff, points, a);
-        for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+        for (uint e = lane, eStop = EB_END(220, e, cands, LANES); e < eStop; e += LANES)
         {
             uint br = gNext[vvRankAt(runOff, points, a, e)];
             gBeams[sorted + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = gBeams[run + e];
@@ -11813,12 +11813,12 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
     uint cells = uint(span.x) * yz;
     uint sorted = vvSortAt(runOff);
     uint seen = 0u;
-    for (uint i = sub, iStop = EB_END(i, cells, subs); i < iStop; i += subs)
+    for (uint i = sub, iStop = EB_END(221, i, cells, subs); i < iStop; i += subs)
     {
         uint b = vvGridBucket(a, c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
         bool dup = false;
         int3 cj = int3(0, 0, 0);
-        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(222, j, i, 1u); j < jStop; j++)
         {
             if (vvGridBucket(a, c0 + cj) == b)
             {
@@ -11843,7 +11843,7 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
         seen += e1 - e0;
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(223, eGuard);
             float4 E = gBeams[sorted + e];
             uint h = asuint(E.w);
             uint vh = gStatic[gP.nodeInfoBase + h].w;
@@ -11882,7 +11882,7 @@ void vvBigGridBuild(uint va, uint runOff, uint cands, uint lane)
     sync();
     float cell = vvBigCell(va);
     uint rank = vvRankAt(runOff, 0u, 0u, 0u);
-    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+    for (uint e = lane, eStop = EB_END(224, e, cands, LANES); e < eStop; e += LANES)
     {
         float4 E = gBeams[gP.vvRun + runOff + e];
         uint h = asuint(E.w);
@@ -11896,13 +11896,13 @@ void vvBigGridBuild(uint va, uint runOff, uint cands, uint lane)
     uint per = GRID_BUCKETS / LANES;
     uint block = LANES / GRID_BLOCKS;
     uint sum = 0u;
-    for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
+    for (uint k = 0u, kStop = EB_END(225, k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
     gsPart[lane] = sum;
     sync();
     if (lane < GRID_BLOCKS)
     {
         uint run = 0u;
-        for (uint k = 0u, kStop = EB_END(k, block, 1u); k < kStop; k++)
+        for (uint k = 0u, kStop = EB_END(226, k, block, 1u); k < kStop; k++)
         {
             uint x = gsPart[lane * block + k];
             gsPart[lane * block + k] = run;
@@ -11925,7 +11925,7 @@ void vvBigGridBuild(uint va, uint runOff, uint cands, uint lane)
     sync();
     {
         uint run = gsPart[lane] + gsBlk[lane / block];
-        for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++)
+        for (uint k = 0u, kStop = EB_END(227, k, per, 1u); k < kStop; k++)
         {
             gsOff[lane * per + k] = run;
             run += gsCount[lane * per + k].load();
@@ -11933,7 +11933,7 @@ void vvBigGridBuild(uint va, uint runOff, uint cands, uint lane)
     }
     sync();
     uint sorted = vvSortAt(runOff);
-    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+    for (uint e = lane, eStop = EB_END(228, e, cands, LANES); e < eStop; e += LANES)
     {
         uint br = gNext[rank + e];
         gBeams[sorted + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = gBeams[gP.vvRun + runOff + e];
@@ -11980,12 +11980,12 @@ void vvTriangleCandsBigGrid(uint va, uint gt, uint sub, uint subs, uint runOff, 
     uint yz = uint(span.y * span.z);
     uint cells = uint(span.x) * yz;
     uint sorted = vvSortAt(runOff);
-    for (uint i = sub, iStop = EB_END(i, cells, subs); i < iStop; i += subs)
+    for (uint i = sub, iStop = EB_END(229, i, cells, subs); i < iStop; i += subs)
     {
         uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
         bool dup = false;
         int3 cj = int3(0, 0, 0);
-        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(230, j, i, 1u); j < jStop; j++)
         {
             if (gridBucket(c0 + cj) == b)
             {
@@ -12009,7 +12009,7 @@ void vvTriangleCandsBigGrid(uint va, uint gt, uint sub, uint subs, uint runOff, 
         uint e1 = gsOff[b + 1u];
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(231, eGuard);
             float4 E = gBeams[sorted + e];
             uint h = asuint(E.w);
             uint vh = gStatic[gP.nodeInfoBase + h].w;
@@ -12064,7 +12064,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
     {
         uint run = vvRunSmall(runOff, points, a);
         vvVisit(sub < cands ? (cands - sub + subs - 1u) / subs : 0u);
-        for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
+        for (uint e = sub, eStop = EB_END(232, e, cands, subs); e < eStop; e += subs)
         {
             float4 E = gBeams[run + e];
             uint h = asuint(E.w);
@@ -12086,12 +12086,12 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
     uint cells = uint(span.x) * yz;
     uint sorted = vvSortAt(runOff);
     uint seen = 0u;
-    for (uint i = sub, iStop = EB_END(i, cells, subs); i < iStop; i += subs)
+    for (uint i = sub, iStop = EB_END(233, i, cells, subs); i < iStop; i += subs)
     {
         uint b = vvGridBucket(a, c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
         bool dup = false;
         int3 cj = int3(0, 0, 0);
-        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(234, j, i, 1u); j < jStop; j++)
         {
             if (vvGridBucket(a, c0 + cj) == b)
             {
@@ -12116,7 +12116,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
         seen += e1 - e0;
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(235, eGuard);
             float4 E = gBeams[sorted + e];
             uint h = asuint(E.w);
             if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
@@ -12169,11 +12169,11 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
 {
     for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
     sync();
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(236, a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
         if (vvLv(a) != l || n > vvHitRoom(a, points)) continue;
-        for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(237, i, n, LANES); i < iStop; i += LANES)
         {
             uint b = vvHitBucket(a, gNext[vvHitSmall(runOff, points, a, i) + 1u]);
             gNext[vvOrderAt(runOff, points, a, i)] = b | (gsCount[b].add(1u) << 10);
@@ -12183,13 +12183,13 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     uint per = GRID_BUCKETS / LANES;
     uint block = LANES / GRID_BLOCKS;
     uint sum = 0u;
-    for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++) sum += gsCount[lane * per + q].load();
+    for (uint q = 0u, qStop = EB_END(238, q, per, 1u); q < qStop; q++) sum += gsCount[lane * per + q].load();
     gsPart[lane] = sum;
     sync();
     if (lane < GRID_BLOCKS)
     {
         uint run = 0u;
-        for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(239, q, block, 1u); q < qStop; q++)
         {
             uint x = gsPart[lane * block + q];
             gsPart[lane * block + q] = run;
@@ -12212,7 +12212,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     sync();
     {
         uint run = gsPart[lane] + gsBlk[lane / block];
-        for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(240, q, per, 1u); q < qStop; q++)
         {
             gsOff[lane * per + q] = run;
             run += gsCount[lane * per + q].load();
@@ -12220,11 +12220,11 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     }
     sync();
     // The sorted hit indices after the ranks (2·points words an owner, four owners).
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(241, a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
         if (vvLv(a) != l || n > vvHitRoom(a, points)) continue;
-        for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(242, i, n, LANES); i < iStop; i += LANES)
         {
             uint br = gNext[vvOrderAt(runOff, points, a, i)];
             gNext[vvOrderAt(runOff, 0u, 0u, 0u) + 2u * VV_PART * points + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = i;
@@ -12238,7 +12238,7 @@ void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint par
 {
     float3 oa = vvRel(va, va);
     uint sorted = vvOrderAt(runOff, 0u, 0u, 0u) + 2u * VV_PART * points;
-    for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(243, i, n, LANES); i < iStop; i += LANES)
     {
         uint gt = gNext[base + 2u * i];
         uint h = gNext[base + 2u * i + 1u];
@@ -12248,7 +12248,7 @@ void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint par
         bool first = true;
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
-            EB_PASS(eGuard);
+            EB_PASS(244, eGuard);
             uint j = gNext[sorted + e];
             if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
             {
@@ -12258,14 +12258,14 @@ void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint par
         }
         if (!first) continue;
         uint vh = gStatic[gP.nodeInfoBase + h].w;
-        for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
+        for (uint it = 0u, itStop = EB_END(245, it, n, 1u); it < itStop; it++)
         {
             VvTri t = vvTriangle(gt, oa, r);
             vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, a);
             uint next = 0xFFFFFFFFu;
             for (uint e = e0, eGuard = 0u; e < e1; e++)
             {
-                EB_PASS(eGuard);
+                EB_PASS(246, eGuard);
                 uint j = gNext[sorted + e];
                 uint gj = gNext[base + 2u * j];
                 if (gNext[base + 2u * j + 1u] == h && gj > gt && gj < next) next = gj;
@@ -12299,7 +12299,7 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
 {
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     // (S) the partner scans: lane per ordered pair (a, b).
-    for (uint p = lane, pStop = EB_END(p, k * k, LANES); p < pStop; p += LANES)
+    for (uint p = lane, pStop = EB_END(247, p, k * k, LANES); p < pStop; p += LANES)
     {
         uint a = p / k;
         uint b = p % k;
@@ -12336,7 +12336,7 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
     {
         uint offered = 0u;
         // (An owner's reset or fix still clears its throttles below, offered or not.)
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        for (uint a = 0u, aStop = EB_END(248, a, k, 1u); a < aStop; a++)
             offered += gsVvOff4[a].load() + gsVvReset4[a] + gsVvFix[a];
         gsUniformOpen = offered;
     }
@@ -12347,14 +12347,14 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
     // (P) every owner's throttle step and candidates.
     {
         uint triTotal = 0u;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) triTotal += gStatic[vvMember(off, a) * 4u + 1u].y;
-        for (uint p = lane, pStop = EB_END(p, triTotal, LANES); p < pStop; p += LANES)
+        for (uint a = 0u, aStop = EB_END(249, a, k, 1u); a < aStop; a++) triTotal += gStatic[vvMember(off, a) * 4u + 1u].y;
+        for (uint p = lane, pStop = EB_END(250, p, triTotal, LANES); p < pStop; p += LANES)
         {
             uint a = 0u;
             uint t = p;
             for (uint c = 0u, cGuard = 0u; c + 1u < k; c++)
             {
-                EB_PASS(cGuard);
+                EB_PASS(251, cGuard);
                 uint n = gStatic[vvMember(off, a) * 4u + 1u].y;
                 if (t < n) break;
                 t -= n;
@@ -12384,7 +12384,7 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
             float3 plo = float3(3.0e38, 3.0e38, 3.0e38);
             float3 phi = -plo;
             float vmaxB = 0.0;
-            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(252, m, k, 1u); m < mStop; m++)
             {
                 if ((gsVvPair[a * VV_PART + m] & 1u) == 0u) continue;
                 uint kb = vvBoxKey(vvMember(off, m), parity);
@@ -12406,7 +12406,7 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
         // either way, and the hits apply in a canonical order, vvApplyOrdered).
         uint cP = vvPartLanes(k);
         uint cl = lane % cP;
-        for (uint a = lane / cP, aStop = EB_END(a, min(lane / cP + 1u, k), 1u); a < aStop; a++)
+        for (uint a = lane / cP, aStop = EB_END(253, a, min(lane / cP + 1u, k), 1u); a < aStop; a++)
         {
 #ifdef EB_ABLATE
             // Measurement only: 262144 the candidates.
@@ -12421,14 +12421,14 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
             float3 chi = sadd3(float3(vvUnkey(gAcc[key + 3u].load()), vvUnkey(gAcc[key + 4u].load()), vvUnkey(gAcc[key + 5u].load())), r3);
             float ownerReach = gP.clipMem != 0u ? CLIP_DEPTH + clipVmax(va, parity) * STEP + 0.001 : 0.0;
             uint run = vvRunSmall(runOff, points, a);
-            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(254, m, k, 1u); m < mStop; m++)
             {
                 if ((gsVvPair[a * VV_PART + m] & 1u) == 0u) continue;
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
                 float3 orel = vvRel(v, va);
-                for (uint i = cl, iStop = EB_END(i, cp.y, cP); i < iStop; i += cP)
+                for (uint i = cl, iStop = EB_END(255, i, cp.y, cP); i < iStop; i += cP)
                 {
                     uint h = gLists[cp.x + i];
                     float3 x = nf3(o + gNodes[h * 3u].xyz);
@@ -12466,19 +12466,19 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
     // (T) every owner's listed triangles against its candidates.
     {
         uint total = 0u;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
+        for (uint a = 0u, aStop = EB_END(256, a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
         uint subs = clamp(LANES / max(total, 1u), 1u, 64u);
 #ifdef EB_ABLATE
         // Measurement only: 131072 the owners' triangles against their candidates.
         if ((gP.ablate & 131072u) != 0u) total = 0u;
 #endif
-        for (uint p = lane, pStop = EB_END(p, total * subs, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(257, p, total * subs, LANES); p < pStop; p += LANES)
         {
             uint q = p / subs;
             uint a = 0u;
             for (uint c = 0u, cGuard = 0u; c + 1u < k; c++)
             {
-                EB_PASS(cGuard);
+                EB_PASS(258, cGuard);
                 uint n = gsVvList4[a].load();
                 if (q < n) break;
                 q -= n;
@@ -12503,18 +12503,18 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
         sync();
         // The listed pairs, a lane each; an owner past the list's room tests inline.
         uint total = 0u;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        for (uint a = 0u, aStop = EB_END(259, a, k, 1u); a < aStop; a++)
         {
             uint n = gsPairCountM[a].load();
             total += n <= TRI_PAIR_CAP ? n : 0u;
         }
-        for (uint p = lane, pStop = EB_END(p, total, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(260, p, total, LANES); p < pStop; p += LANES)
         {
             uint q = p;
             uint a = 0u;
             for (uint c = 0u, cGuard = 0u; c < k; c++)
             {
-                EB_PASS(cGuard);
+                EB_PASS(261, cGuard);
                 uint n = gsPairCountM[c].load();
                 n = n <= TRI_PAIR_CAP ? n : 0u;
                 if (q < n)
@@ -12529,16 +12529,16 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
             vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
         }
         uint over = 0u;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        for (uint a = 0u, aStop = EB_END(262, a, k, 1u); a < aStop; a++)
             over += gsPairCountM[a].load() > TRI_PAIR_CAP ? gsVvList4[a].load() : 0u;
         uint subs = clamp(LANES / max(over, 1u), 1u, 64u);
-        for (uint p = lane, pStop = EB_END(p, over * subs, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(263, p, over * subs, LANES); p < pStop; p += LANES)
         {
             uint q = p / subs;
             uint a = 0u;
             for (uint c = 0u, cGuard = 0u; c < k; c++)
             {
-                EB_PASS(cGuard);
+                EB_PASS(264, cGuard);
                 uint n = gsPairCountM[c].load() > TRI_PAIR_CAP ? gsVvList4[c].load() : 0u;
                 if (q < n)
                 {
@@ -12598,17 +12598,17 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     if (gP.vvSplit != 0u && (gP.ablate & 65536u) == 0u)
     {
         bool every = false;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        for (uint a = 0u, aStop = EB_END(265, a, k, 1u); a < aStop; a++)
         {
             if (gsVvHit4[a].load() > vvHitRoom(a, points)) every = true;
         }
         if (every) vvSnapshot(off, k, parity, lane);
         else
         {
-            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            for (uint a = 0u, aStop = EB_END(266, a, k, 1u); a < aStop; a++)
             {
                 uint base = vvHitSmall(runOff, points, a, 0u);
-                for (uint i = lane, iStop = EB_END(i, gsVvHit4[a].load(), LANES); i < iStop; i += LANES)
+                for (uint i = lane, iStop = EB_END(267, i, gsVvHit4[a].load(), LANES); i < iStop; i += LANES)
                 {
                     uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
                     uint h = gNext[base + 2u * i + 1u];
@@ -12637,7 +12637,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     // triangle's throttle update (its marks are final) and a later owner's reset.
     for (uint l = 1u, lGuard = 0u; l <= top; l++)
     {
-        EB_PASS_UNIFORM(lGuard, EB_MAX_MEMBERS + 1u);
+        EB_PASS_UNIFORM(268, lGuard, EB_MAX_MEMBERS + 1u);
 #ifdef EB_ABLATE
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
@@ -12645,14 +12645,14 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         if (l == 1u && (gP.ablate & 131072u) == 0u && !vvPostDone())
         {
             uint total = 0u;
-            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
-            for (uint p = lane, pStop = EB_END(p, total, LANES); p < pStop; p += LANES)
+            for (uint a = 0u, aStop = EB_END(269, a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
+            for (uint p = lane, pStop = EB_END(270, p, total, LANES); p < pStop; p += LANES)
             {
                 uint q = p;
                 uint a = 0u;
                 for (uint c = 0u, cGuard = 0u; c + 1u < k; c++)
                 {
-                    EB_PASS(cGuard);
+                    EB_PASS(271, cGuard);
                     uint n = gsVvList4[a].load();
                     if (q < n) break;
                     q -= n;
@@ -12665,7 +12665,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
             }
         }
         if (vvGrid && (gP.ablate & 32768u) == 0u) vvHitBuckets(k, l, off, runOff, points, lane);
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        for (uint a = 0u, aStop = EB_END(272, a, k, 1u); a < aStop; a++)
         {
             if (vvLv(a) != l || (gP.ablate & 32768u) != 0u) continue;
             uint va = vvMember(off, a);
@@ -12680,7 +12680,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 uint4 ra1 = gStatic[va * 4u + 1u];
                 uint listed = gsVvList4[a].load();
                 uint subs = clamp(LANES / max(listed, 1u), 1u, 64u);
-                for (uint p = lane, pStop = EB_END(p, listed * subs, LANES); p < pStop; p += LANES)
+                for (uint p = lane, pStop = EB_END(273, p, listed * subs, LANES); p < pStop; p += LANES)
                 {
                     uint t = gNext[vvTestedAt(ra1.x + p / subs)];
                     vvTriangleCandsApply(va, ra1.x + t, p % subs, subs, vvRunSmall(runOff, points, a),
@@ -12694,7 +12694,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         {
             for (uint ph = 0u; ph < 3u; ph++)
             {
-                for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+                for (uint a = 0u, aStop = EB_END(274, a, k, 1u); a < aStop; a++)
                 {
                     if (vvLv(a) != l) continue;
                     uint hits = gsVvHit4[a].load();
@@ -12712,7 +12712,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     // slot), from the hit lists; every node's when an owner's list overflowed.
     uint anyHits = 0u;
     bool listedAll = true;
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(275, a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
         anyHits += n;
@@ -12721,10 +12721,10 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     if (anyHits > 0u && !listedAll) vvSplitClear(off, k, vvSplitSlots(k), lane);
     else if (anyHits > 0u && gP.vvSplit != 0u)
     {
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        for (uint a = 0u, aStop = EB_END(276, a, k, 1u); a < aStop; a++)
         {
             uint base = vvHitSmall(runOff, points, a, 0u);
-            for (uint i = lane, iStop = EB_END(i, gsVvHit4[a].load(), LANES); i < iStop; i += LANES)
+            for (uint i = lane, iStop = EB_END(277, i, gsVvHit4[a].load(), LANES); i < iStop; i += LANES)
             {
                 uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
                 gAcc[vvSplitTri(tn.x)].store(0);
@@ -12784,11 +12784,11 @@ void contactGroup(uint g, uint lane)
     uint2 sleepMask = uint2(0u, 0u);
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
-    for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(278, i, k, LANES); i < iStop; i += LANES)
     {
         uint v = gNext[gP.vvMembers + off + i];
         uint rank = 0u;
-        for (uint j = 0u, jStop = EB_END(j, k, 1u); j < jStop; j++) rank += gNext[gP.vvMembers + off + j] < v ? 1u : 0u;
+        for (uint j = 0u, jStop = EB_END(279, j, k, 1u); j < jStop; j++) rank += gNext[gP.vvMembers + off + j] < v ? 1u : 0u;
         gNext[gP.vvMembers + gP.vehicles + off + rank] = v;
         gMisc[vvRec(v, VV_MEMBER)].x = rank;
     }
@@ -12796,7 +12796,7 @@ void contactGroup(uint g, uint lane)
     if (lane == 0u)
     {
         uint run = 0u;
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(280, m, k, 1u); m < mStop; m++)
         {
             gNext[vvPrefixAt(off, m)] = run;
             run += vvCpCount(vvMember(off, m));
@@ -12805,12 +12805,12 @@ void contactGroup(uint g, uint lane)
         // The coupling's spheres in workgroup memory (cplGsRange): a small group's
         // members one after another.
         cplGsClear();
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplListBegin(vvMember(off, m));
+        for (uint m = 0u, mStop = EB_END(281, m, k, 1u); m < mStop; m++) cplListBegin(vvMember(off, m));
         if (k <= CPL_GS_VEHICLES)
         {
             uint base = 0u;
             uint nodeBase = 0u;
-            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(282, m, k, 1u); m < mStop; m++)
             {
                 cplGsAdd(m, vvMember(off, m), base, nodeBase);
                 base += gsCpl[CPL_GS_TAB + 5u * m + 2u];
@@ -12819,9 +12819,9 @@ void contactGroup(uint g, uint lane)
         }
     }
     sync();
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END_UNIFORM(283, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
     uint stepBase = gMisc[vvMember(off, 0u)].w;
-    for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
+    for (uint s = 0u, sStop = EB_END_UNIFORM(284, s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
     {
         // Wheels on each other (drive header bit 2): the last step's reactions, this
         // step's rays (explicit_beams_drive.slang wheelsPartners).
@@ -12839,12 +12839,12 @@ void contactGroup(uint g, uint lane)
 #endif
 #ifndef EB_VV_SMALL_ONLY
         {
-            for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
+            for (uint m = 0u, mStop = EB_END_UNIFORM(285, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
         }
 #endif
         if (surfOn != 0u)
         {
-            for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END_UNIFORM(286, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
                 surfaceStep(vvMember(off, m), lane, surfOn, (stepBase + s) & 1u);
             sync();
         }
@@ -12870,7 +12870,7 @@ void contactGroup(uint g, uint lane)
     coupleEndMembers(off, k, lane, coupleOn);
     if ((driveOn & 2u) != 0u) wheelsPartners(off, k, lane, gP.steps, false);
     if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END_UNIFORM(287, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }
 
 // The split group path (contact-groups-design.md): a contact group's substeps across

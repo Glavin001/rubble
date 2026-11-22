@@ -21,7 +21,7 @@ void explicit_loop_cap_test(uint3 tid : SV_DispatchThreadID)
     uint nGuard = 0u;
     while (gOut[1] != 1u)
     {
-        EB_PASS(nGuard); // loop-cap-test: pass
+        EB_PASS(558, nGuard); // loop-cap-test: pass
         n++;
     }
     // A constant loop: finite as written.
@@ -31,13 +31,13 @@ void explicit_loop_cap_test(uint3 tid : SV_DispatchThreadID)
     // A counted loop up to a bound the host sets (huge for a runaway).
     uint m = gOut[3];
     uint c = 0u;
-    for (uint j = 0u, jStop = EB_END(j, m, 1u); j < jStop; j++) // loop-cap-test: end
+    for (uint j = 0u, jStop = EB_END(559, j, m, 1u); j < jStop; j++) // loop-cap-test: end
         c++;
     // A counted loop with a step the host sets (0 for a runaway: no pass).
     uint m2 = gOut[4];
     uint s = gOut[5];
     uint c2 = 0u;
-    for (uint j = 0u, jStop = EB_END(j, m2, s); j < jStop; j += s) // loop-cap-test: step
+    for (uint j = 0u, jStop = EB_END(560, j, m2, s); j < jStop; j += s) // loop-cap-test: step
         c2++;
     gOut[0] = n;
     gOut[2] = i;
