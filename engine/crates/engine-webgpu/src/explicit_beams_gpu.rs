@@ -415,13 +415,46 @@ struct ContactPipes {
     plan: [wgpu::ComputePipeline; 3],
     /// Vehicle sleep's awake list ([`plan::SLEEP_LIST`]).
     sleep: wgpu::ComputePipeline,
-    groups: wgpu::ComputePipeline,
-    /// The solo vehicles' frame (`EB_VV_SOLO`).
-    solo: wgpu::ComputePipeline,
-    /// The groups of more than four members ([`Kernel::ContactBig`]); `None` for a
-    /// fleet of at most [`plan::VV_PART`] vehicles, which cannot form one (the
-    /// plan then never gives that dispatch a workgroup): its module is not compiled.
-    big: Option<wgpu::ComputePipeline>,
+    /// The contact groups' frame, the solo vehicles' frame (`EB_VV_SOLO`) and the groups
+    /// of more than four members ([`Kernel::ContactBig`]): created at their first
+    /// dispatch, not with the others. Their modules are the largest (about 1 MB of WGSL
+    /// each), and with the fleet-wide passes and self-collision split (the default) they
+    /// are only the fallback path. A browser compiles them in the background
+    /// (`compute_specs`, deferred): created at start-up, a cold one compiled on Chrome's
+    /// GPU process's main thread for longer than its watchdog allows, and every WebGPU
+    /// device was lost (`compute_spec.rs`). The same pipelines whenever they are made.
+    groups: LazyPipe,
+    solo: LazyPipe,
+    /// `None` for a fleet of at most [`plan::VV_PART`] vehicles, which cannot form a
+    /// group of more than four (the plan then never gives that dispatch a workgroup).
+    big: Option<LazyPipe>,
+}
+
+/// A compute pipeline created at its first use from its WGSL ([`ContactPipes`]).
+struct LazyPipe {
+    entry: &'static str,
+    wgsl: String,
+    layout: wgpu::PipelineLayout,
+    pipe: std::sync::OnceLock<wgpu::ComputePipeline>,
+}
+
+impl LazyPipe {
+    fn get(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
+        self.pipe.get_or_init(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(self.entry),
+                source: wgpu::ShaderSource::Wgsl(self.wgsl.as_str().into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(self.entry),
+                layout: Some(&self.layout),
+                module: &module,
+                entry_point: Some(self.entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        })
+    }
 }
 
 /// The vehicle-contact passes' bind group layout entries: the frame's bindings,
@@ -1296,12 +1329,18 @@ impl Contact {
                 cache: None,
             })
         };
+        let lazy = |entry: &'static str, wgsl: &str| LazyPipe {
+            entry,
+            wgsl: host_wgsl(wgsl, bit_exact),
+            layout: contact_layout.clone(),
+            pipe: std::sync::OnceLock::new(),
+        };
         ContactPipes {
             plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), plan_layout)),
             sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), plan_layout),
-            groups: make(plan::FRAME_ENTRY, contact_wgsl, contact_layout),
-            solo: make(plan::FRAME_ENTRY, solo_wgsl, contact_layout),
-            big: big_groups.then(|| make(plan::CONTACT_ENTRY, big_wgsl, contact_layout)),
+            groups: lazy(plan::FRAME_ENTRY, contact_wgsl),
+            solo: lazy(plan::FRAME_ENTRY, solo_wgsl),
+            big: big_groups.then(|| lazy(plan::CONTACT_ENTRY, big_wgsl)),
         }
     }
 
@@ -3566,7 +3605,9 @@ impl ExplicitBeamsGpu {
                 let (solo, groups, g) = alt.map_or_else(
                     || {
                         let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
-                        (&p.solo, &p.groups, &c.contact_group)
+                        let lazy = if kernel == Kernel::Solo { &p.solo } else { &p.groups };
+                        let pipe = lazy.get(&self.device);
+                        (pipe, pipe, &c.contact_group)
                     },
                     |a| (&a.solo, &a.groups, &a.group),
                 );
@@ -3593,7 +3634,7 @@ impl ExplicitBeamsGpu {
                     // At most VV_PART vehicles: no group this dispatch steps can
                     // exist (its indirect count is always 0), and it has no pipeline.
                     let Some(big) = &p.big else { return };
-                    pass.set_pipeline(big);
+                    pass.set_pipeline(big.get(&self.device));
                     pass.set_bind_group(0, &c.contact_group, &[]);
                 }
             }
