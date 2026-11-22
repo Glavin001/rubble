@@ -306,3 +306,17 @@ fixtures bit for bit, `cars1_t20.0` differing as with the same kernels on both s
 the scenario matrix (12 rows bit for bit, none slower; `--ab-switch kernel` now times its
 halves in rounds as the other switches do), Chrome's validation of all 140 modules in
 both settings.
+
+### Tried and dropped: masking the experiment-only switches
+
+Five perf switches are on in no default (drive-ahead, the levels across the GPU,
+tyre-early, self-hits-local, split-wheels-ahead), yet every pipeline carries their code:
+the flags word is a run-time uniform. Making the pipelines with each read of the word
+masked (`gP.perfFlags & mask`) was bit for bit (fast-check, the widening path, the
+scenario matrix, Chrome's validation) and cut the offline optimized size (solo 83,059 ->
+70,536, member 172,170 -> 150,870, contact 173,434 -> 160,905 instructions), but not
+Chrome's cold compile: solo 41.1 -> 39.9 s, contact 118.8 -> 129.9 s, member 114.0 ->
+123.0 s (noise). Like splitting `driveAheadPart` by its constant, code the compiler can
+only drop by folding a constant does not shorten Chrome's compile; removing copies from
+the source (`fleetLevelsAny`, 49 -> 15 s) does. So `kernel_profile.py`'s burn-down is read
+for duplicated copies, and a fix is judged by Chrome's cold compile, not the profile.

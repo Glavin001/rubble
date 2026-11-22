@@ -15,6 +15,12 @@ instructions with all it inlined, how many copies of it survived optimization, a
 instructions those copies duplicate (what one call site would save, an upper bound). --who FN: FN's instructions by the call path
 that made each copy.
 
+Read it for duplicated copies (a heavy function inlined at several call sites): removing
+those from the source shortens Chrome's compile (fleetLevelsAny's four copies: 49 -> 15 s).
+Code the optimizer only drops by folding a constant (a constant argument, a masked
+uniform) shrinks this count but not Chrome's compile (measured twice: within noise), so
+judge a fix by a cold compile in Chrome (explicit-wgsl-check.mjs, EXPLICIT_WGSL_COLD=1).
+
 Why not count the WGSL: a call that passes a constant (`part = 2u`) is folded down to
 the branch it takes, so a static count overstates it (tools/build-time/compile_cost.py,
 the CI gate, counts statements and cannot see this); and the driver's compile time
