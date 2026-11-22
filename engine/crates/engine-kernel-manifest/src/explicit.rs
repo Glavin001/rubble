@@ -443,3 +443,36 @@ pub fn test_modules() -> Vec<TestModule> {
     }
     out
 }
+
+/// The modules of a fleet with surface contact on the frame modules, split
+/// (`Kernel::FrameSeg`, `Kernel::Surf`): the frame in segments at its four variants
+/// (`EB_FRAME_SEG`), then the surface pass's pipelines (`EB_SURF_PIPE`: the prep, then
+/// per kind its find and its apply). The same list engine-webgpu's build compiles.
+pub fn surface_split_modules() -> Vec<SplitModule> {
+    let mut out = Vec::new();
+    for (name, defines) in [
+        ("explicit_beams_seg", vec![W]),
+        ("explicit_beams_wide_seg", vec![W, L512]),
+        ("explicit_beams_aero_seg", vec![W, L256, AERO]),
+        ("explicit_beams_aero_wide_seg", vec![W, L512, AERO]),
+    ] {
+        let mut defines = defines;
+        defines.push(("EB_FRAME_SEG", "1"));
+        out.push(SplitModule { name: name.to_string(), entry: FRAME_ENTRY, defines });
+    }
+    out.push(SplitModule {
+        name: "explicit_surface_prep".to_string(),
+        entry: "explicit_surface_prep",
+        defines: vec![W, ("EB_SURF_PIPE", "1")],
+    });
+    for (kind, tag) in [("1", "tri"), ("2", "seg"), ("3", "point"), ("4", "pair")] {
+        for (phase, entry) in [("find", "explicit_surface_find"), ("apply", "explicit_surface_apply")] {
+            out.push(SplitModule {
+                name: format!("explicit_surface_{phase}_{tag}"),
+                entry,
+                defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind)],
+            });
+        }
+    }
+    out
+}

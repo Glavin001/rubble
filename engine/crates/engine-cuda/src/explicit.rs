@@ -261,6 +261,12 @@ impl CudaExplicitBeams {
         if !aero {
             out.push(plan::wide_list_module_name(lanes).to_string());
         }
+        // (Surface contact on the frame modules, split: the segments and the pass's
+        // pipelines, which the saving host's planner may ask for.)
+        if layout.surface {
+            out.push(Kernel::FrameSeg.module(aero, lanes).to_string());
+            out.extend(plan::SURF_PASSES.iter().map(|(m, _)| m.to_string()));
+        }
         out.sort();
         out.dedup();
         out

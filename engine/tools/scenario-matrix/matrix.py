@@ -647,7 +647,7 @@ def main():
     bad = []
     if baseline:
         print(f"scenario matrix baseline ({ROUNDS} x {FRAMES} frames of 34 steps, each frame's best round, mean ms a frame; {os.path.basename(CAR)})")
-        print(f"{'row':<8} {'bodies':>6} {'ms/frame':>9} {'target':>7} {'':>6} {'run s':>5}  what")
+        print(f"{'row':<14} {'bodies':>6} {'ms/frame':>9} {'worst':>8} {'target':>7} {'':>6} {'run s':>5}  what")
     else:
         if switch == "bitexact":
             print(f"(bitexact: 'on' is bit-exact, 'off' the fast setting; 'bit4bit' is the tolerance verdict: <= {TOL_MM:g} mm, <= {TOL_BROKEN} + 1 % broken beams' difference, finite; the scene-calibrated tolerance is tests/fast_arithmetic_gpu.rs)")
@@ -658,7 +658,7 @@ def main():
         if not r["ok"] or r["on"] is None or r["off"] is None:
             bad.append(row[0])
             print(f"{row[0]:<8} FAILED to run ({r['secs']:.1f} s)")
-            print("\n".join("    " + l for l in r["out"].splitlines()[-10:]))
+            print("\n".join("    " + l for l in r["out"].splitlines()[-24:]))
             continue
         on, off = r["on"][0], r["off"][0]
         if baseline:
@@ -666,7 +666,9 @@ def main():
             ms = min(on, off)
             tgt, stated = target_ms(row[1])
             mark = "ok" if ms <= tgt else "over"
-            print(f"{row[0]:<8} {row[1]:>6} {ms:>9.3f} {('' if stated else '~') + format(tgt, '.2f'):>7} {mark:>6} {r['secs']:>5.1f}  {row[5]}")
+            # (The worst frame of either half's rounds, the smaller: a run is judged by its peak.)
+            worst = min(r["on"][2], r["off"][2])
+            print(f"{row[0]:<14} {row[1]:>6} {ms:>9.3f} {worst:>8.3f} {('' if stated else '~') + format(tgt, '.2f'):>7} {mark:>6} {r['secs']:>5.1f}  {row[5]}")
             continue
         delta = 100.0 * (on - off) / off
         past = lambda on, off: 100.0 * (on - off) / off > THRESHOLD and on - off > NOISE_MS

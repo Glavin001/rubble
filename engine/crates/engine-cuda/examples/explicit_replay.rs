@@ -154,6 +154,15 @@ fn main() -> anyhow::Result<()> {
             std::fs::write(&path, out)?;
         }
         println!("   run at t {:.1}: {best:.3} ms/frame (each frame's best of {rounds} rounds, mean)", p.header.t);
+        // The peak: each frame's best round (frame k is the same work in every round),
+        // the worst of them and where it is. A run is judged by its worst frame.
+        let each: Vec<f64> = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).collect();
+        let (at, worst) = each.iter().copied().enumerate().fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+        println!(
+            "   run peak: worst {worst:.3} ms at frame {at} of {}; frames: {}",
+            each.len(),
+            each.iter().map(|m| format!("{m:.2}")).collect::<Vec<_>>().join(" ")
+        );
         return Ok(());
     }
     let mut pooled: [Vec<Vec<f64>>; 2] = [Vec::new(), Vec::new()];
