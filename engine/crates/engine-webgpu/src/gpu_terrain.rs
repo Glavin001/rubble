@@ -99,7 +99,7 @@ impl WgpuSim {
             0,
             bytemuck::cast_slice(&words),
         );
-        self.terrain_impulses_pending = false;
+        self.gpu_impulses.applied();
         Ok(())
     }
 
@@ -563,7 +563,7 @@ impl WgpuSim {
             .coupled(substeps, dt, gravity, colliders)?;
         self.terrain_writes(&ops);
         self.terrain_pass(enc, &ops, "terrain coupled");
-        self.terrain_impulses_pending = true;
+        self.gpu_impulses.mark();
         self.wake_pending = true;
         Ok(())
     }
@@ -600,7 +600,7 @@ impl WgpuSim {
             .terrain_plan()?
             .coupled(substeps, dt, gravity, colliders)?;
         self.terrain_submit(&ops, "terrain coupled");
-        self.terrain_impulses_pending = true;
+        self.gpu_impulses.mark();
         self.wake_pending = true;
         let counters = self
             .step()
