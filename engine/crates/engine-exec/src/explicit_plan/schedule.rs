@@ -721,13 +721,26 @@ pub fn surface_fast_default() -> bool {
     }
 }
 
+/// [`FramePlanner::set_surface_fast_contact`]'s default: with `RUBBLE_SURFACE_FAST=1`
+/// on; otherwise the host's own (`host`). On for CUDA: on a T4 every goal row is faster
+/// with it (-6 to -34 %). Off for wgpu: on Metal (M3 Max) two derby rows are 7.5 and
+/// 9.7 % slower with it and two head-on rows 3.6 and 4.7 %, the others 1 to 17 % faster
+/// (vehicle-perf-first-principles.md §8.53); a change that slows a row does not become
+/// a default.
+pub fn surface_fast_contact_default(host: bool) -> bool {
+    match std::env::var("RUBBLE_SURFACE_FAST").as_deref() {
+        Ok("1") => true,
+        _ => host,
+    }
+}
+
 /// Whether this frame (its commands) runs self-collision split with vehicle contact.
 fn self_split_vv_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[Cmd]) -> bool {
     sw.self_split
         && planner.contact_active()
         // (Surface contact: only with its pass as pipelines between the dispatches, and
         // those modules compiled.)
-        && (!planner.has_surface() || (planner.surface_piped() && surface_pipes_ready(sw)))
+        && (!planner.has_surface() || (planner.surface_piped_contact() && surface_pipes_ready(sw)))
         && sw.current
         && !sw.debug
         && steps > 0
@@ -835,7 +848,7 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             // were, above, or in their step), then step s's surface pass for every
             // vehicle, where the frame kernel runs it: after the step's self-collision
             // and before the groups' pass.
-            if planner.surface_piped() {
+            if planner.surface_piped_contact() {
                 out.push(GroupOp::SoloRest { copy: s });
                 out.extend((0..SURF_FAST_PASSES.len()).map(|i| GroupOp::Surf { copy: s, pass: i as u8, groups: planner.vehicles() }));
             }
@@ -1229,6 +1242,11 @@ mod tests {
         assert!(!off.kind.self_split_vv && off.kind.group_split);
         assert!(off.ops().all(|op| !matches!(op, Op::Group(GroupOp::Surf { .. } | GroupOp::SoloRest { .. }))));
         planner.set_surface_fast(true);
+        // The vehicle-contact part alone off: the pass stays in the kernels.
+        planner.set_surface_fast_contact(false);
+        assert!(planner.surface_piped() && !planner.surface_piped_contact());
+        assert!(!frame(&mut planner, &sw, steps).kind.self_split_vv);
+        planner.set_surface_fast_contact(true);
         let late = |m: &str| !m.starts_with("explicit_surface_");
         let waiting = frame(&mut planner, &switches(&late, 3, up.layout.lanes), steps);
         assert!(!waiting.kind.self_split_vv, "the pipelines' modules are not compiled yet");

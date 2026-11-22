@@ -32,13 +32,29 @@ impl FramePlanner {
     /// for bit (vehicle-perf-first-principles.md §8.53). No effect without surface
     /// contact.
     pub fn set_surface_fast(&mut self, on: bool) {
-        self.surface_fast = on;
+        self.surface_fast = if on { 2 } else { 0 };
+    }
+
+    /// With [`Self::set_surface_fast`] on: its vehicle-contact part (self split with
+    /// vehicle contact) on or off; off, a fleet with vehicle contact keeps the pass in
+    /// its kernels and only a wide frame (a lone car, contact off) takes the pipelines.
+    /// A host's default ([`schedule::surface_fast_contact_default`]): the part is not
+    /// faster on every row on every GPU.
+    pub fn set_surface_fast_contact(&mut self, on: bool) {
+        if self.surface_fast != 0 {
+            self.surface_fast = if on { 2 } else { 1 };
+        }
     }
 
     /// The fleet has surface contact and runs it as pipelines on the fast schedules
-    /// ([`Self::set_surface_fast`]).
+    /// ([`Self::set_surface_fast`]): a wide frame's.
     pub fn surface_piped(&self) -> bool {
-        self.surface && self.surface_fast
+        self.surface && self.surface_fast != 0
+    }
+
+    /// … and with vehicle contact too ([`Self::set_surface_fast_contact`]).
+    pub fn surface_piped_contact(&self) -> bool {
+        self.surface && self.surface_fast == 2
     }
 
     /// The wide passes may run this fleet: [`ExplicitLayout::wide_ok`], and with

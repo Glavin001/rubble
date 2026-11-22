@@ -193,8 +193,10 @@ impl ExplicitBeamsGpu {
     /// pass as its own pipelines after each step's self-collision hits; or (off) a
     /// workgroup a vehicle or a group with the pass inside it, or the frame in segments.
     /// The same results bit for bit (`--ab-switch surffast`;
-    /// vehicle-perf-first-principles.md §8.53). On by default natively
-    /// ([`plan::schedule::surface_fast_default`]). No effect without surface contact.
+    /// vehicle-perf-first-principles.md §8.53). By default natively a wide frame's
+    /// alone ([`plan::schedule::surface_fast_default`],
+    /// [`plan::schedule::surface_fast_contact_default`]; `RUBBLE_SURFACE_FAST=1` both
+    /// parts, 0 neither); this sets both. No effect without surface contact.
     pub fn set_surface_fast(&mut self, on: bool) {
         self.planner.set_surface_fast(on);
     }

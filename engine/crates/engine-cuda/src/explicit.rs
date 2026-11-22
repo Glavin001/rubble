@@ -410,6 +410,7 @@ impl CudaExplicitBeams {
         }
         let mut planner = FramePlanner::new(&layout);
         planner.set_surface_fast(schedule::surface_fast_default());
+        planner.set_surface_fast_contact(schedule::surface_fast_contact_default(true));
         Ok(Self {
             ctx,
             stream,

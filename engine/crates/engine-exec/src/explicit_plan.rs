@@ -2929,8 +2929,8 @@ pub struct FramePlanner {
     surface: bool,
     /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
     surface_split: bool,
-    /// [`Self::set_surface_fast`].
-    surface_fast: bool,
+    /// [`Self::set_surface_fast`]: 0 off, 1 a wide frame's alone, 2 with vehicle contact too.
+    surface_fast: u8,
     /// The wide passes could run this fleet but for its surface contact (at most
     /// [`WIDE_MAX_VEHICLES`] vehicles, no wings): [`ExplicitLayout::wide_ok`] without
     /// its surface term.
@@ -2959,7 +2959,7 @@ impl FramePlanner {
             wide_sleep: false,
             surface: layout.surface,
             surface_split: false,
-            surface_fast: false,
+            surface_fast: 0,
             wide_capable: layout.wide_capable(),
             loop_unit: layout.loop_unit,
         }

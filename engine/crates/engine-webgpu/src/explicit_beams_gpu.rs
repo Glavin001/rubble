@@ -1806,6 +1806,7 @@ impl ExplicitBeamsGpu {
         let mut planner = FramePlanner::new(&layout);
         planner.set_surface_split(surface_split_for(coupled));
         planner.set_surface_fast(plan::schedule::surface_fast_default());
+        planner.set_surface_fast_contact(plan::schedule::surface_fast_contact_default(false));
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
