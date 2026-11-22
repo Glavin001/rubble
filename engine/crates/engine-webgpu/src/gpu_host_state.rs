@@ -402,7 +402,7 @@ impl WgpuSim {
         let device = &self.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("state_extent"),
-            source: wgpu::ShaderSource::Wgsl(crate::STATE_EXTENT_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::STATE_EXTENT_WGSL.text().into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("state_extent"),

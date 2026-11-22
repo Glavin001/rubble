@@ -37,6 +37,28 @@ Direction is downward only. In particular:
 - **`engine-kernel-manifest` depends on nothing.** It is the bottom of every kernel
   build; anything it imports would rerun every kernel build script when edited.
 
+## Kernels as data
+
+engine-webgpu's kernels are one compile (`src/kernel_build.rs`) that runs in one of two
+places, the same bytes either way:
+
+- **Embedded** (release, the C library, wasm, dev builds): its build script compiles them
+  into `OUT_DIR` and the crate embeds them (`include_str!`). A kernel edit reruns the
+  script and recompiles the crate and everything above it.
+- **At run time** (the `fast` profile on native: fast-check, the scenario matrix, tests
+  with `--profile fast`; `RUBBLE_KERNELS=embed|runtime` overrides): the build script
+  compiles nothing and does not watch `slang/`; the first kernel a process asks for
+  compiles the store for the current sources (`engine_webgpu::kernel_store`,
+  `target/fast/kernel-store/<key>/`, each compile cached). A kernel edit compiles no
+  Rust. `cargo run --profile fast -p engine-webgpu --bin kernels` compiles the store
+  ahead of a run (the harness scripts do, before the GPU lock).
+
+Every module is a `Kernel` (`engine_webgpu::Kernel`: its name, and its text through
+`Deref<Target = str>` or `.text()`), never a `&str` constant, so code cannot tell the two
+apart. `the_embedded_kernels_are_the_run_time_compile` (engine-webgpu's lib tests) holds
+them byte for byte the same. engine-metal and engine-cuda embed their MSL and CUDA (the
+fast loop does not build them).
+
 ## Kernels
 
 - **Every slangc and nvcc run goes through `engine-slang-build`**, which caches each

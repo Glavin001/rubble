@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     }
     // Soft-body skinning (standalone, run after the step): the same module the
     // native SoftSkinner embeds.
-    std::fs::write(out.join("soft_skin.wgsl"), engine_webgpu::SOFT_SKIN_WGSL)?;
+    std::fs::write(out.join("soft_skin.wgsl"), engine_webgpu::SOFT_SKIN_WGSL.text())?;
     println!("Wrote {} WGSL modules to {}", names.len(), out.display());
 
     // Vehicle presets (fully expanded descriptors) for vehicle.html.

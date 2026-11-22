@@ -100,10 +100,18 @@ def build(cmd, env):
     t = time.monotonic()
     proc = subprocess.run(cmd + ["-v"], cwd=ENGINE, env=env, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True)
-    secs = time.monotonic() - t
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout[-4000:])
         sys.exit("build failed")
+    # Ready means the kernels too: with the fast profile engine-webgpu compiles them at
+    # run time (kernel_store), so the edit's kernel work is this step's.
+    profile = cmd[cmd.index("--profile") + 1] if "--profile" in cmd else ("release" if "--release" in cmd else "dev")
+    warm = subprocess.run(["cargo", "run", "-q", "--profile", profile, "-p", "engine-webgpu", "--bin", "kernels"],
+                          cwd=ENGINE, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if warm.returncode != 0:
+        sys.stderr.write(warm.stdout[-4000:])
+        sys.exit("kernels failed")
+    secs = time.monotonic() - t
     compiled = re.findall(r"^\s*Compiling (\S+)", proc.stdout, re.M)
     scripts = re.findall(r"build/([A-Za-z0-9_-]+?)-[0-9a-f]{16}/build-script-build`", proc.stdout)
     return secs, compiled, scripts

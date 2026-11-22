@@ -3865,7 +3865,7 @@ impl ExplicitBeamsGpu {
         let plan = ["bounds", "pairs", "group"].map(|p| {
             let e = format!("explicit_beams_vv_{p}");
             if matches!(variant, KernelVariant::CurrentDet | KernelVariant::Ablate) && prefix != "explicit_baseline_" {
-                let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1;
+                let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1.text();
                 make(&e, wgsl, &plan_layout)
             } else if variant == KernelVariant::Reference {
                 make(&e, &read(&format!("explicit_ref_{e}")), &plan_layout)
@@ -5011,18 +5011,18 @@ impl Wide {
 pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     let u = crate::uniformize_workgroup_lanes;
     let mut out: Vec<(String, &'static str, String)> = vec![
-        ("explicit_beams".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_WGSL)),
-        ("explicit_beams_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_WIDE_WGSL)),
-        ("explicit_beams_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_AERO_WGSL)),
-        ("explicit_beams_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_AERO_WIDE_WGSL)),
-        ("explicit_beams_solo".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_WGSL)),
-        ("explicit_beams_solo_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_WIDE_WGSL)),
-        ("explicit_beams_solo_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_AERO_WGSL)),
-        ("explicit_beams_solo_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL)),
-        ("explicit_beams_contact".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WGSL)),
-        ("explicit_beams_contact_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WIDE_WGSL)),
-        ("explicit_beams_contact_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WGSL)),
-        ("explicit_beams_contact_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL)),
+        ("explicit_beams".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_WGSL)),
+        ("explicit_beams_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_WIDE_WGSL)),
+        ("explicit_beams_aero".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_AERO_WGSL)),
+        ("explicit_beams_aero_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_AERO_WIDE_WGSL)),
+        ("explicit_beams_solo".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_WGSL)),
+        ("explicit_beams_solo_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_WIDE_WGSL)),
+        ("explicit_beams_solo_aero".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_AERO_WGSL)),
+        ("explicit_beams_solo_aero_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL)),
+        ("explicit_beams_contact".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_WGSL)),
+        ("explicit_beams_contact_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_WIDE_WGSL)),
+        ("explicit_beams_contact_aero".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_AERO_WGSL)),
+        ("explicit_beams_contact_aero_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL)),
     ];
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
@@ -5031,7 +5031,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         let entry = if n.contains("contact_big") { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
         out.push((n.to_string(), entry, u(w)));
     }
-    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
+    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(&crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
         let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
         out.push((n.to_string(), entry, u(w)));

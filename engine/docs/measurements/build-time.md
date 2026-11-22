@@ -108,9 +108,37 @@ matrix's 12 rows bit for bit; no row slower over seven samples of the closest).
 `#[cfg(test)]` code only: an edit there recompiles no crate (checked: schema stays
 fresh), so nothing to move.
 
+## 2026-11-22: kernels compiled at run time in the fast profile
+
+engine-webgpu's kernels in the `fast` profile on native are compiled on first use into a
+store keyed by the Slang sources (`engine_webgpu::kernel_store`), not by its build script
+and embedded: a kernel edit compiles no Rust crate. The measured time includes compiling
+the store (`--bin kernels`), which the harness scripts do before the GPU lock.
+
+| Edit | Main s | Before this s | After s | Crates compiled |
+|---|---|---|---|---|
+| a small kernel file (`soft_skin.slang`) | 4.1 | 3.7 | 1.2 | 3 → 0 |
+| `slang/kernels/explicit_beams.slang` | 28.9 | 15.9 | 13.5 | 3 → 0 |
+| `slang/physics/common.slang` | 28.2 | 15.6 | 9.1 | 3 → 0 |
+| the wings (`explicit_beams_aero.slang`) | 28.9 | 10.9 | 8.5 | 3 → 0 |
+| the soft-body model | 6.1 | 3.3 | 3.9 | 7 |
+| vehicle authoring | 6.1 | 1.8 | 1.8 | 2 |
+| the explicit plan | 4.8 | 2.7 | 2.9 | 5 |
+| the explicit GPU host | 2.6 | 2.6 | 2.6 | 3 |
+| a World module | 1.7 | 1.7 | 1.8 | 1 |
+
+(The Rust edits' times now include the store check of `--bin kernels`, 0.3–0.5 s.)
+
+The same bytes: `the_embedded_kernels_are_the_run_time_compile` (every module of
+`OUT_DIR`, 500+, equal to the run-time compile's); the store against the previous build's
+embedded WGSL, every file the same; on the GPU, fast-check with the store's kernels
+against those (16 of 17 fixtures bit for bit, the 17th as with the same kernels on both
+sides) and the bitwise and loop-cap suites.
+
 ## Where the time still goes
 
 - An explicit kernel edit is slangc: 143 modules of distinct defines in the fast loop,
   about 1.3 s each (a third of it parsing).
-- Every kernel edit recompiles engine-webgpu and everything above it: the build
-  script embeds the kernels with `include_str!`.
+- Release, the C library and wasm still embed the kernels: a kernel edit there
+  recompiles engine-webgpu and everything above it (the web build's fast profile:
+  about 5 s for the world wasm).

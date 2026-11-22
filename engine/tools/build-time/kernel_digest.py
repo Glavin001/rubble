@@ -14,7 +14,9 @@ A change to how kernels are built (caches, crate boundaries, where the lists liv
 must leave this digest identical. A change to kernel source changes it on purpose and
 is checked by the ladder in AGENTS.md instead.
 
-PROFILE (default fast) picks the cargo profile; the kernels do not depend on it.
+PROFILE (default dev) picks the cargo profile; the kernels do not depend on it. Not the
+fast profile: there engine-webgpu compiles its kernels at run time (kernel_store), not in
+its build script.
 STRIP_LINES=1 drops the MSL and CUDA `#line` directives altogether: for a change that
 moves code between files or lines (the code compared, not where it came from).
 """
@@ -113,7 +115,7 @@ def digest_dir(root):
 
 
 def build_digest(out_path):
-    profile = os.environ.get("PROFILE", "fast")
+    profile = os.environ.get("PROFILE", "dev")
     lines = []
     for variant, (crates, extra) in VARIANTS.items():
         for crate, out in sorted(out_dirs(profile, crates, extra).items()):

@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&out)?;
         let mut n = 0;
         // (The build's modules and the test-only ones, compiled on demand.)
-        let dirs = [std::path::Path::new(engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR), engine_webgpu::test_kernels_dir()];
+        let dirs = [engine_webgpu::explicit_beams_wgsl_dir(), engine_webgpu::test_kernels_dir().to_path_buf()];
         for e in dirs.iter().map(|d| std::fs::read_dir(d)).collect::<Result<Vec<_>, _>>()?.into_iter().flatten() {
             let path = e?.path();
             let name = path

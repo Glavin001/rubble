@@ -55,19 +55,19 @@ pub(crate) fn module_wgsl(name: &str) -> &'static str {
         return text;
     }
     match name {
-        "explicit_beams" => EXPLICIT_BEAMS_WGSL,
-        "explicit_beams_wide" => EXPLICIT_BEAMS_WIDE_WGSL,
-        "explicit_beams_aero" => EXPLICIT_BEAMS_AERO_WGSL,
-        "explicit_beams_aero_wide" => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
-        "explicit_beams_solo" => EXPLICIT_BEAMS_SOLO_WGSL,
-        "explicit_beams_solo_wide" => EXPLICIT_BEAMS_SOLO_WIDE_WGSL,
-        "explicit_beams_solo_aero" => EXPLICIT_BEAMS_SOLO_AERO_WGSL,
-        "explicit_beams_solo_aero_wide" => EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
-        "explicit_beams_contact" => EXPLICIT_BEAMS_CONTACT_WGSL,
-        "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
-        "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
-        "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
-        "explicit_beams_sleep_list" => crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL,
+        "explicit_beams" => EXPLICIT_BEAMS_WGSL.text(),
+        "explicit_beams_wide" => EXPLICIT_BEAMS_WIDE_WGSL.text(),
+        "explicit_beams_aero" => EXPLICIT_BEAMS_AERO_WGSL.text(),
+        "explicit_beams_aero_wide" => EXPLICIT_BEAMS_AERO_WIDE_WGSL.text(),
+        "explicit_beams_solo" => EXPLICIT_BEAMS_SOLO_WGSL.text(),
+        "explicit_beams_solo_wide" => EXPLICIT_BEAMS_SOLO_WIDE_WGSL.text(),
+        "explicit_beams_solo_aero" => EXPLICIT_BEAMS_SOLO_AERO_WGSL.text(),
+        "explicit_beams_solo_aero_wide" => EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL.text(),
+        "explicit_beams_contact" => EXPLICIT_BEAMS_CONTACT_WGSL.text(),
+        "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL.text(),
+        "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL.text(),
+        "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL.text(),
+        "explicit_beams_sleep_list" => crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL.text(),
         _ => EXPLICIT_BEAMS_VV_PASSES
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
@@ -79,7 +79,7 @@ pub(crate) fn module_wgsl(name: &str) -> &'static str {
             .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
             .chain(crate::EXPLICIT_BEAMS_WIDE_LIST.iter())
             .find(|(n, _)| *n == name)
-            .map(|(_, w)| *w)
+            .map(|(_, w)| w.text())
             .unwrap_or_else(|| test_module(name)),
     }
 }

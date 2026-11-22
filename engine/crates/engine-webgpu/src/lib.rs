@@ -9,6 +9,22 @@
 mod compute_spec;
 #[cfg(feature = "gpu")]
 mod explicit_beams_gpu;
+pub mod kernel;
+#[cfg(kernels_at_runtime)]
+pub mod kernel_store;
+/// The kernels' compile (src/kernel_build.rs, as build.rs runs it), for the run-time
+/// store and the test that holds the two the same.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+mod kernel_compile {
+    use crate::explicit_post_text;
+    use anyhow::{Context, Result};
+    use engine_slang_build::{compile, compile_entries_to, compile_many, compile_with_defines, par_map, Compile, SlangTarget};
+    use std::path::{Path, PathBuf};
+    include!("kernel_build.rs");
+}
+pub use kernel::Kernel;
+use kernel::kernel;
 mod explicit_modules;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
@@ -57,24 +73,23 @@ pub use poses::PoseRecord;
 pub use soft_skin::SoftSkinner;
 
 /// The explicit vehicles' World coupling (`slang/kernels/vehicle_coupling.slang`).
-pub const VEHICLE_COUPLING_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/vehicle_coupling.wgsl"));
+pub const VEHICLE_COUPLING_WGSL: Kernel = kernel!("vehicle_coupling");
 /// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
-pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
+pub const SOFT_SKIN_WGSL: Kernel = kernel!("soft_skin");
 
 /// The explicit-beams solver (`slang/kernels/explicit_beams.slang`, entry
 /// `explicit_beams_frame`): one workgroup per vehicle runs a whole frame of steps
 /// ([`ExplicitBeamsGpu`]), as `generated/wgsl/explicit_beams.wgsl`.
-pub const EXPLICIT_BEAMS_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
+pub const EXPLICIT_BEAMS_WGSL: Kernel = kernel!("explicit_beams");
 /// The larger contact groups' modules (`EB_VV_BIG_ONLY`, entry
 /// `explicit_beams_contact`; `engine_exec::explicit_plan::Kernel::ContactBig`), at the
 /// frame module's four variants.
-pub const EXPLICIT_BEAMS_CONTACT_BIG: [(&str, &str); 4] = [
-    ("explicit_beams_contact_big", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big.wgsl"))),
-    ("explicit_beams_contact_big_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_wide.wgsl"))),
-    ("explicit_beams_contact_big_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero.wgsl"))),
-    ("explicit_beams_contact_big_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide.wgsl"))),
+pub const EXPLICIT_BEAMS_CONTACT_BIG: [(&str, Kernel); 4] = [
+    ("explicit_beams_contact_big", kernel!("explicit_beams_contact_big")),
+    ("explicit_beams_contact_big_wide", kernel!("explicit_beams_contact_big_wide")),
+    ("explicit_beams_contact_big_aero", kernel!("explicit_beams_contact_big_aero")),
+    ("explicit_beams_contact_big_aero_wide", kernel!("explicit_beams_contact_big_aero_wide")),
 ];
 /// The twelve frame and contact modules (not the large groups' four, which a fleet of
 /// more than four without coupling falls back to as shipped) with surface contact but
@@ -83,58 +98,58 @@ pub const EXPLICIT_BEAMS_CONTACT_BIG: [(&str, &str); 4] = [
 /// upload without coupling room can reach. The host runs them for such an upload
 /// with surface contact (`explicit_beams_gpu::frame_module`); what executes is the
 /// same code, and a browser compiles a kernel a third the size.
-pub const EXPLICIT_BEAMS_NOCPL: [(&str, &str); 12] = [
-    ("explicit_beams_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_nocpl.wgsl"))),
-    ("explicit_beams_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nocpl.wgsl"))),
-    ("explicit_beams_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_nocpl.wgsl"))),
-    ("explicit_beams_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_nocpl.wgsl"))),
-    ("explicit_beams_solo_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_nocpl.wgsl"))),
-    ("explicit_beams_solo_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide_nocpl.wgsl"))),
-    ("explicit_beams_solo_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_nocpl.wgsl"))),
-    ("explicit_beams_solo_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide_nocpl.wgsl"))),
-    ("explicit_beams_contact_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_nocpl.wgsl"))),
-    ("explicit_beams_contact_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide_nocpl.wgsl"))),
-    ("explicit_beams_contact_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_nocpl.wgsl"))),
-    ("explicit_beams_contact_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide_nocpl.wgsl"))),
+pub const EXPLICIT_BEAMS_NOCPL: [(&str, Kernel); 12] = [
+    ("explicit_beams_nocpl", kernel!("explicit_beams_nocpl")),
+    ("explicit_beams_wide_nocpl", kernel!("explicit_beams_wide_nocpl")),
+    ("explicit_beams_aero_nocpl", kernel!("explicit_beams_aero_nocpl")),
+    ("explicit_beams_aero_wide_nocpl", kernel!("explicit_beams_aero_wide_nocpl")),
+    ("explicit_beams_solo_nocpl", kernel!("explicit_beams_solo_nocpl")),
+    ("explicit_beams_solo_wide_nocpl", kernel!("explicit_beams_solo_wide_nocpl")),
+    ("explicit_beams_solo_aero_nocpl", kernel!("explicit_beams_solo_aero_nocpl")),
+    ("explicit_beams_solo_aero_wide_nocpl", kernel!("explicit_beams_solo_aero_wide_nocpl")),
+    ("explicit_beams_contact_nocpl", kernel!("explicit_beams_contact_nocpl")),
+    ("explicit_beams_contact_wide_nocpl", kernel!("explicit_beams_contact_wide_nocpl")),
+    ("explicit_beams_contact_aero_nocpl", kernel!("explicit_beams_contact_aero_nocpl")),
+    ("explicit_beams_contact_aero_wide_nocpl", kernel!("explicit_beams_contact_aero_wide_nocpl")),
 ];
 /// The sixteen frame and contact modules without surface contact (`EB_NO_SURFACE`,
 /// name `<module>_nosurf`; `engine_exec::explicit_plan::Kernel::module_for`): the host
 /// runs them when no vehicle of the upload has surface contact.
-pub const EXPLICIT_BEAMS_NOSURF: [(&str, &str); 16] = [
-    ("explicit_beams_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_nosurf.wgsl"))),
-    ("explicit_beams_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nosurf.wgsl"))),
-    ("explicit_beams_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_nosurf.wgsl"))),
-    ("explicit_beams_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_nosurf.wgsl"))),
-    ("explicit_beams_solo_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_nosurf.wgsl"))),
-    ("explicit_beams_solo_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide_nosurf.wgsl"))),
-    ("explicit_beams_solo_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_nosurf.wgsl"))),
-    ("explicit_beams_solo_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide_nosurf.wgsl"))),
-    ("explicit_beams_contact_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_nosurf.wgsl"))),
-    ("explicit_beams_contact_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide_nosurf.wgsl"))),
-    ("explicit_beams_contact_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_nosurf.wgsl"))),
-    ("explicit_beams_contact_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide_nosurf.wgsl"))),
-    ("explicit_beams_contact_big_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_nosurf.wgsl"))),
-    ("explicit_beams_contact_big_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_wide_nosurf.wgsl"))),
-    ("explicit_beams_contact_big_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_nosurf.wgsl"))),
-    ("explicit_beams_contact_big_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide_nosurf.wgsl"))),
+pub const EXPLICIT_BEAMS_NOSURF: [(&str, Kernel); 16] = [
+    ("explicit_beams_nosurf", kernel!("explicit_beams_nosurf")),
+    ("explicit_beams_wide_nosurf", kernel!("explicit_beams_wide_nosurf")),
+    ("explicit_beams_aero_nosurf", kernel!("explicit_beams_aero_nosurf")),
+    ("explicit_beams_aero_wide_nosurf", kernel!("explicit_beams_aero_wide_nosurf")),
+    ("explicit_beams_solo_nosurf", kernel!("explicit_beams_solo_nosurf")),
+    ("explicit_beams_solo_wide_nosurf", kernel!("explicit_beams_solo_wide_nosurf")),
+    ("explicit_beams_solo_aero_nosurf", kernel!("explicit_beams_solo_aero_nosurf")),
+    ("explicit_beams_solo_aero_wide_nosurf", kernel!("explicit_beams_solo_aero_wide_nosurf")),
+    ("explicit_beams_contact_nosurf", kernel!("explicit_beams_contact_nosurf")),
+    ("explicit_beams_contact_wide_nosurf", kernel!("explicit_beams_contact_wide_nosurf")),
+    ("explicit_beams_contact_aero_nosurf", kernel!("explicit_beams_contact_aero_nosurf")),
+    ("explicit_beams_contact_aero_wide_nosurf", kernel!("explicit_beams_contact_aero_wide_nosurf")),
+    ("explicit_beams_contact_big_nosurf", kernel!("explicit_beams_contact_big_nosurf")),
+    ("explicit_beams_contact_big_wide_nosurf", kernel!("explicit_beams_contact_big_wide_nosurf")),
+    ("explicit_beams_contact_big_aero_nosurf", kernel!("explicit_beams_contact_big_aero_nosurf")),
+    ("explicit_beams_contact_big_aero_wide_nosurf", kernel!("explicit_beams_contact_big_aero_wide_nosurf")),
 ];
 /// Surface contact split from the frame (`engine_exec::explicit_plan::Kernel::FrameSeg`,
 /// `Kernel::Surf`): the frame in segments at its four variants (`EB_FRAME_SEG`), then the
 /// surface pass's pipelines (`EB_SURF_PIPE`, `SURF_PASSES` order).
-pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
-    ("explicit_beams_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_seg.wgsl"))),
-    ("explicit_beams_wide_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_seg.wgsl"))),
-    ("explicit_beams_aero_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_seg.wgsl"))),
-    ("explicit_beams_aero_wide_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_seg.wgsl"))),
-    ("explicit_surface_prep", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_prep.wgsl"))),
-    ("explicit_surface_find_tri", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_tri.wgsl"))),
-    ("explicit_surface_find_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_seg.wgsl"))),
-    ("explicit_surface_find_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_point.wgsl"))),
-    ("explicit_surface_find_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_pair.wgsl"))),
-    ("explicit_surface_apply_tri", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_tri.wgsl"))),
-    ("explicit_surface_apply_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_seg.wgsl"))),
-    ("explicit_surface_apply_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_point.wgsl"))),
-    ("explicit_surface_apply_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_pair.wgsl"))),
+pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, Kernel); 13] = [
+    ("explicit_beams_seg", kernel!("explicit_beams_seg")),
+    ("explicit_beams_wide_seg", kernel!("explicit_beams_wide_seg")),
+    ("explicit_beams_aero_seg", kernel!("explicit_beams_aero_seg")),
+    ("explicit_beams_aero_wide_seg", kernel!("explicit_beams_aero_wide_seg")),
+    ("explicit_surface_prep", kernel!("explicit_surface_prep")),
+    ("explicit_surface_find_tri", kernel!("explicit_surface_find_tri")),
+    ("explicit_surface_find_seg", kernel!("explicit_surface_find_seg")),
+    ("explicit_surface_find_point", kernel!("explicit_surface_find_point")),
+    ("explicit_surface_find_pair", kernel!("explicit_surface_find_pair")),
+    ("explicit_surface_apply_tri", kernel!("explicit_surface_apply_tri")),
+    ("explicit_surface_apply_seg", kernel!("explicit_surface_apply_seg")),
+    ("explicit_surface_apply_point", kernel!("explicit_surface_apply_point")),
+    ("explicit_surface_apply_pair", kernel!("explicit_surface_apply_pair")),
 ];
 /// The split group path (`EB_VV_SPLIT`, engine/docs/measurements/contact-groups-design.md):
 /// per frame-module variant (plain, wide, aero, aero wide) the members' step
@@ -144,51 +159,51 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 /// explicit_beams_fleet.slang, contact-groups-design.md §8); and the members' raycast
 /// wheels on each other (`explicit_beams_split_wheels`).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 44] = [
-    ("explicit_beams_split_groupbegin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin.wgsl"))),
-    ("explicit_beams_split_groupbegin_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin_wide.wgsl"))),
-    ("explicit_beams_split_groupbegin_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin_aero.wgsl"))),
-    ("explicit_beams_split_groupbegin_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin_aero_wide.wgsl"))),
-    ("explicit_beams_split_grouplevels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels.wgsl"))),
-    ("explicit_beams_split_grouplevels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels_wide.wgsl"))),
-    ("explicit_beams_split_grouplevels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels_aero.wgsl"))),
-    ("explicit_beams_split_grouplevels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels_aero_wide.wgsl"))),
-    ("explicit_beams_split_grouplv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv.wgsl"))),
-    ("explicit_beams_split_grouplv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv_wide.wgsl"))),
-    ("explicit_beams_split_grouplv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv_aero.wgsl"))),
-    ("explicit_beams_split_grouplv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv_aero_wide.wgsl"))),
-    ("explicit_beams_split_wheels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels.wgsl"))),
-    ("explicit_beams_split_wheels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_wide.wgsl"))),
-    ("explicit_beams_split_wheels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_aero.wgsl"))),
-    ("explicit_beams_split_wheels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_aero_wide.wgsl"))),
-    ("explicit_beams_split_fleetlevels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels.wgsl"))),
-    ("explicit_beams_split_fleetlevels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_wide.wgsl"))),
-    ("explicit_beams_split_fleetlevels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero.wgsl"))),
-    ("explicit_beams_split_fleetlevels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero_wide.wgsl"))),
-    ("explicit_beams_split_fleetpost", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost.wgsl"))),
-    ("explicit_beams_split_fleetpost_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_wide.wgsl"))),
-    ("explicit_beams_split_fleetpost_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_aero.wgsl"))),
-    ("explicit_beams_split_fleetpost_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_aero_wide.wgsl"))),
-    ("explicit_beams_split_fleetfront", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront.wgsl"))),
-    ("explicit_beams_split_fleetplan", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan.wgsl"))),
-    ("explicit_beams_split_fleetfront_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_wide.wgsl"))),
-    ("explicit_beams_split_fleetplan_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_wide.wgsl"))),
-    ("explicit_beams_split_fleetfront_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_aero.wgsl"))),
-    ("explicit_beams_split_fleetplan_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_aero.wgsl"))),
-    ("explicit_beams_split_fleetfront_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_aero_wide.wgsl"))),
-    ("explicit_beams_split_fleetplan_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_aero_wide.wgsl"))),
-    ("explicit_beams_split_member", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member.wgsl"))),
-    ("explicit_beams_split_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group.wgsl"))),
-    ("explicit_beams_split_tests", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests.wgsl"))),
-    ("explicit_beams_split_member_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_wide.wgsl"))),
-    ("explicit_beams_split_group_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_wide.wgsl"))),
-    ("explicit_beams_split_tests_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_wide.wgsl"))),
-    ("explicit_beams_split_member_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_aero.wgsl"))),
-    ("explicit_beams_split_group_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_aero.wgsl"))),
-    ("explicit_beams_split_tests_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_aero.wgsl"))),
-    ("explicit_beams_split_member_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_aero_wide.wgsl"))),
-    ("explicit_beams_split_group_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_aero_wide.wgsl"))),
-    ("explicit_beams_split_tests_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_aero_wide.wgsl"))),
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 44] = [
+    ("explicit_beams_split_groupbegin", kernel!("explicit_beams_split_groupbegin")),
+    ("explicit_beams_split_groupbegin_wide", kernel!("explicit_beams_split_groupbegin_wide")),
+    ("explicit_beams_split_groupbegin_aero", kernel!("explicit_beams_split_groupbegin_aero")),
+    ("explicit_beams_split_groupbegin_aero_wide", kernel!("explicit_beams_split_groupbegin_aero_wide")),
+    ("explicit_beams_split_grouplevels", kernel!("explicit_beams_split_grouplevels")),
+    ("explicit_beams_split_grouplevels_wide", kernel!("explicit_beams_split_grouplevels_wide")),
+    ("explicit_beams_split_grouplevels_aero", kernel!("explicit_beams_split_grouplevels_aero")),
+    ("explicit_beams_split_grouplevels_aero_wide", kernel!("explicit_beams_split_grouplevels_aero_wide")),
+    ("explicit_beams_split_grouplv", kernel!("explicit_beams_split_grouplv")),
+    ("explicit_beams_split_grouplv_wide", kernel!("explicit_beams_split_grouplv_wide")),
+    ("explicit_beams_split_grouplv_aero", kernel!("explicit_beams_split_grouplv_aero")),
+    ("explicit_beams_split_grouplv_aero_wide", kernel!("explicit_beams_split_grouplv_aero_wide")),
+    ("explicit_beams_split_wheels", kernel!("explicit_beams_split_wheels")),
+    ("explicit_beams_split_wheels_wide", kernel!("explicit_beams_split_wheels_wide")),
+    ("explicit_beams_split_wheels_aero", kernel!("explicit_beams_split_wheels_aero")),
+    ("explicit_beams_split_wheels_aero_wide", kernel!("explicit_beams_split_wheels_aero_wide")),
+    ("explicit_beams_split_fleetlevels", kernel!("explicit_beams_split_fleetlevels")),
+    ("explicit_beams_split_fleetlevels_wide", kernel!("explicit_beams_split_fleetlevels_wide")),
+    ("explicit_beams_split_fleetlevels_aero", kernel!("explicit_beams_split_fleetlevels_aero")),
+    ("explicit_beams_split_fleetlevels_aero_wide", kernel!("explicit_beams_split_fleetlevels_aero_wide")),
+    ("explicit_beams_split_fleetpost", kernel!("explicit_beams_split_fleetpost")),
+    ("explicit_beams_split_fleetpost_wide", kernel!("explicit_beams_split_fleetpost_wide")),
+    ("explicit_beams_split_fleetpost_aero", kernel!("explicit_beams_split_fleetpost_aero")),
+    ("explicit_beams_split_fleetpost_aero_wide", kernel!("explicit_beams_split_fleetpost_aero_wide")),
+    ("explicit_beams_split_fleetfront", kernel!("explicit_beams_split_fleetfront")),
+    ("explicit_beams_split_fleetplan", kernel!("explicit_beams_split_fleetplan")),
+    ("explicit_beams_split_fleetfront_wide", kernel!("explicit_beams_split_fleetfront_wide")),
+    ("explicit_beams_split_fleetplan_wide", kernel!("explicit_beams_split_fleetplan_wide")),
+    ("explicit_beams_split_fleetfront_aero", kernel!("explicit_beams_split_fleetfront_aero")),
+    ("explicit_beams_split_fleetplan_aero", kernel!("explicit_beams_split_fleetplan_aero")),
+    ("explicit_beams_split_fleetfront_aero_wide", kernel!("explicit_beams_split_fleetfront_aero_wide")),
+    ("explicit_beams_split_fleetplan_aero_wide", kernel!("explicit_beams_split_fleetplan_aero_wide")),
+    ("explicit_beams_split_member", kernel!("explicit_beams_split_member")),
+    ("explicit_beams_split_group", kernel!("explicit_beams_split_group")),
+    ("explicit_beams_split_tests", kernel!("explicit_beams_split_tests")),
+    ("explicit_beams_split_member_wide", kernel!("explicit_beams_split_member_wide")),
+    ("explicit_beams_split_group_wide", kernel!("explicit_beams_split_group_wide")),
+    ("explicit_beams_split_tests_wide", kernel!("explicit_beams_split_tests_wide")),
+    ("explicit_beams_split_member_aero", kernel!("explicit_beams_split_member_aero")),
+    ("explicit_beams_split_group_aero", kernel!("explicit_beams_split_group_aero")),
+    ("explicit_beams_split_tests_aero", kernel!("explicit_beams_split_tests_aero")),
+    ("explicit_beams_split_member_aero_wide", kernel!("explicit_beams_split_member_aero_wide")),
+    ("explicit_beams_split_group_aero_wide", kernel!("explicit_beams_split_group_aero_wide")),
+    ("explicit_beams_split_tests_aero_wide", kernel!("explicit_beams_split_tests_aero_wide")),
 ];
 /// Self-collision's listed pairs across workgroups (`EB_SELF_SPLIT`,
 /// engine/docs/measurements/selfcol-design.md): per frame-module variant the solo frame's
@@ -199,106 +214,103 @@ pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 44] = [
 /// and pairs that skip a contact group's members. WebGPU only (native wgpu and browsers).
 /// The wide passes' reused pair list (`explicit_beams_wide_list`, the self split's family
 /// and bindings): the list's part of a step, a workgroup a vehicle, at 256 and 512 lanes.
-pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, &str); 2] = [
-    ("explicit_beams_selfsplit_list", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list.wgsl"))),
-    ("explicit_beams_selfsplit_list_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_list_wide.wgsl"))),
+pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, Kernel); 2] = [
+    ("explicit_beams_selfsplit_list", kernel!("explicit_beams_selfsplit_list")),
+    ("explicit_beams_selfsplit_list_wide", kernel!("explicit_beams_selfsplit_list_wide")),
 ];
-pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
-    ("explicit_beams_selfsplit_step", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step.wgsl"))),
-    ("explicit_beams_selfsplit_walk", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk.wgsl"))),
-    ("explicit_beams_selfsplit_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs.wgsl"))),
-    ("explicit_beams_selfsplit_step_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_wide.wgsl"))),
-    ("explicit_beams_selfsplit_walk_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_wide.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_wide.wgsl"))),
-    ("explicit_beams_selfsplit_step_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_aero.wgsl"))),
-    ("explicit_beams_selfsplit_walk_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_aero.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_aero.wgsl"))),
-    ("explicit_beams_selfsplit_step_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_aero_wide.wgsl"))),
-    ("explicit_beams_selfsplit_walk_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_aero_wide.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_aero_wide.wgsl"))),
+pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, Kernel); 24] = [
+    ("explicit_beams_selfsplit_step", kernel!("explicit_beams_selfsplit_step")),
+    ("explicit_beams_selfsplit_walk", kernel!("explicit_beams_selfsplit_walk")),
+    ("explicit_beams_selfsplit_pairs", kernel!("explicit_beams_selfsplit_pairs")),
+    ("explicit_beams_selfsplit_step_wide", kernel!("explicit_beams_selfsplit_step_wide")),
+    ("explicit_beams_selfsplit_walk_wide", kernel!("explicit_beams_selfsplit_walk_wide")),
+    ("explicit_beams_selfsplit_pairs_wide", kernel!("explicit_beams_selfsplit_pairs_wide")),
+    ("explicit_beams_selfsplit_step_aero", kernel!("explicit_beams_selfsplit_step_aero")),
+    ("explicit_beams_selfsplit_walk_aero", kernel!("explicit_beams_selfsplit_walk_aero")),
+    ("explicit_beams_selfsplit_pairs_aero", kernel!("explicit_beams_selfsplit_pairs_aero")),
+    ("explicit_beams_selfsplit_step_aero_wide", kernel!("explicit_beams_selfsplit_step_aero_wide")),
+    ("explicit_beams_selfsplit_walk_aero_wide", kernel!("explicit_beams_selfsplit_walk_aero_wide")),
+    ("explicit_beams_selfsplit_pairs_aero_wide", kernel!("explicit_beams_selfsplit_pairs_aero_wide")),
 
-    ("explicit_beams_selfsplit_member_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv.wgsl"))),
-    ("explicit_beams_selfsplit_walk_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv.wgsl"))),
-    ("explicit_beams_selfsplit_member_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_wide.wgsl"))),
-    ("explicit_beams_selfsplit_walk_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_wide.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_wide.wgsl"))),
-    ("explicit_beams_selfsplit_member_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_aero.wgsl"))),
-    ("explicit_beams_selfsplit_walk_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero.wgsl"))),
-    ("explicit_beams_selfsplit_member_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_aero_wide.wgsl"))),
-    ("explicit_beams_selfsplit_walk_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero_wide.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv", kernel!("explicit_beams_selfsplit_member_vv")),
+    ("explicit_beams_selfsplit_walk_vv", kernel!("explicit_beams_selfsplit_walk_vv")),
+    ("explicit_beams_selfsplit_pairs_vv", kernel!("explicit_beams_selfsplit_pairs_vv")),
+    ("explicit_beams_selfsplit_member_vv_wide", kernel!("explicit_beams_selfsplit_member_vv_wide")),
+    ("explicit_beams_selfsplit_walk_vv_wide", kernel!("explicit_beams_selfsplit_walk_vv_wide")),
+    ("explicit_beams_selfsplit_pairs_vv_wide", kernel!("explicit_beams_selfsplit_pairs_vv_wide")),
+    ("explicit_beams_selfsplit_member_vv_aero", kernel!("explicit_beams_selfsplit_member_vv_aero")),
+    ("explicit_beams_selfsplit_walk_vv_aero", kernel!("explicit_beams_selfsplit_walk_vv_aero")),
+    ("explicit_beams_selfsplit_pairs_vv_aero", kernel!("explicit_beams_selfsplit_pairs_vv_aero")),
+    ("explicit_beams_selfsplit_member_vv_aero_wide", kernel!("explicit_beams_selfsplit_member_vv_aero_wide")),
+    ("explicit_beams_selfsplit_walk_vv_aero_wide", kernel!("explicit_beams_selfsplit_walk_vv_aero_wide")),
+    ("explicit_beams_selfsplit_pairs_vv_aero_wide", kernel!("explicit_beams_selfsplit_pairs_vv_aero_wide")),
 ];
-/// The build's WGSL directory (native tests read the frozen baseline kernel,
-/// `explicit_baseline_*.wgsl`, from it at run time).
+/// The build's WGSL directory: OUT_DIR's, or with the kernels compiled at run time the
+/// store's ([`kernel_store`]). Native tests and tools read modules from it.
 #[doc(hidden)]
-pub const EXPLICIT_BEAMS_WGSL_DIR: &str = concat!(env!("OUT_DIR"), "/wgsl");
+#[cfg(not(target_arch = "wasm32"))]
+pub fn explicit_beams_wgsl_dir() -> std::path::PathBuf {
+    #[cfg(kernels_at_runtime)]
+    {
+        kernel_store::dir().join("wgsl")
+    }
+    #[cfg(not(kernels_at_runtime))]
+    {
+        std::path::PathBuf::from(concat!(env!("OUT_DIR"), "/wgsl"))
+    }
+}
 
 /// The explicit-beams wide passes (entry, WGSL), one module each: one thread per
 /// element over every vehicle, a dispatch per pass ([`ExplicitBeamsGpu::set_wide`]).
-pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 11] = [
-    ("explicit_beams_wide_begin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_begin.wgsl"))),
-    ("explicit_beams_wide_rebase", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_rebase.wgsl"))),
-    ("explicit_beams_wide_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nodes.wgsl"))),
-    ("explicit_beams_wide_beams", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_beams.wgsl"))),
-    ("explicit_beams_wide_tris", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_tris.wgsl"))),
-    ("explicit_beams_wide_end", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_end.wgsl"))),
-    ("explicit_beams_wide_close", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_close.wgsl"))),
-    ("explicit_beams_wide_hits", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_hits.wgsl"))),
-    ("explicit_beams_wide_centred_beams", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_centred_beams.wgsl"))),
-    ("explicit_beams_wide_centred_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_centred_nodes.wgsl"))),
-    ("explicit_beams_wide_aux", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_aux.wgsl"))),
+pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, Kernel); 11] = [
+    ("explicit_beams_wide_begin", kernel!("explicit_beams_wide_begin")),
+    ("explicit_beams_wide_rebase", kernel!("explicit_beams_wide_rebase")),
+    ("explicit_beams_wide_nodes", kernel!("explicit_beams_wide_nodes")),
+    ("explicit_beams_wide_beams", kernel!("explicit_beams_wide_beams")),
+    ("explicit_beams_wide_tris", kernel!("explicit_beams_wide_tris")),
+    ("explicit_beams_wide_end", kernel!("explicit_beams_wide_end")),
+    ("explicit_beams_wide_close", kernel!("explicit_beams_wide_close")),
+    ("explicit_beams_wide_hits", kernel!("explicit_beams_wide_hits")),
+    ("explicit_beams_wide_centred_beams", kernel!("explicit_beams_wide_centred_beams")),
+    ("explicit_beams_wide_centred_nodes", kernel!("explicit_beams_wide_centred_nodes")),
+    ("explicit_beams_wide_aux", kernel!("explicit_beams_wide_aux")),
 ];
 
 /// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.
-pub const EXPLICIT_BEAMS_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide.wgsl"));
+pub const EXPLICIT_BEAMS_WIDE_WGSL: Kernel = kernel!("explicit_beams_wide");
 /// [`EXPLICIT_BEAMS_WGSL`] with wings, the fuselage drag and command beams
 /// (`EB_AERO`), for fleets that have them; 256 and 512 lanes.
-pub const EXPLICIT_BEAMS_AERO_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero.wgsl"));
-pub const EXPLICIT_BEAMS_AERO_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide.wgsl"));
+pub const EXPLICIT_BEAMS_AERO_WGSL: Kernel = kernel!("explicit_beams_aero");
+pub const EXPLICIT_BEAMS_AERO_WIDE_WGSL: Kernel = kernel!("explicit_beams_aero_wide");
 /// Vehicle–vehicle contact of the explicit-beams solver: the per-frame plan passes
 /// (entry, WGSL) and the contact groups' entry `explicit_beams_contact` at the four
 /// frame module variants (256 lanes, 512, with `EB_AERO`, both).
-pub const EXPLICIT_BEAMS_VV_PASSES: [(&str, &str); 3] = [
-    ("explicit_beams_vv_bounds", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_bounds.wgsl"))),
-    ("explicit_beams_vv_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_pairs.wgsl"))),
-    ("explicit_beams_vv_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_group.wgsl"))),
+pub const EXPLICIT_BEAMS_VV_PASSES: [(&str, Kernel); 3] = [
+    ("explicit_beams_vv_bounds", kernel!("explicit_beams_vv_bounds")),
+    ("explicit_beams_vv_pairs", kernel!("explicit_beams_vv_pairs")),
+    ("explicit_beams_vv_group", kernel!("explicit_beams_vv_group")),
 ];
 /// Vehicle sleep's awake list (`engine_exec::explicit_plan::SLEEP_LIST`).
-pub const EXPLICIT_BEAMS_SLEEP_LIST_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_sleep_list.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_AERO_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide.wgsl"));
+pub const EXPLICIT_BEAMS_SLEEP_LIST_WGSL: Kernel = kernel!("explicit_beams_sleep_list");
+pub const EXPLICIT_BEAMS_CONTACT_WGSL: Kernel = kernel!("explicit_beams_contact");
+pub const EXPLICIT_BEAMS_CONTACT_WIDE_WGSL: Kernel = kernel!("explicit_beams_contact_wide");
+pub const EXPLICIT_BEAMS_CONTACT_AERO_WGSL: Kernel = kernel!("explicit_beams_contact_aero");
+pub const EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL: Kernel = kernel!("explicit_beams_contact_aero_wide");
 /// The frame entry for the vehicles stepped alone while contact is active
 /// (`EB_VV_SOLO`: the vehicle from the solo list, the frame bounds check), at the
 /// four variants; [`EXPLICIT_BEAMS_WGSL`] and the others stay the plain frame.
-pub const EXPLICIT_BEAMS_SOLO_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo.wgsl"));
-pub const EXPLICIT_BEAMS_SOLO_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide.wgsl"));
-pub const EXPLICIT_BEAMS_SOLO_AERO_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero.wgsl"));
-pub const EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide.wgsl"));
+pub const EXPLICIT_BEAMS_SOLO_WGSL: Kernel = kernel!("explicit_beams_solo");
+pub const EXPLICIT_BEAMS_SOLO_WIDE_WGSL: Kernel = kernel!("explicit_beams_solo_wide");
+pub const EXPLICIT_BEAMS_SOLO_AERO_WGSL: Kernel = kernel!("explicit_beams_solo_aero");
+pub const EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL: Kernel = kernel!("explicit_beams_solo_aero_wide");
 /// A buffer's extent for compact snapshots (`slang/kernels/state_extent.slang`,
 /// entry `state_extent`; `WgpuSim::measure_state`).
-pub const STATE_EXTENT_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/state_extent.wgsl"));
+pub const STATE_EXTENT_WGSL: Kernel = kernel!("state_extent");
 
 /// The MPM material probe (`slang/kernels/mpm_material_probe.slang`, entry
 /// `mpm_material_probe`): runs `physics/mpm_material.slang` on test cases so
 /// `tests/mpm_material.rs` can compare it with the engine-terrain CPU mirror.
-pub const MPM_MATERIAL_PROBE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/mpm_material_probe.wgsl"));
+pub const MPM_MATERIAL_PROBE_WGSL: Kernel = kernel!("mpm_material_probe");
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
@@ -313,13 +325,18 @@ pub struct WebGpuWorld {
     pub wgsl_shaders: Vec<(String, String)>,
 }
 
+#[cfg(not(kernels_at_runtime))]
 mod direct {
     include!(concat!(env!("OUT_DIR"), "/direct_wgsl.rs"));
 }
 
 fn spirv_entry_names() -> Vec<&'static str> {
-    // Generated at build time; keep a compile-time fallback for rust-analyzer.
-    include_str!(concat!(env!("OUT_DIR"), "/spirv_entries.txt"))
+    // Generated at build time (or by the run-time compile, kernel_store).
+    #[cfg(not(kernels_at_runtime))]
+    let entries = include_str!(concat!(env!("OUT_DIR"), "/spirv_entries.txt"));
+    #[cfg(kernels_at_runtime)]
+    let entries = kernel_store::spirv_entries();
+    entries
         .lines()
         .filter(|l| !l.is_empty())
         .map(|s| {
@@ -337,7 +354,10 @@ fn entry_list() -> &'static [&'static str] {
 
 impl WebGpuWorld {
     pub fn spirv_bytes(name: &str) -> anyhow::Result<Vec<u8>> {
+        #[cfg(not(kernels_at_runtime))]
         let path = format!("{}/spirv/{name}.spv", env!("OUT_DIR"));
+        #[cfg(kernels_at_runtime)]
+        let path = format!("{}/spirv/{name}.spv", kernel_store::dir().display());
         Ok(std::fs::read(&path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?)
     }
 
@@ -377,7 +397,14 @@ impl WebGpuWorld {
 
     /// Build-time Slang → WGSL modules (embedded; works on wasm32).
     pub fn direct_shaders() -> &'static [(&'static str, &'static str)] {
-        direct::DIRECT_WGSL
+        #[cfg(not(kernels_at_runtime))]
+        {
+            direct::DIRECT_WGSL
+        }
+        #[cfg(kernels_at_runtime)]
+        {
+            kernel_store::direct()
+        }
     }
 
     /// Translate every SPIR-V entry to WGSL through naga.
@@ -632,11 +659,11 @@ fn compile_test_kernels() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
-/// An explicit module's WGSL file: the build's (`EXPLICIT_BEAMS_WGSL_DIR`), else a
+/// An explicit module's WGSL file: the build's ([`explicit_beams_wgsl_dir`]), else a
 /// test-only module's ([`test_kernels_dir`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn explicit_wgsl_path(name: &str) -> std::path::PathBuf {
-    let built = std::path::Path::new(EXPLICIT_BEAMS_WGSL_DIR).join(format!("{name}.wgsl"));
+    let built = explicit_beams_wgsl_dir().join(format!("{name}.wgsl"));
     if built.is_file() {
         return built;
     }
@@ -1257,5 +1284,42 @@ mod tests {
             assert_eq!(atomic_offsets, expected,
                 "{name}: unrelated atomic counter reads per invocation: {unexpected:?}. Read bodyCount/colliderCount directly; a full counter snapshot can cause GPU contention at 100k–506k scale. Atomic increments remain allowed.");
         }
+    }
+}
+
+/// The kernels the build embeds are the run-time compile's (the fast profile's store),
+/// byte for byte: one compile, two places it runs.
+#[cfg(all(test, not(kernels_at_runtime), not(target_arch = "wasm32")))]
+mod embedded_is_runtime {
+    #[test]
+    fn the_embedded_kernels_are_the_run_time_compile() {
+        let built = std::path::Path::new(env!("OUT_DIR"));
+        let dir = built.join("runtime-compile-check");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang");
+        let compiled = crate::kernel_compile::compile_all(&root, &dir).unwrap();
+        let mut n = 0;
+        for sub in ["wgsl", "spirv"] {
+            let mut names: Vec<_> = std::fs::read_dir(built.join(sub)).unwrap().map(|e| e.unwrap().file_name()).collect();
+            names.sort();
+            let mut theirs: Vec<_> = std::fs::read_dir(dir.join(sub)).unwrap().map(|e| e.unwrap().file_name()).collect();
+            theirs.sort();
+            assert_eq!(names, theirs, "{sub}: the same modules");
+            for name in names {
+                let a = std::fs::read(built.join(sub).join(&name)).unwrap();
+                let b = std::fs::read(dir.join(sub).join(&name)).unwrap();
+                assert!(a == b, "{sub}/{}: the embedded module is not the run-time compile's", name.to_string_lossy());
+                n += 1;
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(built.join("spirv_entries.txt")).unwrap(),
+            std::fs::read_to_string(dir.join("spirv_entries.txt")).unwrap()
+        );
+        let embedded: Vec<&str> = super::WebGpuWorld::direct_shaders().iter().map(|(n, _)| *n).collect();
+        assert_eq!(embedded, compiled.wgsl_ok.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(n > 500, "{n} modules compared");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

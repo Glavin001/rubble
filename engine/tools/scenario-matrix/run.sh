@@ -63,6 +63,9 @@ export LAB_BIN="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 if [ -z "$SCENARIO_MATRIX_LOCKED" ]; then
   # shellcheck disable=SC2086
   cargo build $flag -p engine-world --example vehicle_lab 2>&1 | grep -E "^error" -A12
+  # The kernels compiled for the current sources before the GPU lock is taken (with the
+  # fast profile they are compiled at run time, on first use: engine-webgpu kernel_store).
+  cargo run -q $flag -p engine-webgpu --bin kernels >/dev/null || exit 1
   [ -x "$LAB_BIN" ] || { echo "no $LAB_BIN"; exit 1; }
   # The machine's one GPU job at a time: the whole matrix under one hold of the lock.
   exec python3 "$engine/scripts/with-gpu-lock.py" --limit "${LIMIT:-590}" -- env RUBBLE_GPU_LOCK=0 SCENARIO_MATRIX_LOCKED=1 python3 "$here/matrix.py" "$@"

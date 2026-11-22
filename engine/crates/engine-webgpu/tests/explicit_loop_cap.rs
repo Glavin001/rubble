@@ -409,7 +409,7 @@ fn every_shipped_explicit_loop_is_capped_and_valid() {
     // time): those of the current kernel carry its Slang caps; the frozen kernels'
     // are capped by the post-process, every loop.
     // (The build's modules, and the test-only ones compiled on demand.)
-    let dirs = [std::path::Path::new(engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR), engine_webgpu::test_kernels_dir()];
+    let dirs = [engine_webgpu::explicit_beams_wgsl_dir(), engine_webgpu::test_kernels_dir().to_path_buf()];
     let (mut slang, mut post) = (0, 0);
     let mut kinds = (0, 0, 0);
     for entry in dirs.iter().flat_map(|d| std::fs::read_dir(d).unwrap()) {
@@ -543,7 +543,7 @@ fn a_runaway_loop_stops_at_the_slang_cap_and_raises_the_flag() {
     // explicit_loop_cap_test.slang: the kernel's own caps (the same macros as
     // explicit_beams.slang), compiled by build.rs; engine-metal and engine-cuda
     // run the same kernel.
-    let path = format!("{}/loop_cap_test.wgsl", engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR);
+    let path = format!("{}/loop_cap_test.wgsl", engine_webgpu::explicit_beams_wgsl_dir().display());
     let wgsl = std::fs::read_to_string(path).unwrap();
     let cap = EXPLICIT_LOOP_CAP;
     let tag = EXPLICIT_LOOP_CAP_TAG as u32;
