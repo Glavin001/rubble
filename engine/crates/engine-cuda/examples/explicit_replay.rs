@@ -180,6 +180,10 @@ fn main() -> anyhow::Result<()> {
             x.frame(steps)?;
             x.wait()?;
             x.restore(&snap)?;
+            // (The snapshot holds the planner's words, the perf flags among them: a
+            // `perf=MASK` switch is set again, or both halves' timed frames run the
+            // snapshot's flags.)
+            apply(&mut x, on)?;
             let mut each = Vec::with_capacity(frames as usize);
             for _ in 0..frames {
                 let t = Instant::now();
