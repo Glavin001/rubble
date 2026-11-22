@@ -105,6 +105,30 @@ In the browser the same Rust runs: `WebWorld.kernelReplayRun` is called through
 `WebAssembly.promising` (it waits on the GPU with `engine_gpu_wait::until`), with the
 page's rAF loop held by `profiler.mjs` so nothing else borrows the World.
 
+### Timestamps on Apple GPUs
+
+Pass timestamps on Metal (wgpu natively, Dawn in Chrome) have three traps. The replay
+works around each:
+
+- **A pass's begin tick is taken when Metal starts the pass,** which can be before the work
+  encoded ahead of it in the same command buffer has finished. A restore blit followed by a
+  timed pass in one submission would charge part of the blit to the kernel. So every restore
+  is submitted and waited on alone, and the timed pass follows in a submission of its own.
+- **A resolve in the same command buffer can read samples before they land.** The query
+  resolve and readback go in a separate submission after the timed one.
+- **Some passes write no timestamp at all.** A reused query slot would then keep an older
+  pass's tick and stretch every span computed over it. This happened on the ring: a 16.7 ms
+  pass-per-phase span over 11.3 ms of passes with no gaps. Slots are never reused (a fresh
+  query set when one is full), zero ticks are skipped, and the report counts them as
+  `timed passes that wrote no timestamp`. A non-zero count means some rows have fewer
+  samples than `reps`.
+
+Splitting a step into more passes also changes what is measured. Each pass boundary drains
+the GPU, so the pass-per-phase and pass-per-dispatch *spans* are longer than the shipped
+single pass (ring110k: 13.3 ms one pass, 18.7 ms per phase, 20.0 ms per dispatch). Use
+the single-pass step for the total and the isolated rows for attribution. The per-phase
+shape is good only for ranking phases.
+
 ### Native twin
 
 ```bash

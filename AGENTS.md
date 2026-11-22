@@ -124,7 +124,11 @@
   current when the model changes). Soft-body vehicles in the World: start with `engine/docs/handoff/soft-rigid-world.md`
   (what exists, lessons, how to run and measure) and `engine/docs/handoff/known-bugs.md`.
   Project skills live in `.cursor/skills/` (linked from `.claude/skills/`): read
-  `gpu-safe-runs` before any GPU run and `physics-evidence-first` before changing physics.
+  `gpu-safe-runs` before any GPU run, `physics-evidence-first` before changing physics, and
+  `profiling-gpu-time` before performance work: find where the time goes per kernel
+  (kernel replay, Xcode capture, Instruments, browser harness;
+  `engine/docs/profiling-metal.md` and `profiling-webgpu.md`) before choosing what to
+  optimize.
 
 ## Cursor Cloud specific instructions
 
