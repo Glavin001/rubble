@@ -14,7 +14,8 @@
 //! Switches (vehicle_lab's `--ab-switch` names): `perf=MASK` (the planner's perf flags
 //! with MASK set or cleared), `groupsplit` (the split group path and self split),
 //! `selfsplit`, `surffast` (a fleet with surface contact on the fast schedules, its pass
-//! as pipelines), `widelist` (the wide passes with their reused pair list), `fused` (its
+//! as pipelines), `vvwide` (vehicle contact's frames without a group on the wide passes),
+//! `widelist` (the wide passes with their reused pair list), `fused` (its
 //! fused aux pass), `wide` (the wide passes); this host's own `devindirect` (indirect
 //! launches read their counts on the GPU, off: the host reads them back).
 //! `--ab-profile`: each half's frame by kernel, gaps and host work, after the A/B. Exit 0 when the halves end bit for bit.
@@ -74,6 +75,8 @@ fn main() -> anyhow::Result<()> {
             "selfsplit" => x.set_self_split(on),
             // Surface contact on the fast schedules (the pass as pipelines).
             "surffast" => x.set_surface_fast(on),
+            // Vehicle contact's frames without a group on the wide passes.
+            "vvwide" => x.planner_mut().set_vv_wide(on),
             "widelist" => {
                 x.set_wide(true);
                 x.set_wide_list(on);
@@ -88,7 +91,7 @@ fn main() -> anyhow::Result<()> {
             }
             // The host's own: indirect launches' counts read on the GPU, or read back.
             "devindirect" => x.set_device_indirect(on),
-            other => anyhow::bail!("switch {other} is not on this host (perf=MASK, groupsplit, selfsplit, surffast, widelist, fused, wide, devindirect)"),
+            other => anyhow::bail!("switch {other} is not on this host (perf=MASK, groupsplit, selfsplit, surffast, vvwide, widelist, fused, wide, devindirect)"),
         }
         Ok(())
     };

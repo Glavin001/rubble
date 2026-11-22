@@ -820,3 +820,8 @@ void splitGroupLevelsOnce(uint g, uint lane, uint word)
     splitGroupEnd(off, k, lane, s);
 }
 #endif
+// The owners' state by vehicle and the fleet-wide front (included here, after this
+// file's own code, as explicit_beams.slang did after including this file).
+#ifdef EB_VV_FLEET
+#include "explicit_beams_fleet.slang"
+#endif

@@ -240,6 +240,14 @@ pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 44] = [
 /// and pairs that skip a contact group's members. WebGPU only (native wgpu and browsers).
 /// The wide passes' reused pair list (`explicit_beams_wide_list`, the self split's family
 /// and bindings): the list's part of a step, a workgroup a vehicle, at 256 and 512 lanes.
+/// A fleet with vehicle contact on the wide passes while the contact plan holds no group
+/// (`engine_exec::explicit_plan::vv_wide`, `explicit_beams_vvwide.slang`): the gate, and
+/// the node and close passes with the solo vehicles' frame-bounds check.
+pub const EXPLICIT_BEAMS_VV_WIDE: [(&str, Kernel); 3] = [
+    ("explicit_vv_gate", kernel!("explicit_vv_gate")),
+    ("explicit_beams_wide_nodes_vv", kernel!("explicit_beams_wide_nodes_vv")),
+    ("explicit_beams_wide_close_vv", kernel!("explicit_beams_wide_close_vv")),
+];
 pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, Kernel); 2] = [
     ("explicit_beams_selfsplit_list", kernel!("explicit_beams_selfsplit_list")),
     ("explicit_beams_selfsplit_list_wide", kernel!("explicit_beams_selfsplit_list_wide")),

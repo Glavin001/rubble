@@ -31,6 +31,7 @@ pub mod drive;
 pub mod portable;
 pub mod schedule;
 mod surface_fast;
+pub mod vv_wide;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
 use glam::Vec3;
@@ -2937,6 +2938,8 @@ pub struct FramePlanner {
     wide_capable: bool,
     /// [`ExplicitLayout::loop_unit`].
     loop_unit: u64,
+    vv_wide: bool,
+    vv_seen: Option<u32>,
 }
 
 impl FramePlanner {
@@ -2962,6 +2965,8 @@ impl FramePlanner {
             surface_fast: 0,
             wide_capable: layout.wide_capable(),
             loop_unit: layout.loop_unit,
+            vv_wide: false,
+            vv_seen: None,
         }
     }
 

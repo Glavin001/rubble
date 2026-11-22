@@ -132,6 +132,9 @@ pub enum GroupOp {
     /// frame's end, the last step's reactions only), a workgroup a group
     /// ([`Switches::wheels_bodies`]).
     Wheels { copy: u32 },
+    /// A launch of the wide frame a fleet with vehicle contact runs while the plan holds
+    /// no group, or one of today's sized by its gate ([`super::vv_wide`]).
+    Wide(super::vv_wide::WideOp),
 }
 
 /// Which kernel runs a groups' dispatch ([`GroupOp::Group`]): the one with every pass
@@ -207,6 +210,7 @@ impl GroupOp {
             GroupOp::SoloRest { .. } => "explicit self solo hits",
             GroupOp::Surf { pass, .. } => SURF_FAST_PASSES[pass as usize].0,
             GroupOp::Wheels { .. } => "explicit split wheels on cars",
+            GroupOp::Wide(w) => w.label(),
         }
     }
 }
@@ -345,6 +349,9 @@ pub struct FrameKind {
     pub level_slots: u32,
     /// Self split's step dispatches run over the awake vehicles ([`SELF_AWAKE_ARGS`]).
     pub self_awake: bool,
+    /// The split group path with the wide frame for a plan without a group
+    /// ([`super::vv_wide`]).
+    pub vv_wide: bool,
 }
 
 impl FrameKind {
@@ -424,6 +431,8 @@ pub enum ArgBuf {
     /// The surface pass's on the fast schedules ([`SURF_ARGS_BYTES`]): storage at the
     /// prep's binding 10, the indirect arguments of each kind's find and apply.
     Surf,
+    /// The wide frame's gate's ([`super::vv_wide::WIDE_ARGS_BYTES`]).
+    Wide,
 }
 
 /// A launch's workgroups: a count, or three words of an argument buffer at a byte offset.
@@ -546,6 +555,7 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
             None,
             None,
         ),
+        Op::Group(GroupOp::Wide(w)) => super::vv_wide::launch(&w, aero, lanes),
         Op::Group(GroupOp::Surf { copy, pass, groups }) => {
             let (module, entry) = SURF_FAST_PASSES[pass as usize];
             match surf_args_offset(copy, pass) {
@@ -940,6 +950,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
     let vv = !selfs && self_split_vv_on(planner, sw, steps, &cmds);
     kind.self_split_vv = vv;
     let group = vv || group_split_on(planner, sw, steps);
+    kind.vv_wide = group && super::vv_wide::on(planner, sw, steps, vv);
     // Vehicle sleep's awake-indexed dispatch on a split path (a step a dispatch): the
     // kernel's sleepPad0 = 2 in every copy. The awake list's kernel then also wakes
     // the sleeping members of a group with an awake member and writes the split
@@ -979,7 +990,8 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
             let at = 4 * W_PERF_FLAGS;
             for k in 0..=steps as usize {
                 let w = u32::from_le_bytes(bytes[stride * k + at..stride * k + at + 4].try_into().unwrap());
-                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(w & !PERF_HIT_SLOT_MAP).to_le_bytes());
+                let w = super::vv_wide::step_flags(planner, sw, &kind, w);
+                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&w.to_le_bytes());
             }
         }
         // Copy steps + 1: the groups' frame start (the kernel's SPLIT_BEGIN); with the
@@ -1056,7 +1068,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         // every vehicle a step a dispatch in every frame (no solo frame).
         cmds.retain(|c| match c {
             Cmd::Indirect { kernel: Kernel::Contact | Kernel::ContactBig, .. } => false,
-            Cmd::Indirect { kernel: Kernel::Solo, .. } => !vv,
+            Cmd::Indirect { kernel: Kernel::Solo, .. } => !vv && !kind.vv_wide,
             _ => true,
         });
     }
@@ -1118,11 +1130,11 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
     if group {
         let unit = cmds.len() as u32;
         let label = if vv { "explicit self split groups" } else { "explicit split groups" };
-        for op in group_split_ops(planner, sw, &kind, steps) {
+        for op in super::vv_wide::ops(planner, sw, &kind, steps) {
             match op {
-                GroupOp::SelfWalk { .. } if sw.self_split_skip & 1 != 0 => continue,
-                GroupOp::SelfPairs { .. } if sw.self_split_skip & 2 != 0 => continue,
-                _ => launches.push(Launch { op: Op::Group(op), unit, fine: Fine::Split, unit_label: Some(label) }),
+                Op::Group(GroupOp::SelfWalk { .. }) if sw.self_split_skip & 1 != 0 => continue,
+                Op::Group(GroupOp::SelfPairs { .. }) if sw.self_split_skip & 2 != 0 => continue,
+                _ => launches.push(Launch { op, unit, fine: Fine::Split, unit_label: Some(label) }),
             }
         }
     }

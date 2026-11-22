@@ -45,6 +45,8 @@ use wgpu::util::DeviceExt;
 #[path = "explicit_surface_gpu.rs"]
 mod surface_gpu;
 use surface_gpu::{split_entries, surface_split_for, Split};
+#[path = "explicit_vv_wide_gpu.rs"]
+mod vv_wide_gpu;
 
 pub struct ExplicitBeamsGpu {
     device: wgpu::Device,
@@ -58,6 +60,8 @@ pub struct ExplicitBeamsGpu {
     /// Surface contact split from the frame ([`Kernel::FrameSeg`], [`Kernel::Surf`]),
     /// created at first use; its frame module.
     split: std::sync::OnceLock<Split>,
+    vv_wide: std::sync::OnceLock<vv_wide_gpu::VvWide>,
+    vv_seen: vv_wide_gpu::Seen,
     split_module: &'static str,
     /// Bit-exact results ([`Self::set_bit_exact`]): the kernels' strict arithmetic as
     /// built (true), or without it (false: the compilers may fuse and reassociate).
@@ -1807,6 +1811,7 @@ impl ExplicitBeamsGpu {
         planner.set_surface_split(surface_split_for(coupled));
         planner.set_surface_fast(plan::schedule::surface_fast_default());
         planner.set_surface_fast_contact(plan::schedule::surface_fast_contact_default(false));
+        planner.set_vv_wide(plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(vehicles.len())));
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
@@ -1820,6 +1825,8 @@ impl ExplicitBeamsGpu {
             frame: std::sync::OnceLock::new(),
             frame_module,
             split: std::sync::OnceLock::new(),
+            vv_wide: std::sync::OnceLock::new(),
+            vv_seen: Default::default(),
             split_module: Kernel::FrameSeg.module(aero, lanes),
             bit_exact,
             params,
@@ -3404,9 +3411,7 @@ impl ExplicitBeamsGpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         let read = self.encode(&mut enc, steps, None, None).0;
         self.queue.submit([enc.finish()]);
-        if read {
-            self.contact.map_status();
-        }
+        self.frame_submitted(read);
     }
 
     /// [`Self::frame`] encoded into `enc` (a host's own submission, such as the World's
@@ -3454,6 +3459,7 @@ impl ExplicitBeamsGpu {
         if read {
             self.contact.map_status();
         }
+        self.vv_wide_map();
     }
 
     /// The frame's commands (the shared plan's), replayed: a compute pass per run of
@@ -3469,6 +3475,7 @@ impl ExplicitBeamsGpu {
         self.check_contact_status();
         self.write_wakes();
         let wide_allowed = self.alt_pipes().is_none();
+        self.vv_wide_seen();
         let frame = self.write_params(steps, wide_allowed);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
@@ -3569,6 +3576,7 @@ impl ExplicitBeamsGpu {
         if read {
             self.contact.read_status(&self.device, enc);
         }
+        self.vv_wide_read(enc);
         (read, labels)
     }
 
@@ -4185,6 +4193,7 @@ impl ExplicitBeamsGpu {
         self.self_split_vv.set(frame.kind.self_split_vv);
         self.wide_list_frame.set(frame.kind.wide_list);
         self.level_slots.set(frame.kind.level_slots);
+        self.vv_seen.used.set(frame.kind.vv_wide);
         self.queue.write_buffer(&self.params, 0, &frame.params);
         frame
     }
@@ -4606,6 +4615,7 @@ impl ExplicitBeamsGpu {
                 pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
             }
             GroupOp::SoloRest { .. } | GroupOp::Surf { .. } => self.run_surface_op(pass, op),
+            GroupOp::Wide(w) => self.run_vv_wide_op(pass, w),
         }
     }
 
@@ -4998,6 +5008,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         out.push((n.to_string(), entry, u(w)));
     }
     out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(&crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
+    out.extend(crate::EXPLICIT_BEAMS_VV_WIDE.iter().map(|(n, w)| (n.to_string(), *n, u(w))));
     for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
         let entry = plan::SURF_PASSES.iter().chain(plan::SURF_FAST_PASSES.iter()).find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
         out.push((n.to_string(), entry, u(w)));

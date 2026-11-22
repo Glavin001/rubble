@@ -78,6 +78,7 @@ pub(crate) fn module_wgsl(name: &str) -> &'static str {
             .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
             .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
             .chain(crate::EXPLICIT_BEAMS_WIDE_LIST.iter())
+            .chain(crate::EXPLICIT_BEAMS_VV_WIDE.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| w.text())
             .unwrap_or_else(|| test_module(name)),
