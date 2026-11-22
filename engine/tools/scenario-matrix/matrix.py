@@ -105,6 +105,56 @@ ROWS = [
 ]
 
 
+def apart(n):
+    """n cars driving side by side 8 m apart on flat ground, never touching."""
+    return {"scene": "flat", "cars": n, "surface": True,
+            "others": [{"x": 8 * k, "z": 0, "angle": 0, "kmh": 60} for k in range(1, n)],
+            "restart": {"start": {"kmh": 60}}, "events": []}
+
+
+def clash(n):
+    """n / 2 head-on pairs, 8 m apart sideways, every pair meeting in the same steps."""
+    others = [{"x": 8 * k, "z": 0, "angle": 0, "kmh": 50} for k in range(1, n // 2)]
+    others += [{"x": 8 * k, "z": 20, "angle": 180, "kmh": 50} for k in range(n // 2)]
+    return {"scene": "flat", "cars": n, "surface": True, "others": others,
+            "restart": {"start": {"kmh": 50}}, "events": []}
+
+
+def mountain(n):
+    return {"scene": "mountain", "cars": n, "surface": True, "mountain": {"terrain": "ledges", "rockslide": False}}
+
+
+def derby(n):
+    return {"scene": "derby", "cars": n, "surface": True}
+
+
+# The goal's rows (20 soft cars in real time at full fidelity: surface contact on in
+# every one). A scenario here is a dict, written to STATES/scenes/ROW.json when the row
+# runs. `run.sh --make goal` and `--baseline goal` name them all; the default rows above
+# are the gate and stay as they are.
+GOAL = (
+    [(f"apart{n}", n, apart(n), [], 1.0, f"{n} cars driving apart on flat ground (scaling, no contact)")
+     for n in (1, 2, 4, 8, 16, 20, 32)]
+    + [(f"clash{n}", n, clash(n), [], 0.7, f"{n // 2} head-on pairs at 50 km/h each, all mid-crush at once (scaling, in contact)")
+       for n in (2, 4, 8, 16, 20, 32)]
+    + [(f"mountain20_t{t}", 20, mountain(20), [], float(t), f"20 cars down the mountain's ledges, t = {t} s")
+       for t in (2, 4, 7, 12)]
+    + [(f"derby20_t{t}", 20, derby(20), [], float(t), f"20 cars in the derby arena with its 86 props, t = {t} s")
+       for t in (2, 5, 10)]
+    + [
+        ("pole", 1, {"scene": "flat", "surface": True, "restart": {"crash": {"kind": "pole", "kmh": 50}}, "events": []},
+         [], 0.1, "one car into a fixed 0.15 m pole at 50 km/h, mid-crush"),
+        ("wall_s", 1, {"scene": "flat", "surface": True, "restart": {"crash": {"kind": "wall", "kmh": 56}}, "events": []},
+         [], 0.1, "the wall row with surface contact on"),
+        ("bricks_s", 1, {"scene": "flat", "surface": True, "restart": {"start": {"kmh": 40}},
+                         "events": [{"t": 0, "obstacle": {"kind": "bricks", "ahead": 5, "cols": 6, "rows": 5, "deep": 2}}]},
+         [], 0.7, "the bricks row with surface contact on"),
+        ("pile8_s", 8, mountain(8), [], 8.0, "8 cars piling up on the mountain's ledges, surface contact on"),
+    ]
+)
+ROWS_ALL = ROWS + GOAL
+
+
 def target_ms(bodies):
     """The owner's targets: one soft body 1 ms a frame (worst), 8 bodies in contact 3 ms;
     between and past them a straight line through both (an extrapolation, marked ~)."""
@@ -119,7 +169,14 @@ def lab_args(row):
         args += ["--car", CAR]
     if "--cars" not in extra:
         args += ["--cars", "1"]
-    if scenario:
+    if isinstance(scenario, dict):
+        import json
+        os.makedirs(os.path.join(STATES, "scenes"), exist_ok=True)
+        path = os.path.join(STATES, "scenes", name + ".json")
+        with open(path, "w") as f:
+            json.dump(scenario, f)
+        args += ["--scenario", path]
+    elif scenario:
         args += ["--scenario", os.path.join(SCENES, scenario)]
     return args + extra
 
@@ -153,9 +210,16 @@ def make_portable(rows):
 def pick(names):
     if not names:
         return ROWS
-    rows = [r for r in ROWS if any(n == r[0] or n in r[0] for n in names)]
+    # (`goal`: every goal row; `all`: both lists. An exact name wins over a substring,
+    # so `pile8` is not also `pile8_s`.)
+    rows = []
+    for n in names:
+        exact = [r for r in ROWS_ALL if r[0] == n]
+        rows += (GOAL if n == "goal" else ROWS_ALL if n == "all" else exact
+                 or [r for r in ROWS_ALL if n in r[0]])
+    rows = [r for k, r in enumerate(rows) if r not in rows[:k]]
     if not rows:
-        sys.exit(f"no row matches {names}; rows: {', '.join(r[0] for r in ROWS)}")
+        sys.exit(f"no row matches {names}; rows: {', '.join(r[0] for r in ROWS_ALL)}")
     return rows
 
 
