@@ -1,7 +1,9 @@
 # The World on CUDA (Modal): plan
 
-Status (2026-11-21): **C0 to C3 done and measured; C6 step 1 measured** (§6). Next: C4
-(the coupling as a shared plan, with the portable World fixture and `run.sh --world --cuda`).
+Status (2026-11-22): **C0 to C4 done and measured; C6 step 1 measured** (§6). The World
+step of the `run.sh --world` gate (the coupling's emit, the rigid step, the plan, the
+explicit frame, the loads) runs on CUDA in one context on one stream: `CudaWorld`,
+`run.sh --world --cuda`. Next: C5 (terrain) or C6 (stress), as demand decides.
 Goal: every GPU pass of a World step runs on CUDA on Modal the way the explicit soft-body
 frame already does (`tools/scenario-matrix/run.sh --cuda`): kernels built locally by nvcc,
 Modal only runs the binary, a verdict costs cents and needs no cold driver compile. Today
@@ -40,11 +42,11 @@ resolve timestamps when timing is on). Its GPU work, in order:
 |---|---|---|---|---|
 | Terrain MPM coupled substeps (first: the rigid step applies their reactions) | `terrain_mpm` (56 `mpm_*`), `terrain_mpm_fast`, `terrain_mpm_cuda` (16 `_gs` entries) | **Yes** (`CUDA_TERRAIN_KERNELS`, engine-cuda `build.rs:349-420`) | **No**: never run on a GPU; executor designed in `docs/deformable-terrain.md`, "CUDA plan" | shared: `engine_terrain::plan::TerrainPlan` (`gpu_terrain.rs:553`) |
 | Terrain live surface, terrain watch | `terrain_surface` (9), `terrain_watch` (3) | No (Metal builds `terrain_watch`) | No | surface: shared (`SurfacePlan::frame`); watch: wgpu host (`gpu_terrain_watch.rs:95`) |
-| Coupling emit, before the step: the last window's impulses onto the rigid bodies | `vehicle_coupling.slang`: `cpl_emit`, `cpl_emit_end` | **No** | **No** | wgpu host (`explicit_vehicles.rs:681`, from `:1210`) |
+| Coupling emit, before the step: the last window's impulses onto the rigid bodies | `vehicle_coupling.slang`: `cpl_emit`, `cpl_emit_end` | **Yes** (C4: `CUDA_COUPLING_KERNELS`, engine-cuda `build.rs` `coupling_kernels`) | **Yes** (C4: `CudaWorld`, `cpl_emit_gs` over the proxied list's count on the GPU) | shared (C4): `explicit_plan::coupling::world::emit`; the wgpu host replays it (`explicit_vehicles.rs` `Replay`) |
 | **Rigid step** (broadphase, narrowphase, convex SAT, colouring, AVBD, sleep, CCD, archive, contact events; and the riders `encode_step` emits from `StepInputs`: vehicles, characters, projectiles, queries, legacy soft bodies, guidance, explosions, locks, `pose_pack`) | `world_step`, `convex_step`, `convex_sat_body`, `ccd_step`, `compact_solve`, `persistent_solve`, `reuse_copy`, `vehicle_step(_persistent)`, `character_step`, `soft_step`, `guide_step`, `pose_pack` | **Partly**: the 126 `PERSISTENT_ENTRIES`. `encode_step` can emit 37 entries that are not among them (after `resolve_entry`): the sleep archive (`archive_*`, 12), the legacy soft bodies (`soft_*`, 15), guidance (`guide_*`, 5), `lock_predict`, `lock_project`, `explode`, `pose_pack`, `clear_solver_contacts` | **Partly**: `CudaSim` replays the same `encode_step`, but with fixed inputs (no joints, convex, heightfield or soil, vehicles, soft bodies, commands, guidance or explosions; `lib.rs:393-441`), and reads binding 23 back (7.1 stream syncs a step on the 10k columns) | shared: `rigid_plan::encode_step` (wgpu `gpu.rs:3471` replays exactly it) |
 | In-step contact fracture, hooked into the rigid step at phase `"warm"` | stress-gpu `fracture.slang`: `fr_cs_*`, `fr_gi_solve` or `fr_csl_*`, `fr_gate`, the split | No | No | wgpu host, inserted into the shared plan through a phase hook (`threshold.rs:2382`, stress-gpu `fracture.rs:2128`) |
-| Coupling after the step: bounds, candidates from the World's resting table, plan, share, loads, sleep mask | `vehicle_coupling.slang`: `cpl_bounds`, `cpl_query`, `cpl_plan`, `cpl_share`, `cpl_loads`, `cpl_loads_end`, `cpl_sleep_mask` | **No** | **No** | wgpu host (`explicit_vehicles.rs:713-823`) |
-| Explicit soft-body frame (node–beam vehicles; the coupling's explicit side: proxies, window impulses, `coupling_list` / `coupling_fold`, piece windows) | `explicit_beams*.slang` incl. `explicit_beams_rigid` | **Yes** (`CUDA_EXPLICIT_KERNELS`, `ENGINE_CUDA_EXPLICIT_MODULES`) | **Yes**: `CudaExplicitBeams`, device-side indirect (`{entry}_gs`); proxies only from the CPU (`set_proxies` / `decode_proxies`) | shared: `explicit_plan::schedule`, `explicit_plan::coupling` |
+| Coupling after the step: bounds, candidates from the World's resting table, plan, share, loads, sleep mask | `vehicle_coupling.slang`: `cpl_bounds`, `cpl_query`, `cpl_plan`, `cpl_share`, `cpl_loads`, `cpl_loads_end`, `cpl_sleep_mask` | **Yes** (C4, all nine entries) | **Yes** (C4: `CudaWorld`), but the plan is always the scan of every collider: `cpl_query` is built and never launched, because `CudaSim` keeps no resting table for walkers (its awake-indexed broadphase is off and `pose_pack` is not built). The same proxies either way | shared (C4): `explicit_plan::coupling::world::frame` |
+| Explicit soft-body frame (node–beam vehicles; the coupling's explicit side: proxies, window impulses, `coupling_list` / `coupling_fold`, piece windows) | `explicit_beams*.slang` incl. `explicit_beams_rigid` | **Yes** (`CUDA_EXPLICIT_KERNELS`, `ENGINE_CUDA_EXPLICIT_MODULES`) | **Yes**: `CudaExplicitBeams`, device-side indirect (`{entry}_gs`); proxies from the CPU (`write_proxies` / `read_proxies`) or, in a `CudaWorld`, from `cpl_plan` on the GPU | shared: `explicit_plan::schedule`, `explicit_plan::coupling` |
 | Fracture frame: ingest, loads, breaks, strikes, crush, Blast stress solver (`blast_parity`), split, crush apply, log | stress-gpu `coupling.slang` (`ingest_*`), `fracture.slang` (`fr_*`), `blast_fracture`, `blast_topology`, `blast_motion`, `blast_cgls` or `blast_native(_wide)`, `blast_wide_gate`, `blast_virial`, `blast_material`, `blast_view`, `fracture_log` (of stress-gpu's 43 modules) | **No**: compiled to Metal and WGSL only (`stress-gpu/scripts/compile_shaders.sh`), outside `engine-slang-build` | **No** | **hand-recorded wgpu** (stress-gpu `ingest.rs`, `fracture.rs`, `blast.rs`; from engine-world `threshold.rs:2418`). `docs/stress-5d-one-command-buffer.md` requirement 4 (a backend-neutral plan) is "not met" |
 | Blast pressure loading (`stress` feature), before encoding | (CPU windows and breaks, then stress-gpu `encode_split_crush`) | No | No | wgpu host, **blocking**: reads bodies and frames, submits the split on its own, reads counters, crush events, chunk bodies, bonds (`blast_threshold.rs:576`, `:715-750`) |
 | Soft skins (render), ray queries (`raycast_batch`), overlap queries (`overlap_query`) | `soft_skin` (3), `vehicle_step` `raycast_batch`, `world_step` `build_aabbs` + `overlap_query` | `build_aabbs` only | No | wgpu host (`soft_skin.rs:189`, `gpu.rs:4732`, `gpu.rs:2347`) |
@@ -155,7 +157,7 @@ line (`World step`, `frame alone`, `the World adds`), marked "coupling not on CU
 C4. Verdict: the rigid step of every row bit for bit between two CUDA runs and its
 `download_bodies` within the wgpu host's tolerances after N steps; wall clock per row.
 
-**C4. The coupling.** Move the World side's dispatch order (gather proxies, candidate
+**C4. The coupling (done, §6).** Move the World side's dispatch order (gather proxies, candidate
 list, fold, apply window impulses, status) from engine-world into
 `engine_exec::explicit_plan::coupling` as `Cmd`s, so wgpu follows it first (bit for bit
 against today on the Mac: `vehicle_lab --ab-switch coupling` and the matrix) and then
@@ -196,7 +198,8 @@ from the closest measured run, to be replaced by the first real run of each.
 | cudasim correctness gates (640 / 10k / 100k columns, coverage) | 1 | 6.1 (measured, 2026-11-21) | $0.0018 | rigid kernels only: ~70 s when all recompile; the fatbin cache skips unchanged ones |
 | C1: 640 / 10k / 100k bit for bit both ways, plus 10k / 100k timed both ways | 1 | 20 (measured) | $0.006 | as above |
 | C2: 110k ring, both CCD fields, every cudasim gate | 1 | 38.6 (measured) | $0.011 | as above |
-| C3/C4: `run.sh --world --cuda`, 12 rows | 12 | 60–150 (est., from the matrix) | $0.02–0.05 | rigid + explicit + coupling modules the rows load: ~4 min (the matrix's figure) |
+| C4: engine-cuda `tests/world.rs` (the coupling against the CPU reference, the wgpu World and itself) | 1 | 7.9 (measured, 2026-11-22) | $0.0023 | the nine coupling entries: seconds; the explicit modules the tests load, cached by content |
+| C4: `run.sh --world --cuda`, the 8 `--world` rows | 1 (1 core, 2 GiB) | 20.8 (measured, 2026-11-22) | $0.0038 | rigid + coupling + the 36 explicit modules the rows' vehicles may launch (all cached by content that day: 15 s) |
 | Explicit matrix `run.sh --cuda SWITCH`, 12 rows (exists) | 12 | 50–120 (measured, 2026-11-19) | $0.02–0.04 | ~4 min |
 | C5: `terrain_parity` | 1 | 10–30 (est.) | <$0.01 | terrain modules |
 | C6: `blast_parity` quick tier digests | 1–N | 60–300 (est.; the tier is minutes on the Mac) | $0.02–0.09 | the 32 stress compute modules: 42 s (measured, 3 jobs) |
@@ -312,11 +315,134 @@ emit that CUDA does not build). **Decided:** the portable World fixture and `wor
 move into C4. The gate's number is the rigid step, the explicit frame *and* the coupling
 together; a replay without the coupling would print a World that does not exist.
 
+**C4, the coupling: the World step on CUDA (2026-11-22).** The whole `run.sh --world`
+step now runs on CUDA: emit, rigid step, plan, explicit frame, loads, on one stream.
+
+- *One plan.* The World side's order and parameters moved out of engine-world into
+  `engine_exec::explicit_plan::coupling::world`: the nine entries, each binding's source
+  and access, the `Params` block and its builder, the work buffer's layout, the window
+  clock (`Clock`: the steps owed, the pending emit) and the commands of `emit()` and
+  `frame()`. `rigid_host::GpuImpulses` is the flag `mark_gpu_impulses` sets (it becomes
+  `MotionInputs::impulses`); WgpuSim and CudaSim both hold it.
+- *The wgpu host follows it, unchanged, proven.* `explicit_vehicles.rs` only allocates,
+  binds and replays (`Replay`). On Metal (M3 Max) `tests/explicit_world_digest.rs` (two
+  sedans onto twelve boxes, 90 steps, bit-exact vehicles) prints the same three hashes
+  before and after (vehicles `6f27744e66371c85`, bodies `4d43ab986f580753`, window
+  impulses `d9f168781e626775`), and the coupling's suites pass (`explicit_vehicles` 11,
+  `explicit_vehicle_broadphase` 3, `explicit_sleep`, `explicit_loop_budget`,
+  `explicit_drive_world`, `wheels_hit_bodies_world`, `surface_pairs`,
+  `vehicle_lab_piece_windows`, `vehicle_lab_reset` 3). `run.sh --world` on the Mac:
+  PASS, the World adds 0.49 to 1.43 ms on the 8 rows.
+- *`vehicle_coupling.slang` on CUDA.* engine-cuda `build.rs` `coupling_kernels`: an entry
+  a module, `{entry}_gs` for the list dispatches (`cpl_share`, `cpl_loads`, `cpl_emit`),
+  the hazard check (nothing found: no source change), the loop caps' presence, the L2
+  rule. Slang keeps all fifteen globals in every entry's bank, so one set of pointers
+  serves `cpl_query` too.
+- *`CudaWorld`* (`engine-cuda/src/world.rs`) owns a `CudaSim` and a `CudaExplicitBeams`
+  in the device's primary context (they shared it already) on the rigid host's stream,
+  and the coupling's params, work and list-argument buffers. `step(dt)` queues the
+  window's parameters, the emit, the rigid step, the plan, the frame and the loads with
+  no host wait; the step's counters, the frame's loop-cap flag, the coupling's status
+  word and the asleep bits go to pinned memory behind an event (a ring of three, as the
+  wgpu readback ring) and are adopted by a later step: one step late when the caller
+  waits each step, which is also what makes two runs bit for bit.
+- *Not the same as wgpu, on purpose stated:* the plan is always the scan of every
+  collider. `cpl_query` (candidates from the World broadphase's resting table) is built
+  but never launched: `CudaSim` keeps no resting table for walkers (awake-indexed
+  broadphase off, `pose_pack` not built). The proxies are the same either way
+  (engine-world `explicit_vehicle_broadphase.rs`, `the_broadphase_plan_is_the_scan_*`);
+  the matrix's rows were planned by the scan on wgpu
+  too (their Worlds keep no resting table), so the gate compares like with like there.
+  The threshold ingest (chunk loads into a fracture) has stand-in buffers: no fracture
+  on CUDA (C6).
+
+Verdicts on a T4, strict floats (`ENGINE_CUDA_FMAD=0`), `engine-cuda/tests/world.rs`
+(7 tests, one container, 7.9 s, $0.0023):
+
+| Check | Result |
+|---|---|
+| Explicit side against the CPU reference coupling (`ProxySet`, proxies written by the host; engine-metal's `coupled_sedan_into_a_rigid_box`) | first contact frames within 6.0e-8 m; box 10.8040 m/s against 10.8041; momentum closed to 0.0079 of 56,441 N s |
+| World path, momentum (engine-world's `a_vehicle_shoves_a_free_box_and_momentum_closes`): sedan at 15 m/s into a free 1200 kg box, plan, frame, emit and rigid step on the GPU | worst error 0.023 of 56,441 N s (4e-7); box 13.10 m/s, between the plastic 11.37 and the elastic 22.75 |
+| Two sedans dropped onto a static deck and onto dynamic boxes over a static slab, 120 steps | finite; lowest nodes 0.4996 m (deck top 0.5) and −0.0007 m (slab top 0); each vehicle's windows put −616.1 and −615.3 N s a window on the bodies (its weight: −615.0); boxes pushed, none thrown; status words zero |
+| The same, two runs | explicit state bit for bit, every state word; 0 of 8 bodies differ |
+| The pile with a dynamic deck against the wgpu World on Metal (M3 Max), step for step | lowest nodes within 9.5e-5 m at steps 19, 59 and 119; deck height equal to 1e-4 m; window impulses −614.5701 / −615.3270 N s against −614.5701 / −615.3169 |
+| Vehicle sleep on against off (`cpl_sleep_mask` every window, no vehicle asleep) | no state section differs |
+
+*The portable World* (`engine_exec::world_portable`, `ROW.wfx`): the rigid scene (bodies
+with their previous rows, colliders, hull arena, joints, materials, parameters,
+capacity), the coupling's carried state (clock, pending emit, work buffer with the
+vehicle table, the proxied list and the broadphase proxies, the indirect arguments), the
+vehicles' portable explicit state and each vehicle's drive input for the 30 steps after
+the moment. Written by the wgpu World (`World::save_explicit_world`, `vehicle_lab
+--save-world`, `run.sh --make-world`: the row's scene run to its moment, no `.fx`
+needed); read by `CudaWorld::from_portable`. **It holds the scene, not the solver's
+caches**: a replay starts its contacts cold, so `world_replay` runs 5 warm-up steps
+before it times, and its bodies follow the saved World's only as closely as a cold start
+allows. Beyond drive inputs, what the lab does before a step (piece labels, retired
+nodes) is not replayed.
+
+`tools/scenario-matrix/run.sh --world --cuda` (engine-cuda `world_replay`, all 8 `--world`
+rows in one container, 1 core: 16.4 s of replay, 20.8 container seconds, **$0.0038**),
+ms a step on a T4; the Mac column is `run.sh --world` on Metal from the same session
+(wall, another session sharing the machine's CPU):
+
+| Row | Soft bodies, rigid bodies | T4: World step | frame alone | the World adds | of it the rigid step (GPU) | the coupling's passes (GPU) | T4 step, GPU: p95 / worst | Mac (Metal): the World adds |
+|---|---|---|---|---|---|---|---|---|
+| drive | 1, 3 | 4.104 | 3.791 | **+0.313** | 0.254 | 0.047 | 4.210 / 4.292 | +0.505 |
+| wall | 1, 4 | 4.383 | 4.067 | **+0.316** | 0.255 | 0.054 | 4.486 / 4.604 | +0.541 |
+| headon | 2, 3 | 16.529 | 16.221 | **+0.307** | 0.268 | 0.052 | 17.300 / 17.814 | +0.593 |
+| side | 2, 3 | 10.686 | 10.341 | **+0.345** | 0.266 | 0.051 | 11.094 / 12.523 | +0.520 |
+| bricks | 1, 63 | 5.299 | 4.255 | **+1.045** | 0.975 | 0.089 | 5.474 / 5.551 | +1.428 |
+| rocks | 1, 7 | 4.685 | 3.914 | **+0.772** | 0.524 | 0.058 | 4.899 / 4.969 | +0.984 |
+| barrier | 2, 3 | 10.304 | 9.984 | **+0.320** | 0.260 | 0.049 | 10.659 / 10.740 | +0.574 |
+| truss | 1, 3 | 1.562 | 1.264 | **+0.299** | 0.252 | 0.047 | 1.592 / 1.616 | +0.487 |
+
+- *Every row's second replay from the file ends bit for bit* (explicit state words and
+  bodies), and the end-state hashes are the same in three separate runs (three
+  containers) of the same files.
+- *What the World adds on CUDA is the rigid step's fixed cost.* With 3 bodies the rigid
+  step is 0.25 to 0.27 ms: its launches (a fixed cost a step), not its work. The
+  coupling's own passes are 0.05 to 0.09 ms together (emit 0.011 to 0.045, plan 0.018 to
+  0.027, loads, asleep bits and the status read 0.017). The bricks row's 1.05 ms is
+  0.98 ms of rigid step for 63 bodies. The Mac's 0.49 to 1.43 ms is wall time with
+  the host's encoding in it, on a machine another session was using.
+- *Per step, not only the median:* `world_replay` prints every step's GPU ms, the median,
+  p95 and worst step and which it was. The worst step is 4 to 8 % over the median on
+  seven rows; side's is 12.5 ms against 10.7 (17 %: the first step from the moment, in every round).
+- *A measurement trap found and closed:* the first row a fresh container replays read 14
+  to 25 ms a step in its first round against 10.5 in the next two, differently from run
+  to run, with bit-identical results: a T4 runs its first seconds of work slower. It is
+  not module loading (`CudaExplicitBeams::preload` loads every module before timing and
+  changed nothing). `world_replay` now replays the first file once, unreported, before
+  it times anything (`warm_gpu`); the barrier row's worst step went from 25.5 to
+  10.7 ms. `explicit_replay` has its own warm-up frames (`AB_WARM_MS`).
+
+*Found on the way (pre-existing, both hosts; for a coupling session):* a vehicle resting
+on a **dynamic** body that itself rests on a static one sinks through it. The pile test's
+sedan on a 3000 kg deck lying on the slab goes down at about 0.2 m/s (0.44 m to 0.11 m
+between steps 19 and 119) on Metal and on CUDA alike, while its windows put its full
+weight on the deck: within a window the explicit solver integrates the deck's proxy as a
+free body, and the slab's support reaches the vehicle only as the deck's reset at the
+next window. On a static body (or the vehicles' own ground) it rests (−0.0007 m).
+`tests/world.rs` holds CUDA to the wgpu World's numbers for this scene; it does not
+judge them.
+
+**C4 is closed here.** Not done, and why: `cpl_query` on CUDA (needs the rigid host's
+resting table: C7); `explicit_ab`'s `coupling_list` / `coupling_fold` switches (the
+explicit host has `set_coupling_header`; the A/B example was not extended); a two-build
+A/B of the World step (`world_replay` reports one build; the explicit frame's A/B is
+`run.sh --cuda --base`); the rows' bodies against the wgpu host's after N steps (the
+cold start makes that a tolerance, not a bit check; the pile test above is the
+cross-host check that exists).
+
 ## 5. Open questions to settle while building (not blockers)
 
-- C3's one-context composition: `CudaSim` and `CudaExplicitBeams` each create a context
-  and stream today. Sharing one (or importing the other's pointers) is a host change of
-  a few lines but decides whether the coupling's banks can point into both.
+- *Settled (C4):* one context, one stream. `CudaSim` and `CudaExplicitBeams` each
+  retained the device's **primary** context already, so their pointers were always valid
+  in each other's modules; they only had a stream each. `CudaWorld` checks the contexts
+  are one, moves the explicit host onto the rigid host's stream
+  (`CudaExplicitBeams::use_stream`) and fills the coupling's banks with pointers into
+  both hosts' buffers.
 - Whether the wgpu host's World step encodes anything around `encode_step` that the
   shared plan does not (pose copies, timer marks, the terrain's and fracture's passes
   between engine substeps). Those belong in a World-level schedule, not in each host.

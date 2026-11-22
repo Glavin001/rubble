@@ -669,8 +669,8 @@ pub(crate) fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled>
     }
     // The split paths' modules (the split group path, self-collision split, the wide
     // passes' reused pair list, self split with vehicle contact): one list for every
-    // host's build (engine_kernel_manifest::explicit::split_modules).
-    for m in engine_kernel_manifest::explicit::split_modules() {
+    // host's build (engine_kernel_manifest::explicit::split_modules); and surface_fast_modules.
+    for m in engine_kernel_manifest::explicit::split_modules().into_iter().chain(engine_kernel_manifest::explicit::fast_schedule_modules()) {
         jobs.push((m.name, m.entry, m.defines));
     }
     for r in par_map(&jobs, |(name, entry, defines)| -> Result<()> {

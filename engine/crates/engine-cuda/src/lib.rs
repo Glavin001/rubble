@@ -53,6 +53,8 @@ pub use table::{CudaKernel, CUDA_KERNELS, CUDA_TERRAIN_KERNELS, PTX_ARCH, SASS_A
 
 pub mod explicit;
 pub use explicit::{CudaExplicitBeams, CudaSnapshot, CUDA_EXPLICIT_KERNELS, CUDA_LOOP_CAP_TEST};
+pub mod world;
+pub use world::{CouplingDef, CouplingState, CudaWorld, StepTimes, CUDA_COUPLING_KERNELS};
 
 /// Binding 23: colour slots, work slots and convex slots, three words each.
 const INDIRECT_BINDING: u32 = 23;
@@ -60,6 +62,11 @@ const PASS_BINDING: u32 = 22;
 
 fn backend(e: DriverError) -> ExecError {
     ExecError::Backend(format!("CUDA: {e:?}"))
+}
+
+/// `bytes` as records (any alignment).
+fn pods<T: bytemuck::Pod>(bytes: &[u8]) -> Vec<T> {
+    bytes.chunks_exact(std::mem::size_of::<T>()).map(bytemuck::pod_read_unaligned).collect()
 }
 
 /// Workgroup grid for `threads` invocations at 64 per group, rows of 32768
@@ -115,6 +122,13 @@ pub struct CudaSim {
     steps_done: u32,
     counted_steps: u32,
     contacts_parity: u32,
+    /// A host's GPU pass appended impulse records for the next step (the explicit
+    /// vehicles' emit: [`Self::mark_gpu_impulses`]).
+    gpu_impulses: rigid_host::GpuImpulses,
+    /// The next step runs although the last counters show nothing awake.
+    wake_pending: bool,
+    /// The last [`Self::step_submit`] queued a step (false: skipped, every body asleep).
+    last_step_ran: bool,
     /// Host copy of binding 23; stale once a kernel that binds it is queued.
     indirect: Vec<u32>,
     indirect_dirty: bool,
@@ -312,6 +326,9 @@ impl CudaSim {
             steps_done: 0,
             counted_steps: 0,
             contacts_parity: 0,
+            gpu_impulses: Default::default(),
+            wake_pending: false,
+            last_step_ran: false,
             indirect,
             indirect_dirty: true,
             indirect_syncs: 0,
@@ -321,6 +338,46 @@ impl CudaSim {
             profiling: false,
             phase_events: Vec::new(),
         })
+    }
+
+    /// The rigid scene of a portable World (`engine_exec::world_portable`): its bodies
+    /// (current and previous rows), colliders, hull arena, joints, materials and
+    /// parameters in a world of its capacity, with this host's own step modes. The
+    /// contacts start cold (the file holds the scene, not the solver's caches).
+    pub fn from_portable(w: &engine_exec::world_portable::PortableWorld) -> anyhow::Result<Self> {
+        let r = &w.header.rigid;
+        let mut sim = Self::new(r.capacity.clone())?;
+        let e = |e: ExecError| anyhow::anyhow!("{e}");
+        sim.set_params(r.params);
+        sim.set_sleep_island_rounds(r.sleep_island_rounds);
+        let mats: Vec<Material> = pods(w.blob("materials"));
+        anyhow::ensure!(mats.len() <= 64, "{} materials, the table holds 64", mats.len());
+        sim.set_materials(&mats).map_err(e)?;
+        let hulls = w.blob("hulls");
+        anyhow::ensure!(
+            hulls.len() as u64 <= sim.sizes[18],
+            "the hull arena's {} records exceed the capacity's {}",
+            hulls.len() / 16,
+            sim.sizes[18] / 16
+        );
+        let records: Vec<[u32; 4]> = pods(hulls);
+        sim.has_soil |= rigid_host::records_have_soil(&records);
+        sim.upload(18, 0, hulls).map_err(e)?;
+        let bodies: Vec<BodyState> = pods(w.blob("bodies"));
+        anyhow::ensure!(bodies.len() as u32 <= r.capacity.max_bodies, "more bodies than the capacity");
+        sim.add_bodies(&bodies);
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        sim.upload(0, u64::from(r.capacity.max_bodies) * stride, w.blob("bodies_previous")).map_err(e)?;
+        let colliders: Vec<Collider> = pods(w.blob("colliders"));
+        anyhow::ensure!(colliders.len() as u32 <= r.capacity.max_colliders, "more colliders than the capacity");
+        sim.add_colliders(&colliders);
+        anyhow::ensure!(r.joint_count <= r.capacity.max_joints, "more joints than the capacity");
+        if r.joint_count > 0 {
+            sim.upload(5, rigid_host::joint_offset(0), w.blob("joints")).map_err(e)?;
+        }
+        sim.joint_count = r.joint_count;
+        sim.free_joints = r.free_joints.clone();
+        Ok(sim)
     }
 
     /// Indirect commands read their workgroup counts on the GPU (the default), or
@@ -340,6 +397,62 @@ impl CudaSim {
     /// Driver calls act on the calling thread's current context.
     fn bind_ctx(&self) -> Result<(), ExecError> {
         unsafe { result::ctx::set_current(self.ctx) }.map_err(backend)
+    }
+
+    /// Binding `slot`'s device buffer and its bytes (a host pass that binds the rigid
+    /// buffers beside its own: the explicit vehicles' coupling, [`crate::CudaWorld`]).
+    pub(crate) fn buffer(&self, slot: usize) -> (sys::CUdeviceptr, u64) {
+        (self.bufs[slot], self.sizes[slot].max(16))
+    }
+
+    pub fn body_count(&self) -> u32 {
+        self.body_count
+    }
+
+    pub fn collider_count(&self) -> u32 {
+        self.collider_count
+    }
+
+    /// A host's GPU pass appended impulse records for the next step after the host's
+    /// (`IMPULSE_COUNT` atomics, then `IMPULSE_FIRST` set to the count): the step
+    /// schedules `apply_impulses` and runs even if nothing is awake (as
+    /// `WgpuSim::mark_gpu_impulses`).
+    pub fn mark_gpu_impulses(&mut self) {
+        self.gpu_impulses.mark();
+        self.wake_pending = true;
+    }
+
+    /// [`Self::mark_gpu_impulses`] without the wake: the next step that runs applies the
+    /// records (as `WgpuSim::schedule_gpu_impulses`).
+    pub fn schedule_gpu_impulses(&mut self) {
+        self.gpu_impulses.mark();
+    }
+
+    /// The next step runs even if the last counters show nothing awake.
+    pub fn request_step(&mut self) {
+        self.wake_pending = true;
+    }
+
+    /// Whether the next [`Self::step_submit`] queues a step: not when the counters
+    /// describe the latest step, show no body awake and nothing asked for one.
+    pub fn next_step_runs(&self) -> bool {
+        !(self.steps_done > 0
+            && self.counted_steps == self.steps_done
+            && self.last_counters.awake_count == 0
+            && self.body_count > 0
+            && !self.wake_pending)
+    }
+
+    /// Whether the last [`Self::step_submit`] queued a step.
+    pub fn last_step_ran(&self) -> bool {
+        self.last_step_ran
+    }
+
+    /// Counters read without [`Self::drain`]'s wait (a host's own late read of binding
+    /// 7): those of the step after which `steps_done` steps were done.
+    pub(crate) fn adopt_counters(&mut self, c: StepCounters, steps_done: u32) {
+        self.last_counters = c;
+        self.counted_steps = steps_done;
     }
 
     fn upload(&self, slot: usize, offset: u64, bytes: &[u8]) -> Result<(), ExecError> {
@@ -556,6 +669,7 @@ impl CudaSim {
             wheel_count: 0,
             motion: rigid_plan::MotionInputs {
                 look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
+                impulses: self.gpu_impulses.this_step(0),
                 ..self.motion
             },
             soft: Default::default(),
@@ -695,15 +809,13 @@ impl CudaSim {
     pub fn step_submit(&mut self) -> Result<(), ExecError> {
         self.bind_ctx()?;
         // Skip only when the counters describe the latest step.
-        if self.steps_done > 0
-            && self.counted_steps == self.steps_done
-            && self.last_counters.awake_count == 0
-            && self.body_count > 0
-        {
+        if !self.next_step_runs() {
             self.counted_steps += 1;
             self.steps_done += 1;
+            self.last_step_ran = false;
             return Ok(());
         }
+        self.last_step_ran = true;
         let (cell, levels, _) = rigid_host::choose_grid(
             &self.host_cols,
             &self.host_bodies,
@@ -806,6 +918,8 @@ impl CudaSim {
         }
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
+        self.gpu_impulses.applied();
+        self.wake_pending = false;
         Ok(())
     }
 

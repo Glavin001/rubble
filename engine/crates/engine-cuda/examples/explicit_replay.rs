@@ -13,7 +13,9 @@
 //!
 //! Switches (vehicle_lab's `--ab-switch` names): `perf=MASK` (the planner's perf flags
 //! with MASK set or cleared), `groupsplit` (the split group path and self split),
-//! `selfsplit`, `widelist` (the wide passes with their reused pair list), `fused` (its
+//! `selfsplit`, `surffast` (a fleet with surface contact on the fast schedules, its pass
+//! as pipelines), `vvwide` (vehicle contact's frames without a group on the wide passes),
+//! `vv` (a measurement, not bit for bit: vehicle contact on against off), `widelist` (the wide passes with their reused pair list), `fused` (its
 //! fused aux pass), `wide` (the wide passes); this host's own `devindirect` (indirect
 //! launches read their counts on the GPU, off: the host reads them back).
 //! `--ab-profile`: each half's frame by kernel, gaps and host work, after the A/B. Exit 0 when the halves end bit for bit.
@@ -71,6 +73,13 @@ fn main() -> anyhow::Result<()> {
                 x.set_self_split(on);
             }
             "selfsplit" => x.set_self_split(on),
+            // Surface contact on the fast schedules (the pass as pipelines).
+            "surffast" => x.set_surface_fast(on),
+            // Vehicle contact's frames without a group on the wide passes.
+            "vvwide" => x.planner_mut().set_vv_wide(on),
+            // Measurement (time only: the halves differ by design): vehicle contact on
+            // against off, where the fleet's own steps run as the wide passes.
+            "vv" => x.set_vehicle_contact(on),
             "widelist" => {
                 x.set_wide(true);
                 x.set_wide_list(on);
@@ -85,7 +94,7 @@ fn main() -> anyhow::Result<()> {
             }
             // The host's own: indirect launches' counts read on the GPU, or read back.
             "devindirect" => x.set_device_indirect(on),
-            other => anyhow::bail!("switch {other} is not on this host (perf=MASK, groupsplit, selfsplit, widelist, fused, wide, devindirect)"),
+            other => anyhow::bail!("switch {other} is not on this host (perf=MASK, groupsplit, selfsplit, surffast, vvwide, vv, widelist, fused, wide, devindirect)"),
         }
         Ok(())
     };
@@ -154,10 +163,12 @@ fn main() -> anyhow::Result<()> {
             std::fs::write(&path, out)?;
         }
         println!("   run at t {:.1}: {best:.3} ms/frame (each frame's best of {rounds} rounds, mean)", p.header.t);
+        print_peak(&runs);
         return Ok(());
     }
     let mut pooled: [Vec<Vec<f64>>; 2] = [Vec::new(), Vec::new()];
     let mut words: [Vec<(&'static str, Vec<u32>)>; 2] = [Vec::new(), Vec::new()];
+    let mut unstable = false;
     for _ in 0..rounds {
         for (side, on) in [(0usize, true), (1, false)] {
             x.restore(&snap)?;
@@ -167,6 +178,10 @@ fn main() -> anyhow::Result<()> {
             x.frame(steps)?;
             x.wait()?;
             x.restore(&snap)?;
+            // (The snapshot holds the planner's words, the perf flags among them: a
+            // `perf=MASK` switch is set again, or both halves' timed frames run the
+            // snapshot's flags.)
+            apply(&mut x, on)?;
             let mut each = Vec::with_capacity(frames as usize);
             for _ in 0..frames {
                 let t = Instant::now();
@@ -175,7 +190,9 @@ fn main() -> anyhow::Result<()> {
                 each.push(t.elapsed().as_secs_f64() * 1e3);
             }
             pooled[side].push(each);
-            words[side] = x.state_words()?;
+            let now = x.state_words()?;
+            unstable |= !words[side].is_empty() && masked(&words[side]) != masked(&now) && name_unstable(on, &words[side], &now);
+            words[side] = now;
         }
     }
     for (side, name) in [(0, "on"), (1, "off")] {
@@ -194,7 +211,7 @@ fn main() -> anyhow::Result<()> {
             each.len()
         );
     }
-    let same = masked(&words[0]) == masked(&words[1]);
+    let same = masked(&words[0]) == masked(&words[1]) && !unstable;
     for ((name, a), (_, b)) in words[0].iter().zip(&words[1]) {
         let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
         if diff > 0 {
@@ -215,6 +232,18 @@ fn main() -> anyhow::Result<()> {
         profile(&mut x, &snap, steps, &p, "off", |x| apply(x, false))?;
     }
     std::process::exit(i32::from(!same));
+}
+
+/// A half that did not repeat its own last round, word for word (`last`, `now`): named,
+/// so a difference between the halves is not read as the switch's. Returns true.
+fn name_unstable(on: bool, last: &[(&'static str, Vec<u32>)], now: &[(&'static str, Vec<u32>)]) -> bool {
+    for ((name, a), (_, b)) in last.iter().zip(now) {
+        let at: Vec<String> = a.iter().zip(b).enumerate().filter(|(_, (p, q))| p != q).take(4).map(|(i, (p, q))| format!("[{i}] {p:#x} / {q:#x}")).collect();
+        if !at.is_empty() {
+            println!("     the {} half differs from its own last round: {name}: {}", if on { "on" } else { "off" }, at.join(", "));
+        }
+    }
+    true
 }
 
 /// `--ab-profile` (matrix.py PROFILE_SPLIT=1): where the frame's time goes with the switch
@@ -278,4 +307,16 @@ fn profile(
         );
     }
     Ok(())
+}
+
+/// The peak: each frame's best round (frame k is the same work in every round), the
+/// worst of them and where it is. A run is judged by its worst frame.
+fn print_peak(runs: &[Vec<f64>]) {
+    let each: Vec<f64> = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).collect();
+    let (at, worst) = each.iter().copied().enumerate().fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    println!(
+        "   run peak: worst {worst:.3} ms at frame {at} of {}; frames: {}",
+        each.len(),
+        each.iter().map(|m| format!("{m:.2}")).collect::<Vec<_>>().join(" ")
+    );
 }

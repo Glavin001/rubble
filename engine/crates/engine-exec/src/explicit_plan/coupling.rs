@@ -1,6 +1,9 @@
 //! The rigid coupling's per-vehicle records (`slang/kernels/explicit_beams_rigid.slang`)
 //! from a CPU [`ProxySet`], and back: shared by every explicit-beams host built with
-//! coupling room ([`super::CouplingLayout`]).
+//! coupling room ([`super::CouplingLayout`]). The World side (the passes of
+//! `vehicle_coupling.slang` around the rigid step and the explicit frame): [`world`].
+
+pub mod world;
 
 use super::CouplingLayout;
 use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet};

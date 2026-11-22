@@ -70,9 +70,17 @@ uint coupleRec() { return grabRec() + 2u; }
 // copy is the buffer's value). The header's .x bit 2 (the workgroup copies off, tests)
 // no longer reads the buffer here: a branch at each of the ~600 inlined uses made the
 // drivers' compile ~15% longer (engine/docs/measurements/kernel-compile-time.md).
+// (EB_CPL_DIRECT, a kernel a thread an element with no barrier, the surface pass's
+// spread pipelines: the words from the buffer itself; the same values.)
 uint cplHdr(uint i)
 {
+#ifdef EB_CPL_DIRECT
+    uint4 h = gMisc[coupleRec()];
+    uint4 h1 = gMisc[coupleRec() + 1u];
+    return i == 0u ? h.y : (i == 1u ? h.z : (i == 2u ? h.w : (i == 3u ? h1.x : h1.y)));
+#else
     return gsCpl[CPL_GS_HDR + i];
+#endif
 }
 // The host allows at most CPL_MAX_SHAPES shapes and no more bodies per vehicle
 // (explicit_plan CouplingLayout::new), so these bounds never change a valid header;
@@ -301,7 +309,11 @@ float4 cplFaceFrame(uint v, uint k, float3 x)
 // gNext at gMisc[coupleRec() + 1].y, per vehicle S x 4 words: per shape (centre,
 // grown radius squared) (engine_exec::explicit_plan coupling layout).
 uint cplSphere(uint v, uint k) { return cplHdr(4u) + (v * cplS() + k) * CPL_SPHERE_WORDS; }
+#ifdef EB_CPL_DIRECT
+bool cplCullOn() { return (gMisc[coupleRec()].x & 2u) == 0u; }
+#else
 bool cplCullOn() { return (gsCpl[0] & 2u) == 0u; }
+#endif
 
 // The spheres in workgroup memory as well (the same words): the frame's vehicle, or a
 // small contact group's members, each its first shapes from its base while they fit
@@ -1505,7 +1517,12 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
 // is off whenever they run, so the record arithmetic never sees an unset copy.
 bool cplHas(uint v)
 {
+#ifdef EB_CPL_DIRECT
+    // (gsCpl[0] is coupleBegin's copy of the header's .x: the one condition.)
+    return gMisc[coupleRec()].x != 0u && gMisc[cplBase(v)].y != 0u;
+#else
     return gsCpl[0] != 0u && gMisc[coupleRec()].x != 0u && gMisc[cplBase(v)].y != 0u;
+#endif
 }
 
 // The frame's start (lane 0, before the barrier the uniform read follows).

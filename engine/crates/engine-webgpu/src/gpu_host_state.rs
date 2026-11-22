@@ -133,6 +133,46 @@ impl WgpuSim {
         &self.bufs[7]
     }
 
+    /// The rigid scene at this moment as a portable World's rigid part
+    /// (`engine_exec::world_portable`): its header and the blobs `bodies`,
+    /// `bodies_previous`, `colliders`, `hulls` (the arena's records up to the last one
+    /// in use), `joints` and `materials`, in that order. The scene, not the solver's
+    /// caches: a host that loads it starts its contacts cold. Blocking reads.
+    pub fn portable_rigid(&self) -> (engine_exec::world_portable::RigidHeader, Vec<Vec<u8>>) {
+        let read = |slot: usize, offset: u64, size: u64| -> Vec<u8> {
+            if size == 0 {
+                return Vec::new();
+            }
+            let words = crate::explicit_coupling::read_words(&self.device, &self.queue, &self.bufs[slot], offset, size);
+            bytemuck::cast_slice(&words).to_vec()
+        };
+        let body = std::mem::size_of::<BodyState>() as u64;
+        let n = u64::from(self.body_count);
+        let mut hulls = read(18, 0, self.bufs[18].size());
+        let used = hulls.chunks_exact(16).rposition(|r| r.iter().any(|b| *b != 0)).map_or(0, |k| k + 1);
+        hulls.truncate(used * 16);
+        let blobs = vec![
+            read(0, 0, n * body),
+            read(0, u64::from(self.capacity.max_bodies) * body, n * body),
+            read(2, 0, u64::from(self.collider_count) * std::mem::size_of::<Collider>() as u64),
+            hulls,
+            read(5, 0, u64::from(self.joint_count) * std::mem::size_of::<engine_schema::Joint>() as u64),
+            read(3, 0, 64 * std::mem::size_of::<engine_schema::Material>() as u64),
+        ];
+        let header = engine_exec::world_portable::RigidHeader {
+            capacity: self.capacity.clone(),
+            params: self.params,
+            body_count: self.body_count,
+            collider_count: self.collider_count,
+            joint_count: self.joint_count,
+            free_joints: self.free_joints.clone(),
+            sleep_island_rounds: self.sleep_island_rounds,
+            steps_done: self.steps_done,
+            host_modes: format!("{:?}", self.step_modes()),
+        };
+        (header, blobs)
+    }
+
     /// The step's colour bucket sizes (binding 17: bodies per primal colour in
     /// words `[0, max_colors)`, then per-colour max degrees), for checks that
     /// the colouring covered every awake body.
