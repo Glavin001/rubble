@@ -329,8 +329,11 @@ steps: a solo vehicle's (`explicitBeamsFrameStep`) and a group member's
 (`contactMemberStep`), each returning at once for the other kind. With vehicle contact,
 the grouping pass (`explicit_beams_vv_group`) now makes every vehicle a member, one
 without partners a group of its own, and the module holds the member step alone. A
-group past `VV_MAX_GROUP` members still runs alone and is reported; such a vehicle
-reaching this module fails the frame loudly (loop-cap id 599) instead of being skipped.
+group past `VV_MAX_GROUP` members is the host's error as before (`contact_status`:
+"more than 64"); its vehicles still run alone in the contact module, and on the split
+group path are not stepped that frame. Any other vehicle reaching this module in no
+group fails the frame loudly (loop-cap id 599). The contact module (deferred on the lab's
+pages) keeps its solo half: dropping it would turn that error into a failed frame.
 
 | | before | after |
 |---|---|---|

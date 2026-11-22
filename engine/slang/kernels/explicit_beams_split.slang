@@ -169,9 +169,10 @@ void splitMember(uint v, uint lane, uint s)
     uint4 G = fl.y != 0u ? gMisc[gP.vvGroups + fl.z] : uint4(0u, 0u, 0u, 0u);
     // (A sleeping member is not stepped: its group sleeps.)
     bool awake = v < gP.vehicles && !sleepAsleep(v);
-    // An awake vehicle in no group (only a group past VV_MAX_GROUP members, reported):
-    // this module has no solo step for it, so the frame fails loudly.
-    if (awake && fl.y == 0u) ebLoopCapHit(599);
+    // An awake vehicle in no group: this module has no solo step for it. A group past
+    // VV_MAX_GROUP members is the host's error already (contact_status: "more than 64";
+    // its vehicles are not stepped that frame); any other such vehicle fails the frame.
+    if (awake && fl.y == 0u && gAcc[vvCtl(VV_TOO_BIG)].load() == 0) ebLoopCapHit(599);
     uint k = splitUniform(lane, awake ? G.y : 0u);
     if (k == 0u) return;
     uint off = G.x;

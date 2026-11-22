@@ -8142,8 +8142,9 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     // own: the members' step is the solo frame's bit for bit (contactMemberStep), and
     // the split group path's vehicles' module then holds that step alone, half its size
     // and its first-load compile (explicit_beams_split.slang explicit_beams_split_member;
-    // kernel-compile-time.md). Only a group past VV_MAX_GROUP members runs alone below
-    // (reported), as before.
+    // kernel-compile-time.md). A group past VV_MAX_GROUP members is reported below (the
+    // host's error); its vehicles run alone in the contact module, and are not stepped
+    // that frame on the split group path.
     for (uint v = lane, vStop = EB_END(126, v, nv, 256u); v < vStop; v += 256u)
     {
         gAcc[gP.vvLabel + v].store(int(v));
