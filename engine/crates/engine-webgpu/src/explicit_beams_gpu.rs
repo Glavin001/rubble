@@ -3156,11 +3156,39 @@ impl ExplicitBeamsGpu {
         let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize) - plan::fleet_level_words(nv);
         let ctl = end - plan::FLEET_CTL_WORDS;
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        // (FK_DEBUG=1: why a list is or is not kept, from the control words and the plan.)
+        if std::env::var("FK_DEBUG").is_ok_and(|v| v != "0") {
+            self.fleet_keep_debug(&next, at, ctl);
+        }
         // (Word 14 is the passes' clock, not a count of this window.)
         let out = std::array::from_fn(|k| u64::from(next[ctl + if k == 9 { 15 } else { 5 + k }]));
         self.queue.write_buffer(&self.bufs[8], ((ctl + 5) * 4) as u64, &[0u8; 32]);
         self.queue.write_buffer(&self.bufs[8], ((ctl + 15) * 4) as u64, &[0u8; 4]);
         out
+    }
+
+    /// Measurement (FK_DEBUG=1, with [`Self::take_fleet_keep_stats`]): why a list is or is
+    /// not kept: the control words (the kernel's fkCtl), each vehicle's partners in the plan
+    /// and of the last pass against the partners a build covers, and what the last build covered.
+    fn fleet_keep_debug(&self, next: &[u32], at: usize, ctl: usize) {
+        let (w, nv, cover) = (&self.planner.words, self.layout.spans.len(), plan::FLEET_KEEP_COVER);
+        let c = &next[ctl..ctl + plan::FLEET_CTL_WORDS];
+        eprintln!("     fk ctl: mode {} valid {} epoch {} wait {} (streak {}) subs {} (over {}) pass {}", c[0], c[1], c[2], c[3] & 0xFFFF, c[3] >> 16, c[4] & 127, c[4] >> 7, c[14]);
+        // The plan's adjacency (flAdjFirst, flAdjAt) and the last pass's bits (1 partners,
+        // 4 a later copy of a pair); the build's cover (before four rows of nv + 1 and 9 · nv).
+        let (adj, bits, covered) = (at + nv + 1, at + nv + 1 + 2 * w[49] as usize, ctl - 9 * nv - 4 * (nv + 1) - nv * (cover + 1));
+        let count = |v: usize, mask: u32, want: u32| (next[at + v]..next[at + v + 1]).filter(|&e| next[bits + next[adj + e as usize] as usize] & mask == want).count();
+        let per = |f: &dyn Fn(usize) -> usize| (0..nv).map(f).collect::<Vec<_>>();
+        eprintln!("     fk partners in the plan (a build covers {cover}): {:?}; of the last pass: {:?}; covered at the last build: {:?}", per(&|v| count(v, 4, 0)), per(&|v| count(v, 5, 1)), per(&|v| next[covered + v * (cover + 1)] as usize));
+    }
+
+    /// Measurement: the big triangles the last walking contact pass gave threads of their
+    /// own ([`plan::PERF_FLEET_WALK_BOX`], the kernel's FL_NEXT_BIG). 0 without the fleet state.
+    #[doc(hidden)]
+    pub fn fleet_big_triangles(&self) -> u32 {
+        let (w, nv) = (&self.planner.words, self.layout.spans.len());
+        let at = w[plan::W_VV_FLEET_NEXT] as usize + (nv + 1) + 6 * w[49] as usize + 5 * (nv + 1) + 6 * nv + self.layout.total[2] as usize + 2;
+        if w[plan::W_VV_FLEET_NEXT] == 0 { 0 } else { bytemuck::cast_slice::<u8, u32>(&self.read(&self.bufs[8]))[at] }
     }
 
     /// Measurement: per vehicle, the kept candidates' reference motion of the next pass

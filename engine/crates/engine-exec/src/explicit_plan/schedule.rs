@@ -596,7 +596,7 @@ pub fn fleet_flags(planner: &FramePlanner, sw: &Switches, vv: bool) -> u32 {
     // level slots ([`FLEET_LEVEL_SLOTS_SHIFT`], the kernel's lvSlots): no bit of the
     // word is free. The map is the wide hits kernel's alone, which no split module is,
     // so these copies leave it out (the same results either way).)
-    flags &= !PERF_HIT_SLOT_MAP;
+    flags &= !(PERF_HIT_SLOT_MAP | super::PERF_FLEET_WALK_BOX);
     let rest = PERF_FLEET_FRONT | PERF_FLEET_KEEP | PERF_FLEET_FUSE | PERF_MEMBER_LIST;
     if front
         && sw.group_split_tests

@@ -474,6 +474,10 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// item before it, a chain that grew with the step's hits (the kernel's PERF_HIT_SLOT_MAP,
 /// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.46.
 pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
+/// For [`FramePlanner::set_perf_flags`]'s callers; kept as bit 30 of the word after [`W_BEAM_ORDER`] (the fleet
+/// copies' perf word has no free bit): the fleet-wide walk tests a candidate's position before it loads its
+/// vehicle and velocity (the kernel's flWalkBox; vehicle-perf-first-principles.md §8.56). The same pairs.
+pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
@@ -2725,7 +2729,7 @@ impl ExplicitUpload {
             beam_order_base,
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
-        words[W_PERF_FLAGS] = perf_flags_default();
+        (words[W_PERF_FLAGS], words[W_BEAM_ORDER + 1]) = (perf_flags_default() & !PERF_FLEET_WALK_BOX, (perf_flags_default() & PERF_FLEET_WALK_BOX) << 1);
         words[W_VV_SCRATCH] = vv_scratch;
         words[W_VV_SCRATCH_OFF] = vv_scratch_off;
         words[W_VV_TRI_PAIRS] = vv_tri_pairs;
@@ -3081,15 +3085,16 @@ impl FramePlanner {
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
         // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
-        self.words[W_PERF_FLAGS] = flags & !PERF_KEEP_TRACK_REST;
+        self.words[W_PERF_FLAGS] = flags & !(PERF_KEEP_TRACK_REST | PERF_FLEET_WALK_BOX);
+        self.words[W_BEAM_ORDER + 1] = (self.words[W_BEAM_ORDER + 1] & !(PERF_FLEET_WALK_BOX << 1)) | (flags & PERF_FLEET_WALK_BOX) << 1;
     }
 
     pub fn perf_flags(&self) -> u32 {
-        self.words[W_PERF_FLAGS]
+        self.words[W_PERF_FLAGS] | (self.words[W_BEAM_ORDER + 1] >> 1 & PERF_FLEET_WALK_BOX)
     }
 
     pub fn set_ablation2(&mut self, mask: u32) {
-        self.words[W_BEAM_ORDER + 1] = mask;
+        self.words[W_BEAM_ORDER + 1] = mask | (self.words[W_BEAM_ORDER + 1] & PERF_FLEET_WALK_BOX << 1);
     }
 
     /// The parameters for a frame of `steps` steps, from byte 0 of binding 0: copy k
