@@ -767,11 +767,26 @@ void cplCountBy(uint v, uint lane, uint lanes)
 // E and the shapes' fastest point speed, as float bits (atomic max; cleared at the
 // frame's start, cplListBegin). gNext right after the spheres (CouplingLayout::list_base):
 // per vehicle and shape its centre at the frame's first step (4 words), then per node
-// (global index) 12 words: x0, the limit m - E(build) (-1: no list), then 16 shape
+// (global index) 13 words: x0, the limit m - E(build) (-1: no list), then 16 shape
 // indices, 16 bits each, in order, ended by 0xFFFF (0xFFFE first: more than 16 in reach,
-// every shape tested).
+// every shape tested), then the node's range this step (CPL_LIST_RANGE, PERF_CPL_RANGES;
+// not written or read without that bit).
 static const uint CPL_LIST_CAP = 16u;
-static const uint CPL_LIST_WORDS = 12u;
+static const uint CPL_LIST_WORDS = 13u;
+static const uint CPL_LIST_RANGE = 12u;
+// perfFlags bit 134217728 (explicit_plan::PERF_CPL_RANGES; lossless): the count pass
+// keeps each node's range (the first and last shape it found the node inside, CPL_NONE
+// when none: the word gsCpl holds for the frame's own workgroup) in the node's list
+// record as well, and the node phase reads it there for a node whose range is not in its
+// workgroup's memory: a node of the wide passes, whose count ran on another workgroup, a
+// node past CPL_GS_NODES, any node with the ranges' copies off (the header's bit 64). Such
+// a node walked its whole list and ran the face test on each listed shape, every step,
+// inside a shape or not. The rule is the workgroup ranges' own: a step's count pass and
+// its node phase test the same node position against the same shapes' frames (nothing
+// writes either between them, on any schedule: the bodies' counts, which split a
+// contact's mass, rest on the same), so a shape outside the range was rejected by the
+// same face test and adds no force and no sum. vehicle-perf-first-principles.md §8.52.
+static const uint PERF_CPL_RANGES = 134217728u;
 static const uint CPL_LIST_ALL = 0xFFFEu;
 static const float CPL_LIST_MIN = 0.02;
 static const float CPL_LIST_MAX = 4.0;
@@ -926,8 +941,15 @@ void cplCountListed(uint v, uint lane, uint lanes, uint s)
 }
 // The same with the spheres read from workgroup memory for the shapes below gr.y
 // (cplGsRange), from gNext for the rest (gr (0, 0): every one from gNext).
+void cplCountListedKept(uint v, uint lane, uint lanes, uint s, uint2 gr);
 void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr)
 {
+    // PERF_CPL_RANGES: its own function (Metal's codegen of the path below stays).
+    if ((gP.perfFlags & PERF_CPL_RANGES) != 0u)
+    {
+        cplCountListedKept(v, lane, lanes, s, gr);
+        return;
+    }
     uint4 hdr = cplVeh(v);
     if (hdr.y == 0u) return;
     uint4 r0 = gStatic[v * 4u];
@@ -956,6 +978,39 @@ void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr)
     }
 }
 
+// cplCountListedGr with each node's range kept in its list record too (PERF_CPL_RANGES):
+// the same tests, counts and lists; one more word a node, which only cplContactsKept reads.
+void cplCountListedKept(uint v, uint lane, uint lanes, uint s, uint2 gr)
+{
+    uint4 hdr = cplVeh(v);
+    if (hdr.y == 0u) return;
+    uint4 r0 = gStatic[v * 4u];
+    uint acc = cplAcc(v);
+    uint2 gn = cplGsNodes(v);
+    uint la = cplListAcc(v);
+    float E = asfloat(gAcc[la].load());
+    float vs = asfloat(gAcc[la + 1u].load());
+    bool first = cplListFirst(s);
+    uint left = gP.steps > s ? gP.steps - s : 1u;
+    for (uint i = lane, iStop = EB_END(i, r0.y, lanes); i < iStop; i += lanes)
+    {
+        uint gi = r0.x + i;
+        uint range = CPL_NONE;
+        uint nl = cplListNode(gi);
+        if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) == 0u)
+        {
+            float3 x = gNodes[gi * 3u].xyz;
+            float4 h = asfloat(uint4(gNext[nl], gNext[nl + 1u], gNext[nl + 2u], gNext[nl + 3u]));
+            if (!first && length(x - h.xyz) + E < h.w)
+                range = cplCountHeld(v, x, nl, hdr.y, acc, gr);
+            else
+                range = cplCountBuild(v, x, gNodes[gi * 3u + 1u].xyz, nl, hdr.y, acc, gr, E, vs, left);
+        }
+        if (i < gn.y) gsCpl[CPL_GS_NODE + gn.x + i] = range;
+        gNext[nl + CPL_LIST_RANGE] = range;
+    }
+}
+
 // The count pass (step s): with the list, or every shape.
 void cplCountStep(uint v, uint lane, uint lanes, uint s)
 {
@@ -969,8 +1024,11 @@ void cplCountStep(uint v, uint lane, uint lanes, uint s)
 
 // cplContacts with the list: the node's listed shapes (the count pass this step left
 // it valid), or every shape when it keeps none; within its node range as before.
+float3 cplContactsKept(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction);
 float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
+    // PERF_CPL_RANGES: its own function (Metal's codegen of the path below stays).
+    if ((gP.perfFlags & PERF_CPL_RANGES) != 0u) return cplContactsKept(v, local, x, f, vel, mass, friction);
 #ifdef EB_NO_SURFACE
     bool fastSide = false; // gP.surfSplit is 0 in this module's uploads
 #else
@@ -991,6 +1049,84 @@ float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, flo
         k1 = min((r >> 16) + 1u, hdr.y);
     }
     uint nl = cplListNode(gStatic[v * 4u].x + local);
+    bool every = (gNext[nl + 4u] & 0xFFFFu) == CPL_LIST_ALL;
+    uint count = every ? k1 : CPL_LIST_CAP;
+    for (uint e = every ? k0 : 0u, eStop = EB_END(e, count, 1u); e < eStop; e++)
+    {
+        uint k = every ? e : ((gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu);
+        if (k >= k1) break;
+        if (k < k0) continue;
+        if (!cplMay(v, k, x, true, gr)) continue;
+        float4 n4 = cplFace(v, k, x);
+        if (n4.w == 0.0) continue;
+        if (fastSide) n4 = cplFastSide(v, k, vel, n4);
+        uint at = cplShape(v, k);
+        uint j = gMisc[at].y;
+        uint b = cplBody(v, j);
+        float4 c0 = asfloat(gMisc[b]);
+        float4 q = asfloat(gMisc[b + 1u]);
+        float4 c2 = asfloat(gMisc[b + 2u]);
+        float4 c3 = asfloat(gMisc[b + 3u]);
+        float3 r = x - c0.xyz;
+        float3 vb = c2.xyz + cross(c3.xyz, r);
+        float3 fc;
+        if (c0.w == 0.0)
+        {
+            // Infinite mass: the static shape rule (relative to a kinematic body's motion).
+            float3 u = all(vb == float3(0.0, 0.0, 0.0)) ? vel : vel - vb;
+            if (cplStaticOwnSurface(v)) fc = cplStaticContactV(f, u, mass, n4.xyz, v, friction);
+            else fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
+        }
+        else
+        {
+            float3 ii = asfloat(gMisc[b + 4u].xyz);
+            float3 rn = cross(r, n4.xyz);
+            float3 lr = cplRot(float4(-q.xyz, q.w), rn);
+            float3 irn = cplRot(q, ii * lr);
+            float split = float(max(uint(gAcc[acc + j].load()), 1u)) * max(c2.w, 1.0);
+            float wb = split * (c0.w + dot(rn, irn));
+            float wn = 1.0 / mass;
+            float mred = 1.0 / (wn + wb);
+            float share = wn / (wn + wb);
+            fc = contactForce(f * share, vel - vb, mred, n4.xyz, boxSurface(), 0.0, friction);
+        }
+        f += fc;
+        float3 react = -fc;
+        float3 m = cross(x - asfloat(gMisc[at + 6u].xyz), react);
+        uint s = acc + nb + 6u * k;
+        gAcc[s].add(toFixed(react.x));
+        gAcc[s + 1u].add(toFixed(react.y));
+        gAcc[s + 2u].add(toFixed(react.z));
+        gAcc[s + 3u].add(toFixed(m.x));
+        gAcc[s + 4u].add(toFixed(m.y));
+        gAcc[s + 5u].add(toFixed(m.z));
+    }
+    return f;
+}
+
+// cplContactsListed with every node's range (PERF_CPL_RANGES): a node whose range is not
+// in its workgroup's memory reads the word the step's count pass left in its list record.
+// The loop is cplContactsListed's.
+float3 cplContactsKept(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
+{
+#ifdef EB_NO_SURFACE
+    bool fastSide = false; // gP.surfSplit is 0 in this module's uploads
+#else
+    bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
+#endif
+    // The node's range first (a node inside no shape reads nothing else): its
+    // workgroup's copy, else the word this step's count pass left in its list record
+    // (cplCountListedKept).
+    uint2 gn = cplGsNodes(v);
+    uint nl = cplListNode(gStatic[v * 4u].x + local);
+    uint rg = local < gn.y ? gsCpl[CPL_GS_NODE + gn.x + local] : gNext[nl + CPL_LIST_RANGE];
+    if (rg == CPL_NONE) return f;
+    uint4 hdr = cplVeh(v);
+    uint acc = cplAcc(v);
+    uint nb = cplB();
+    uint2 gr = cplGsRange(v);
+    uint k0 = rg & 0xFFFFu;
+    uint k1 = min((rg >> 16) + 1u, hdr.y);
     bool every = (gNext[nl + 4u] & 0xFFFFu) == CPL_LIST_ALL;
     uint count = every ? k1 : CPL_LIST_CAP;
     for (uint e = every ? k0 : 0u, eStop = EB_END(e, count, 1u); e < eStop; e++)

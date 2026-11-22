@@ -98,7 +98,8 @@ impl CouplingLayout {
     pub const SHAPE_RECS: u32 = 7;
     pub const LIST_ACC_WORDS: u32 = 2;
     pub const LIST_SHAPE_WORDS: u32 = 4;
-    pub const LIST_NODE_WORDS: u32 = 12;
+    /// (12 of the list, then the node's range this step: [`PERF_CPL_RANGES`].)
+    pub const LIST_NODE_WORDS: u32 = 13;
 
     fn new(cap: CouplingCapacity, vehicles: u32, misc_base: u32, acc_base: u32) -> Self {
         assert!(
@@ -461,6 +462,15 @@ pub const PERF_SELF_HITS_LOCAL: u32 = 33554432;
 /// step s's rest dispatch (its second row), its tyres at step s + 1's start (the kernel's
 /// PERF_SPLIT_WHEELS_AHEAD, `splitWheelsAhead`, `splitTyres`). §8.36.
 pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
+/// [`W_PERF_FLAGS`]: the coupling's count pass keeps each node's range (the first and last
+/// proxy shape it found the node inside this step, none: the kernel's `cplCountListedKept`)
+/// in the node's candidate list record, and the node phase reads it there for a node whose
+/// range is not in its workgroup's memory (the wide passes' nodes, a node past the
+/// workgroup's 1,024, any node with the ranges' copies off): a node inside no shape tests
+/// none, where it walked its list and ran the face test on every listed shape (the
+/// kernel's PERF_CPL_RANGES, `cplContactsKept`). Off by default.
+/// vehicle-perf-first-principles.md §8.52.
+pub const PERF_CPL_RANGES: u32 = 134217728;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
