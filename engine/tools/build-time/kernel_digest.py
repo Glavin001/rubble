@@ -15,6 +15,8 @@ must leave this digest identical. A change to kernel source changes it on purpos
 is checked by the ladder in AGENTS.md instead.
 
 PROFILE (default fast) picks the cargo profile; the kernels do not depend on it.
+STRIP_LINES=1 drops the MSL and CUDA `#line` directives altogether: for a change that
+moves code between files or lines (the code compared, not where it came from).
 """
 import hashlib
 import json
@@ -99,6 +101,8 @@ def digest_dir(root):
                 data = fh.read()
             if f.endswith(LINE_SUFFIXES):
                 data = LINE_RE.sub(normalise_line, data)
+                if os.environ.get("STRIP_LINES") == "1":
+                    data = re.sub(rb"(?m)^#line [^\n]*\n", b"", data)
             if f.endswith(".rs"):
                 data = OUT_DIR_RE.sub(rb'"OUT[\1]/', data)
             if f.startswith("cuda_") and f.endswith(".rs"):

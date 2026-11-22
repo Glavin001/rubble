@@ -38,6 +38,7 @@ EDITS = {
     "kernel-small": ("slang/kernels/soft_skin.slang", "a small kernel file"),
     "kernel-explicit": ("slang/kernels/explicit_beams.slang", "the explicit vehicles' kernel"),
     "kernel-common": ("slang/physics/common.slang", "the most-included shared kernel file"),
+    "kernel-aero": ("slang/kernels/explicit_beams_aero.slang", "the explicit kernel's wings (EB_AERO)"),
     "softbody-runtime": ("crates/engine-softbody/src/explicit_beams.rs", "softbody's runtime model"),
     # (Where it is after the authoring split, else where it was: the tool measures both.)
     "softbody-authoring": (["crates/engine-softbody-authoring/src/authoring/vehicle.rs",
