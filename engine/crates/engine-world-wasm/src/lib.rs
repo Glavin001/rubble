@@ -101,8 +101,28 @@ fn note_gpu_error(what: String) {
     }
 }
 
+// A fast web build's kernels (compiled at run time, engine_webgpu::kernel_store): read
+// from `generated/kernels/` beside this module (build-web.sh copies the native store
+// there), synchronously, as the engine asks for one (its constructors do not wait).
+#[wasm_bindgen(inline_js = "export function rubble_kernel_file(rel) {
+  const r = new XMLHttpRequest();
+  r.open('GET', new URL('../../../kernels/' + rel, import.meta.url), false);
+  r.send();
+  if (r.status !== 200) throw new Error('kernels/' + rel + ': HTTP ' + r.status);
+  return r.responseText;
+}")]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    fn rubble_kernel_file(rel: &str) -> Result<String, JsValue>;
+}
+
+fn kernel_file(rel: &str) -> Result<String, String> {
+    rubble_kernel_file(rel).map_err(|e| format!("{e:?}"))
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
+    engine_webgpu::set_kernel_loader(kernel_file);
     std::panic::set_hook(Box::new(|info| {
         web_sys::console::error_1(&info.to_string().into());
         if let Ok(mut last) = PANIC.lock() {

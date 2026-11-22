@@ -117,6 +117,13 @@ slower, so measure performance with a release build only
 RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh
 ```
 
+That build's world wasm reads its kernels at run time from `generated/kernels/`, so after
+a kernel edit this is all the pages need (then reload):
+
+```bash
+cd engine && cargo run --profile fast -p engine-webgpu --bin kernels -- --copy-to crates/engine-webgpu/generated/kernels
+```
+
 Then open `http://localhost:8080/` in a WebGPU browser (Chrome or Edge on desktop). The
 build runs `wgsl_export` (Slang kernels to WGSL, the vehicle wasm), the fracture-lab
 wasm and `scene_export` (the Rust-built scenes as GPU snapshots), then copies the pages

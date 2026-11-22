@@ -32,7 +32,10 @@ set -euo pipefail
 # RUBBLE_WEB_PROFILE=fast: a local build to iterate on. The engine's wasm and host tools
 # build with the `fast` profile (no link-time optimisation, incremental) and no wasm-opt,
 # and the world wasm gets no Asyncify build (pages that need it, Safari's, need a release
-# build). A kernel or Rust edit rebuilds the world wasm in about 5 s instead of 44
+# build). A Rust edit rebuilds the world wasm in about 5 s instead of 44, and the world
+# wasm reads its kernels at run time from generated/kernels/, so a kernel edit needs no
+# wasm rebuild at all: `cargo run --profile fast -p engine-webgpu --bin kernels --
+# --copy-to crates/engine-webgpu/generated/kernels` and a reload
 # (engine/docs/measurements/build-time.md). The physics is the same; the host code runs
 # slower than in release, so never measure with it. Default release: Vercel and CI.
 WEB_PROFILE="${RUBBLE_WEB_PROFILE:-release}"
@@ -189,6 +192,14 @@ if part kernels; then
   step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
   # Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
   cargo run "${PROFILE_ARGS[@]}" -p engine-webgpu --no-default-features --bin wgsl_export
+  # (A release build embeds them: no kernels/ folder ships, not even a fast build's.)
+  rm -rf "$WEB/generated/kernels"
+  if [[ "$WEB_PROFILE" == fast ]]; then
+    # The fast build's world wasm reads its kernels at run time from generated/kernels/
+    # (engine-webgpu kernel_store): the native store for the current sources, copied. A
+    # kernel edit for the pages is then this step and a reload, no wasm rebuild.
+    cargo run -q --profile fast -p engine-webgpu --bin kernels -- --copy-to "$WEB/generated/kernels" >/dev/null
+  fi
 fi
 if part stress; then
   step "Fracture scene wasm (the unit tests; the page loads it inside the world wasm)"
@@ -200,7 +211,10 @@ if part world; then
   # the vehicle generator (engine-vehiclegen) for the vehicle designer page
   wasm-pack build crates/engine-vehiclegen-wasm "${WASM_PACK_PROFILE[@]}" --target web \
     --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
-  CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm "${WASM_PACK_PROFILE[@]}" --target web \
+  # (The fast build's world wasm reads its kernels from generated/kernels/ at run time.)
+  world_kernels=embed
+  [[ "$WEB_PROFILE" == fast ]] && world_kernels=runtime
+  RUBBLE_KERNELS=$world_kernels CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm "${WASM_PACK_PROFILE[@]}" --target web \
     --out-dir ../engine-webgpu/generated/world-wasm
 fi
 if part stress; then

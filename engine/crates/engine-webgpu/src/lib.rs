@@ -25,6 +25,18 @@ mod kernel_compile {
 }
 pub use kernel::Kernel;
 use kernel::kernel;
+
+/// On wasm, how a build with its kernels compiled at run time (a fast web build) reads
+/// them: `load(rel)` returns the store's file `rel` (`wgsl/<name>.wgsl`, `wgsl_ok.txt`,
+/// `spirv_entries.txt`). Nothing to do when the kernels are embedded (every other build).
+#[cfg(target_arch = "wasm32")]
+pub fn set_kernel_loader(load: fn(&str) -> Result<String, String>) {
+    #[cfg(kernels_at_runtime)]
+    kernel_store::set_loader(load);
+    #[cfg(not(kernels_at_runtime))]
+    let _ = load;
+}
+#[cfg(feature = "gpu")]
 mod explicit_modules;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
@@ -46,6 +58,7 @@ mod soft_skin;
 pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_modules::set_explicit_module_override;
+#[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, group_split_default, set_explicit_shader_checks_off, explicit_shader_module, explicit_shader_checks_off, explicit_compilation_options, SHADER_CHECKS_OFF_METAL, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
@@ -354,9 +367,9 @@ fn entry_list() -> &'static [&'static str] {
 
 impl WebGpuWorld {
     pub fn spirv_bytes(name: &str) -> anyhow::Result<Vec<u8>> {
-        #[cfg(not(kernels_at_runtime))]
+        #[cfg(any(not(kernels_at_runtime), target_arch = "wasm32"))]
         let path = format!("{}/spirv/{name}.spv", env!("OUT_DIR"));
-        #[cfg(kernels_at_runtime)]
+        #[cfg(all(kernels_at_runtime, not(target_arch = "wasm32")))]
         let path = format!("{}/spirv/{name}.spv", kernel_store::dir().display());
         Ok(std::fs::read(&path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?)
     }

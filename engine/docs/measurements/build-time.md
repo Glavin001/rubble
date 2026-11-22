@@ -135,6 +135,23 @@ embedded WGSL, every file the same; on the GPU, fast-check with the store's kern
 against those (16 of 17 fixtures bit for bit, the 17th as with the same kernels on both
 sides) and the bitwise and loop-cap suites.
 
+## 2026-11-22: the fast web build's world wasm reads its kernels at run time
+
+With `RUBBLE_WEB_PROFILE=fast`, the world wasm is built with `RUBBLE_KERNELS=runtime`: it
+embeds no WGSL (18 MB instead of 78 MB) and reads each module the first time the engine
+asks, from `generated/kernels/` beside it (engine-world-wasm installs the reader,
+`engine_webgpu::set_kernel_loader`; build-web.sh copies the native store there). A kernel
+edit for the pages is then:
+
+    cargo run --profile fast -p engine-webgpu --bin kernels -- --copy-to crates/engine-webgpu/generated/kernels
+
+and a reload: 9.2 s after a `common.slang` edit (the slangc work), the world wasm not
+rebuilt (before: wgsl_export, then the world wasm, 5 s fast or 44 s release, plus the
+same slangc work). Checked in Chrome: demo.html (235 modules read, no errors) and
+vehicle-lab.html (the generated sedan driving) run from it; with the pane hidden both
+this build and the same build with embedded kernels step once a second (the browser's
+throttling), so the page's speed is the same. Release (Vercel, CI) embeds as before.
+
 ## Where the time still goes
 
 - An explicit kernel edit is slangc: 143 modules of distinct defines in the fast loop,
