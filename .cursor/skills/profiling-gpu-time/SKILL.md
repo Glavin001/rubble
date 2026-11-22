@@ -55,20 +55,27 @@ the repo's gitignored `out/`, never `/tmp`.
 
 ## Reading the numbers
 
-**Never use pass-per-phase or pass-per-dispatch timings for absolute cost.** These include
-`RUBBLE_GPU_TIMING`, `timing=phases`, `step_profiled` and GPU marks. Each pass boundary
-drains the GPU, and the idle time lands on the next phase. Measured on ring110k (native
-wgpu-on-Metal, all bricks awake):
+**Get the total from the single-pass step; get attribution from the replay's rows.**
+Split-pass shapes (`timing=phases`, `step_profiled`, a pass per dispatch) change the
+workload a little and can be read wrongly. Measured on ring110k (native wgpu-on-Metal,
+every brick awake, 2026-11-22):
 
 | How the step is timed | GPU ms |
 |---|---|
-| One pass (what ships) | 13.3 |
-| A pass per phase | 18.7 span |
-| A pass per dispatch | 20.0 span |
-| Kernel replay, isolated sum | 13.8 |
+| One pass (what ships) | 13.19 |
+| A pass per phase | 13.86 span (0.01 ms idle between passes) |
+| A pass per dispatch | 15.74 span |
+| Kernel replay, in sequence | 13.75 |
+| Kernel replay, isolated sum | 14.32 |
 
-Phase timings rank phases at best. Cost that grows with world size has been blamed on the
-wrong phase this way before.
+- A pass per phase is nearly free; a pass per dispatch adds about 20 %.
+- Earlier figures of 18.7 / 20.0 ms came from a timestamp bug, not from real idle time:
+  the samples were read before they had landed, or from a reused query slot. Metal
+  timestamps must be resolved after the timed submission completes
+  (`profiling-webgpu.md`, *Timestamps on Apple GPUs*).
+- `RUBBLE_GPU_TIMING` marks have put a size-dependent cost on the wrong phase before
+  (a 3 ms broadphase cost that grew with world size was once reported as `coloring`). For "what grows with N", flip one switch and compare wall
+  medians.
 
 **Kernel replay.**
 - `iso ms` is the median of M runs of that dispatch alone, from the exact input the real
@@ -77,11 +84,17 @@ wrong phase this way before.
 - The empty-pass or launch floor (about 2–3 µs) is included in every isolated time.
 - `isolated sum − n × floor` estimates the step without launch costs. What the whole step
   takes beyond that is barriers and drains between dependent dispatches.
+- On native Metal the isolated sum runs 0.3–0.9 ms *over* the whole step: each op alone
+  starts with cold caches. Rank by `in-seq` where it exists. Treat isolated times as
+  upper bounds.
+- A row with zero workgroups (an empty indirect dispatch) is left out of the sums. In
+  sequence it still costs a launch and a barrier.
 - The share of each kernel depends on the state: profile the moment you care about, and
   compare runs at the same step.
 
-**Many repeated small dispatches** (solver colours × iterations: 4 iterations of 5–6 colour
-passes plus a dual pass) are usually barrier- or occupancy-bound, not ALU-bound. Compare
+**Many repeated small dispatches** (the primal colour solve: about 10 colours × 4
+iterations, 40–44 dispatches, 42–57 % of every rigid step measured) are usually barrier-,
+latency- or occupancy-bound, not ALU-bound. Compare
 each one's workgroups with the 40 GPU cores on an M3 Max, and read occupancy in the capture
 before touching the math.
 
@@ -98,8 +111,9 @@ memory-bound kernel the shader profiler's limiter and memory utilisation are the
   and `Queue::Submit`, and presentation waits behind queued compute.
 - A shader compile in the middle of a run (Tint → MSL, 18 ms) is a stutter: warm the
   pipelines before the scene starts.
-- First measured browser frame (ring, 60 Hz): 3.1 ms of JS per rAF frame, 2.4 ms of it in
-  `world.poll`. Check host spans before assuming a page is GPU-bound.
+- Measured browser frame (ring110k, 60 Hz): 3.0 ms of JS per rAF frame, 2.4 ms of it in
+  `world.poll` (not the device poll; 0.03 ms on the 8-car lab). Check host spans before
+  assuming a page is GPU-bound.
 
 **Overheads of the tools themselves.**
 - Labels (`RUBBLE_METAL_LABELS=1`, `RUBBLE_GPU_LABELS=1`) roughly double the host's
@@ -110,7 +124,9 @@ memory-bound kernel the shader profiler's limiter and memory utilisation are the
 
 **Reproducibility.**
 - Native rigid steps (`MetalSim`, native wgpu) are not reproducible run to run: lockstep
-  worlds drift apart.
+  worlds drift apart. `metal_profile` hashes the end state of the whole step replayed M
+  times from one input. Brick Ring 28k gave 7 different end states from 7 runs, while 9k
+  and Box Pile 32k gave one.
 - Compare kernels on one saved state (the replay does this) or with the matrix's fixtures,
   never two free-running worlds.
 - The noise threshold is 5 % **and** 0.05 ms (`diff.mjs`, the matrix).

@@ -10,7 +10,58 @@ Sibling: `docs/profiling-metal.md` (the `metal-profiling` session: engine-metal,
 Instruments). This page covers `engine-webgpu` (wgpu, browser and native), the WASM
 bindings and the pages.
 
-<!-- BASELINE -->
+## Baseline (M3 Max, 2026-11-22)
+
+`main` at d5a1d480 plus this branch. Release builds. Chrome is the system Chrome,
+headless, visible, rAF 60 Hz, `crossOriginIsolated`. Runs are in `out/webgpu-profile/`
+(`tools/webgpu-profile/baseline.sh`).
+
+| Run | GPU per step | Host per frame | Notes |
+|---|---|---|---|
+| Ring110k, browser (`b-ring`, sedan, `sleep=0`) | 14.8 ms (rigid 11.6, car frame 2.5, coupling plan 0.56) | JS 3.0 ms, of which `world.poll` 2.37 | GPU-bound at 60 Hz |
+| Ring110k, native wgpu (`n-ring110k`, no car) | 13.28 ms (replay whole step 13.19) | — | 110,440 awake |
+| 8-car lab, browser (`b-lab8`, mountain, ledges) | 16.3 ms (car frame 15.5, rigid 0.31) | JS 0.57 ms | GPU-bound: the vehicle frame |
+| 8-car lab, native wgpu (`n-lab8`) | 15.8 ms | — | rigid replay whole step 0.55 ms |
+
+**Ring110k by kernel** (native replay at step 60, in-sequence medians, 13.19 ms whole step):
+
+| Kernel | Dispatches | ms | Share |
+|---|---|---|---|
+| `solve_primal_color_compact` | 40 | 6.20 | 47 % |
+| `solve_dual_compact` | 4 | 1.89 | 14 % |
+| `narrowphase_fresh_copy_persistent` | 1 | 1.45 | 11 % |
+| `persist_list_copy_persistent` | 1 | 0.94 | 7 % |
+| `broadphase_query` | 1 | 0.81 | 6 % |
+| `solve_primal_sparse_compact` | 4 (4 workgroups each) | 0.59 | 4.5 % |
+| `narrowphase_defer_copy_persistent` | 1 | 0.55 | 4 % |
+| everything else (40 dispatches) | | ~1.3 | ~10 % |
+
+## Opportunities (ranked by evidence, none adopted)
+
+These are leads with their evidence. Each still needs a shader-profiler capture to name its
+limiter, and the scenario matrix to admit any change.
+
+1. **The primal colour solve is half the rigid step**: 6.2 ms of 13.2 on ring110k, in 40
+   dispatches (about 10 colours × 4 iterations). It is the same picture on native Metal at
+   9k–32k bodies (42–57 %, `profiling-metal.md`). Each dispatch writes at 4–10 GB/s, far
+   below the memory system, so it is likely latency-, barrier- or occupancy-bound rather
+   than bandwidth-bound. Next step: a capture of the colour passes for limiter and occupancy.
+2. **`world.poll` takes 2.4 ms per browser frame on the ring** (80 % of the frame's JS),
+   against 0.03 ms on the 8-car lab. `world.poll.device` is 0, so it is host work that grows
+   with body count, not a GPU wait. Next step: split the span to find which part of poll
+   scales with the 110k bodies.
+3. **`solve_primal_sparse_compact` runs 4 workgroups on a 40-core GPU**: 0.15 ms per
+   iteration, 0.6 ms per step. This is a near-serial tail of the colouring.
+4. **Empty and tiny dispatches in small rigid steps.** On the 8-car lab's rigid step (0.55
+   ms), the isolated work sums to 0.16 ms while in sequence it takes 0.51 ms. 42 dispatches
+   had zero workgroups and still cost a launch and a barrier each.
+5. **Chrome's GPU process** (Chrome trace, 2026-11-19): wire decode about 1.9 ms per ring
+   step, `Queue::Submit` 30 ms/s, presentation blocked 255 ms/s behind queued compute, and
+   one Tint → MSL compile (18 ms) in the middle of the run (a stutter: warm the pipelines).
+6. **The vehicle frame dominates vehicle scenes** (15.5 of 16.3 ms for 8 cars on the
+   mountain). The explicit plan is timed per segment by `timing=phases`. The rigid replay
+   does not cover it.
+
 
 ## The tools
 
@@ -114,8 +165,11 @@ works around each:
   encoded ahead of it in the same command buffer has finished. A restore blit followed by a
   timed pass in one submission would charge part of the blit to the kernel. So every restore
   is submitted and waited on alone, and the timed pass follows in a submission of its own.
-- **A resolve in the same command buffer can read samples before they land.** The query
-  resolve and readback go in a separate submission after the timed one.
+- **A resolve can read samples before they land,** in the same command buffer and also in a
+  later submission that is queued straight behind a long pass. The timed submission is waited
+  on before the resolve is encoded. Without that wait, a 13 ms whole-step pass read 0 on most
+  reps and `tests/kernel_replay.rs` failed. Earlier reports of the per-phase span (18.7 ms
+  against 13.3 ms for the ring) were this race, not real idle time.
 - **Some passes write no timestamp at all.** A reused query slot would then keep an older
   pass's tick and stretch every span computed over it. This happened on the ring: a 16.7 ms
   pass-per-phase span over 11.3 ms of passes with no gaps. Slots are never reused (a fresh
@@ -123,11 +177,10 @@ works around each:
   `timed passes that wrote no timestamp`. A non-zero count means some rows have fewer
   samples than `reps`.
 
-Splitting a step into more passes also changes what is measured. Each pass boundary drains
-the GPU, so the pass-per-phase and pass-per-dispatch *spans* are longer than the shipped
-single pass (ring110k: 13.3 ms one pass, 18.7 ms per phase, 20.0 ms per dispatch). Use
-the single-pass step for the total and the isolated rows for attribution. The per-phase
-shape is good only for ranking phases.
+With timestamps read correctly, splitting a step costs little. On ring110k natively:
+13.19 ms in one pass, a 13.86 ms span with a pass per phase (0.01 ms idle between phase
+passes), and 15.74 ms with a pass per dispatch. In Chrome: 11.63 / 11.67 / 11.82 ms. Take the
+total from the single pass and attribution from the replay's rows.
 
 ### Native twin
 

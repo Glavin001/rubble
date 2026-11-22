@@ -12,7 +12,7 @@ Slang kernels as the browser:
 The legacy `MetalWorld` (its own step graph) is not instrumented. The World API (`engine-world`:
 `city_scale`, `vehicle_lab`) runs on wgpu; on this machine wgpu runs on Metal, so the Instruments
 script (section 4) records it too. The per-kernel tools (sections 1 to 3 and 5) need the native
-hosts. The WebGPU side has its own tools (`RUBBLE_GPU_TIMING`, the webgpu-profiling work).
+hosts. The WebGPU side has its own tools: `profiling-webgpu.md`.
 
 All GPU runs go through `scripts/gpu-lock.sh` (the machine's one GPU job, a kill timer): see
 [GPU lock](#gpu-lock). Outputs go to the repository's gitignored `out/`.
@@ -181,12 +181,53 @@ holds). Other sessions' GPU jobs queue on the same lock: run profiles in the bac
 
 ## Checks
 
-(filled in below with this machine's results)
+2026-11-19 and 2026-11-22, M3 Max (`tools/metal-profile/baseline.sh checks`):
+
+- **Soft cars (`cars:8`):** the same end state, bit for bit, across two default runs, labels
+  on and debug libraries on, at the same GPU time (0.712–0.714 ms a frame). Labels and debug
+  libraries change nothing on the explicit solver.
+- **Rigid (`MetalSim`, Brick Ring 9k):** labels and debug libraries add no GPU time
+  (1.73–1.77 ms). Labels roughly double host encode time (0.13 against 0.06 ms), which is
+  why they are opt-in. Two free-running default runs end in different states, so compare
+  only from one input (the replay's state hash).
+- **One step from one input** (replayed M = 7 times): Brick Ring 9k and Box Pile 32k end in
+  one state, while **Brick Ring 28k ends in 7 different states.** The rigid step is not
+  reproducible from a fixed input at that scale.
 
 ## Baseline (M3 Max, 40-core GPU)
 
-(filled in below)
+2026-11-22, `main` d5a1d480 plus this branch, `tools/metal-profile/baseline.sh small`
+(`out/metal-profile/small/`). Rigid: 4 iterations. Cars: one 60 Hz frame (33 solver steps
+at 2 kHz).
+
+| Scene | Lockstep GPU | Replay whole step | Primal colour solve | Next largest |
+|---|---|---|---|---|
+| Brick Ring 9k (9,132 bodies) | 1.75 ms | 1.41 ms | 57 % (44 dispatches) | broadphase_query 7.5 %, narrowphase_fresh 7.1 % |
+| Brick Ring 28k (11.7k awake) | 2.55 ms | 2.57 ms | 44 % | solve_dual 9.8 %, narrowphase_fresh 7.1 % |
+| Box Pile 32k (32k awake) | 1.59 ms | 2.73 ms | 42 % | narrowphase_fresh 16.6 %, sleep_island_gate 7.8 % |
+| cars:1 | 0.68 ms | 0.68 ms | — | one kernel (`explicit_beams_wide_nosurf`, 512 threads) |
+| cars:8 (2,936 nodes, 17,360 beams) | 0.72 ms | 0.72 ms | — | `explicit_beams_solo_wide_nosurf` 96 % |
+| cars:8:wide | 0.72 ms | 0.72 ms | — | the same |
+
+In lockstep the GPU sits idle 0.16–0.31 ms between steps: the host round trip, which
+pipelined stepping hides. On native Metal the isolated sum is 0.3–0.9 ms larger than the
+whole step (each op alone starts with cold caches).
 
 ## Optimization opportunities (ranked)
 
-(filled in below)
+Leads with their evidence. Each needs a capture for its limiter before any change, and the
+scenario matrix to admit it.
+
+1. **The primal colour solve is 42–57 % of every rigid step** (44 dispatches at 9k–28k).
+   Its write bandwidth is 4–10 GB/s, so it is not bandwidth-bound. Capture it
+   (`RUBBLE_CAPTURE_STEP` with `RUBBLE_METAL_DEBUG_LIB=1`) for occupancy and limiter, and
+   look at per-colour dispatch overhead against per-thread work.
+2. **A car's frame barely grows with car count**: 0.68 ms for 1 car against 0.72 ms for 8.
+   That is about 20 µs for each of the 33 serial solver steps, at about 1 GB/s. The frame is
+   bound by the latency of serial steps, not by work. More cars are nearly free; one car is
+   only faster with fewer serial barriers in a step (`measurements/vehicle-perf-first-principles.md`).
+3. **`narrowphase_fresh_copy_persistent` on piles** (16.6 % of Box Pile 32k).
+4. **`sleep_island_gate`: 8 dispatches, 5–8 % of rigid steps,** at 0.1–0.6 GB/s.
+5. **The 28k ring's step is not reproducible from one input** (Checks). This is not a
+   cost, but it bears on the bit-exact test mode: find which kernel's atomics order leaks
+   into state before relying on bit-for-bit A/Bs of rigid scenes at that scale.

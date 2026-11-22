@@ -365,6 +365,7 @@ impl Timer {
     /// (begin, end) ticks.
     fn finish(&self, device: &wgpu::Device, queue: &wgpu::Queue, enc: wgpu::CommandEncoder, slots: u32) -> Vec<(u64, u64)> {
         queue.submit([enc.finish()]);
+        wait_idle(device, queue);
         let mut r = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay resolve") });
         let n = 2 * slots;
         let first = 2 * self.base.get();
