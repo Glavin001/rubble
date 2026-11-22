@@ -276,6 +276,14 @@ impl CudaExplicitBeams {
         if layout.surface {
             out.push(Key::Plan(Kernel::FrameSeg));
             out.extend((0..plan::SURF_PASSES.len()).map(|i| Key::Plan(Kernel::Surf(i))));
+            // (And on the fast schedules, FramePlanner::set_surface_fast: the pass's
+            // pipelines there, the solo vehicles' rest, and the wide passes where they
+            // could run the fleet.)
+            out.extend(plan::SURF_FAST_PASSES.iter().map(|(m, _)| Key::Split(m.to_string())));
+            out.push(Key::Split(plan::solo_rest_module_name(aero, lanes, true)));
+            if layout.wide_capable() {
+                out.extend((0..plan::WIDE_PASSES.len()).map(|i| Key::Plan(Kernel::Wide(i))));
+            }
         }
         out
     }
@@ -336,7 +344,22 @@ impl CudaExplicitBeams {
     /// host: every binding, the layout, the planner's settings and that host's frame
     /// paths): the same frames from it, with no vehicles or World here.
     pub fn from_portable(p: &plan::portable::Portable) -> anyhow::Result<Self> {
-        let mut g = Self::from_parts(p.header.layout.clone(), p.bindings.clone())?;
+        let mut bindings = p.bindings.clone();
+        // A fixture of a fleet with surface contact saved by a host that had no wide
+        // passes for it (before FramePlanner::set_surface_fast) holds no vehicle table.
+        // The table is the vehicles' static records (the upload's `table_recs`; a host
+        // that writes a vehicle's record writes both), so it is made from them here, as
+        // the upload makes it.
+        let table = plan::BIND_TABLE as usize;
+        let layout = &p.header.layout;
+        if layout.surface && layout.wide_capable() && (bindings[table].len() as u64) < plan::TABLE_BYTES {
+            let n = 16 * 4 * layout.spans.len();
+            anyhow::ensure!(bindings[plan::BIND_STATIC as usize].len() >= n, "the fixture's static records are short");
+            let mut t = bindings[plan::BIND_STATIC as usize][..n].to_vec();
+            t.resize(plan::TABLE_BYTES as usize, 0);
+            bindings[table] = t;
+        }
+        let mut g = Self::from_parts(p.header.layout.clone(), bindings)?;
         g.planner.apply(&p.header.planner);
         let s = p.header.switches;
         g.group_split = s.group_split;
@@ -420,12 +443,15 @@ impl CudaExplicitBeams {
             (ArgBuf::Fleet2, FLEET_ARGS_BYTES),
             (ArgBuf::Spare1, FLEET_ARGS_BYTES),
             (ArgBuf::Spare2, FLEET_ARGS_BYTES),
+            (ArgBuf::Surf, schedule::SURF_ARGS_BYTES),
         ] {
             let ptr = unsafe { result::malloc_sync(bytes as usize) }.map_err(map)?;
             unsafe { result::memset_d8_sync(ptr, 0, bytes as usize) }.map_err(map)?;
             arg_bufs.insert(buf, (ptr, bytes));
         }
-        let planner = FramePlanner::new(&layout);
+        let mut planner = FramePlanner::new(&layout);
+        planner.set_surface_fast(schedule::surface_fast_default());
+        planner.set_surface_fast_contact(schedule::surface_fast_contact_default(true));
         Ok(Self {
             ctx,
             stream,
@@ -787,6 +813,12 @@ impl CudaExplicitBeams {
     }
     pub fn set_wide_fused(&mut self, on: bool) {
         self.wide_fused = on;
+    }
+    /// A fleet with surface contact on the fast schedules, the surface pass as its own
+    /// pipelines (`FramePlanner::set_surface_fast`; on by default,
+    /// `schedule::surface_fast_default`): the same results bit for bit.
+    pub fn set_surface_fast(&mut self, on: bool) {
+        self.planner.set_surface_fast(on);
     }
 
     /// Indirect launches read their workgroup counts on the GPU (on by default; the same

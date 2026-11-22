@@ -1456,7 +1456,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         } else if reuse_ab {
             x.set_pair_reuse(on);
 
-        } else {
+        } else if !x.set_named_switch(arg("--ab-switch").as_deref().unwrap_or(""), on) {
             x.set_surface_culls(on);
         }
     };
@@ -2764,7 +2764,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 } else if reuse_ab {
                     "pair reuse"
                 } else {
-                    "surface culls"
+                    arg("--ab-switch").as_deref().and_then(engine_webgpu::ExplicitBeamsGpu::named_switch).unwrap_or("surface culls")
                 },
                 out[0].0,
                 out[1].0

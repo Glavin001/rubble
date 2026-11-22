@@ -408,3 +408,70 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     soloStepSave(v, lane);
     ebLoopCapFlush();
 }
+
+// Surface contact on the self split paths, the surface pass as its own pipelines
+// (surfPiped; explicit_beams_surface_pipes.slang): a solo vehicle's step s (gP.pad2)
+// after its walk and pairs dispatches and before the pipelines: the walk's list recorded
+// and the step's self-collision hits applied, as the next step dispatch's start runs them
+// without surface contact (explicitBeamsFrameStep's rest, which then skips them). The
+// same calls on the same state: the hit flag and the pair list's state loaded as that
+// dispatch loads them and saved as the step's end saves them (soloStepSave: the flag in
+// the vehicle's segment record, where the pipelines' prep and the next step read it).
+// A workgroup a vehicle, as the step's (its awake-indexed pick, its sleep rule); with
+// vehicle contact a group's member returns at once (its hits: contactMemberStep or
+// memberRest).
+#ifdef EB_SOLO_STEP
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_solo_rest(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint lane = lid.x;
+    uint v = gid.x;
+    bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
+    if (sleepListed) v = sleepPick(gid.x, lane);
+    if (v >= gP.vehicles || gP.pad2 >= gP.steps) return ebLoopCapFlush();
+#ifdef EB_VV_SOLO
+    if (lane == 0u) gsUniformLanes = gMisc[vvRec(v, VV_FLAGS)].y;
+    sync();
+    if (gsUniformLanes != 0u) return ebLoopCapFlush();
+#endif
+    if (gP.sleepRec != 0u && !sleepListed)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint4 r3 = gStatic[v * 4u + 3u];
+    uint4 misc = gMisc[v];
+    float3 origin = asfloat(misc.xyz);
+    uint parity = (misc.w + gP.pad2) & 1u;
+    if (lane == 0u)
+    {
+        gsHit = gMisc[segRec(v)].x;
+        gsTestedCount[0].store(0u);
+        gsTestedCount[1].store(0u);
+        gsUniformLanes = r1.y > 0u ? 1u : 0u;
+    }
+    soloStepLoad(v, lane);
+    sync();
+    uint selfOn = gsUniformLanes;
+    if (lane == 0u)
+    {
+        selfSplitHits(v);
+        if (selfHitsLocalOn(v)) gsUniformHits = 2u;
+    }
+    if (selfOn != 0u)
+    {
+        sync();
+        uint hitsOn = gsUniformHits;
+        if (hitsOn == 2u)
+            selfApplyLocalKeep(v, lane, r0.z, r2.z, r2.w, parity);
+        else
+            selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
+    }
+    sync();
+    soloStepSave(v, lane);
+    ebLoopCapFlush();
+}
+#endif

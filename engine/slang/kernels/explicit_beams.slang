@@ -6182,7 +6182,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.pad2 > 0u)
     {
         uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
-        if (lane == 0u)
+        if (lane == 0u && !surfPiped())
         {
             selfSplitHits(v);
             // (PERF_SELF_HITS_LOCAL: 2, the hits from workgroup memory; uniform after the
@@ -6190,9 +6190,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (selfHitsLocalOn(v)) gsUniformHits = 2u;
         }
 #ifdef EB_ABLATE
-        if (selfOn != 0u && !EB_A2(64u))
+        if (selfOn != 0u && !surfPiped() && !EB_A2(64u))
 #else
-        if (selfOn != 0u)
+        if (selfOn != 0u && !surfPiped())
 #endif
         {
             sync();

@@ -149,7 +149,20 @@ pub const EXPLICIT_BEAMS_NOSURF: [(&str, Kernel); 16] = [
 /// Surface contact split from the frame (`engine_exec::explicit_plan::Kernel::FrameSeg`,
 /// `Kernel::Surf`): the frame in segments at its four variants (`EB_FRAME_SEG`), then the
 /// surface pass's pipelines (`EB_SURF_PIPE`, `SURF_PASSES` order).
-pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, Kernel); 13] = [
+pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, Kernel); 24] = [
+    ("explicit_surface_cull_x", kernel!("explicit_surface_cull_x")),
+    ("explicit_surface_plan", kernel!("explicit_surface_plan")),
+    // (The fast schedules' pipelines, `SURF_FAST_PASSES`: the prep that sizes the others'
+    // dispatches, each kind's find and apply a thread an element.)
+    ("explicit_surface_prep_args", kernel!("explicit_surface_prep_args")),
+    ("explicit_surface_find_tri_x", kernel!("explicit_surface_find_tri_x")),
+    ("explicit_surface_find_seg_x", kernel!("explicit_surface_find_seg_x")),
+    ("explicit_surface_find_point_x", kernel!("explicit_surface_find_point_x")),
+    ("explicit_surface_find_pair_x", kernel!("explicit_surface_find_pair_x")),
+    ("explicit_surface_apply_tri_x", kernel!("explicit_surface_apply_tri_x")),
+    ("explicit_surface_apply_seg_x", kernel!("explicit_surface_apply_seg_x")),
+    ("explicit_surface_apply_point_x", kernel!("explicit_surface_apply_point_x")),
+    ("explicit_surface_apply_pair_x", kernel!("explicit_surface_apply_pair_x")),
     ("explicit_beams_seg", kernel!("explicit_beams_seg")),
     ("explicit_beams_wide_seg", kernel!("explicit_beams_wide_seg")),
     ("explicit_beams_aero_seg", kernel!("explicit_beams_aero_seg")),
@@ -231,7 +244,12 @@ pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, Kernel); 2] = [
     ("explicit_beams_selfsplit_list", kernel!("explicit_beams_selfsplit_list")),
     ("explicit_beams_selfsplit_list_wide", kernel!("explicit_beams_selfsplit_list_wide")),
 ];
-pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, Kernel); 24] = [
+pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, Kernel); 28] = [
+    // (With surface contact as pipelines: the solo vehicles' rest, `explicit_beams_solo_rest`.)
+    ("explicit_beams_selfsplit_rest_vv", kernel!("explicit_beams_selfsplit_rest_vv")),
+    ("explicit_beams_selfsplit_rest_vv_wide", kernel!("explicit_beams_selfsplit_rest_vv_wide")),
+    ("explicit_beams_selfsplit_rest_vv_aero", kernel!("explicit_beams_selfsplit_rest_vv_aero")),
+    ("explicit_beams_selfsplit_rest_vv_aero_wide", kernel!("explicit_beams_selfsplit_rest_vv_aero_wide")),
     ("explicit_beams_selfsplit_step", kernel!("explicit_beams_selfsplit_step")),
     ("explicit_beams_selfsplit_walk", kernel!("explicit_beams_selfsplit_walk")),
     ("explicit_beams_selfsplit_pairs", kernel!("explicit_beams_selfsplit_pairs")),

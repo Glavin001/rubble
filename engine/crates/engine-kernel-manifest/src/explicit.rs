@@ -216,6 +216,16 @@ pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
 pub const SELF_PAIRS_ENTRY: &str = "explicit_beams_self_pairs";
 pub const WIDE_LIST_ENTRY: &str = "explicit_beams_wide_list";
+/// Surface contact on the self split paths: a solo vehicle's self-collision hits of a step
+/// applied in a dispatch of its own, before the surface pass's pipelines (the kernel's
+/// soloRest).
+pub const SOLO_REST_ENTRY: &str = "explicit_beams_solo_rest";
+
+/// The module of [`SOLO_REST_ENTRY`] at the frame variant with `aero` and `lanes`, with
+/// vehicle contact (`vv`) or not: the self split's step module's defines, another entry.
+pub fn solo_rest_module_name(aero: bool, lanes: u32, vv: bool) -> String {
+    format!("explicit_beams_selfsplit_rest{}{}", if vv { "_vv" } else { "" }, variant_tag(aero, lanes))
+}
 
 /// The split group path's modules by `which` (`split_module_name`), each at the frame
 /// module's four variants (`split_modules`).
@@ -304,6 +314,8 @@ pub fn split_modules() -> Vec<SplitModule> {
         member.push(("EB_VV_SPLIT", "1"));
         push(format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, member);
         push(format!("explicit_beams_selfsplit_walk_vv{tag}"), SELF_WALK_ENTRY, base.clone());
+        // Surface contact on this path (the pass as pipelines): the solo vehicles' rest.
+        push(format!("explicit_beams_selfsplit_rest_vv{tag}"), SOLO_REST_ENTRY, base.clone());
         push(format!("explicit_beams_selfsplit_pairs_vv{tag}"), SELF_PAIRS_ENTRY, base);
     }
     out
@@ -440,6 +452,54 @@ pub fn test_modules() -> Vec<TestModule> {
                 out.push(TestModule { source, name: format!("{prefix}contact{tag}"), entry, defines: d });
             }
         }
+    }
+    out
+}
+
+/// The surface pass's pipelines of the fast schedules, in dispatch order: (module,
+/// entry). The prep sizes the others' dispatches (`EB_SURF_ARGS`: binding 10, the
+/// surface arguments), each of which runs a thread an element (`EB_SURF_SPREAD`).
+pub const SURF_FAST_PASSES: [(&str, &str); 11] = [
+    ("explicit_surface_prep_args", "explicit_surface_prep"),
+    // The pair path's listing, a thread an element, then its decision, a workgroup a
+    // vehicle (binding 10 as the prep).
+    ("explicit_surface_cull_x", "explicit_surface_cull"),
+    ("explicit_surface_plan", "explicit_surface_plan"),
+    ("explicit_surface_find_tri_x", "explicit_surface_find"),
+    ("explicit_surface_find_seg_x", "explicit_surface_find"),
+    ("explicit_surface_find_point_x", "explicit_surface_find"),
+    ("explicit_surface_find_pair_x", "explicit_surface_find"),
+    ("explicit_surface_apply_tri_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_seg_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_point_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_pair_x", "explicit_surface_apply"),
+];
+
+/// [`SURF_FAST_PASSES`] with their defines, for every host's build.
+pub fn surface_fast_modules() -> Vec<SplitModule> {
+    let mut out = vec![
+        SplitModule {
+            name: SURF_FAST_PASSES[0].0.to_string(),
+            entry: SURF_FAST_PASSES[0].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_ARGS", "1")],
+        },
+        SplitModule {
+            name: SURF_FAST_PASSES[1].0.to_string(),
+            entry: SURF_FAST_PASSES[1].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", "5"), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+        },
+        SplitModule {
+            name: SURF_FAST_PASSES[2].0.to_string(),
+            entry: SURF_FAST_PASSES[2].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", "6"), ("EB_SURF_ARGS", "1")],
+        },
+    ];
+    for (i, kind) in ["1", "2", "3", "4", "1", "2", "3", "4"].into_iter().enumerate() {
+        out.push(SplitModule {
+            name: SURF_FAST_PASSES[3 + i].0.to_string(),
+            entry: SURF_FAST_PASSES[3 + i].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+        });
     }
     out
 }
