@@ -57,8 +57,10 @@ uint selfSplitRow(uint y) { return sleepListedOn() ? sleepRow(y) : y; }
 // True (and nothing tested): the listed pairs are past the list's room, so the step walks
 // the grid itself (the caller's triangleGrid loop, selfSplitTests's below): one call site
 // of the walk where the member step has its own (the compilers inline every call).
-bool selfSplitTestsOrWalk(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
-                          uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
+// What the step does after: 1 walk the grid (the listed pairs past the list's room), 2 the
+// pieces' tests (piecesBegin and its triangleCandidates loop, then on a building step
+// piecesClearBuild): for a caller with one call site for the walk and the candidates.
+uint selfSplitTestsHow(uint v, uint lane, uint mode)
 {
     sync();
     // A building step (mode 1): the walk dispatch lists and tests the pairs
@@ -66,7 +68,7 @@ bool selfSplitTestsOrWalk(uint v, uint lane, uint mode, uint triOff, uint triCou
     // count, the list's validity and statistics after the walk (selfSplitWalkEnd).
     bool build = mode == 1u;
     uint listed = gsCount[GRID_BUCKETS + RU_COUNT].load();
-    if (!build && listed > TRI_PAIR_CAP) return true;
+    if (!build && listed > TRI_PAIR_CAP) return 1u;
     if (!build && lane == 0u)
     {
         gAcc[selfListedAt(v)].store(int(listed));
@@ -76,10 +78,14 @@ bool selfSplitTestsOrWalk(uint v, uint lane, uint mode, uint triOff, uint triCou
         gSelfArgs[at + 1u].store(int(selfSplitRows()));
         gSelfArgs[at + 2u].store(1);
     }
-    // (Both the building step and a listed one test the pieces' triangles: one call site,
-    // as the compilers inline every call.)
+    return 2u;
+}
+bool selfSplitTestsOrWalk(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
+                          uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if (selfSplitTestsHow(v, lane, mode) == 1u) return true;
     piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-    if (build && lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
+    if (mode == 1u && lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
     return false;
 }
 void selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,

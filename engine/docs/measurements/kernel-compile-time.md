@@ -454,3 +454,19 @@ cold 34 -> 30.4 s (the walk) -> 25.3 s (the pair loop). Checked: fast-check (16 
 for bit, the known quirk), the scenario matrix (12 rows bit for bit, none slower), the
 pair-reuse, contact, self-split and bitwise GPU suites in bit-exact mode (35 tests),
 `sleep-check.sh` (21), Chrome's validation of all 140 modules.
+
+### One candidate test for the pieces, the brute pairs and every candidate
+
+`piecesTestTriangle`, `triangleGridBrute` and `triangleTest` were one loop each over a
+triangle's candidates (the box and covered-cell filter or not, the geometry from the
+records or computed, `pairFar` first for the pieces), each with its own `tryContact`. They
+are one function now (`triangleCandidates`, `slang/kernels/explicit_beams_tri_cands.slang`,
+the three kept as callers of it), and the member step, which runs one of the three a
+step, calls it from one loop (the self split's listed path reports "pieces",
+`selfSplitTestsHow`). The same tests in the same order. Chrome cold:
+`explicit_beams_selfsplit_member_vv_wide` 16.5 -> 13.6 s; with the earlier changes,
+`explicit_beams_contact_wide_nosurf` 81.6 s (from 119), `explicit_beams_solo_wide_nosurf`
+25.4 s, `explicit_beams_split_grouplevels_wide` 9.0 s. Checked: fast-check (16 of 17 bit
+for bit, the known quirk), `groupsplit`, the scenario matrix (12 rows bit for bit, none
+slower), the pair-reuse, contact, self-split, bitwise and group-split GPU suites in
+bit-exact mode (38 tests), `sleep-check.sh` (21), Chrome's validation of all 140 modules.

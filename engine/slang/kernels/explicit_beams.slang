@@ -3879,13 +3879,12 @@ TriGeo triGeoLoad(uint gt)
 
 // Lane `sub` of the `lanes` lanes of triangle gt tests candidates sub, sub + lanes, …
 // Forces go to fixed-point atomics, so the lanes' order does not change the sums.
+void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
+                        uint beamOff, uint groupOff, uint groupCount, uint parity, uint mode);
 void triangleTest(uint gt, uint sub, uint lanes, float3 origin, float r, uint candOff, uint candCount,
                   uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r, parity);
-    for (uint k = sub, kStop = EB_END(13, k, candCount, lanes); k < kStop; k += lanes)
-        tryContact(t, gLists[candOff + k], origin, r, beamOff, groupOff, groupCount, parity);
+    triangleCandidates(gt, sub, lanes, origin, r, 1.0, candOff, candCount, beamOff, groupOff, groupCount, parity, 0u);
 }
 
 // The grid's bucket of a cell.
@@ -4059,47 +4058,7 @@ static const uint BRUTE_PAIRS_PER_LANE = 16u;
 void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
                        uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    TriGeo t = triangleGeo(gt, origin, r, parity);
-    float3 f0 = floor((t.lo - origin) / cell);
-    float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
-    // Too many cells: every candidate (no filter), else those the grid walk visits;
-    // one call site of tryContact for both (the compilers inline every call).
-    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
-    int3 c0 = int3(0, 0, 0);
-    int3 span = int3(1, 1, 1);
-    uint yz = 1u;
-    uint cells = 0u;
-    if (!every)
-    {
-        c0 = int3(f0);
-        span = int3(fs);
-        yz = uint(span.y * span.z);
-        cells = uint(span.x) * yz;
-    }
-    for (uint k = sub, kStop = EB_END(17, k, candCount, subs); k < kStop; k += subs)
-    {
-        uint h = gLists[candOff + k];
-        if (!every)
-        {
-            float3 e = gNodes[h * 3u].xyz;
-            float3 p = origin + e;
-            if (any(p < t.lo) || any(p > t.hi)) continue;
-            int3 c = int3(floor(e / cell));
-            if (!(all(c >= c0) && all(c < c0 + span)))
-            {
-                // Outside the covered cells: tested only when its bucket is a covered
-                // cell's (a hash collision the grid walk would visit).
-                uint b = gridBucket(c);
-                bool covered = false;
-                for (uint i = 0u, iStop = EB_END(18, i, cells, 1u); i < iStop; i++)
-                    covered = covered
-                        || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
-                if (!covered) continue;
-            }
-        }
-        tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
-    }
+    triangleCandidates(gt, sub, subs, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, 1u);
 }
 
 // Whether contacter h is provably too far from triangle t's plane for tryContact to do
@@ -4116,6 +4075,8 @@ bool pairFar(TriGeo t, uint h, float3 origin, float r)
     float reach = max(r, CLIP_DEPTH);
     return abs(delta) > reach * 1.001 + 1.0e-4;
 }
+
+#include "explicit_beams_tri_cands.slang"
 
 // A step without the grid finds its self-collision candidates early: the beam
 // phase (positions are final after the node phase) lists the (triangle, candidate)
@@ -4540,19 +4501,28 @@ bool piecesBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, ui
 
 // pairReuseTests' volatile triangles (labels in use): every candidate of each, as the walk
 // tests it (pairReuseTest), PIECE_SUBS lanes a triangle.
-void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float cell, uint candOff, uint candCount,
-                 uint beamOff, uint groupOff, uint groupCount, uint parity)
+// The volatile triangles' tests' count (0: none) and lanes a triangle (piecesTests's,
+// for a caller with its own loop of triangleCandidates).
+uint piecesBegin(uint v, uint lane, out uint subs)
 {
-    if (!piecesOn(v)) return;
+    subs = PIECE_SUBS;
+    if (!piecesOn(v)) return 0u;
 #ifdef EB_ABLATE
     // Measurement only (time): 2^28 the volatile triangles' tests (also the surface
     // pass's, which this scene does not run).
-    if ((gP.ablate & 268435456u) != 0u) return;
+    if ((gP.ablate & 268435456u) != 0u) return 0u;
 #endif
     uint vol = gsCount[GRID_BUCKETS + RU_VOL].load();
     if (lane == 0u) gsCount[GRID_BUCKETS + RU_VSUM].add(vol);
     // Few triangles: more lanes each (the same tests, spread wider).
-    uint subs = max(PIECE_SUBS, min(64u, LANES / max(vol, 1u)));
+    subs = max(PIECE_SUBS, min(64u, LANES / max(vol, 1u)));
+    return vol;
+}
+void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float cell, uint candOff, uint candCount,
+                 uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint subs;
+    uint vol = piecesBegin(v, lane, subs);
     for (uint p = lane, pStop = EB_END(25, p, vol * subs, LANES); p < pStop; p += LANES)
         piecesTestTriangle(gNext[pieceVolAt(triOff + p / subs)], p % subs, subs, origin, r, cell, candOff, candCount,
                            beamOff, groupOff, groupCount, parity);
@@ -4563,47 +4533,7 @@ void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float c
 void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
                         uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
-    uint at = gP.triGeo + gt * TRI_GEO_RECS;
-    float4 r4 = gBeams[at + 4u];
-    float4 r5 = gBeams[at + 5u];
-    float3 lo = r4.xyz;
-    float3 hi = float3(r4.w, r5.xy);
-    float3 f0 = floor((lo - origin) / cell);
-    float3 fs = floor((hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
-    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
-    int3 c0 = int3(0, 0, 0);
-    int3 span = int3(1, 1, 1);
-    if (!every)
-    {
-        c0 = int3(f0);
-        span = int3(fs);
-    }
-    TriGeo t = triGeoLoad(gt);
-    for (uint c = sub, cStop = EB_END(26, c, candCount, subs); c < cStop; c += subs)
-    {
-        uint h = gLists[candOff + c];
-        if (!every)
-        {
-            float3 e = gNodes[h * 3u].xyz;
-            float3 p = origin + e;
-            if (any(p < lo) || any(p > hi)) continue;
-            int3 cc = int3(floor(e / cell));
-            if (!(all(cc >= c0) && all(cc < c0 + span)))
-            {
-                uint yz = uint(span.y * span.z);
-                uint cells = uint(span.x) * yz;
-                uint b = gridBucket(cc);
-                bool covered = false;
-                for (uint i = 0u, iStop = EB_END(27, i, cells, 1u); i < iStop; i++)
-                    covered = covered
-                        || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
-                if (!covered) continue;
-            }
-        }
-        if (pairFar(t, h, origin, r)) continue;
-        tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
-    }
+    triangleCandidates(gt, sub, subs, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, 2u);
 }
 
 // After the node phase (its last writes to positions and velocities: the lane's own
@@ -8621,9 +8551,12 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
         sync();
     }
     // The grid's walk below: the step's own, or the self split's when its listed pairs
-    // are past the list's room (selfSplitTestsOrWalk): one call site of triangleGrid.
+    // are past the list's room (selfSplitTestsHow): one call site of triangleGrid. And one
+    // loop of triangleCandidates for the pieces', the brute pairs' or every candidate's
+    // tests (a step runs one of them): one call site of tryContact for the three.
     bool walk = candCount > 0u && cell > 0.0 && gridOn != 0u;
     bool listedTests = false;
+    bool pieces = false;
 #ifdef EB_SOLO_STEP
     if (gridOn != 0u && reuse != 0u)
     {
@@ -8633,8 +8566,9 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
         // and pairs dispatches after this one.
         if (reuse == 1u)
             selfSplitBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount, parity);
-        walk = selfSplitTestsOrWalk(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff,
-                                    groupOff, groupCount, parity);
+        uint how = selfSplitTestsHow(v, lane, reuse);
+        walk = how == 1u;
+        pieces = how == 2u;
 #else
         memberListTests(v, lane, reuse, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
                         beamOff, groupOff, groupCount, parity);
@@ -8652,26 +8586,33 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
                          groupCount, parity, 0u);
         }
     }
-    else if (!listedTests && candCount > 0u && cell > 0.0)
+    uint cmode = 3u; // 2 the pieces', 1 the brute pairs', 0 every candidate's (triangleCandidates)
+    uint cN = 0u;
+    uint ck = 1u;
+    uint cstride = LANES;
+    if (pieces)
     {
-        uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
-        uint stride = (LANES / lanes) * lanes;
-        for (uint p = lane, pStop = EB_END(153, p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
-        {
-            uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
-            triangleGridBrute(triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
-                              groupOff, groupCount, parity);
-        }
+        cN = piecesBegin(v, lane, ck);
+        cN *= ck;
+        cmode = 2u;
     }
-    else if (!listedTests && candCount > 0u)
+    else if (!walk && !listedTests && candCount > 0u)
     {
-        uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
-        uint stride = (LANES / lanes) * lanes;
-        for (uint p = lane, pStop = EB_END(154, p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
-            triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
-                         groupCount, parity);
+        bool brute = cell > 0.0;
+        uint listed = brute && triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+        ck = clamp(LANES / max(listed, 1u), 1u, candCount);
+        cstride = (LANES / ck) * ck;
+        cN = listed * ck;
+        cmode = brute ? 1u : 0u;
     }
+    for (uint p = lane, pStop = EB_END(153, p, cN, cstride); p < pStop && lane < cstride; p += cstride)
+    {
+        uint q = p / ck;
+        uint gt = cmode == 2u ? gNext[pieceVolAt(triOff + q)] : triOff + (cmode == 1u && triCount <= TRI_LIST ? gsTested[q] : q);
+        triangleCandidates(gt, p % ck, ck, origin, range, cell, candOff, candCount, beamOff, groupOff, groupCount, parity,
+                           cmode);
+    }
+    if (pieces && reuse == 1u && lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
 #ifdef EB_SELF_SPLIT
     if (keep)
     {

@@ -46,7 +46,7 @@ crates/engine-world/src/play/showcase.rs 1963
 crates/engine-world/src/threshold.rs 4061
 crates/engine-world/src/vehicle_lab/mod.rs 3630
 experiments/gpu-floor/src/floor.rs 1950
-slang/kernels/explicit_beams.slang 11613
+slang/kernels/explicit_beams.slang 11554
 slang/kernels/explicit_beams_baseline.slang 3609
 slang/kernels/explicit_beams_ref.slang 4932
 slang/kernels/terrain_mpm.slang 3729
