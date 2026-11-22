@@ -22,6 +22,9 @@ use engine_webgpu::{CouplingCapacity, CouplingLayout, ExplicitBeamsGpu, VEHICLE_
 
 pub use cw::{wheel_reach, PROXY_SLACK};
 
+#[path = "explicit_vehicles_portable.rs"]
+mod portable;
+
 /// How the World couples its explicit vehicles ([`World::add_explicit_vehicles`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExplicitVehiclesDef {
