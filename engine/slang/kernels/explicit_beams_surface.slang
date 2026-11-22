@@ -1184,6 +1184,18 @@ uint surfaceOn() { return 0u; }
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 #endif
 
+// Whether the host runs the surface pass as its own pipelines between this module's
+// dispatches (explicit_beams_surface_pipes.slang; uniform: a parameter): a self split
+// module (built without the pass, EB_NO_SURFACE) run for a fleet with surface contact,
+// which a host does only with the pipelines (engine_exec explicit_plan
+// FramePlanner::surface_piped). A solo vehicle's step then leaves its self-collision hits
+// to a dispatch before the pipelines (explicit_beams_selfsplit_frame.slang soloRest).
+#if defined(EB_NO_SURFACE) && defined(EB_SELF_SPLIT)
+bool surfPiped() { return gP.surfSplit != 0u; }
+#else
+bool surfPiped() { return false; }
+#endif
+
 #if defined(EB_FRAME_SEG) || defined(EB_SURF_PIPE) || defined(EB_SOLO_STEP)
 // A frame in segments with the surface pass as its own pipelines
 // (explicit_beams_surface_pipes.slang): per vehicle one gMisc record, the wide passes'

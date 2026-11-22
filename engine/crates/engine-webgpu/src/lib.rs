@@ -231,7 +231,12 @@ pub const EXPLICIT_BEAMS_WIDE_LIST: [(&str, Kernel); 2] = [
     ("explicit_beams_selfsplit_list", kernel!("explicit_beams_selfsplit_list")),
     ("explicit_beams_selfsplit_list_wide", kernel!("explicit_beams_selfsplit_list_wide")),
 ];
-pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, Kernel); 24] = [
+pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, Kernel); 28] = [
+    // (With surface contact as pipelines: the solo vehicles' rest, `explicit_beams_solo_rest`.)
+    ("explicit_beams_selfsplit_rest_vv", kernel!("explicit_beams_selfsplit_rest_vv")),
+    ("explicit_beams_selfsplit_rest_vv_wide", kernel!("explicit_beams_selfsplit_rest_vv_wide")),
+    ("explicit_beams_selfsplit_rest_vv_aero", kernel!("explicit_beams_selfsplit_rest_vv_aero")),
+    ("explicit_beams_selfsplit_rest_vv_aero_wide", kernel!("explicit_beams_selfsplit_rest_vv_aero_wide")),
     ("explicit_beams_selfsplit_step", kernel!("explicit_beams_selfsplit_step")),
     ("explicit_beams_selfsplit_walk", kernel!("explicit_beams_selfsplit_walk")),
     ("explicit_beams_selfsplit_pairs", kernel!("explicit_beams_selfsplit_pairs")),

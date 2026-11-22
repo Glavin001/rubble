@@ -2928,6 +2928,12 @@ pub struct FramePlanner {
     surface: bool,
     /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
     surface_split: bool,
+    /// [`Self::set_surface_fast`].
+    surface_fast: bool,
+    /// The wide passes could run this fleet but for its surface contact (at most
+    /// [`WIDE_MAX_VEHICLES`] vehicles, no wings): [`ExplicitLayout::wide_ok`] without
+    /// its surface term.
+    wide_capable: bool,
     /// [`ExplicitLayout::loop_unit`].
     loop_unit: u64,
 }
@@ -2952,6 +2958,8 @@ impl FramePlanner {
             wide_sleep: false,
             surface: layout.surface,
             surface_split: false,
+            surface_fast: false,
+            wide_capable: layout.wide_capable(),
             loop_unit: layout.loop_unit,
         }
     }
@@ -2959,6 +2967,31 @@ impl FramePlanner {
     /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
     pub fn has_surface(&self) -> bool {
         self.surface
+    }
+
+    /// A fleet with surface contact on the fast schedules (the wide passes with their
+    /// reused pair list, self-collision split with vehicle contact), the surface pass as
+    /// its own pipelines ([`Kernel::Surf`]) at the point of each step where the frame
+    /// kernel runs it: after the step's self-collision hits are applied, before its
+    /// slide nodes and closing barrier. Off (the default here; a host turns it on,
+    /// [`schedule::surface_fast_default`]): such a fleet keeps a workgroup a vehicle or a
+    /// group with the pass inside it, or the frame in segments. The same results bit
+    /// for bit (vehicle-perf-first-principles.md §8.53). No effect without surface
+    /// contact.
+    pub fn set_surface_fast(&mut self, on: bool) {
+        self.surface_fast = on;
+    }
+
+    /// The fleet has surface contact and runs it as pipelines on the fast schedules
+    /// ([`Self::set_surface_fast`]).
+    pub fn surface_piped(&self) -> bool {
+        self.surface && self.surface_fast
+    }
+
+    /// The wide passes may run this fleet: [`ExplicitLayout::wide_ok`], and with
+    /// surface contact only with the pass as pipelines ([`Self::surface_piped`]).
+    fn wide_ok(&self) -> bool {
+        self.wide_ok || (self.wide_capable && self.surface_piped())
     }
 
     /// A host with the split modules ([`Kernel::FrameSeg`], [`Kernel::Surf`]): frames of
@@ -3064,7 +3097,7 @@ impl FramePlanner {
     /// sleeping vehicle's step count stands, so a fleet with sleep keeps a workgroup (or
     /// a step's dispatches) a vehicle.
     pub fn is_wide(&self) -> bool {
-        self.wide_ok && self.wide_on && !self.contact_active() && (!self.sleep_on() || (self.wide_sleep && self.nv == 1))
+        self.wide_ok() && self.wide_on && !self.contact_active() && (!self.sleep_on() || (self.wide_sleep && self.nv == 1))
     }
 
     /// A host whose wide passes run vehicle sleep for a lone vehicle (the kernel's
@@ -3076,7 +3109,9 @@ impl FramePlanner {
     /// Run frames as the wide passes or one workgroup per vehicle; returns
     /// [`Self::is_wide`].
     pub fn set_wide(&mut self, on: bool) -> bool {
-        if self.wide_ok {
+        // (A fleet with surface contact keeps the choice for when its pass runs as
+        // pipelines, [`Self::set_surface_fast`]; until then its frames are not wide.)
+        if self.wide_capable {
             self.wide_on = on;
         }
         self.is_wide()
@@ -3207,10 +3242,16 @@ impl FramePlanner {
             out
         } else if self.is_wide() && wide_allowed {
             let plan = self.wide_plan(steps);
-            let mut out: Vec<Cmd> = plan
-                .iter()
-                .map(|&(k, kind, x)| d(Kernel::Wide(kind), x, k))
-                .collect();
+            let mut out: Vec<Cmd> = Vec::with_capacity(plan.len() + 1);
+            for &(k, kind, x) in &plan {
+                out.push(d(Kernel::Wide(kind), x, k));
+                // Surface contact (the fleet's pass as pipelines, [`Self::surface_piped`]):
+                // step k's surface pass after its hits are applied, a workgroup a
+                // vehicle, as the frame runs it after selfApply.
+                if kind == WIDE_HITS && self.surface {
+                    out.extend((0..SURF_PASSES.len()).map(|i| d(Kernel::Surf(i), nv, k)));
+                }
+            }
             // Begin and rebase, then the vehicles' origins and steps into the
             // table, then the steps.
             out.insert(
@@ -3322,6 +3363,14 @@ impl FramePlanner {
 impl ExplicitLayout {
     pub fn vehicles(&self) -> usize {
         self.spans.len()
+    }
+
+    /// The wide passes can run this fleet, or could but for its surface contact
+    /// ([`Self::wide_ok`] without that term): with the surface pass as pipelines
+    /// ([`FramePlanner::set_surface_fast`]) they do. A host builds its wide pipelines
+    /// by this.
+    pub fn wide_capable(&self) -> bool {
+        self.wide_ok || (self.surface && self.spans.len() <= WIDE_MAX_VEHICLES && !self.aero)
     }
 
     /// Byte offset in [`BIND_NODES`] of a node's velocity (3 f32).

@@ -11,7 +11,8 @@
 //! pipeline and buffers and owns nothing of the order.
 
 use super::{
-    self_split_module_names, split_module_name, wide_list_module_name, Cmd, FramePlanner, Kernel, PARAM_COPIES,
+    self_split_module_names, solo_rest_module_name, split_module_name, wide_list_module_name, Cmd, FramePlanner, Kernel, PARAM_COPIES,
+    SOLO_REST_ENTRY, SURF_PASSES,
     PARAM_LEVEL_COPIES, PARAM_STRIDE, PERF_AHEAD_APART, PERF_FLEET_ANY, PERF_FLEET_FRONT, PERF_FLEET_FUSE,
     PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_HIT_SLOT_MAP, PERF_KEEP_TRACK_REST, PERF_MEMBER_LIST,
     PERF_WHEELS_APART, PERF_WIDE_FUSED, PERF_WIDE_LIST, PERF_DRIVE_AHEAD, PERF_SPLIT_WHEELS_AHEAD, PERF_TYRE_AHEAD,
@@ -98,6 +99,16 @@ pub enum GroupOp {
     /// pairs, before the groups' pass; parameter copy `copy` (the step with the kernel's
     /// SPLIT_LEVELS). No workgroups without a group.
     SelfRest { copy: u32 },
+    /// Self-collision split with surface contact as pipelines
+    /// ([`FramePlanner::surface_piped`]): the solo vehicles' step `copy` after its walk
+    /// and pairs, its self-collision hits applied (the kernel's soloRest: what the next
+    /// step dispatch's start runs without surface contact), a workgroup a vehicle; a
+    /// group's member returns at once. The surface pipelines follow.
+    SoloRest { copy: u32 },
+    /// The surface pass's pipeline `pass` ([`SURF_PASSES`]) of step `copy`, a workgroup
+    /// each of `groups` vehicles: after the step's self-collision hits (the members'
+    /// rest, the solo vehicles'), before the groups' pass.
+    Surf { copy: u32, pass: u8, groups: u32 },
     /// The members' raycast wheels on each other before step `copy` (copy steps + 1: the
     /// frame's end, the last step's reactions only), a workgroup a group
     /// ([`Switches::wheels_bodies`]).
@@ -174,6 +185,8 @@ impl GroupOp {
             GroupOp::SelfWalk { .. } => "explicit self walk",
             GroupOp::SelfPairs { .. } => "explicit self pairs",
             GroupOp::SelfRest { .. } => "explicit self members' hits",
+            GroupOp::SoloRest { .. } => "explicit self solo hits",
+            GroupOp::Surf { pass, .. } => SURF_PASSES[pass as usize].0,
             GroupOp::Wheels { .. } => "explicit split wheels on cars",
         }
     }
@@ -281,8 +294,12 @@ pub struct Switches<'a> {
 impl Switches<'_> {
     /// The wide passes' fused aux work as frames take it: not while wheels see bodies
     /// (it runs step s + 1's wheels beside step s's proxies).
-    pub fn wide_fused_on(&self) -> bool {
-        self.wide_fused && !self.wheels_bodies
+    /// Nor with surface contact: step s's surface pass reads the proxies' poses and the
+    /// nodes' accumulators as step s's hits left them and writes the bodies' sums and the
+    /// hubs' accumulators, which step s + 1's coupling and tyres read; fused, those run
+    /// on step s's list and hits kernels, before the pass.
+    pub fn wide_fused_on(&self, planner: &FramePlanner) -> bool {
+        self.wide_fused && !self.wheels_bodies && !planner.has_surface()
     }
 }
 
@@ -499,6 +516,18 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
         Op::Group(GroupOp::SelfRest { copy }) => {
             l(selfs(true, 0), copy, Grid::Indirect(ArgBuf::Plan, SPLIT_MEMBER_ARGS), Some(ArgBuf::SelfSplit), None)
         }
+        // (Every vehicle's workgroup, as the vehicles' step: a member's returns at once.)
+        Op::Group(GroupOp::SoloRest { copy }) => l(
+            (solo_rest_module_name(aero, lanes, true), SOLO_REST_ENTRY),
+            copy,
+            Grid::Indirect(ArgBuf::Plan, SPLIT_ALL_ARGS),
+            None,
+            None,
+        ),
+        Op::Group(GroupOp::Surf { copy, pass, groups }) => {
+            let (module, entry) = SURF_PASSES[pass as usize];
+            l((module.to_string(), entry), copy, Grid::Groups(groups), None, None)
+        }
     })
 }
 
@@ -649,11 +678,31 @@ pub fn member_rest_on(planner: &FramePlanner, vv: bool) -> bool {
     vv && planner.perf_flags() & PERF_MEMBER_LIST != 0
 }
 
+/// Whether the modules of surface contact on the self split path with vehicle contact are
+/// compiled: the surface pass's pipelines and the solo vehicles' rest.
+fn surface_pipes_ready(sw: &Switches) -> bool {
+    SURF_PASSES.iter().all(|(m, _)| (sw.ready)(m)) && (sw.ready)(&solo_rest_module_name(sw.aero, sw.lanes, true))
+}
+
+/// Whether hosts run a fleet with surface contact on the fast schedules, its pass as
+/// pipelines ([`FramePlanner::set_surface_fast`]): on natively and on CUDA unless
+/// `RUBBLE_SURFACE_FAST=0`; off in a browser (wasm32) until Chrome's bit-for-bit A/B has
+/// held it there (AGENTS.md, rung 3).
+pub fn surface_fast_default() -> bool {
+    match std::env::var("RUBBLE_SURFACE_FAST").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => cfg!(not(target_arch = "wasm32")),
+    }
+}
+
 /// Whether this frame (its commands) runs self-collision split with vehicle contact.
 fn self_split_vv_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[Cmd]) -> bool {
     sw.self_split
         && planner.contact_active()
-        && !planner.has_surface()
+        // (Surface contact: only with its pass as pipelines between the dispatches, and
+        // those modules compiled.)
+        && (!planner.has_surface() || (planner.surface_piped() && surface_pipes_ready(sw)))
         && sw.current
         && !sw.debug
         && steps > 0
@@ -692,9 +741,9 @@ fn self_split_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[Cmd]
 /// coupling and wheels (the kernel's `wideAheadApart`).
 pub fn list_groups(planner: &FramePlanner, sw: &Switches, nv: u32) -> u32 {
     let f = planner.perf_flags();
-    if sw.wide_fused_on() && f & PERF_AHEAD_APART != 0 && f & PERF_WHEELS_APART != 0 {
+    if sw.wide_fused_on(planner) && f & PERF_AHEAD_APART != 0 && f & PERF_WHEELS_APART != 0 {
         3 * nv
-    } else if sw.wide_fused_on() && f & PERF_AHEAD_APART != 0 {
+    } else if sw.wide_fused_on(planner) && f & PERF_AHEAD_APART != 0 {
         2 * nv
     } else {
         nv
@@ -733,6 +782,14 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             out.push(GroupOp::SelfPairs { copy: s, offset: 12 * slot });
             if member_rest_on(planner, vv) {
                 out.push(GroupOp::SelfRest { copy: steps + 2 + s });
+            }
+            // Surface contact as pipelines: the solo vehicles' hits applied (the members'
+            // were, above, or in their step), then step s's surface pass for every
+            // vehicle, where the frame kernel runs it: after the step's self-collision
+            // and before the groups' pass.
+            if planner.surface_piped() {
+                out.push(GroupOp::SoloRest { copy: s });
+                out.extend((0..SURF_PASSES.len()).map(|i| GroupOp::Surf { copy: s, pass: i as u8, groups: planner.vehicles() }));
             }
         } else {
             out.push(GroupOp::Member(s));
@@ -840,7 +897,8 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
     let wl = wide
         && sw.wide_list
         && steps > 0
-        && !planner.has_surface()
+        // (A wide frame of a fleet with surface contact has its pass as pipelines after
+        // each step's hits: FramePlanner::commands.)
         && sw.current
         && self_split_ready(planner, sw, false)
         && (sw.ready)(wide_list_module_name(sw.lanes));
@@ -850,7 +908,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         let at = 4 * W_PERF_FLAGS;
         let flags = planner.words[W_PERF_FLAGS];
         for k in 0..=steps as usize {
-            let fused = if sw.wide_fused_on() { PERF_WIDE_FUSED } else { 0 };
+            let fused = if sw.wide_fused_on(planner) { PERF_WIDE_FUSED } else { 0 };
             bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(flags | PERF_WIDE_LIST | fused).to_le_bytes());
         }
         bytes
@@ -978,7 +1036,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
             }
             // (PERF_WIDE_FUSED: steps 1..'s coupling and wheels ran on the step
             // before's list and hits kernels.)
-            if k == WIDE_AUX && sw.wide_fused_on() && param_copy >= 1 && param_copy < steps {
+            if k == WIDE_AUX && sw.wide_fused_on(planner) && param_copy >= 1 && param_copy < steps {
                 continue;
             }
             if k == WIDE_END {
@@ -1016,6 +1074,141 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn surface_cars(n: usize) -> Vec<engine_softbody::explicit_beams::ExplicitBeams> {
+        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+        let text = "nodes\n0, 0.0, 0.0, 0.0\n1, 0.3, 0.0, 0.0\n2, 0.0, 0.3, 0.0\nbeams\n0, 1\n1, 2\n2, 0\nend\n";
+        (0..n)
+            .map(|k| {
+                let mut v = ExplicitBeams::from_truck(text, glam::Vec3::new(5.0 * k as f32, 1.0, 0.0), glam::Vec3::ZERO, ExplicitBeamsSettings::default())
+                    .expect("the truck parses");
+                v.surface_contact = true;
+                v
+            })
+            .collect()
+    }
+
+    fn switches(ready: &dyn Fn(&str) -> bool, vehicles: usize, lanes: u32) -> Switches<'_> {
+        Switches {
+            group_split: true,
+            group_split_tests: true,
+            self_split: true,
+            wide_list: true,
+            wide_fused: true,
+            wheels_bodies: false,
+            vv_grid: true,
+            group_apart: true,
+            current: true,
+            ablate: false,
+            debug: false,
+            wide_allowed: true,
+            aero: false,
+            lanes,
+            vehicles,
+            level_want: 0,
+            self_split_skip: 0,
+            ready,
+        }
+    }
+
+    /// A lone car with surface contact, its pass as pipelines
+    /// (`FramePlanner::set_surface_fast`): the wide passes with the reused pair list,
+    /// and after each step's hits the surface pass's pipelines in order, every one
+    /// on the step's parameter copy; the aux pass every step (no fused coupling and
+    /// wheels: they would run before the pass). Off: the frame in segments, as before.
+    #[test]
+    fn a_lone_surface_car_runs_wide_with_the_pipelines_after_each_steps_hits() {
+        use super::super::{ExplicitUpload, WIDE_HITS};
+        let up = ExplicitUpload::new(&surface_cars(1), None);
+        assert!(up.layout.surface && !up.layout.wide_ok && up.layout.wide_capable());
+        let ready = |_: &str| true;
+        let sw = switches(&ready, 1, up.layout.lanes);
+        let steps = 5;
+        let mut planner = FramePlanner::new(&up.layout);
+        planner.set_surface_split(true);
+        planner.set_wide(true);
+        assert!(!planner.is_wide(), "wide only with the pass as pipelines");
+        let off = frame(&mut planner, &sw, steps);
+        assert!(off.ops().all(|op| matches!(op, Op::Cmd(Cmd::Dispatch { kernel: Kernel::FrameSeg | Kernel::Surf(_), .. }))));
+        planner.set_surface_fast(true);
+        assert!(planner.is_wide());
+        let on = frame(&mut planner, &sw, steps);
+        assert_eq!(on.kind.wide_list, steps);
+        let ops: Vec<Op> = on.ops().copied().collect();
+        let mut hits = 0;
+        for (i, op) in ops.iter().enumerate() {
+            let Op::Cmd(Cmd::Dispatch { kernel: Kernel::Wide(k), param_copy, .. }) = *op else { continue };
+            if k != WIDE_HITS {
+                continue;
+            }
+            hits += 1;
+            for (j, _) in SURF_PASSES.iter().enumerate() {
+                assert_eq!(
+                    ops[i + 1 + j],
+                    Op::Cmd(Cmd::Dispatch { kernel: Kernel::Surf(j), groups: 1, param_copy }),
+                    "step {param_copy}: pipeline {j} after the hits"
+                );
+            }
+        }
+        assert_eq!(hits, steps);
+        assert_eq!(ops.iter().filter(|op| matches!(op, Op::Cmd(Cmd::Dispatch { kernel: Kernel::Surf(_), .. }))).count(), steps as usize * SURF_PASSES.len());
+        // The aux pass (the coupling's step, the wheels) every step and at the end:
+        // never fused onto the list and hits kernels with surface contact.
+        let aux = ops.iter().filter(|op| matches!(op, Op::Cmd(Cmd::Dispatch { kernel: Kernel::Wide(k), .. }) if *k == WIDE_AUX)).count();
+        assert!(aux == 0 || aux == steps as usize + 1, "{aux} aux passes");
+        let at = 4 * W_PERF_FLAGS;
+        let flags = u32::from_le_bytes(on.params[at..at + 4].try_into().unwrap());
+        assert_eq!(flags & PERF_WIDE_FUSED, 0);
+        assert_ne!(flags & PERF_WIDE_LIST, 0);
+    }
+
+    /// Cars with surface contact and vehicle contact, the pass as pipelines: self split
+    /// with vehicle contact, and in each step after the vehicles' step, the walk, the
+    /// pairs and the members' rest: the solo vehicles' rest, then the pipelines over
+    /// every vehicle on the step's own copy, before the groups' pass. Off, or until the
+    /// pipelines' modules are compiled: no self split (the pass in the kernels).
+    #[test]
+    fn surface_cars_in_contact_run_self_split_with_the_pipelines_before_the_groups() {
+        use super::super::ExplicitUpload;
+        let up = ExplicitUpload::new(&surface_cars(3), None);
+        let ready = |_: &str| true;
+        let sw = switches(&ready, 3, up.layout.lanes);
+        let steps = 4;
+        let mut planner = FramePlanner::new(&up.layout);
+        let off = frame(&mut planner, &sw, steps);
+        assert!(!off.kind.self_split_vv && off.kind.group_split);
+        assert!(off.ops().all(|op| !matches!(op, Op::Group(GroupOp::Surf { .. } | GroupOp::SoloRest { .. }))));
+        planner.set_surface_fast(true);
+        let late = |m: &str| !m.starts_with("explicit_surface_");
+        let waiting = frame(&mut planner, &switches(&late, 3, up.layout.lanes), steps);
+        assert!(!waiting.kind.self_split_vv, "the pipelines' modules are not compiled yet");
+        let on = frame(&mut planner, &sw, steps);
+        assert!(on.kind.self_split_vv && on.kind.group_split);
+        let ops: Vec<GroupOp> = on.ops().filter_map(|op| if let Op::Group(g) = op { Some(*g) } else { None }).collect();
+        for s in 0..steps {
+            let at = ops.iter().position(|g| *g == GroupOp::SelfMember(s)).expect("the vehicles' step");
+            let pairs = ops.iter().position(|g| matches!(g, GroupOp::SelfPairs { copy, .. } if *copy == s)).expect("the pairs");
+            let rest = ops.iter().position(|g| *g == GroupOp::SoloRest { copy: s }).expect("the solo vehicles' rest");
+            assert!(at < pairs && pairs < rest);
+            if let Some(m) = ops.iter().position(|g| *g == GroupOp::SelfRest { copy: steps + 2 + s }) {
+                assert!(pairs < m && m < rest, "the members' rest before the solo vehicles'");
+            }
+            for (j, _) in SURF_PASSES.iter().enumerate() {
+                assert_eq!(ops[rest + 1 + j], GroupOp::Surf { copy: s, pass: j as u8, groups: 3 });
+            }
+            // The groups' pass of the step (its levels) comes after the pipelines.
+            let levels = ops
+                .iter()
+                .position(|g| matches!(g, GroupOp::Group { copy, part: 4, .. } if *copy == steps + 2 + s))
+                .expect("the groups' levels");
+            assert!(levels > rest + SURF_PASSES.len());
+            let l = split_launch(&Op::Group(ops[rest]), false, up.layout.lanes, &on.kind).unwrap();
+            assert_eq!((l.entry, l.copy, l.grid), (SOLO_REST_ENTRY, s, Grid::Indirect(ArgBuf::Plan, SPLIT_ALL_ARGS)));
+            let l = split_launch(&Op::Group(ops[rest + 1]), false, up.layout.lanes, &on.kind).unwrap();
+            assert_eq!((l.module.as_str(), l.entry, l.copy, l.grid), (SURF_PASSES[0].0, SURF_PASSES[0].1, s, Grid::Groups(3)));
+        }
+        assert_eq!(ops.last(), Some(&GroupOp::SelfMember(steps)));
+    }
 
     /// The split frame's dispatches for 1, 4 and 64 vehicles, 1 to 34 steps (and the
     /// most a parameter buffer holds): a step dispatch for each parameter copy 0 ..= steps

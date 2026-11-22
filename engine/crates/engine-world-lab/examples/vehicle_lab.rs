@@ -1334,6 +1334,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `--ab-switch selfsplit`: self-collision's listed pairs across workgroups
     // (`set_self_split`, selfcol-design.md) against the tests in the car's workgroup.
     let selfsplit_ab = arg("--ab-switch").as_deref() == Some("selfsplit");
+    // `--ab-switch surffast`: a fleet with surface contact on the fast schedules, the
+    // surface pass as its own pipelines (`set_surface_fast`), against a workgroup a
+    // vehicle or group with the pass inside it (or the frame in segments).
+    let surffast_ab = arg("--ab-switch").as_deref() == Some("surffast");
     // `--ab-switch beams`: the beam phase on its records sorted by kind against file order.
     let beams_ab = arg("--ab-switch").as_deref() == Some("beams");
     // `--ab-switch wheels`: raycast wheels hitting bodies (`set_wheels_see_bodies`) on
@@ -1429,6 +1433,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.set_wheels_see_bodies(on);
         } else if selfsplit_ab {
             x.set_self_split(on);
+        } else if surffast_ab {
+            x.set_surface_fast(on);
         } else if coupling_ab {
             x.set_coupling_candidate_list(on);
         } else if fold_ab {
@@ -2738,6 +2744,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     "sorted beams"
                 } else if selfsplit_ab {
                     "self split"
+                } else if surffast_ab {
+                    "surface contact on the fast schedules"
                 } else if coupling_ab {
                     "coupling list"
                 } else if fold_ab {
@@ -2763,6 +2771,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             if wide_ab {
                 println!("   wide: nodes, beams and groups bit for bit: {physics}");
             }
+            // (A lone car's fast schedule is the wide passes, against the frame in
+            // segments: the same scratch difference as the wide switch's. Its verdict:
+            // the nodes, beams and groups, vehicle sleep's words, and the coupling's
+            // (every proxy record and sum), which surface contact writes.)
+            let wide_side = surffast_ab && x.is_wide();
+            let physics_cpl = physics
+                && out[0].2.iter().zip(&out[1].2).all(|((_, a), (_, b))| a == b);
+            if wide_side {
+                println!("   surface fast on the wide passes: nodes, beams, groups, coupling and sleep words bit for bit: {physics_cpl}");
+            }
             // The two sides' physical difference (for a switch not bit for bit by design,
             // as bitexact): the largest node distance per car, the broken beams and the
             // nodes' kinetic energy each side, and whether every position is finite.
@@ -2785,7 +2803,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             }
             // (AB_TIME_ONLY=1: a measurement switch that changes the results on purpose.)
             // (bitexact: not bit for bit by design; the physical line above is its verdict.)
-            anyhow::ensure!(same || bitexact_ab || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
+            anyhow::ensure!(
+                same || bitexact_ab || (wide_ab && physics) || (wide_side && physics_cpl) || std::env::var("AB_TIME_ONLY").is_ok(),
+                "the A/B switch changed the state"
+            );
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();

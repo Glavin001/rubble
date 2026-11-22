@@ -548,14 +548,53 @@ pub fn coupling_node_ranges_off_default() -> bool {
     }
 }
 
-/// The split frame's pipelines and bind group ([`FramePlanner::set_surface_split`]).
+/// Measurement (mask bit 16 of [`explicit_shader_checks_off`], never in a default): the
+/// surface pass's pipelines with their workgroup memory zeroed at each workgroup's start,
+/// as naga does unless told otherwise. Natively they are made without it: naga's MSL
+/// zeroes from one lane, 0.16 to 0.19 ms a dispatch on an M3 Max for the coupling's
+/// workgroup copies (2,080 words), nine dispatches a step, 52 of the 70 ms of a one-car
+/// frame in segments (vehicle-perf-first-principles.md §8.53). Every workgroup value
+/// these entries read is written in the same dispatch before the barrier the reads
+/// follow: the coupling's header copies and the empty sphere table (coupleBegin,
+/// cplGsClear in surfPipeSkip), the prep's pair-path flag, the sleep rule's flag
+/// (sleepSkip). `--ab-switch checks=21:5` holds the two bit for bit.
+#[doc(hidden)]
+pub fn surface_pipes_zeroed(device: &wgpu::Device) -> bool {
+    explicit_shader_checks_off(device) & 16 != 0
+}
+
+/// The split frame's pipelines and bind group ([`FramePlanner::set_surface_split`]); the
+/// surface pass's pipelines also serve the fast schedules
+/// ([`FramePlanner::set_surface_fast`]), which never make the segments' pipeline.
 struct Split {
-    frame: wgpu::ComputePipeline,
+    frame: std::sync::OnceLock<wgpu::ComputePipeline>,
     surf: Vec<wgpu::ComputePipeline>,
     group: wgpu::BindGroup,
+    device: wgpu::Device,
+    pipeline_layout: wgpu::PipelineLayout,
+    frame_module: String,
+    bit_exact: bool,
 }
 
 impl Split {
+    /// The segments' pipeline ([`Kernel::FrameSeg`]), made at its first use.
+    fn frame(&self) -> &wgpu::ComputePipeline {
+        self.frame.get_or_init(|| {
+            let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
+                label: Some(&self.frame_module),
+                source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(&self.frame_module), self.bit_exact).into()),
+            });
+            self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(&self.frame_module),
+                layout: Some(&self.pipeline_layout),
+                module: &module,
+                entry_point: Some(plan::FRAME_ENTRY),
+                compilation_options: explicit_compilation_options(&self.device),
+                cache: None,
+            })
+        })
+    }
+
     fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], frame_module: &str, bit_exact: bool) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("explicit-beams-split"),
@@ -566,6 +605,9 @@ impl Split {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
+        // (The surface pass's pipelines without the zeroing of workgroup memory unless a
+        // measurement asks: surface_pipes_zeroed.)
+        let zero = surface_pipes_zeroed(device) && explicit_compilation_options(device).zero_initialize_workgroup_memory;
         let pipe = |module_name: &str, entry: &str| {
             let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                 label: Some(module_name),
@@ -576,11 +618,13 @@ impl Split {
                 layout: Some(&pipeline_layout),
                 module: &module,
                 entry_point: Some(entry),
-                compilation_options: explicit_compilation_options(device),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: zero,
+                    ..Default::default()
+                },
                 cache: None,
             })
         };
-        let frame = pipe(frame_module, plan::FRAME_ENTRY);
         let surf = plan::SURF_PASSES.iter().map(|&(m, e)| pipe(m, e)).collect();
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams-split"),
@@ -590,7 +634,15 @@ impl Split {
                 resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
             }),
         });
-        Self { frame, surf, group }
+        Self {
+            frame: std::sync::OnceLock::new(),
+            surf,
+            group,
+            device: device.clone(),
+            pipeline_layout,
+            frame_module: frame_module.to_string(),
+            bit_exact,
+        }
     }
 }
 
@@ -963,6 +1015,9 @@ struct SelfSplit {
     /// With vehicle contact: the vehicles' dispatch (the split group path's members'),
     /// the walk and the pairs that skip a group's members, compiled on first use.
     vv: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
+    /// With vehicle contact and surface contact as pipelines: the solo vehicles' rest
+    /// (`plan::SOLO_REST_ENTRY`), compiled on first use.
+    rest_vv: std::sync::OnceLock<wgpu::ComputePipeline>,
     device: wgpu::Device,
     step_layout: wgpu::PipelineLayout,
     pairs_layout: wgpu::PipelineLayout,
@@ -1027,6 +1082,7 @@ impl SelfSplit {
             args,
             ablate: std::sync::OnceLock::new(),
             vv: std::sync::OnceLock::new(),
+            rest_vv: std::sync::OnceLock::new(),
             device: device.clone(),
             step_layout,
             pairs_layout,
@@ -1081,6 +1137,13 @@ impl SelfSplit {
                 self.pipeline(&format!("explicit_beams_selfsplit_pairs_vv{t}"), "explicit_beams_self_pairs", &self.pairs_layout),
             ]
         })
+    }
+
+    /// With vehicle contact and surface contact as pipelines: the solo vehicles' rest
+    /// (their self-collision hits applied before the surface pass's pipelines).
+    fn rest_vv_pipe(&self, aero: bool, lanes: u32) -> &wgpu::ComputePipeline {
+        self.rest_vv
+            .get_or_init(|| self.pipeline(&plan::solo_rest_module_name(aero, lanes, true), plan::SOLO_REST_ENTRY, &self.pairs_layout))
     }
 
     /// The step module's ablation build (measurement only; `_wide` and 256-lane builds).
@@ -1552,6 +1615,9 @@ impl ExplicitBeamsGpu {
         // plain frame only once it is turned off (created at first use).
         let deferred = vehicles.len() > 1;
         let coupled = coupling.is_some();
+        // A fleet with surface contact on the fast schedules (the surface pass as
+        // pipelines, FramePlanner::set_surface_fast) where the host starts with them.
+        let fast = surface && plan::schedule::surface_fast_default();
         let mut specs = if surface && surface_split_for(coupled) {
             // Surface contact split from the frame: its segments' module and the
             // surface pass's pipelines (Split::new's descriptors).
@@ -1577,7 +1643,7 @@ impl ExplicitBeamsGpu {
                 deferred,
             }]
         };
-        if layout.wide_ok {
+        if layout.wide_ok || (fast && layout.wide_capable()) {
             specs.extend(plan::WIDE_PASSES.iter().map(|&entry| crate::ComputeSpec {
                 label: entry,
                 module: entry,
@@ -1640,8 +1706,23 @@ impl ExplicitBeamsGpu {
         // Self-collision split's pipelines (selfcol-design.md), deferred: a host that
         // compiles them ahead gates the split on them (crate::pipeline_ready), so the
         // first frames run the tests in the workgroup until they are compiled. Not with
-        // surface contact (the split runs only without it).
-        if !surface {
+        // surface contact (the split runs only without it), unless its pass runs as
+        // pipelines: then with the solo vehicles' rest and those pipelines.
+        if fast {
+            let rest: &'static str = crate::EXPLICIT_BEAMS_SELF_SPLIT
+                .iter()
+                .map(|(n, _)| *n)
+                .find(|n| *n == plan::solo_rest_module_name(aero, lanes, true))
+                .expect("explicit beams: the solo rest module");
+            let pipes = plan::SURF_PASSES.iter().copied().chain((vehicles.len() > 1).then_some((rest, plan::SOLO_REST_ENTRY)));
+            for (module, entry) in pipes {
+                if specs.iter().any(|s| s.module == module) {
+                    continue;
+                }
+                specs.push(crate::ComputeSpec { label: entry, module, wgsl: u(module_wgsl(module)), entry, layout: Some(split_entries()), deferred: true });
+            }
+        }
+        if !surface || fast {
             for (name, entry, args) in self_split_modules(aero, lanes, vehicles.len() > 1) {
                 if specs.iter().any(|s| s.module == name) {
                     continue;
@@ -1664,7 +1745,7 @@ impl ExplicitBeamsGpu {
         }
         // The wide passes' reused pair list (explicit_beams_wide_list), deferred as the
         // self split's: wide frames walk their own grid until it is compiled.
-        if !surface && !aero && layout.wide_ok {
+        if (!surface || fast) && !aero && layout.wide_capable() {
             let name = wide_list_module(lanes);
             specs.push(crate::ComputeSpec {
                 label: "explicit_beams_wide_list",
@@ -1680,7 +1761,7 @@ impl ExplicitBeamsGpu {
         // Chrome on Metal) and runs only with self-collision split off: where the self
         // split's modules are compiled too (its own members' step takes its place), it
         // goes last, behind every module the default path waits for.
-        if !surface {
+        if !surface || fast {
             let member = split_module("member", aero, lanes);
             if let Some(i) = specs.iter().position(|s| s.module == member) {
                 let spec = specs.remove(i);
@@ -1810,8 +1891,10 @@ impl ExplicitBeamsGpu {
             &params, &statics, &lists, &nodes, &beams, &acc, &groups, &misc, &next,
         ];
         let vehicles_n = layout.spans.len();
+        // (A fleet with surface contact too: its wide frames run with the surface pass
+        // as pipelines, FramePlanner::set_surface_fast.)
         let wide = layout
-            .wide_ok
+            .wide_capable()
             .then(|| Wide::new(device, queue, &buffers, upload.table_records(), bit_exact));
         let contact = Contact::new(
             device,
@@ -1847,6 +1930,7 @@ impl ExplicitBeamsGpu {
         ];
         let mut planner = FramePlanner::new(&layout);
         planner.set_surface_split(surface_split_for(coupled));
+        planner.set_surface_fast(plan::schedule::surface_fast_default());
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
@@ -3692,7 +3776,7 @@ impl ExplicitBeamsGpu {
                 let Cmd::Dispatch { param_copy, .. } = *cmd else { unreachable!() };
                 pass.set_pipeline(match kernel {
                     Kernel::Surf(i) => &s.surf[i],
-                    _ => &s.frame,
+                    _ => s.frame(),
                 });
                 pass.set_bind_group(0, &s.group, &[param_copy * PARAM_STRIDE as u32]);
             }
@@ -4245,6 +4329,23 @@ impl ExplicitBeamsGpu {
         self.wide_fused = on;
     }
 
+    /// A fleet with surface contact on the fast schedules (on: the wide passes with
+    /// their reused pair list, self-collision split with vehicle contact), the surface
+    /// pass as its own pipelines after each step's self-collision hits; or (off) a
+    /// workgroup a vehicle or a group with the pass inside it, or the frame in segments.
+    /// The same results bit for bit (`--ab-switch surffast`;
+    /// vehicle-perf-first-principles.md §8.53). On by default natively
+    /// ([`plan::schedule::surface_fast_default`]). No effect without surface contact.
+    pub fn set_surface_fast(&mut self, on: bool) {
+        self.planner.set_surface_fast(on);
+    }
+
+    /// Whether the fleet's surface contact runs as pipelines on the fast schedules
+    /// ([`Self::set_surface_fast`], and the fleet has surface contact).
+    pub fn surface_fast(&self) -> bool {
+        self.planner.surface_piped()
+    }
+
     /// Self-collision's listed pairs across workgroups (selfcol-design.md) on, or tested
     /// in each vehicle's workgroup (off, as before): the same results bit for bit. Off by
     /// default (`RUBBLE_SELF_SPLIT=1` on). For frames on the per-vehicle frame kernel
@@ -4636,6 +4737,21 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(&p.vv_pipes()[0]);
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
                 pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+            }
+            GroupOp::SoloRest { copy } => {
+                // Surface contact as pipelines: the solo vehicles' hits, a workgroup a
+                // vehicle as their step's (a member's returns at once).
+                let p = self.self_split_pipes();
+                let (aero, _, lanes) = self.module_kind;
+                pass.set_pipeline(p.rest_vv_pipe(aero, lanes));
+                pass.set_bind_group(0, &p.pairs_bind, &at(copy));
+                pass.dispatch_workgroups_indirect(args, SPLIT_ALL_ARGS);
+            }
+            GroupOp::Surf { copy, pass: i, groups } => {
+                let s = self.split_pipes();
+                pass.set_pipeline(&s.surf[i as usize]);
+                pass.set_bind_group(0, &s.group, &at(copy));
+                pass.dispatch_workgroups(groups, 1, 1);
             }
         }
     }

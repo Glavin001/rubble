@@ -216,6 +216,16 @@ pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
 pub const SELF_PAIRS_ENTRY: &str = "explicit_beams_self_pairs";
 pub const WIDE_LIST_ENTRY: &str = "explicit_beams_wide_list";
+/// Surface contact on the self split paths: a solo vehicle's self-collision hits of a step
+/// applied in a dispatch of its own, before the surface pass's pipelines (the kernel's
+/// soloRest).
+pub const SOLO_REST_ENTRY: &str = "explicit_beams_solo_rest";
+
+/// The module of [`SOLO_REST_ENTRY`] at the frame variant with `aero` and `lanes`, with
+/// vehicle contact (`vv`) or not: the self split's step module's defines, another entry.
+pub fn solo_rest_module_name(aero: bool, lanes: u32, vv: bool) -> String {
+    format!("explicit_beams_selfsplit_rest{}{}", if vv { "_vv" } else { "" }, variant_tag(aero, lanes))
+}
 
 /// The split group path's modules by `which` (`split_module_name`), each at the frame
 /// module's four variants (`split_modules`).
@@ -304,6 +314,8 @@ pub fn split_modules() -> Vec<SplitModule> {
         member.push(("EB_VV_SPLIT", "1"));
         push(format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, member);
         push(format!("explicit_beams_selfsplit_walk_vv{tag}"), SELF_WALK_ENTRY, base.clone());
+        // Surface contact on this path (the pass as pipelines): the solo vehicles' rest.
+        push(format!("explicit_beams_selfsplit_rest_vv{tag}"), SOLO_REST_ENTRY, base.clone());
         push(format!("explicit_beams_selfsplit_pairs_vv{tag}"), SELF_PAIRS_ENTRY, base);
     }
     out
