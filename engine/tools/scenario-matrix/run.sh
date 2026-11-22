@@ -27,6 +27,14 @@
 #       after --make). Bit for bit holds within CUDA (ENGINE_CUDA_FMAD=0 for strict floats
 #       when a switch runs other modules: nvcc fuses multiply-adds per module); timing is
 #       directional (a T4, this host's launch overheads).
+#   tools/scenario-matrix/run.sh --world --cuda [ROW ...]   the World's own cost a step on
+#       CUDA: every row's portable World (out/scenario-matrix/world/ROW.wfx: run
+#       `tools/scenario-matrix/run.sh --make-world` once, on the Mac under the GPU lock)
+#       replayed by engine-cuda's world_replay in one T4 container: the coupling's emit,
+#       the rigid step, the plan, the explicit frame and the loads on one CUDA stream.
+#       Each step's GPU ms (median, p95, worst), the gate's line (World step, frame
+#       alone, the World adds) and whether two replays end bit for bit. WORLD_MS=ms fails
+#       a row whose World adds more (unset: timing on a T4 is reported, not judged).
 #   tools/scenario-matrix/run.sh --modal ...   opt-in: every row in a T4 container of its
 #       own on Modal through Vulkan (tools/modal/gpu_run.sh --matrix; build in local
 #       Docker). Not for kernel edits: NVIDIA compiles each new kernel version on Modal's
@@ -47,6 +55,23 @@ if [ "$1" = "--cuda" ] && { [ "${2:-}" = "--base" ] || [ "${2:-}" = "--head" ]; 
   # shellcheck disable=SC2086
   exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} "${refs[@]}" --matrix-cuda -- --two-builds "$@"
 fi
+if [ "$1" = "--world" ] && [ "${2:-}" = "--cuda" ]; then
+  shift 2
+  ls "$engine"/out/scenario-matrix/world/*.wfx >/dev/null 2>&1 || {
+    echo "no portable World in out/scenario-matrix/world: tools/scenario-matrix/run.sh --make-world"; exit 1; }
+  if [ $# -gt 0 ]; then files=""; for r in "$@"; do files="$files $engine/out/scenario-matrix/world/$r.wfx"; done
+  else files="$(ls "$engine"/out/scenario-matrix/world/*.wfx)"; fi
+  # The explicit modules the rows' vehicles may launch (CPU only: no device code built).
+  if [ -z "${ENGINE_CUDA_EXPLICIT_MODULES:-}" ]; then
+    # shellcheck disable=SC2086
+    ENGINE_CUDA_EXPLICIT_MODULES="$(ENGINE_CUDA_EXPLICIT_MODULES=none cargo run -q --profile fast -p engine-cuda --example world_replay -- --modules $files)" || exit 1
+    export ENGINE_CUDA_EXPLICIT_MODULES
+  fi
+  data=""
+  for f in $files; do data="$data --data engine/out/scenario-matrix/world/$(basename "$f")"; done
+  # shellcheck disable=SC2086
+  exec "$engine/tools/modal/gpu_run.sh" --cpus 1 --mem 2 ${WORLD_MS:+--env WORLD_MS=$WORLD_MS} ${MODAL_OPTS:-} $data -- -p engine-cuda --example world_replay -- --dir out/scenario-matrix/world "$@"
+fi
 if [ "$1" = "--cuda" ]; then
   shift
   # shellcheck disable=SC2086
@@ -58,6 +83,7 @@ if [ "$1" = "--modal" ]; then
   exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} --matrix -- "$@"
 fi
 [ "$1" = "--local" ] && shift  # the default; kept for scripts that pass it
+# (--make-world: each --world row's World as a portable World for --world --cuda.)
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
 export LAB_BIN="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 if [ -z "$SCENARIO_MATRIX_LOCKED" ]; then

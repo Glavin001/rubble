@@ -84,7 +84,16 @@ pub struct Header {
 /// (`BodyState`, `body_count` each), the colliders, the hull arena's records, the joint
 /// records, the material table, the coupling's work buffer, and the explicit vehicles'
 /// portable state (a whole `RUBBLEPF` file).
-pub const BLOBS: [&str; 8] = ["bodies", "bodies_previous", "colliders", "hulls", "joints", "materials", "work", "explicit"];
+pub const BLOBS: [&str; 8] = [
+    "bodies",
+    "bodies_previous",
+    "colliders",
+    "hulls",
+    "joints",
+    "materials",
+    "work",
+    "explicit",
+];
 
 #[derive(Clone, Debug)]
 pub struct PortableWorld {
@@ -96,14 +105,25 @@ pub struct PortableWorld {
 impl PortableWorld {
     /// `blobs`: [`BLOBS`] in order; `header.blobs` is filled here.
     pub fn new(mut header: Header, blobs: Vec<Vec<u8>>) -> Self {
-        assert_eq!(blobs.len(), BLOBS.len(), "a portable World holds every blob");
+        assert_eq!(
+            blobs.len(),
+            BLOBS.len(),
+            "a portable World holds every blob"
+        );
         header.version = VERSION;
-        header.blobs = BLOBS.iter().zip(&blobs).map(|(n, b)| (n.to_string(), b.len() as u64)).collect();
+        header.blobs = BLOBS
+            .iter()
+            .zip(&blobs)
+            .map(|(n, b)| (n.to_string(), b.len() as u64))
+            .collect();
         Self { header, blobs }
     }
 
     pub fn blob(&self, name: &str) -> &[u8] {
-        let k = BLOBS.iter().position(|n| *n == name).unwrap_or_else(|| panic!("no blob {name}"));
+        let k = BLOBS
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("no blob {name}"));
         &self.blobs[k]
     }
 
@@ -114,7 +134,8 @@ impl PortableWorld {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let head = serde_json::to_vec(&self.header).expect("the header serialises");
-        let mut out = Vec::with_capacity(12 + head.len() + self.blobs.iter().map(Vec::len).sum::<usize>());
+        let mut out =
+            Vec::with_capacity(12 + head.len() + self.blobs.iter().map(Vec::len).sum::<usize>());
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&(head.len() as u32).to_le_bytes());
         out.extend_from_slice(&head);
@@ -129,10 +150,15 @@ impl PortableWorld {
             return Err("not a portable World state (no RUBBLEWF magic)".into());
         }
         let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let head = bytes.get(12..12 + n).ok_or("the header runs past the file")?;
+        let head = bytes
+            .get(12..12 + n)
+            .ok_or("the header runs past the file")?;
         let header: Header = serde_json::from_slice(head).map_err(|e| format!("header: {e}"))?;
         if header.version != VERSION {
-            return Err(format!("version {} (this build reads {VERSION})", header.version));
+            return Err(format!(
+                "version {} (this build reads {VERSION})",
+                header.version
+            ));
         }
         let names: Vec<&str> = header.blobs.iter().map(|b| b.0.as_str()).collect();
         if names != BLOBS {
@@ -141,7 +167,9 @@ impl PortableWorld {
         let mut at = 12 + n;
         let mut blobs = Vec::with_capacity(BLOBS.len());
         for (name, len) in &header.blobs {
-            let b = bytes.get(at..at + *len as usize).ok_or_else(|| format!("blob {name} runs past the file"))?;
+            let b = bytes
+                .get(at..at + *len as usize)
+                .ok_or_else(|| format!("blob {name} runs past the file"))?;
             blobs.push(b.to_vec());
             at += *len as usize;
         }
@@ -168,7 +196,10 @@ impl PortableWorld {
         ];
         for (name, bytes) in want {
             if self.blob(name).len() != bytes {
-                return Err(format!("blob {name} is {} bytes, the header's counts say {bytes}", self.blob(name).len()));
+                return Err(format!(
+                    "blob {name} is {} bytes, the header's counts say {bytes}",
+                    self.blob(name).len()
+                ));
             }
         }
         if self.blob("hulls").len() % 16 != 0 {
@@ -190,12 +221,29 @@ mod tests {
     fn portable_world_round_trips() {
         use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
         let text = "nodes\n0, 0.0, 0.0, 0.0\n1, 0.3, 0.0, 0.0\n2, 0.0, 0.3, 0.0\nbeams\n0, 1\n1, 2\n2, 0\nend\n";
-        let car = ExplicitBeams::from_truck(text, glam::Vec3::Y, glam::Vec3::ZERO, ExplicitBeamsSettings::default()).expect("the truck parses");
-        let cap = CouplingCapacity { bodies: 4, shapes: 8, planes: 64 };
+        let car = ExplicitBeams::from_truck(
+            text,
+            glam::Vec3::Y,
+            glam::Vec3::ZERO,
+            ExplicitBeamsSettings::default(),
+        )
+        .expect("the truck parses");
+        let cap = CouplingCapacity {
+            bodies: 4,
+            shapes: 8,
+            planes: 64,
+        };
         let up = ExplicitUpload::new(std::slice::from_ref(&car), Some(cap));
         let planner = FramePlanner::new(&up.layout);
         let bindings: Vec<Vec<u8>> = (0..BIND_COUNT as u32).map(|b| up.bytes(b)).collect();
-        let explicit = Portable::new(1.5, "test", up.layout.clone(), planner.settings(), HostSwitches::default(), bindings);
+        let explicit = Portable::new(
+            1.5,
+            "test",
+            up.layout.clone(),
+            planner.settings(),
+            HostSwitches::default(),
+            bindings,
+        );
         let capacity = WorldCapacity {
             max_bodies: 64,
             max_colliders: 64,
@@ -232,7 +280,13 @@ mod tests {
                 margin: 0.1,
                 hull_geom: false,
                 piece_records: (0, 0),
-                clock: cw::Clock { carry: 0.25, emit_pending: true, emit_wakes: true, windows: 90, steps: 3000 },
+                clock: cw::Clock {
+                    carry: 0.25,
+                    emit_pending: true,
+                    emit_wakes: true,
+                    windows: 90,
+                    steps: 3000,
+                },
                 sleep_mask: vec![0],
                 any_awake: true,
                 list_args: [1, 1, 1, 0],
@@ -257,10 +311,15 @@ mod tests {
         assert_eq!(back.blobs, blobs);
         assert_eq!(back.header.coupling.clock, w.header.coupling.clock);
         assert_eq!(back.header.inputs, w.header.inputs);
-        assert_eq!(back.explicit().expect("the explicit state").bindings, explicit.bindings);
+        assert_eq!(
+            back.explicit().expect("the explicit state").bindings,
+            explicit.bindings
+        );
         let mut short = w.clone();
         short.blobs[2].clear();
         short.header.blobs[2].1 = 0;
-        assert!(PortableWorld::from_bytes(&short.to_bytes()).unwrap_err().contains("colliders"));
+        assert!(PortableWorld::from_bytes(&short.to_bytes())
+            .unwrap_err()
+            .contains("colliders"));
     }
 }

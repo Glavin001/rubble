@@ -44,7 +44,10 @@ pub fn status_error(bits: u32, cap: super::super::CouplingCapacity) -> Result<()
     if bits == 0 {
         return Ok(());
     }
-    let names: Vec<&str> = (0..ST_NAMES.len()).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
+    let names: Vec<&str> = (0..ST_NAMES.len())
+        .filter(|k| bits & (1 << k) != 0)
+        .map(|k| ST_NAMES[k])
+        .collect();
     Err(format!(
         "explicit vehicles: {} (capacity {:?}; raise ExplicitVehiclesDef::capacity)",
         names.join(", "),
@@ -279,7 +282,16 @@ pub struct Params {
 /// 2^22..2^31. A sound state never reaches it; a corrupt count stops there and sets
 /// ST_LOOP. `fixed`: a test's budget instead (`explicit_plan::loop_budget_override`).
 pub fn loop_budget(p: &Params, fixed: Option<u32>) -> u32 {
-    let [c, h, s, pl, b, k, v] = [p.colliders, p.hash_size, p.s, p.planes, p.b, p.cand_cap, p.vehicles].map(u64::from);
+    let [c, h, s, pl, b, k, v] = [
+        p.colliders,
+        p.hash_size,
+        p.s,
+        p.planes,
+        p.b,
+        p.cand_cap,
+        p.vehicles,
+    ]
+    .map(u64::from);
     let unit = c + 33 * h + s * (s + pl + b) + k * k + 64 * v + 4096;
     fixed.unwrap_or_else(|| (4 * unit).clamp(1 << 22, 1 << 31) as u32)
 }
@@ -372,7 +384,10 @@ pub fn params(i: &ParamsInput) -> Params {
         piece_box_base: i.piece_records.1,
         pad: 0,
     };
-    Params { loop_budget: loop_budget(&p, i.loop_budget), ..p }
+    Params {
+        loop_budget: loop_budget(&p, i.loop_budget),
+        ..p
+    }
 }
 
 /// The work buffer (binding 9), in words: [0] chunk rows used, [1] status,
@@ -407,7 +422,17 @@ impl WorkLayout {
         let sleep_mask_word = table / 4 + 4 * nv;
         let list_word = (sleep_mask_word + mask_words).next_multiple_of(4);
         let extra_word = list_word + 4 + nv;
-        Self { vehicles, max_bodies, cleared, table, sleep_mask_word, mask_words, list_word, extra_word, cand_cap: 3 * shapes }
+        Self {
+            vehicles,
+            max_bodies,
+            cleared,
+            table,
+            sleep_mask_word,
+            mask_words,
+            list_word,
+            extra_word,
+            cand_cap: 3 * shapes,
+        }
     }
 
     /// The buffer's bytes.
@@ -468,11 +493,21 @@ pub enum Buf {
 pub enum Cmd {
     /// Zero `size` bytes of the work buffer from `offset`.
     Clear { offset: u64, size: u64 },
-    Copy { src: Buf, src_offset: u64, dst: Buf, dst_offset: u64, size: u64 },
+    Copy {
+        src: Buf,
+        src_offset: u64,
+        dst: Buf,
+        dst_offset: u64,
+        size: u64,
+    },
     /// The dispatches up to the next command that is not one run together (a compute pass
     /// on WebGPU), timed as `segment` when the host times the step (`before_step`: among
     /// the segments ahead of the rigid step's).
-    Pass { label: &'static str, segment: Option<&'static str>, before_step: bool },
+    Pass {
+        label: &'static str,
+        segment: Option<&'static str>,
+        before_step: bool,
+    },
     /// `entry` over `groups` workgroups.
     Dispatch { entry: Entry, groups: u32 },
     /// `entry` over the workgroups in the proxied list's indirect arguments
@@ -488,17 +523,30 @@ pub enum Cmd {
 /// Step 1, before the rigid step: the last window's impulses as impulse records.
 pub fn emit() -> Vec<Cmd> {
     vec![
-        Cmd::Pass { label: "vehicle coupling emit", segment: Some("cpl_emit"), before_step: true },
+        Cmd::Pass {
+            label: "vehicle coupling emit",
+            segment: Some("cpl_emit"),
+            before_step: true,
+        },
         Cmd::Indirect { entry: Entry::Emit },
-        Cmd::Dispatch { entry: Entry::EmitEnd, groups: 1 },
+        Cmd::Dispatch {
+            entry: Entry::EmitEnd,
+            groups: 1,
+        },
     ]
 }
 
 /// The clears that open a window's plan.
 fn clears(work: &WorkLayout) -> [Cmd; 2] {
     [
-        Cmd::Clear { offset: 0, size: work.cleared },
-        Cmd::Clear { offset: 4 * work.list_word, size: 4 },
+        Cmd::Clear {
+            offset: 0,
+            size: work.cleared,
+        },
+        Cmd::Clear {
+            offset: 4 * work.list_word,
+            size: 4,
+        },
     ]
 }
 
@@ -516,24 +564,61 @@ pub struct FrameOpts {
 pub fn frame(work: &WorkLayout, o: FrameOpts) -> Vec<Cmd> {
     let nv = work.vehicles;
     let mut c = clears(work).to_vec();
-    c.push(Cmd::Pass { label: "vehicle coupling plan", segment: Some("cpl_plan"), before_step: false });
-    c.push(Cmd::Dispatch { entry: Entry::Bounds, groups: nv });
+    c.push(Cmd::Pass {
+        label: "vehicle coupling plan",
+        segment: Some("cpl_plan"),
+        before_step: false,
+    });
+    c.push(Cmd::Dispatch {
+        entry: Entry::Bounds,
+        groups: nv,
+    });
     if o.query {
-        c.push(Cmd::Dispatch { entry: Entry::Query, groups: nv });
+        c.push(Cmd::Dispatch {
+            entry: Entry::Query,
+            groups: nv,
+        });
     }
-    c.push(Cmd::Dispatch { entry: Entry::Plan, groups: nv });
-    c.push(Cmd::Copy { src: Buf::Work, src_offset: 4 * work.list_word, dst: Buf::ListArgs, dst_offset: 0, size: 4 });
+    c.push(Cmd::Dispatch {
+        entry: Entry::Plan,
+        groups: nv,
+    });
+    c.push(Cmd::Copy {
+        src: Buf::Work,
+        src_offset: 4 * work.list_word,
+        dst: Buf::ListArgs,
+        dst_offset: 0,
+        size: 4,
+    });
     // Only the vehicles with proxies (cpl_plan's list).
-    c.push(Cmd::Pass { label: "vehicle coupling share", segment: Some("cpl_share"), before_step: false });
-    c.push(Cmd::Indirect { entry: Entry::Share });
+    c.push(Cmd::Pass {
+        label: "vehicle coupling share",
+        segment: Some("cpl_share"),
+        before_step: false,
+    });
+    c.push(Cmd::Indirect {
+        entry: Entry::Share,
+    });
     c.push(Cmd::Mark("vehicle coupling plan"));
     c.push(Cmd::Frame);
     c.push(Cmd::Mark("explicit frame"));
-    c.push(Cmd::Pass { label: "vehicle coupling loads", segment: Some("cpl_loads"), before_step: false });
-    c.push(Cmd::Indirect { entry: Entry::Loads });
-    c.push(Cmd::Dispatch { entry: Entry::LoadsEnd, groups: 1 });
+    c.push(Cmd::Pass {
+        label: "vehicle coupling loads",
+        segment: Some("cpl_loads"),
+        before_step: false,
+    });
+    c.push(Cmd::Indirect {
+        entry: Entry::Loads,
+    });
+    c.push(Cmd::Dispatch {
+        entry: Entry::LoadsEnd,
+        groups: 1,
+    });
     if o.sleep {
-        c.push(Cmd::Dispatch { entry: Entry::SleepMask, groups: work.sleep_mask_groups() });
+        c.push(Cmd::Dispatch {
+            entry: Entry::SleepMask,
+            groups: work.sleep_mask_groups(),
+        });
     }
     c
 }
@@ -541,7 +626,13 @@ pub fn frame(work: &WorkLayout, o: FrameOpts) -> Vec<Cmd> {
 /// After a window, for a host that reads the status on its own every [`STATUS_EVERY`]
 /// windows ([`Clock::window_done`]): the first words of work to [`Buf::Status`].
 pub fn status_read() -> Cmd {
-    Cmd::Copy { src: Buf::Work, src_offset: 0, dst: Buf::Status, dst_offset: 0, size: 16 }
+    Cmd::Copy {
+        src: Buf::Work,
+        src_offset: 0,
+        dst: Buf::Status,
+        dst_offset: 0,
+        size: 16,
+    }
 }
 
 /// Tests and measurement: the plan alone from the current state (the clears, the bounds,
@@ -549,20 +640,43 @@ pub fn status_read() -> Cmd {
 pub fn plan_alone(work: &WorkLayout, query: bool, label: &'static str) -> Vec<Cmd> {
     let nv = work.vehicles;
     let mut c = clears(work).to_vec();
-    c.push(Cmd::Pass { label, segment: None, before_step: false });
-    c.push(Cmd::Dispatch { entry: Entry::Bounds, groups: nv });
+    c.push(Cmd::Pass {
+        label,
+        segment: None,
+        before_step: false,
+    });
+    c.push(Cmd::Dispatch {
+        entry: Entry::Bounds,
+        groups: nv,
+    });
     if query {
-        c.push(Cmd::Dispatch { entry: Entry::Query, groups: nv });
+        c.push(Cmd::Dispatch {
+            entry: Entry::Query,
+            groups: nv,
+        });
     }
-    c.push(Cmd::Dispatch { entry: Entry::Plan, groups: nv });
-    c.push(Cmd::Dispatch { entry: Entry::Share, groups: nv });
+    c.push(Cmd::Dispatch {
+        entry: Entry::Plan,
+        groups: nv,
+    });
+    c.push(Cmd::Dispatch {
+        entry: Entry::Share,
+        groups: nv,
+    });
     c
 }
 
 /// Tests: `cpl_emit` alone over the proxied list (no `cpl_emit_end`: the caller puts the
 /// impulse list back).
 pub fn emit_alone() -> Vec<Cmd> {
-    vec![Cmd::Pass { label: "vehicle coupling emit", segment: None, before_step: false }, Cmd::Indirect { entry: Entry::Emit }]
+    vec![
+        Cmd::Pass {
+            label: "vehicle coupling emit",
+            segment: None,
+            before_step: false,
+        },
+        Cmd::Indirect { entry: Entry::Emit },
+    ]
 }
 
 /// The coupling's clock and what one window owes the next: the explicit steps owed to
@@ -585,7 +699,13 @@ pub struct Clock {
 
 impl Default for Clock {
     fn default() -> Self {
-        Self { carry: 0.0, emit_pending: false, emit_wakes: true, windows: 0, steps: 0 }
+        Self {
+            carry: 0.0,
+            emit_pending: false,
+            emit_wakes: true,
+            windows: 0,
+            steps: 0,
+        }
     }
 }
 
@@ -685,19 +805,34 @@ mod tests {
                 })
                 .collect()
         };
-        let mut all = frame(&w, FrameOpts { query: true, sleep: true });
+        let mut all = frame(
+            &w,
+            FrameOpts {
+                query: true,
+                sleep: true,
+            },
+        );
         all.push(status_read());
         assert_eq!(
             names(&all).join(" "),
             "clear clear | cpl_boundsx3 cpl_queryx3 cpl_planx3 copy>ListArgs | cpl_share* mark FRAME mark | cpl_loads* \
              cpl_loads_endx1 cpl_sleep_maskx1 copy>Status"
         );
-        let least = frame(&w, FrameOpts { query: false, sleep: false });
+        let least = frame(
+            &w,
+            FrameOpts {
+                query: false,
+                sleep: false,
+            },
+        );
         assert_eq!(
             names(&least).join(" "),
             "clear clear | cpl_boundsx3 cpl_planx3 copy>ListArgs | cpl_share* mark FRAME mark | cpl_loads* cpl_loads_endx1"
         );
         assert_eq!(names(&emit()).join(" "), "| cpl_emit* cpl_emit_endx1");
-        assert_eq!(names(&plan_alone(&w, true, "x")).join(" "), "clear clear | cpl_boundsx3 cpl_queryx3 cpl_planx3 cpl_sharex3");
+        assert_eq!(
+            names(&plan_alone(&w, true, "x")).join(" "),
+            "clear clear | cpl_boundsx3 cpl_queryx3 cpl_planx3 cpl_sharex3"
+        );
     }
 }

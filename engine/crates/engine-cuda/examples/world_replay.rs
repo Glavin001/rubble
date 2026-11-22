@@ -20,6 +20,9 @@
 //! first round, and whether a second replay from the file ends bit for bit the same
 //! (`--no-repeat` skips it).
 //!
+//! Before the first file's replay the same replay runs once, unreported, to bring the
+//! GPU up to speed (`warm_gpu`).
+//!
 //! `--dir DIR [ROW ...]`: every `DIR/ROW.wfx` (all of them when no row is named), then
 //! one table and a verdict: PASS when every row ran, its status words stayed zero and its
 //! repeat ended bit for bit (and, with `WORLD_MS` set, the World adds no more than that).
@@ -34,7 +37,9 @@ use std::time::Instant;
 
 fn arg(name: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
-    a.iter().position(|x| x == name).and_then(|i| a.get(i + 1).cloned())
+    a.iter()
+        .position(|x| x == name)
+        .and_then(|i| a.get(i + 1).cloned())
 }
 
 fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -42,7 +47,8 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 fn read(file: &str) -> anyhow::Result<PortableWorld> {
-    PortableWorld::from_bytes(&std::fs::read(file).map_err(|e| anyhow::anyhow!("{file}: {e}"))?).map_err(|e| anyhow::anyhow!("{file}: {e}"))
+    PortableWorld::from_bytes(&std::fs::read(file).map_err(|e| anyhow::anyhow!("{file}: {e}"))?)
+        .map_err(|e| anyhow::anyhow!("{file}: {e}"))
 }
 
 fn fnv(h: &mut u64, bytes: &[u8]) {
@@ -102,7 +108,28 @@ struct Row {
     repeat: Option<bool>,
 }
 
+/// The first replay of a process runs once before anything is timed: a GPU that has just
+/// been given to the container runs its first seconds of work slower (a T4's clocks
+/// come up under load: the first row's first round read 14 to 25 ms a step against
+/// 10.5 in its later rounds, and differently from run to run, with bit-identical
+/// results), which would be reported as that row's worst steps.
+fn warm_gpu(file: &str) -> anyhow::Result<()> {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    let p = read(file)?;
+    let mut w = CudaWorld::from_portable(&p)?;
+    w.explicit().preload()?;
+    let steps = num::<usize>("--warm", 5) + num::<usize>("--steps", 20);
+    for k in 0..steps.max(p.header.inputs.len()) {
+        step(&mut w, &p, k)?;
+    }
+    Ok(())
+}
+
 fn replay(file: &str) -> anyhow::Result<Row> {
+    warm_gpu(file)?;
     let p = read(file)?;
     let (warm, rounds): (usize, usize) = (num("--warm", 5), num::<usize>("--rounds", 3).max(1));
     let held = p.header.inputs.len();
@@ -110,7 +137,11 @@ fn replay(file: &str) -> anyhow::Result<Row> {
     let n = num::<usize>("--steps", 20).max(1);
     let n = if held > warm { n.min(held - warm) } else { n };
     let mut w = CudaWorld::from_portable(&p)?;
-    let name = std::path::Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or(file).to_string();
+    let name = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file)
+        .to_string();
     println!(
         "{name}: {} ({} vehicles, {} bodies, {} colliders, t {:.3}) on {}",
         p.header.note,
@@ -121,6 +152,9 @@ fn replay(file: &str) -> anyhow::Result<Row> {
         w.device_name()
     );
     println!("  the rigid contacts start cold: {warm} warm-up steps, not timed; the coupling plans by the scan (saved: by {})", if p.header.coupling.planned_by_query { "the World broadphase" } else { "the scan" });
+    // Every module loaded before a step is timed (one is otherwise loaded at its first
+    // launch, inside the frame that needs it).
+    w.explicit().preload()?;
     for k in 0..warm {
         step(&mut w, &p, k)?;
     }
@@ -139,7 +173,14 @@ fn replay(file: &str) -> anyhow::Result<Row> {
             wall.push(t.elapsed().as_secs_f64() * 1e3);
         }
         let times = w.step_times_ms()?;
-        println!("  round {round}, GPU ms a step: {}", times.iter().map(|t| format!("{:.3}", t.total)).collect::<Vec<_>>().join(" "));
+        println!(
+            "  round {round}, GPU ms a step: {}",
+            times
+                .iter()
+                .map(|t| format!("{:.3}", t.total))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         gpu.extend(times);
         if round == 0 {
             hash = state_hash(&mut w)?;
@@ -163,7 +204,12 @@ fn replay(file: &str) -> anyhow::Result<Row> {
         frame_gpu.extend(w.explicit().frame_times_ms()?);
     }
     let total: Vec<f64> = gpu.iter().map(|t| t.total).collect();
-    let (worst_at, worst) = total.iter().copied().enumerate().max_by(|a, b| a.1.total_cmp(&b.1)).expect("steps");
+    let (worst_at, worst) = total
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("steps");
     let part = |f: fn(&StepTimes) -> f64| median(&gpu.iter().map(f).collect::<Vec<_>>());
     println!(
         "  World step, GPU ms ({} steps): median {:.3}, p95 {:.3}, worst {:.3} (round {}, step {})",
@@ -190,7 +236,10 @@ fn replay(file: &str) -> anyhow::Result<Row> {
         n * rounds,
         step_ms - frame_ms
     );
-    println!("  ring waits {}, coupling launches {}", w.ring_waits, w.launches);
+    println!(
+        "  ring waits {}, coupling launches {}",
+        w.ring_waits, w.launches
+    );
     drop(w);
     let repeat = if std::env::args().any(|a| a == "--no-repeat") {
         None
@@ -212,7 +261,17 @@ fn replay(file: &str) -> anyhow::Result<Row> {
             None => "not run",
         }
     );
-    Ok(Row { name, note: p.header.note.clone(), step_ms, frame_ms, gpu_median: median(&total), gpu_p95: p95(&total), gpu_worst: worst, hash, repeat })
+    Ok(Row {
+        name,
+        note: p.header.note.clone(),
+        step_ms,
+        frame_ms,
+        gpu_median: median(&total),
+        gpu_p95: p95(&total),
+        gpu_worst: worst,
+        hash,
+        repeat,
+    })
 }
 
 fn main() -> anyhow::Result<()> {
@@ -220,7 +279,13 @@ fn main() -> anyhow::Result<()> {
     if args.get(1).map(String::as_str) == Some("--modules") {
         let mut all: Vec<String> = Vec::new();
         for file in &args[2..] {
-            all.extend(CudaExplicitBeams::modules_for_replay(&read(file)?.explicit().map_err(|e| anyhow::anyhow!("{file}: {e}"))?.header.layout));
+            all.extend(CudaExplicitBeams::modules_for_replay(
+                &read(file)?
+                    .explicit()
+                    .map_err(|e| anyhow::anyhow!("{file}: {e}"))?
+                    .header
+                    .layout,
+            ));
         }
         all.sort();
         all.dedup();
@@ -229,10 +294,16 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(file) = arg("--fixture") {
         let row = replay(&file)?;
-        anyhow::ensure!(row.repeat != Some(false), "{}: two replays differ", row.name);
+        anyhow::ensure!(
+            row.repeat != Some(false),
+            "{}: two replays differ",
+            row.name
+        );
         return Ok(());
     }
-    let dir = arg("--dir").ok_or_else(|| anyhow::anyhow!("--fixture FILE, --dir DIR [ROW ...] or --modules FILE ..."))?;
+    let dir = arg("--dir").ok_or_else(|| {
+        anyhow::anyhow!("--fixture FILE, --dir DIR [ROW ...] or --modules FILE ...")
+    })?;
     // The rows named after the options' values, or every file of the directory.
     let at = args.iter().position(|a| a == "--dir").expect("checked") + 2;
     let mut named: Vec<String> = Vec::new();
@@ -256,7 +327,10 @@ fn main() -> anyhow::Result<()> {
         named.iter().map(|r| format!("{dir}/{r}.wfx")).collect()
     };
     files.sort();
-    anyhow::ensure!(!files.is_empty(), "{dir}: no portable World (*.wfx): matrix.py --make-world");
+    anyhow::ensure!(
+        !files.is_empty(),
+        "{dir}: no portable World (*.wfx): matrix.py --make-world"
+    );
     let limit: Option<f64> = std::env::var("WORLD_MS").ok().and_then(|v| v.parse().ok());
     let t_all = Instant::now();
     let mut rows = Vec::new();
@@ -271,7 +345,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!("scenario matrix, the World's own cost on CUDA: each row's portable World, warmed up, then rounds of World steps and the same explicit steps as frames alone (wall medians; GPU ms from events)");
-    println!("{:<8} {:>8} {:>9} {:>9} {:>8} {:>8} {:>8} {:>11} {:<6}  what", "row", "step ms", "frame ms", "World ms", "GPU med", "GPU p95", "GPU max", "repeat", "");
+    println!(
+        "{:<8} {:>8} {:>9} {:>9} {:>8} {:>8} {:>8} {:>11} {:<6}  what",
+        "row", "step ms", "frame ms", "World ms", "GPU med", "GPU p95", "GPU max", "repeat", ""
+    );
     for r in &rows {
         let adds = r.step_ms - r.frame_ms;
         let over = limit.is_some_and(|l| adds > l);
@@ -298,7 +375,15 @@ fn main() -> anyhow::Result<()> {
         );
         let _ = r.hash;
     }
-    let verdict = if bad.is_empty() { "PASS".to_string() } else { format!("FAIL ({})", bad.join(", ")) };
-    println!("verdict: {verdict}; {} rows in {:.1} s", files.len(), t_all.elapsed().as_secs_f64());
+    let verdict = if bad.is_empty() {
+        "PASS".to_string()
+    } else {
+        format!("FAIL ({})", bad.join(", "))
+    };
+    println!(
+        "verdict: {verdict}; {} rows in {:.1} s",
+        files.len(),
+        t_all.elapsed().as_secs_f64()
+    );
     std::process::exit(i32::from(!bad.is_empty()));
 }

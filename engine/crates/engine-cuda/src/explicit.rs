@@ -249,23 +249,51 @@ impl CudaExplicitBeams {
     /// [`Self::modules_for_layout`], vehicle sleep's list, and the split paths' modules at
     /// the fleet's frame variant (the device code a matrix build embeds).
     pub fn modules_for_replay(layout: &ExplicitLayout) -> Vec<String> {
-        let (aero, lanes) = (layout.aero, layout.lanes);
-        let mut out: Vec<String> = Self::modules_for_layout(layout).into_iter().map(str::to_string).collect();
-        if layout.sleep.is_some() {
-            out.push(Kernel::Sleep.module_for(aero, lanes, layout.surface).to_string());
-        }
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
-            out.push(plan::split_module_name(which, aero, lanes));
-        }
-        for vv in [false, true] {
-            out.extend(plan::self_split_module_names(aero, lanes, vv).into_iter().map(|(m, _, _)| m));
-        }
-        if !aero {
-            out.push(plan::wide_list_module_name(lanes).to_string());
-        }
+        let mut out: Vec<String> = Self::keys_for_replay(layout).iter().map(|k| Self::key_module(layout, k)).collect();
         out.sort();
         out.dedup();
         out
+    }
+
+    /// The kernels behind [`Self::modules_for_replay`].
+    fn keys_for_replay(layout: &ExplicitLayout) -> Vec<Key> {
+        let (aero, lanes) = (layout.aero, layout.lanes);
+        let mut out: Vec<Key> = Self::kernels_for_layout(layout).into_iter().map(Key::Plan).collect();
+        if layout.sleep.is_some() {
+            out.push(Key::Plan(Kernel::Sleep));
+        }
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
+            out.push(Key::Split(plan::split_module_name(which, aero, lanes)));
+        }
+        for vv in [false, true] {
+            out.extend(plan::self_split_module_names(aero, lanes, vv).into_iter().map(|(m, _, _)| Key::Split(m)));
+        }
+        if !aero {
+            out.push(Key::Split(plan::wide_list_module_name(lanes).to_string()));
+        }
+        out
+    }
+
+    /// The module a kernel of a fleet of `layout` comes from.
+    fn key_module(layout: &ExplicitLayout, key: &Key) -> String {
+        match key {
+            Key::Plan(k) => k.module_for(layout.aero, layout.lanes, layout.surface).to_string(),
+            Key::Split(name) => name.clone(),
+        }
+    }
+
+    /// Load now every module a replay of this fleet may launch that this build embeds
+    /// (measurement: a module is otherwise loaded at its first launch, host work inside
+    /// a timed frame, and the stream's events around the frame count it).
+    pub fn preload(&mut self) -> Result<(), ExecError> {
+        self.bind_ctx()?;
+        for key in Self::keys_for_replay(&self.layout) {
+            let name = Self::key_module(&self.layout, &key);
+            if CUDA_EXPLICIT_KERNELS.iter().any(|t| t.name == name.as_str() && !t.image.is_empty()) {
+                self.load(&key)?;
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::modules_for_layout`] of `vehicles` (host only, no device): e.g. the

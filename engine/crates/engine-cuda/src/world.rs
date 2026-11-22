@@ -65,7 +65,11 @@ pub struct CouplingDef {
 impl Default for CouplingDef {
     fn default() -> Self {
         Self {
-            capacity: CouplingCapacity { bodies: 16, shapes: 64, planes: 1024 },
+            capacity: CouplingCapacity {
+                bodies: 16,
+                shapes: 64,
+                planes: 1024,
+            },
             categories: 0xFFFF,
             mask: 0xFFFF,
             margin: 0.1,
@@ -156,7 +160,9 @@ fn status_words(mask_words: usize) -> usize {
 impl CudaWorld {
     /// The build embedded device code for the coupling (nvcc was present).
     pub fn has_ptx() -> bool {
-        CudaSim::has_ptx() && CudaExplicitBeams::has_ptx() && CUDA_COUPLING_KERNELS.iter().all(|k| !k.image.is_empty())
+        CudaSim::has_ptx()
+            && CudaExplicitBeams::has_ptx()
+            && CUDA_COUPLING_KERNELS.iter().all(|k| !k.image.is_empty())
     }
 
     /// Device code is embedded and an NVIDIA driver with a device loads.
@@ -166,20 +172,35 @@ impl CudaWorld {
 
     /// `vehicles` (their current state) in `sim`'s world: they collide two way with its
     /// bodies from the next step (engine-world's `World::add_explicit_vehicles`).
-    pub fn new(sim: CudaSim, vehicles: &[ExplicitBeams], def: &CouplingDef) -> anyhow::Result<Self> {
+    pub fn new(
+        sim: CudaSim,
+        vehicles: &[ExplicitBeams],
+        def: &CouplingDef,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(!vehicles.is_empty(), "explicit vehicles: none given");
         let c = def.capacity;
         anyhow::ensure!(
             c.bodies <= c.shapes && c.shapes <= 1024 && c.planes < 1 << 16,
             "explicit vehicles: at most 1024 shapes (and no more bodies) and 65535 hull planes per vehicle, not {c:?}"
         );
-        let mut explicit = CudaExplicitBeams::with_settings(vehicles, Some(def.capacity), def.sleep)?;
+        let mut explicit =
+            CudaExplicitBeams::with_settings(vehicles, Some(def.capacity), def.sleep)?;
         explicit.set_vehicle_contact(def.vehicle_contact);
-        explicit.set_coupling_on(true).map_err(|e| anyhow::anyhow!("{e}"))?;
+        explicit
+            .set_coupling_on(true)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let layout = explicit.coupling().expect("coupling room");
-        let work_layout = cw::WorkLayout::new(vehicles.len() as u32, sim.capacity.max_bodies, def.capacity.shapes);
+        let work_layout = cw::WorkLayout::new(
+            vehicles.len() as u32,
+            sim.capacity.max_bodies,
+            def.capacity.shapes,
+        );
         let mut work = vec![0u8; work_layout.bytes() as usize];
-        let rows: Vec<[u32; 4]> = vehicles.iter().enumerate().map(|(i, v)| cw::vehicle_row(explicit.layout().spans[i].node_off, v)).collect();
+        let rows: Vec<[u32; 4]> = vehicles
+            .iter()
+            .enumerate()
+            .map(|(i, v)| cw::vehicle_row(explicit.layout().spans[i].node_off, v))
+            .collect();
         let at = work_layout.table as usize;
         work[at..at + rows.len() * 16].copy_from_slice(bytemuck::cast_slice(&rows));
         let state = CouplingState {
@@ -206,7 +227,8 @@ impl CudaWorld {
     /// table, the proxied list and the broadphase proxies).
     pub fn from_portable(w: &engine_exec::world_portable::PortableWorld) -> anyhow::Result<Self> {
         let sim = CudaSim::from_portable(w)?;
-        let explicit = CudaExplicitBeams::from_portable(&w.explicit().map_err(|e| anyhow::anyhow!("{e}"))?)?;
+        let explicit =
+            CudaExplicitBeams::from_portable(&w.explicit().map_err(|e| anyhow::anyhow!("{e}"))?)?;
         let c = &w.header.coupling;
         anyhow::ensure!(
             explicit.coupling() == Some(c.layout),
@@ -215,7 +237,8 @@ impl CudaWorld {
             explicit.coupling()
         );
         anyhow::ensure!(
-            c.work_layout.max_bodies == w.header.rigid.capacity.max_bodies && c.work_layout.vehicles == c.layout.vehicles,
+            c.work_layout.max_bodies == w.header.rigid.capacity.max_bodies
+                && c.work_layout.vehicles == c.layout.vehicles,
             "the coupling's work layout is not the World's: {:?}",
             c.work_layout
         );
@@ -238,7 +261,11 @@ impl CudaWorld {
 
     /// A World from its hosts and the coupling's own state (a portable World fixture's,
     /// or [`Self::new`]'s): `explicit` moves onto `sim`'s stream.
-    pub fn from_parts(sim: CudaSim, mut explicit: CudaExplicitBeams, state: CouplingState) -> anyhow::Result<Self> {
+    pub fn from_parts(
+        sim: CudaSim,
+        mut explicit: CudaExplicitBeams,
+        state: CouplingState,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             CUDA_COUPLING_KERNELS.iter().all(|k| !k.image.is_empty()),
             "engine-cuda was built without nvcc: no device code for vehicle_coupling.slang (see engine/TOOLCHAIN.md)"
@@ -251,12 +278,23 @@ impl CudaWorld {
             state.work_layout.bytes()
         );
         // One context (both hosts retain the device's primary context) and one stream.
-        anyhow::ensure!(sim.ctx == explicit.context(), "CudaSim and CudaExplicitBeams are in two CUDA contexts");
+        anyhow::ensure!(
+            sim.ctx == explicit.context(),
+            "CudaSim and CudaExplicitBeams are in two CUDA contexts"
+        );
         unsafe { result::ctx::set_current(sim.ctx) }.map_err(map)?;
         let stream = sim.stream;
-        explicit.use_stream(stream).map_err(|e| anyhow::anyhow!("{e}"))?;
+        explicit
+            .use_stream(stream)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let dev = result::device::get(0).map_err(map)?;
-        let sms = unsafe { result::device::get_attribute(dev, sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) }.map_err(map)? as u32;
+        let sms = unsafe {
+            result::device::get_attribute(
+                dev,
+                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+        }
+        .map_err(map)? as u32;
 
         let alloc = |bytes: &[u8]| -> anyhow::Result<sys::CUdeviceptr> {
             let ptr = unsafe { result::malloc_sync(bytes.len().max(16)) }.map_err(map)?;
@@ -268,7 +306,9 @@ impl CudaWorld {
         let work = alloc(&state.work)?;
         let list_args = alloc(bytemuck::cast_slice(&state.list_args))?;
         let dummy = vec![0u8; cw::INGEST_DUMMY_BYTES as usize];
-        let spare: Vec<sys::CUdeviceptr> = (0..5).map(|_| alloc(&dummy)).collect::<anyhow::Result<_>>()?;
+        let spare: Vec<sys::CUdeviceptr> = (0..5)
+            .map(|_| alloc(&dummy))
+            .collect::<anyhow::Result<_>>()?;
 
         // Each binding's device buffer and bytes.
         let buffer = |binding: u32| -> (sys::CUdeviceptr, u64) {
@@ -302,13 +342,18 @@ impl CudaWorld {
                 .map_err(|e2| anyhow::anyhow!("CUDA: load module {}: {e2:?}", t.entry))?;
             let function = unsafe { result::module::get_function(module, CString::new(t.entry)?) }
                 .map_err(|e2| anyhow::anyhow!("CUDA: function {}: {e2:?}", t.entry))?;
-            let gs = unsafe { result::module::get_function(module, CString::new(format!("{}_gs", t.entry))?) }
-                .map_err(|e2| anyhow::anyhow!("CUDA: function {}_gs: {e2:?}", t.entry))?;
+            let gs = unsafe {
+                result::module::get_function(module, CString::new(format!("{}_gs", t.entry))?)
+            }
+            .map_err(|e2| anyhow::anyhow!("CUDA: function {}_gs: {e2:?}", t.entry))?;
             let threads = t.threads[0] * t.threads[1] * t.threads[2];
-            let per_sm = unsafe { result::occupancy::max_active_block_per_multiprocessor(gs, threads as i32, 0) }
-                .map_err(|e2| anyhow::anyhow!("CUDA: occupancy {}: {e2:?}", t.entry))?;
-            let (globals, bytes) = unsafe { result::module::get_global(module, CString::new("SLANG_globalParams")?) }
-                .map_err(|e2| anyhow::anyhow!("CUDA: {} globals: {e2:?}", t.entry))?;
+            let per_sm = unsafe {
+                result::occupancy::max_active_block_per_multiprocessor(gs, threads as i32, 0)
+            }
+            .map_err(|e2| anyhow::anyhow!("CUDA: occupancy {}: {e2:?}", t.entry))?;
+            let (globals, bytes) =
+                unsafe { result::module::get_global(module, CString::new("SLANG_globalParams")?) }
+                    .map_err(|e2| anyhow::anyhow!("CUDA: {} globals: {e2:?}", t.entry))?;
             anyhow::ensure!(
                 bytes >= t.params_bytes as usize,
                 "{}: SLANG_globalParams is {bytes} bytes, reflection says {}",
@@ -327,14 +372,24 @@ impl CudaWorld {
                 }
             }
             unsafe { result::memcpy_htod_sync(globals, &bank) }.map_err(map)?;
-            kernels.push(Kernel { module, function, indirect: (gs, per_sm.max(1) as u32 * sms.max(1)), threads });
+            kernels.push(Kernel {
+                module,
+                function,
+                indirect: (gs, per_sm.max(1) as u32 * sms.max(1)),
+                threads,
+            });
         }
         let words = status_words(state.sleep_mask.len());
         let mut slots = Vec::with_capacity(RING);
         for _ in 0..RING {
             let host = unsafe { result::malloc_host(words * 4, 0) }.map_err(map)? as *mut u8;
             let event = result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT).map_err(map)?;
-            slots.push(Slot { host, event, steps_done: 0, ran: false });
+            slots.push(Slot {
+                host,
+                event,
+                steps_done: 0,
+                ran: false,
+            });
         }
         Ok(Self {
             explicit,
@@ -405,13 +460,31 @@ impl CudaWorld {
         let k = &self.kernels[entry.index()];
         let r = match groups {
             Some(0) => return Ok(()),
-            Some(n) => unsafe { result::launch_kernel(k.function, (n, 1, 1), (k.threads, 1, 1), 0, self.stream, &mut []) },
+            Some(n) => unsafe {
+                result::launch_kernel(
+                    k.function,
+                    (n, 1, 1),
+                    (k.threads, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [],
+                )
+            },
             None => {
                 // The proxied list's count, read on the GPU (`{entry}_gs`): no host wait.
                 let (f, blocks) = k.indirect;
                 let mut counts = self.list_args;
                 let mut params = [&mut counts as *mut sys::CUdeviceptr as *mut c_void];
-                unsafe { result::launch_kernel(f, (blocks, 1, 1), (k.threads, 1, 1), 0, self.stream, &mut params) }
+                unsafe {
+                    result::launch_kernel(
+                        f,
+                        (blocks, 1, 1),
+                        (k.threads, 1, 1),
+                        0,
+                        self.stream,
+                        &mut params,
+                    )
+                }
             }
         };
         r.map_err(|e| ExecError::Backend(format!("CUDA: launch {}: {e:?}", entry.name())))?;
@@ -437,14 +510,31 @@ impl CudaWorld {
     }
 
     /// Replay the shared plan's commands; `steps`: the explicit frame's at [`cw::Cmd::Frame`].
-    fn replay(&mut self, cmds: &[cw::Cmd], steps: u32, events: &mut Option<Vec<sys::CUevent>>) -> Result<(), ExecError> {
+    fn replay(
+        &mut self,
+        cmds: &[cw::Cmd],
+        steps: u32,
+        events: &mut Option<Vec<sys::CUevent>>,
+    ) -> Result<(), ExecError> {
         for c in cmds {
             match *c {
-                cw::Cmd::Clear { offset, size } => {
-                    unsafe { result::memset_d8_async(self.work + offset, 0, size as usize, self.stream) }.map_err(backend)?
+                cw::Cmd::Clear { offset, size } => unsafe {
+                    result::memset_d8_async(self.work + offset, 0, size as usize, self.stream)
                 }
-                cw::Cmd::Copy { src, src_offset, dst, dst_offset, size } => unsafe {
-                    result::memcpy_dtod_async(self.buf(dst) + dst_offset, self.buf(src) + src_offset, size as usize, self.stream)
+                .map_err(backend)?,
+                cw::Cmd::Copy {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    size,
+                } => unsafe {
+                    result::memcpy_dtod_async(
+                        self.buf(dst) + dst_offset,
+                        self.buf(src) + src_offset,
+                        size as usize,
+                        self.stream,
+                    )
                 }
                 .map_err(backend)?,
                 cw::Cmd::Pass { .. } | cw::Cmd::Mark(_) => {}
@@ -490,7 +580,8 @@ impl CudaWorld {
             piece_records: self.piece_records,
             loop_budget: plan::loop_budget_override(),
         });
-        unsafe { result::memcpy_htod_async(self.params, bytemuck::bytes_of(&p), self.stream) }.map_err(backend)
+        unsafe { result::memcpy_htod_async(self.params, bytemuck::bytes_of(&p), self.stream) }
+            .map_err(backend)
     }
 
     /// Queue one World step of `dt` seconds. Does not wait (unless every slot of the
@@ -527,7 +618,13 @@ impl CudaWorld {
         self.stamp(&mut events)?;
         if ran {
             // Step 3: the next window's plan, frame and chunk loads.
-            let cmds = cw::frame(&self.work_layout, cw::FrameOpts { query: false, sleep: self.explicit.sleep_on() });
+            let cmds = cw::frame(
+                &self.work_layout,
+                cw::FrameOpts {
+                    query: false,
+                    sleep: self.explicit.sleep_on(),
+                },
+            );
             self.replay(&cmds, steps, &mut events)?;
             let _ = self.clock.window_done(steps, self.needs_step());
         } else {
@@ -537,7 +634,8 @@ impl CudaWorld {
         self.read_status(ran)?;
         self.stamp(&mut events)?;
         if let Some(e) = events {
-            self.events.push(e.try_into().expect("six events a timed step"));
+            self.events
+                .push(e.try_into().expect("six events a timed step"));
         }
         Ok(())
     }
@@ -551,7 +649,9 @@ impl CudaWorld {
             self.ring_waits += 1;
             self.adopt(false)?;
         }
-        let k = (0..RING).find(|k| !self.in_flight.contains(k)).expect("a free slot");
+        let k = (0..RING)
+            .find(|k| !self.in_flight.contains(k))
+            .expect("a free slot");
         let counters = std::mem::size_of::<StepCounters>();
         let c4 = counters.div_ceil(4) * 4;
         let masks = self.sleep_mask.len() * 4;
@@ -560,11 +660,17 @@ impl CudaWorld {
         let cap = u64::from(self.explicit.layout().status.cap);
         unsafe {
             let dst = |at: usize, len: usize| std::slice::from_raw_parts_mut(host.add(at), len);
-            result::memcpy_dtoh_async(dst(0, counters), self.sim.buffer(7).0, self.stream).map_err(backend)?;
+            result::memcpy_dtoh_async(dst(0, counters), self.sim.buffer(7).0, self.stream)
+                .map_err(backend)?;
             result::memcpy_dtoh_async(dst(c4, 4), acc + cap, self.stream).map_err(backend)?;
             result::memcpy_dtoh_async(dst(c4 + 4, 8), self.work, self.stream).map_err(backend)?;
             if masks > 0 {
-                result::memcpy_dtoh_async(dst(c4 + 12, masks), self.work + 4 * self.work_layout.sleep_mask_word, self.stream).map_err(backend)?;
+                result::memcpy_dtoh_async(
+                    dst(c4 + 12, masks),
+                    self.work + 4 * self.work_layout.sleep_mask_word,
+                    self.stream,
+                )
+                .map_err(backend)?;
             }
             result::event::record(self.slots[k].event, self.stream).map_err(backend)?;
         }
@@ -591,12 +697,16 @@ impl CudaWorld {
             if self.slots[k].ran {
                 self.sim.adopt_counters(c, self.slots[k].steps_done);
                 if c.overflow_flags != 0 && self.failed.is_none() {
-                    self.failed = Some(format!("rigid step {}: GPU overflow flags=0x{:x}", self.slots[k].steps_done, c.overflow_flags));
+                    self.failed = Some(format!(
+                        "rigid step {}: GPU overflow flags=0x{:x}",
+                        self.slots[k].steps_done, c.overflow_flags
+                    ));
                 }
             }
             let step = self.slots[k].steps_done;
             if let Err(e) = plan::explicit_loop_cap_hit(word(c4) as i32) {
-                self.failed.get_or_insert(format!("World step {step}: explicit vehicles: {e}"));
+                self.failed
+                    .get_or_insert(format!("World step {step}: explicit vehicles: {e}"));
             }
             if let Err(e) = cw::status_error(word(c4 + 8), self.layout.cap) {
                 self.failed.get_or_insert(format!("World step {step}: {e}"));
@@ -606,8 +716,18 @@ impl CudaWorld {
                 for (i, m) in self.sleep_mask.iter_mut().enumerate() {
                     *m = word(c4 + 12 + 4 * i);
                 }
-                let full = |k: usize| if 32 * (k + 1) <= nv { u32::MAX } else { (1u32 << (nv % 32)) - 1 };
-                self.any_awake = self.sleep_mask.iter().enumerate().any(|(k, &w)| w != full(k));
+                let full = |k: usize| {
+                    if 32 * (k + 1) <= nv {
+                        u32::MAX
+                    } else {
+                        (1u32 << (nv % 32)) - 1
+                    }
+                };
+                self.any_awake = self
+                    .sleep_mask
+                    .iter()
+                    .enumerate()
+                    .any(|(k, &w)| w != full(k));
             }
         }
         match self.failed.take() {
@@ -635,8 +755,19 @@ impl CudaWorld {
         self.wait()?;
         let mut out = Vec::new();
         for e in std::mem::take(&mut self.events) {
-            let ms = |a: usize, b: usize| unsafe { result::event::elapsed(e[a], e[b]) }.map(f64::from).map_err(backend);
-            out.push(StepTimes { total: ms(0, 5)?, emit: ms(0, 1)?, rigid: ms(1, 2)?, plan: ms(2, 3)?, frame: ms(3, 4)?, loads: ms(4, 5)? });
+            let ms = |a: usize, b: usize| {
+                unsafe { result::event::elapsed(e[a], e[b]) }
+                    .map(f64::from)
+                    .map_err(backend)
+            };
+            out.push(StepTimes {
+                total: ms(0, 5)?,
+                emit: ms(0, 1)?,
+                rigid: ms(1, 2)?,
+                plan: ms(2, 3)?,
+                frame: ms(3, 4)?,
+                loads: ms(4, 5)?,
+            });
             for ev in e {
                 unsafe {
                     let _ = result::event::destroy(ev);
@@ -655,7 +786,12 @@ impl CudaWorld {
     fn read_work(&mut self, offset: u64, words: usize) -> Result<Vec<u32>, ExecError> {
         let mut out = vec![0u32; words];
         unsafe {
-            result::memcpy_dtoh_async(bytemuck::cast_slice_mut::<u32, u8>(&mut out), self.work + offset, self.stream).map_err(backend)?;
+            result::memcpy_dtoh_async(
+                bytemuck::cast_slice_mut::<u32, u8>(&mut out),
+                self.work + offset,
+                self.stream,
+            )
+            .map_err(backend)?;
             result::stream::synchronize(self.stream).map_err(backend)?;
         }
         Ok(out)
@@ -674,7 +810,12 @@ impl CudaWorld {
         let work = self.read_work(0, (self.work_layout.bytes() / 4) as usize)?;
         let mut args = [0u32; 4];
         unsafe {
-            result::memcpy_dtoh_async(bytemuck::cast_slice_mut::<u32, u8>(&mut args), self.list_args, self.stream).map_err(backend)?;
+            result::memcpy_dtoh_async(
+                bytemuck::cast_slice_mut::<u32, u8>(&mut args),
+                self.list_args,
+                self.stream,
+            )
+            .map_err(backend)?;
             result::stream::synchronize(self.stream).map_err(backend)?;
         }
         Ok((work, args))
@@ -683,7 +824,9 @@ impl CudaWorld {
     /// Per vehicle, its last window's proxy shapes as (collider, impulse N s, angular
     /// impulse about the shape's reference point, that point): what the next step's
     /// emit puts on the bodies (engine-world's `explicit_window_impulses`; waits).
-    pub fn window_impulses(&mut self) -> Result<Vec<Vec<(u32, [f32; 3], [f32; 3], [f32; 3])>>, ExecError> {
+    pub fn window_impulses(
+        &mut self,
+    ) -> Result<Vec<Vec<(u32, [f32; 3], [f32; 3], [f32; 3])>>, ExecError> {
         self.wait()?;
         let l = self.layout;
         let misc = self.explicit.download_words(plan::BIND_MISC)?;
@@ -691,14 +834,25 @@ impl CudaWorld {
             let i = (r * 4) as usize;
             [misc[i], misc[i + 1], misc[i + 2], misc[i + 3]]
         };
-        let f3 = |r: [u32; 4]| [f32::from_bits(r[0]), f32::from_bits(r[1]), f32::from_bits(r[2])];
+        let f3 = |r: [u32; 4]| {
+            [
+                f32::from_bits(r[0]),
+                f32::from_bits(r[1]),
+                f32::from_bits(r[2]),
+            ]
+        };
         Ok((0..l.vehicles)
             .map(|v| {
                 let n = rec(l.vehicle(v))[1];
                 (0..n)
                     .map(|k| {
                         let at = l.shape(v, k);
-                        (rec(at)[2], f3(rec(at + 4)), f3(rec(at + 5)), f3(rec(at + 6)))
+                        (
+                            rec(at)[2],
+                            f3(rec(at + 4)),
+                            f3(rec(at + 5)),
+                            f3(rec(at + 6)),
+                        )
                     })
                     .collect()
             })
@@ -743,7 +897,10 @@ impl Drop for CudaWorld {
             for k in &self.kernels {
                 let _ = result::module::unload(k.module);
             }
-            for &b in [self.params, self.work, self.list_args].iter().chain(&self.spare) {
+            for &b in [self.params, self.work, self.list_args]
+                .iter()
+                .chain(&self.spare)
+            {
                 let _ = result::free_sync(b);
             }
         }

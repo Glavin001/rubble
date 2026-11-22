@@ -11,7 +11,13 @@ impl ExplicitVehicles {
     /// The coupling's carried state and its work buffer's bytes. Blocking read.
     fn portable_coupling(&self, sim: &engine_webgpu::WgpuSim) -> (CouplingHeader, Vec<u8>) {
         let l = self.work_layout;
-        let work = engine_webgpu::explicit_coupling::read_words(sim.device(), sim.queue(), &self.work, 0, l.bytes());
+        let work = engine_webgpu::explicit_coupling::read_words(
+            sim.device(),
+            sim.queue(),
+            &self.work,
+            0,
+            l.bytes(),
+        );
         // The indirect arguments hold the proxied list's count as the last plan left it
         // (copied from work, where it stays until the next window's plan).
         let list_args = [work[l.list_word as usize], 1, 1, 0];
@@ -41,7 +47,10 @@ impl World {
     /// ([`Self::save_explicit_world`] records them). Blocking reads. Not for a World with
     /// a fracture, terrain, characters or rigid vehicles: a loading host has none.
     pub fn explicit_world_portable(&self, t: f64, note: &str) -> anyhow::Result<PortableWorld> {
-        let x = self.explicit.as_ref().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        let x = self
+            .explicit
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
         x.gpu.wait();
         let (rigid, mut blobs) = self.sim.portable_rigid();
         let (coupling, work) = x.portable_coupling(&self.sim);
@@ -85,7 +94,13 @@ impl World {
             let inputs = (0..vehicles)
                 .map(|v| {
                     drive.map(|d| {
-                        let w = engine_webgpu::explicit_coupling::read_words(self.sim.device(), self.sim.queue(), x.gpu.misc_buffer(), d.input_offset(v), 16);
+                        let w = engine_webgpu::explicit_coupling::read_words(
+                            self.sim.device(),
+                            self.sim.queue(),
+                            x.gpu.misc_buffer(),
+                            d.input_offset(v),
+                            16,
+                        );
                         [w[0], w[1], w[2], w[3]]
                     })
                 })
