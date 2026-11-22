@@ -6426,3 +6426,36 @@ snapshot's own count on the on half, every other word the same), and did not rep
 44 further rounds of that row or in any other run; its cause was not found. `explicit_replay` now also fails a half that
 does not repeat its own last round and names it, so that a difference between the
 halves is not read as the switch's.
+
+### 8.54 After §8.53: where 20 cars' time is on the Mac (2026-11-22)
+
+Checked at the merge of §8.53 (7dff0d41), Mac, `run.sh surffast` (both parts on / off):
+apart1 5.72 / 21.41, pole 17.10 / 33.26, wall_s 8.41 / 24.62 (bit for bit), and the
+vehicle-contact part slower on clash20 (+7.0 %) and derby20_t5 (+10.9 %), as §8.53 says;
+it stays off for wgpu.
+
+By dispatch kind (`PROFILE_SPLIT=1 run.sh perf=0`, wgpu's default, each dispatch a timed
+pass; Metal's timestamps misattribute between kinds, the dispatch counts are exact):
+
+| row | frame, untimed | members' step | fleet walk | levels | the rest |
+|---|---|---|---|---|---|
+| apart20 | 13.8 | one `Solo` dispatch of 13.0 (every car alone in its workgroup, 34 steps: 0.38 ms a step) | — | — | 334 of 378 dispatches are empty |
+| clash20 | 25.2 | 17.3 (34 × 0.51) | 0.2 | 3.8 | 3.6 |
+| mountain20_t12 | 42.8 | 23.8 (34 × 0.70) | 10.2 (34 × 0.30) | 3.3 | 6.5 |
+| mountain20_t20 | 66.9 | 26.0 (34 × 0.76) | 30.7 (34 × 0.90) | 6.4 | 7.5 |
+
+Cars apart with vehicle contact off, so that the fleet runs the wide passes with the
+surface pipelines (live runs of 2 s, GPU ms a step of the explicit frame, median / p95):
+1 car 5.47 / 5.50, 8 cars 6.40 / 6.47, 20 cars 9.07 / 12.36, 32 cars 10.74 / 14.28. That
+is about 5.3 ms of launches (19 a step) plus 0.17 ms a car. With vehicle contact on and
+no group the same cars are 9.2 / 14.3 at 20.
+
+Reading:
+
+1. A car's whole step in one workgroup costs 0.4 to 0.8 ms a step on the Mac whatever
+   else happens; across the GPU (the wide passes) 20 cars' steps cost about 0.1 ms a
+   step together. The members' step is the largest part of every row in contact.
+2. The fleet walk grows with the pile: 0.3 ms a dispatch at t 12, 0.9 at t 20. It is
+   the mountain run's growth from 40 to 70 ms.
+3. The frame's floor is its launches: 19 a step for a lone surface car is 5.3 ms before
+   any car's work.
