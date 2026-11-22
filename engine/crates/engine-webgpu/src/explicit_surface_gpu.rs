@@ -55,6 +55,11 @@ pub(super) struct Split {
 }
 
 impl Split {
+    /// The surface pass's arguments on the fast schedules ([`schedule::ArgBuf::Surf`]).
+    pub(super) fn args(&self) -> &wgpu::Buffer {
+        &self.args
+    }
+
     /// The segments' pipeline ([`Kernel::FrameSeg`]), made at its first use.
     pub(super) fn frame(&self) -> &wgpu::ComputePipeline {
         self.frame.get_or_init(|| {
@@ -208,11 +213,13 @@ impl ExplicitBeamsGpu {
     }
 
     /// A/B harnesses (`vehicle_lab --ab-switch NAME`): the host switch of that name set,
-    /// or false for a name that is none. `surffast`: [`Self::set_surface_fast`].
+    /// or false for a name that is none. `surffast`: [`Self::set_surface_fast`]; `vvwide`:
+    /// [`FramePlanner::set_vv_wide`].
     #[doc(hidden)]
     pub fn set_named_switch(&mut self, name: &str, on: bool) -> bool {
         match name {
             "surffast" => self.set_surface_fast(on),
+            "vvwide" => self.set_vv_wide(on),
             _ => return false,
         }
         true
@@ -221,7 +228,11 @@ impl ExplicitBeamsGpu {
     /// What [`Self::set_named_switch`]'s `name` switches (`None`: no such switch).
     #[doc(hidden)]
     pub fn named_switch(name: &str) -> Option<&'static str> {
-        (name == "surffast").then_some("surface contact on the fast schedules")
+        match name {
+            "surffast" => Some("surface contact on the fast schedules"),
+            "vvwide" => Some("vehicle contact's frames without a group on the wide passes"),
+            _ => None,
+        }
     }
 
     /// The fast schedules' surface launches ([`GroupOp::SoloRest`], [`GroupOp::Surf`]).

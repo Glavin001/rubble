@@ -6505,3 +6505,266 @@ candidates' tracking of every node (`fkTrackVehicle`), and wheels on each other
 (`wheelsPartners`) between a step's coupling and its nodes. Each is per element or per
 vehicle and none reads workgroup state of another, so none is a reason it cannot be
 hosted; each is kernel work in the wide node pass and its proof.
+
+### 8.57 Every car's own step on the wide passes under vehicle contact: the map, and the frames without a group (2026-11-22)
+
+§8.54's first reading: a car's whole step in one workgroup costs 0.4 to 0.8 ms a step on
+the Mac, the same cars' steps across the GPU (the wide passes) about 0.1 ms a step
+together. A fleet with vehicle contact on never takes the wide passes today
+(`FramePlanner::is_wide` needs contact off). This section is the map of what a car's own
+step is on each path, then the first part built: the frames in which the contact plan
+holds no group.
+
+**The paths today** (contact on, `schedule::frame`):
+
+| the fleet | the plan holds no group | the plan holds a group |
+|---|---|---|
+| surface contact, its pass in the kernels (wgpu's default: `surface_fast_contact_default(false)`) | one `Solo` dispatch, a workgroup a vehicle for the whole frame (`explicit_beams_frame` under `EB_VV_SOLO`), sized by the plan (`vvArgs` words 0..2: the vehicles, or 0 with a group) | every vehicle a step a dispatch on `explicit_beams_split_member` (`Member(s)`, sized by words 20..22: 0 without a group): a solo vehicle `explicitBeamsFrameStep`, a member `splitMember` |
+| no surface contact, or its pass as pipelines with vehicle contact (CUDA's default): self split with vehicle contact | every vehicle a step a dispatch whatever the plan (`SelfMember(s)`, words 28..30: the vehicles always), the walk, the pairs, the members' rest (none without a group), the solo vehicles' rest and the surface pipelines (surface fleets) | the same dispatches, then the fleet's front, tests and levels |
+
+**The map.** What a vehicle's own step runs on the members' path and on the solo
+vehicles' (`contactMemberStep`, `splitMember`, `memberRestStep`, `contactMemberBegin`,
+`contactMemberEnd`, `splitGroupBegin`, `splitGroupEnd`; `explicitBeamsFrameStep` under
+`EB_VV_SOLO`), against the wide passes (`explicit_beams_wide_*`, `explicit_beams_wide_list`).
+"Reading" marks what is read from the code and not yet held by a test.
+
+| item | today: where, what it reads and writes | on the wide step | status |
+|---|---|---|---|
+| the frame's start: the origin's rebase | solo: the step dispatch of step 0 (every lane reads node 0, the nodes shifted, `gMisc[v].xyz`, `cplRebase`); member: `contactMemberBegin` in the groups' begin dispatch | `wide_begin` (the shift into `gMisc[wideMisc + 1 + v]`, `cplRebase`), `wide_rebase` (a thread a node), then the host's copy of the origins and step counts into the vehicle table | built for a frame without a group (the same arithmetic: `P − first` when `length(first) > REBASE_RADIUS`). With a group: the groups' begin must then skip `contactMemberBegin` (reading) |
+| the coupling's step, the wheels | solo: `coupleStep`, `driveStep` (or `PERF_DRIVE_AHEAD`'s parts); member: `splitCoupleStep` (the members' partition of lanes; a group past `CPL_GS_VEHICLES` members or header bit 4 runs `cplIntegrate` with no `cplReactBy` before it, where `coupleStep` runs both) and `splitDriveStep` / `splitTyres` | `wide_aux` (a workgroup a vehicle: `coupleStep`, `driveStep`); with `PERF_WIDE_FUSED` on the list and hits kernels | built without a group. With a group (reading): the fused form cannot be taken, since step s + 1's tyres would read their hubs' accumulators before step s's contact levels add to them; and `splitCoupleStep`'s large-group branch must be shown the same as `coupleStep` or kept |
+| the solo vehicles' frame-bounds check | `nodeUpdateSolo` / `nodeUpdateShapes` / `nodeUpdateCoupled` with `solo`: each node's position before its update against the allowed box (`gsVvBounds`: centre and half extents from `vvRec(v, VV_ALLOWED_LO/HI)` minus the origin, in workgroup memory), not for a retired node; every node again at the frame's end. Writes `gAcc[vvCtl(VV_OUTSIDE)]` by an atomic maximum | the node pass's thread, before its `nodeUpdate`: the box from the two records and the table's origin, a thread a node; the frame's last positions in the close pass | **built** (`explicit_beams_wide_nodes_vv`, `explicit_beams_wide_close_vv`): the same expression per node; the half sum times 0.5 is exact, so no rounding differs from the workgroup's stored copy |
+| each member's contact box by step parity | `memberBox` after the member's node phase (and again after centred damping): atomic minima and maxima of `nf3(origin + P)` into `vvBoxKey(v, parity)`, the other parity's keys cleared for the next step, the allowed box checked (`vvReportOutside`); `contactMemberEnd` clears all twelve | the node pass's thread after `nodeUpdate` (and the centred nodes' pass): order-free atomics a node; the other parity's clear in the pass's per-vehicle part | not built. Reading: exact (minima, maxima); the fleet's front reads the keys after the members' steps, which the wide step keeps |
+| the pending-beam reset of a member's triangle throttles | `VV_FLAGS.w`, set by the contact pass on a fast approach (`explicit_beams.slang` 10085, 11085; `explicit_beams_fleet.slang` 121): at the next step's throttle update every triangle's wait is zeroed and the triangle listed; cleared after the update (`contactMemberStep`, lane 0, s > 0), and in `contactMemberEnd` | the list kernel's throttle loop (it reads the flag per vehicle) and `wide_end`; `PERF_WIDE_GEO`'s `triangleFinishPeek` in the beams pass must then fill every triangle of a pending member | not built. Reading: exact, per vehicle |
+| the members' pair-list state between steps | `memberListLoad` / `memberListKeep` / `memberListSave`: the list's state (`gsCount` past the buckets, `REUSE_WORDS` words) in `soloStepAt(v)` | the list kernel keeps the same words there (`soloStepSave`, `soloStepLoad`) | the same words already: nothing to host. `pairReuseBegin` at step 0 on both |
+| the kept candidates' tracking of every node | `fkTrackVehicle` at the end of `memberRest` when the host sets `PERF_KEEP_TRACK_REST`; otherwise the scans' dispatch tracks (`fkTrack`, a thread a node) | not hosted: without the members' rest the host does not set the flag and the scans' dispatch tracks, one launch a step in a frame with a group | a schedule choice, no kernel work (the fleet's kept candidates are being changed in parallel: left to that work) |
+| wheels on each other | `wheelsPartners` in a dispatch of its own a workgroup a group before each step's vehicles (`GroupOp::Wheels`): the staged reactions into the partners' accumulators, the rays | the same dispatch before the step's aux pass | not built: a fleet whose wheels see bodies stays on today's path |
+| the node, beam, centred and list phases, the walk, the pairs, the hits | the member's or the solo vehicle's workgroup; a member's node phase always takes the accumulators (`hits` true) | `wide_nodes` (always `hits` true), `wide_centred_*`, `wide_beams`, the list kernel, the walk and pairs dispatches, `wide_hits` | the wide frame against the frame kernel is held bit for bit already with contact off (`explicit_beams_bitwise`, the matrix's one-car rows) |
+| the surface pass | in the member's or solo vehicle's kernel, or as pipelines after the rests (§8.53) | the pipelines after `wide_hits` (§8.53) | built without a group |
+| the frame's end | solo: `coupleEnd`, `pairReuseEnd`, the triangles' last throttle update, the last group breaks, the step count, the last bounds check; member: `splitGroupEnd` (`coupleEndMembers`, `contactMemberEnd`) | the list kernel's end, `wide_aux` at `steps`, `wide_end`, `wide_close` | built without a group. With a group: `splitGroupEnd` must skip what the wide end ran (reading) |
+| the step parity | a member's own step uses its own count (`gMisc[v].w + s`); the groups' pass its first member's | the wide passes clear every vehicle's group slots by vehicle 0's parity: every vehicle must have run the same steps | holds while no vehicle sleeps (every vehicle steps every frame): vehicle sleep stays on today's path |
+
+Nothing in the list reads another vehicle's workgroup memory; the two rows marked as
+needing a proof before they move are the coupling's large-group branch and the order of
+the tyres against the contact levels.
+
+**Measured before building: what the wide passes cost these cars.** §8.54's figures for
+cars apart with contact off (20 cars 9.07 ms a step at the median, 12.36 at p95) are a
+live run's GPU time. The matrix's rows are one saved moment timed by wall clock
+(encode, submit, wait), and that moment is at the run's p95. The same fixtures replayed
+with vehicle contact off, so that the fleet runs the wide passes
+(`EXTRA="--vv 0" run.sh perf=0 ROW`, Mac, bit-exact on), against today's frame with
+contact on:
+
+| row | contact on today (`Solo`) | contact off (the wide passes) |
+|---|---|---|
+| apart2 | 8.29 | 6.07 to 6.34 |
+| apart8 | 13.61 | 9.92 to 10.55 |
+| apart20 | 14.30 | 12.50 to 12.52 |
+| apart32 | 15.34 | 14.64 to 14.83 |
+
+So the most this part can give on the Mac is 14.3 → 12.5 ms at 20 cars (−12.5 %), 27 %
+at 8, 4 % at 32: a workgroup a vehicle costs that GPU the same for 2 cars as for 32
+(8.3 to 15.3 ms), the wide passes' work grows with the cars.
+
+**Built: the frames without a group** (`FramePlanner::set_vv_wide`, `--ab-switch vvwide`
+in `vehicle_lab` and in engine-cuda's `explicit_replay`; `RUBBLE_VV_WIDE=0|1`;
+`explicit_plan/vv_wide.rs`, `explicit_beams_vvwide.slang`). The plan decides on the GPU,
+so such a frame holds both schedules and each is sized there:
+
+- `explicit_vv_gate` (one workgroup after the plan's passes, every frame): from the
+  plan's group count (`vvArgs` word 3, which every snapshot carries) the wide passes'
+  workgroup counts into a buffer of its own (`ArgBuf::Wide`, ten slots): each pass's
+  count when the plan holds no group, else 0; and the vehicles' count for today's
+  launches that run every frame (`SelfMember`, `SoloRest`) when it holds one, else 0.
+- Every wide launch is sized from that buffer, in the order of a wide frame with the
+  reused pair list. The node and close passes are two new modules, the wide ones with
+  the bounds check ahead of them (`explicit_beams_wide_nodes_vv`,
+  `explicit_beams_wide_close_vv`); every other launch is a module the hosts had.
+- With self split and vehicle contact (no surface contact, or CUDA's surface pipelines)
+  the walk, the pairs and the surface pipelines are today's own dispatches, and one
+  launch of each serves both schedules: a step is the wide passes up to the list
+  kernel, the vehicles' step, the walk, the pairs, the wide hits, then the rests, the
+  surface pipelines and the groups' passes. With the surface pass in the kernels (wgpu's
+  default) the wide frame brings its own walk, pairs and surface pipelines ahead of each
+  step's members' dispatch, the prep and the plan sized by the gate; their argument
+  slots (the self split's and the surface pass's) are zeroed at the frame's start by the
+  gate's module again, since a slot is otherwise cleared by the step before it, which
+  gets no workgroup in a frame with a group. Zeroing every slot at a frame's start
+  changes nothing for a frame that writes them.
+- The steps' parameter copies carry the wide passes' flags (`PERF_WIDE_LIST`, the fused
+  aux work where a wide frame takes it, `PERF_HIT_SLOT_MAP`); no kernel of the split
+  group path reads them (the groups' pass reads `lvSlots` from other copies when its
+  tests are split, which this schedule requires).
+- No launch binds as storage the buffer it is sized from (held by the schedule's tests).
+
+**A launch is not free when the GPU gives it no workgroup.** The brief for this part
+took §8.54's "334 of 378 dispatches are empty" as costing nothing; that was GPU time.
+With both schedules in every frame (the first build), every row with a group was slower
+by wall clock, bit for bit:
+
+| | Mac (Metal), on / off, ms a frame | T4 (CUDA) |
+|---|---|---|
+| pile2 | 10.48 / 9.28, +13.0 % | 12.91 / 11.53, +11.9 % |
+| barrier | 7.66 / 7.06, +8.5 % | 11.78 / 10.62, +10.9 % |
+| side | 9.08 / 8.47, +7.2 % | 14.78 / 13.53, +9.3 % |
+| headon | 12.56 / 11.84, +6.1 % | 18.65 / 17.41, +7.1 % |
+| clash2 | 19.11 / 17.46, +9.4 % | 22.20 / 20.90, +6.2 % |
+| clash20 | 29.62 / 27.73, +6.8 % | 45.08 / 44.02, +2.4 % |
+| mountain20_t12 | 42.21 / 40.74, +3.6 % | 79.21 / 78.08, +1.4 % |
+
+That is 0.6 to 1.9 ms a frame for 200 to 700 launches without a workgroup: 2 to 5 µs
+each on the Mac (wgpu's encoding and Metal's, not the GPU), and on CUDA an indirect
+launch always runs its resident blocks to read a count of zero. The same holds for
+today's frames: a frame without a group already carries about 340 launches of the
+groups' path that get no workgroup, which is the difference between this part's result
+and the contact-off column above (13.6 against 12.5 ms at 20 cars).
+
+So a frame holds both schedules only when the host expects no group: the host reads the
+plan's group count back without waiting (wgpu: four bytes copied after a frame's passes
+and mapped asynchronously, every fourth frame; CUDA: at `wait`, where the stream is
+idle) and gives it to the planner (`FramePlanner::set_vv_wide_seen`). After a plan
+without a group the next frames hold both; until then, and after a plan with a group,
+a frame is today's, which serves a plan without a group as before. Either frame is
+right for either plan, so the hint costs or saves time and cannot change a result: a
+frame that holds both schedules while the plan forms a group runs today's launches
+(sized by the gate), and `explicit_vv_wide_gpu` holds such frames bit for bit. This is
+the same kind of read as the levels' slots (`level_want`).
+
+**Results** (2026-11-22, bit-exact on, ms a frame of 34 steps; `run.sh vvwide ROW...`, 10
+frames, 3 rounds, the switch forced on whatever the fleet's size). Every one of the 37
+rows ends bit for bit on both machines, every state word and every coupling word.
+
+| row | Mac (Metal), on / off | T4 (CUDA, `ENGINE_CUDA_FMAD=0`), on / off |
+|---|---|---|
+| apart2 | 7.59 / 8.33, −8.9 % | 10.75 / 12.91, −16.7 % |
+| apart4 | 10.97 / 12.86, −14.7 % | 15.97 / 18.19, −12.2 % |
+| apart8 | 11.52 / 13.63, −15.5 % | 18.20 / 19.64, −7.3 % |
+| apart16 | 13.69 / 14.16, −3.3 % | 23.18 / 23.98, −3.3 % |
+| apart20 | 13.59 / 14.39, −5.6 % | 25.97 / 26.87, −3.4 % |
+| apart32 | 15.89 / 15.32, +3.8 % | 33.64 / 35.68, −5.7 % |
+| apart1, drive, tumble, wall, bricks, rocks, truss, pole, wall_s, bricks_s (one vehicle: contact not active) | −4.8 to +2.2 % | −0.1 to +0.2 % |
+| pile2, pile8, pile32, headon, side, barrier | −0.8 to +0.6 % | −0.1 to +0.2 % |
+| clash2 to clash32 | −0.5 to +0.3 % | 0.0 to +0.1 % |
+| mountain20_t2, t4, t7, t12, t20 | −0.6 to +0.1 % | −0.1 to +0.3 % |
+| derby20_t2, t5, t10 | −0.1 to +0.1 % | +0.1 % |
+| pile8_s | −0.1 % | 0.0 % |
+| verdict | PASS (37 rows) | PASS (37 rows) |
+
+The rows with a group run today's frame (the host has read a plan with a group back),
+so they are the same launches as before plus the read. On the Mac the cars-apart rows
+were measured five more times on a GPU other sessions shared: apart2 −6 to −19 %,
+apart4 −8 to −15 %, apart8 −12 to −20 %, apart16 −3.3 to +1.3 %, apart20 −5.6 to
++4.5 %, apart32 0.0 to +10.3 % (past the gate's 5 % in three of five runs). On the T4
+every count is faster.
+
+The defaults, before → after, mean of each frame's best round (worst frame), each
+`run.sh --baseline` a run of its own (`RUBBLE_VV_WIDE=0` before; the two T4 runs were
+two containers, whose rows off this path differ by 1 to 6 % between them, so only the
+rows this path changes are listed):
+
+| row | Mac before → after | T4 before → after |
+|---|---|---|
+| apart2 | 8.31 (8.46) → 7.53 (7.91) | 13.20 (13.38) → 10.92 (11.15) |
+| apart4 | 12.84 (14.21) → 10.31 (12.56) | 18.41 (20.44) → 15.88 (17.96) |
+| apart8 | 13.54 (14.84) → 11.51 (13.30) | 20.49 (22.66) → 18.28 (20.32) |
+| apart16 | 14.07 (15.34) → 14.07 (15.37), not taken | 26.02 (28.81) → 23.17 (25.27) |
+| apart20 | 14.24 (15.64) → 14.26 (15.62), not taken | 29.54 (32.00) → 25.96 (27.74) |
+| apart32 | 15.22 (16.54) → 15.24 (16.60), not taken | 39.70 (42.82) → 33.59 (36.31) |
+
+**Defaults.**
+
+- *CUDA*: on (`vv_wide_default(true)`). Passes the gate on every row.
+- *wgpu, natively*: on for a fleet of at most 8 vehicles (`DEFAULT_MOST_VEHICLES`,
+  `explicit_vv_wide_gpu.rs`), where every measured row is faster; off above, where it
+  is a tie at 16 and 20 and slower at 32. `RUBBLE_VV_WIDE=1` any fleet, 0 none. It acts
+  only where the host's wide passes with the reused pair list are on (the lab's
+  options; the World's own defaults leave them off).
+- *wasm*: off. Chrome accepts the three new modules; its bit-for-bit A/B on the lab
+  page (AGENTS.md rung 3) was not run, and a browser's compiles ahead do not list them.
+- *engine-metal*: its host replays the planner's commands and never turns it on.
+
+**Proofs** (commands from `engine/`).
+
+- `tools/scenario-matrix/run.sh vvwide ROW...` on the Mac, 37 rows: bit for bit, PASS.
+- `ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda vvwide ROW...`, 37 rows
+  (mountain20_t20 and the derby rows among them): bit for bit, PASS.
+- `ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda --base 25ea30b4 --head
+  a973e8cf`, the 12 default rows as two builds: every end state word for word, −0.2 to
+  +0.2 %, PASS.
+- `cargo test --profile fast -p engine-webgpu --test explicit_vv_wide_gpu` with
+  `RUBBLE_BIT_EXACT=1` (new, 6 tests): three cars apart with and without surface
+  contact, 24 frames; a pair closing head-on and one alone, 40 frames, with and without
+  surface contact (24 frames held the wide schedule, 18 had a group, 3 held the wide
+  schedule while the plan formed a group); a vehicle falling out of its frame bounds
+  reported in the same words from the solo frame and from the wide passes.
+- `cargo test --profile fast -p engine-exec` 28 (three new: the gate's slots are the wide
+  plan's counts; each path's launches in order; no launch binds the buffer it is sized
+  from), engine-webgpu `explicit_plan_modules` 1, `explicit_loop_cap` 6: pass.
+- The suites that hold the GPU to the CPU reference, bit-exact, with the host's
+  defaults and again with the wide frame forced where the plan allows it
+  (`RUBBLE_VV_WIDE=1 RUBBLE_WIDE=1 RUBBLE_WIDE_LIST=1 RUBBLE_GROUP_SPLIT=1
+  RUBBLE_SELF_SPLIT=1`), `--profile fast`, each under the GPU lock: `fleet_contact_gpu` 1,
+  `group_split_gpu` 3, `self_split_gpu` 8, `explicit_contact_gpu` 13,
+  `explicit_surface_fast_gpu` 6 pass both ways. (How many of their frames took the wide
+  schedule in the forced runs was not counted; `explicit_vv_wide_gpu` counts its own.)
+- Chrome: `EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
+  explicit-wgsl-check.mjs`: all 158 modules. `tools/build-time/compile_cost.py --check`:
+  0 failing (the new modules 0.0 to 0.5 s). `tools/build-time/check.py`: the two
+  `vehicle_lab.rs` lines of the base, nothing new. `explicit_beams.slang` keeps its
+  11,645 lines: its include of the fleet's file moved to the end of
+  `explicit_beams_split.slang`, and of the base's 440 generated WGSL modules every one
+  is byte for byte the same (three are new).
+- Not added: budget lines for the three new modules in
+  `tools/build-time/inline-budget.txt` (116, 300 and 34,203 inlined lines); that check
+  already fails at the base on 15 modules of §8.53 without a line.
+
+**Left on today's path, and why.**
+
+- *Every frame with a group* (the map above: nothing of it is built).
+- *A fleet whose wheels see bodies* (`Switches::wheels_bodies`): the wheels' dispatch is
+  a group's; its place in a wide step is not built.
+- *Vehicle sleep*: the wide passes need one step parity for the fleet.
+- *A fleet past 8 vehicles on wgpu, a browser*: the defaults above.
+
+**What the frames with a group would gain, measured before building them.** The same
+fixtures with vehicle contact off run every car's own step on the wide passes (the
+surface pass as pipelines) and nothing of vehicle contact. Against today's frame with
+its own-step dispatches named (Mac: §8.54's table, the members' step holds the surface
+pass; T4: `PROFILE_SPLIT=1 run.sh --cuda perf=0`, the vehicles' step, the walk, the
+pairs, the rests and the surface pipelines):
+
+| row | Mac: today, of it the members' step | Mac: own steps on the wide passes | T4: today, of it the cars' own dispatches | T4: own steps on the wide passes |
+|---|---|---|---|---|
+| clash20 | 25.2, 17.3 | 16.3 | 44.3, 31.4 | 28.0 |
+| mountain20_t12 | 42.8, 23.8 | 22.3 | 78.0, 46.8 | 44.0 |
+| mountain20_t20 | 66.9, 26.0 | 23.9 | 125.9, about 50 | 46.9 |
+| derby20_t5 | 29.8 | 19.1 | 56.7 | 32.7 |
+| pile8_s | 25.1 | 13.3 | 32.2 | 21.9 |
+| pile8 (no surface contact) | 12.4, 9.1 (timed apart: each inflated) | 5.4 | 21.2, 15.7 | 10.2 |
+| pile32 (no surface contact) | 37.7, 13.0 (timed apart) | 10.9 | 77.2, 35.4 | 30.3 |
+
+On the Mac the 20-car rows with surface contact would gain at most 1.0 to 2.1 ms a
+frame (3 to 4 %): the wide frame runs the surface pass as pipelines, which at 16 to 20
+cars costs that GPU about what the pass inside the members' workgroups does (§8.53's
+finding for the vehicle-contact part), so the cars' own steps across the GPU are not
+"far less" there. On the T4, where §8.53 already took the surface pass out of the
+vehicles' step, the step dispatch is 12 to 33 % of these frames and the wide passes
+would save 3 to 5 ms: 7 % of clash20, 4 % of mountain20_t12, 2 % of mountain20_t20,
+and more only without surface contact (pile8 about 26 %, pile32 about 7 %; on the Mac
+pile8 at most 30 %, pile32 6 %). These are upper bounds: with contact off the wide
+frame of a fleet without surface contact also fuses its aux work, which a frame with a
+group cannot (the map's second row). The frames
+are elsewhere: on the T4's mountain20_t20 the fleet's tests are 59 of 126 ms, the
+levels 10, the surface pass's pair path (its find, listing, prep and plan) 23.
+
+So the frames with a group were not built: the map above is what they need, and the
+table is what they would return. In order of return: the fleet's tests on the mountain
+(§8.55), the surface pass's pair path, the launches a step (a launch costs the Mac's
+host 2 to 5 µs with or without a workgroup, and a frame has 850), and only then the
+members' step.
+
+**Not verified.** Chrome's bit-for-bit A/B on the lab page and whole 40 s runs (rungs 3
+and 4); engine-metal's parity suite (its host is unchanged); `explicit_beams_bitwise`
+and the World's suites (`explicit_vehicles`, `vehicle_lab_reset`); the T4's rows with
+wgpu through Vulkan. The Mac's timings are from a GPU other sessions were using through
+the lock: deltas within one process are paired, the two baseline runs are not.

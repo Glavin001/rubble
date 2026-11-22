@@ -271,6 +271,13 @@ impl CudaExplicitBeams {
         if !aero {
             out.push(Key::Split(plan::wide_list_module_name(lanes).to_string()));
         }
+        // (A fleet with vehicle contact on the wide passes while its plan holds no group,
+        // FramePlanner::set_vv_wide: the gate, the two passes with the bounds check, and
+        // the wide passes as its launches name them.)
+        if layout.spans.len() > 1 && layout.wide_capable() {
+            let vv = [plan::VV_GATE.0, plan::VV_WIDE_NODES.0, plan::VV_WIDE_CLOSE.0];
+            out.extend(vv.iter().chain(plan::WIDE_PASSES.iter()).map(|m| Key::Split(m.to_string())));
+        }
         // (Surface contact on the frame modules, split: the segments and the pass's
         // pipelines, which the saving host's planner may ask for.)
         if layout.surface {
@@ -444,6 +451,7 @@ impl CudaExplicitBeams {
             (ArgBuf::Spare1, FLEET_ARGS_BYTES),
             (ArgBuf::Spare2, FLEET_ARGS_BYTES),
             (ArgBuf::Surf, schedule::SURF_ARGS_BYTES),
+            (ArgBuf::Wide, plan::vv_wide::WIDE_ARGS_BYTES),
         ] {
             let ptr = unsafe { result::malloc_sync(bytes as usize) }.map_err(map)?;
             unsafe { result::memset_d8_sync(ptr, 0, bytes as usize) }.map_err(map)?;
@@ -452,6 +460,10 @@ impl CudaExplicitBeams {
         let mut planner = FramePlanner::new(&layout);
         planner.set_surface_fast(schedule::surface_fast_default());
         planner.set_surface_fast_contact(schedule::surface_fast_contact_default(true));
+        // (Vehicle contact's frames without a group on the wide passes: on here unless
+        // RUBBLE_VV_WIDE=0. On a T4 every row of 2 to 32 cars apart is 3 to 15 % faster
+        // and no row slower; vehicle-perf-first-principles.md §8.57.)
+        planner.set_vv_wide(plan::vv_wide::vv_wide_default(true));
         Ok(Self {
             ctx,
             stream,
@@ -1002,6 +1014,12 @@ impl CudaExplicitBeams {
     pub fn wait(&mut self) -> Result<(), ExecError> {
         self.bind_ctx()?;
         unsafe { result::stream::synchronize(self.stream) }.map_err(backend)?;
+        // (The contact plan's group count, for FramePlanner::set_vv_wide_seen: the stream
+        // is idle here.)
+        if self.planner.vv_wide() {
+            let groups = self.download::<u32>(BIND_ARGS)?.get(3).copied();
+            self.planner.set_vv_wide_seen(groups);
+        }
         if std::mem::take(&mut self.status_due) {
             let acc = self.download::<i32>(plan::BIND_ACC)?;
             self.layout.kernel_status(&acc).map_err(ExecError::Backend)?;

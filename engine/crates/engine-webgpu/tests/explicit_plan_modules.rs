@@ -18,6 +18,7 @@ fn plan_modules_are_the_shipped_wgsl() {
         .chain(engine_webgpu::EXPLICIT_BEAMS_SURF_SPLIT.iter())
         .chain(engine_webgpu::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
         .chain(engine_webgpu::EXPLICIT_BEAMS_SELF_SPLIT.iter())
+        .chain(engine_webgpu::EXPLICIT_BEAMS_VV_WIDE.iter())
         .map(|(n, _)| *n)
         .collect();
     let mut shipped: Vec<(String, &str)> = engine_webgpu::explicit_beams_shipped_wgsl()

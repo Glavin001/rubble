@@ -504,6 +504,29 @@ pub fn surface_fast_modules() -> Vec<SplitModule> {
     out
 }
 
+/// A fleet with vehicle contact on the wide passes while the contact plan holds no
+/// group (`slang/kernels/explicit_beams_vvwide.slang`, `EB_VV_WIDE`;
+/// `engine_exec::explicit_plan::vv_wide`): (module, entry) of the gate that sizes the
+/// frame's two schedules on the GPU, and of the node and close passes with the solo
+/// vehicles' frame-bounds check.
+pub const VV_GATE: (&str, &str) = ("explicit_vv_gate", "explicit_vv_gate");
+pub const VV_WIDE_NODES: (&str, &str) = ("explicit_beams_wide_nodes_vv", "explicit_beams_wide_nodes_vv");
+pub const VV_WIDE_CLOSE: (&str, &str) = ("explicit_beams_wide_close_vv", "explicit_beams_wide_close_vv");
+
+/// [`VV_GATE`], [`VV_WIDE_NODES`] and [`VV_WIDE_CLOSE`] with their defines, for every
+/// host's build.
+pub fn vv_wide_modules() -> Vec<SplitModule> {
+    [VV_GATE, VV_WIDE_NODES, VV_WIDE_CLOSE]
+        .into_iter()
+        .map(|(name, entry)| SplitModule { name: name.to_string(), entry, defines: vec![W, ("EB_VV_WIDE", "1")] })
+        .collect()
+}
+
+/// [`surface_fast_modules`] then [`vv_wide_modules`]: the fast schedules' small modules.
+pub fn fast_schedule_modules() -> Vec<SplitModule> {
+    surface_fast_modules().into_iter().chain(vv_wide_modules()).collect()
+}
+
 /// The modules of a fleet with surface contact on the frame modules, split
 /// (`Kernel::FrameSeg`, `Kernel::Surf`): the frame in segments at its four variants
 /// (`EB_FRAME_SEG`), then the surface pass's pipelines (`EB_SURF_PIPE`: the prep, then

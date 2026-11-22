@@ -11639,7 +11639,7 @@ void contactGroup(uint g, uint lane)
 #ifdef EB_VV_SPLIT
 #include "explicit_beams_fleet_track.slang"
 #include "explicit_beams_split.slang"
-#ifdef EB_VV_FLEET
-#include "explicit_beams_fleet.slang"
 #endif
+#ifdef EB_VV_WIDE
+#include "explicit_beams_vvwide.slang"
 #endif
