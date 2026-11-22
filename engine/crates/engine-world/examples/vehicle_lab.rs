@@ -1349,6 +1349,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `--ab-switch widelist`: the wide passes with the reused pair list against their own
     // grid walk every step.
     let widelist_ab = arg("--ab-switch").as_deref() == Some("widelist");
+    // `--ab-switch groupapart`: the groups' dispatches on the kernels of one kind each
+    // (`set_group_apart`) against the kernel with every pass.
+    let groupapart_ab = arg("--ab-switch").as_deref() == Some("groupapart");
     // `--ab-switch fused`: the wide passes' aux work on the list and hits kernels' lanes
     // against an aux dispatch a step (both wide with the list).
     let fused_ab = arg("--ab-switch").as_deref() == Some("fused");
@@ -1378,6 +1381,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
         if bitexact_ab {
             x.set_bit_exact(on);
+        } else if groupapart_ab {
+            x.set_group_apart(on);
         } else if groupsplit_ab {
             x.set_group_split(on);
             x.set_self_split(on);
@@ -2622,6 +2627,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     "this kernel (on) / --ab-kernel-dir's (off)"
                 } else if bitexact_ab {
                     "bit-exact (on) / fast (off)"
+                } else if groupapart_ab {
+                    "groups' kernels of one kind each (on) / with every pass (off)"
                 } else if groupsplit_ab {
                     "group split"
                 } else if sleep_ab {
@@ -2650,6 +2657,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out[0].0,
                 out[1].0
             );
+            if groupapart_ab {
+                println!("     groups' kernels made (every pass, begin, levels once, levels' end): {:?}", x.group_kernels_made());
+            }
             // (Wide against the workgroup frame: the two keep different scratch in the
             // accumulators and misc records; the nodes, beams and groups are the state.)
             // (And vehicle sleep's own words, when it is on: the records and anchors.)

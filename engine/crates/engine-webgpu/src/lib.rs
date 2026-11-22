@@ -142,7 +142,19 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 /// explicit_beams_fleet.slang, contact-groups-design.md §8); and the members' raycast
 /// wheels on each other (`explicit_beams_split_wheels`).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 32] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 44] = [
+    ("explicit_beams_split_groupbegin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin.wgsl"))),
+    ("explicit_beams_split_groupbegin_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin_wide.wgsl"))),
+    ("explicit_beams_split_groupbegin_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin_aero.wgsl"))),
+    ("explicit_beams_split_groupbegin_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_groupbegin_aero_wide.wgsl"))),
+    ("explicit_beams_split_grouplevels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels.wgsl"))),
+    ("explicit_beams_split_grouplevels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels_wide.wgsl"))),
+    ("explicit_beams_split_grouplevels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels_aero.wgsl"))),
+    ("explicit_beams_split_grouplevels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplevels_aero_wide.wgsl"))),
+    ("explicit_beams_split_grouplv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv.wgsl"))),
+    ("explicit_beams_split_grouplv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv_wide.wgsl"))),
+    ("explicit_beams_split_grouplv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv_aero.wgsl"))),
+    ("explicit_beams_split_grouplv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_grouplv_aero_wide.wgsl"))),
     ("explicit_beams_split_wheels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels.wgsl"))),
     ("explicit_beams_split_wheels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_wide.wgsl"))),
     ("explicit_beams_split_wheels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_wheels_aero.wgsl"))),

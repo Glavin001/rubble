@@ -252,7 +252,7 @@ impl CudaExplicitBeams {
         if layout.sleep.is_some() {
             out.push(Kernel::Sleep.module_for(aero, lanes, layout.surface).to_string());
         }
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
             out.push(plan::split_module_name(which, aero, lanes));
         }
         for vv in [false, true] {
@@ -477,6 +477,7 @@ impl CudaExplicitBeams {
             wide_fused: self.wide_fused,
             wheels_bodies: self.wheels_bodies,
             vv_grid: self.vv_grid,
+            group_apart: schedule::group_apart_default(),
             current: true,
             ablate: false,
             debug: false,
