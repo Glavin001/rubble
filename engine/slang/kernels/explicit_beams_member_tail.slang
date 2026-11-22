@@ -29,21 +29,6 @@ struct MemberTail
     uint flagsV;
     uint stepBase;
 };
-MemberTail memberTailNone(uint v, uint s)
-{
-    MemberTail t;
-    t.v = v;
-    t.s = s;
-    t.origin = float3(0.0, 0.0, 0.0);
-    t.range = 0.0;
-    t.beamOff = 0u;
-    t.groupOff = 0u;
-    t.groupCount = 0u;
-    t.parity = 0u;
-    t.flagsV = 0u;
-    t.stepBase = 0u;
-    return t;
-}
 void memberTail(MemberTail t, uint how, uint lane)
 {
     if ((how & MT_SYNC) != 0u) sync();

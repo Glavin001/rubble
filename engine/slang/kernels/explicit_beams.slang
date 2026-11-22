@@ -8405,7 +8405,8 @@ void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, u
 // describe; 0: no tail here).
 uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail t)
 {
-    t = memberTailNone(v, s);
+    t.v = v;
+    t.s = s;
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];

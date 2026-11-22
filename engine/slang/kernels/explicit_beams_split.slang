@@ -162,7 +162,8 @@ void splitWheelsAhead(uint v, uint lane, uint s)
 // frame; any other vehicle returns at once.
 uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
 {
-    t = memberTailNone(v, s);
+    t.v = v;
+    t.s = s;
     // (With self-collision split the vehicles' dispatch runs once more after the last
     // step, s = steps: the solo vehicles' last rest and frame end; a member has none.)
     if (s >= gP.steps) return 0u;
@@ -635,7 +636,8 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 // step, which reads what the hits leave. A solo vehicle returns at once.
 uint memberRestStepHead(uint v, uint lane, uint s, out MemberTail t)
 {
-    t = memberTailNone(v, s);
+    t.v = v;
+    t.s = s;
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
     // (A sleeping member has no step to finish.)
