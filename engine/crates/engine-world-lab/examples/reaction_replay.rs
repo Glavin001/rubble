@@ -6,10 +6,10 @@
 //!
 //! ```sh
 //! cd engine
-//! cargo run --release -p engine-world --example reaction_replay -- building-blast \
+//! cargo run --release -p engine-world-lab --example reaction_replay -- building-blast \
 //!   [--seconds 6] [--tnt 20] [--crush conserve|remove|off] [--support-loss on|off] \
 //!   [--factor 1.0] [--blast-loading on|off] [--out replay.json]
-//! cargo run --release -p engine-world --example reaction_replay -- --list
+//! cargo run --release -p engine-world-lab --example reaction_replay -- --list
 //! ```
 //!
 //! Scenarios (each a reusable recipe; flags override its switches):
@@ -23,9 +23,9 @@
 //! - `pack:<scene>:<shot>`: any reference pack and authored shot (`destruction_reactions`
 //!   `--list`), crushing as `--crush` says.
 
-#[path = "../tests/support/frames.rs"]
+#[path = "../../engine-world/tests/support/frames.rs"]
 mod frames;
-#[path = "../tests/support/reactions.rs"]
+#[path = "../../engine-world/tests/support/reactions.rs"]
 mod reactions;
 
 use rubble::*;

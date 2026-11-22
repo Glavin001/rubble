@@ -3,7 +3,7 @@
 //! first car's centroid, speed and broken beams and the awake bodies; then the GPU ms per
 //! World step (with `BR_PHASES=1` per segment: the rigid step against the vehicles').
 //!
-//! cargo run --release -p engine-world --example brick_ring_drive_probe
+//! cargo run --release -p engine-world-lab --example brick_ring_drive_probe
 //! (one at a time on a quiet GPU; bounded: run it under `perl -e 'alarm 600; exec @ARGV'`).
 //! Environment:
 //! - BR_CAR: none (default, the ring alone), etk (a converted vehicle folder, BR_MOD and

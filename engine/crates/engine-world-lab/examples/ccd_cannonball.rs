@@ -11,7 +11,7 @@
 //! momentum, else `hit`.
 //!
 //! ```text
-//! perl -e 'alarm 900; exec @ARGV' cargo run --release -p engine-world --example ccd_cannonball \
+//! perl -e 'alarm 900; exec @ARGV' cargo run --release -p engine-world-lab --example ccd_cannonball \
 //!     [-- --car sedan1|sedan|etkk] [--modes cpu,gpu,world] [--speeds 30,100,300,600]
 //! ```
 //! (`etkk`: the imported ETK, `RUBBLE_ETK=<vehicles dir holding etkk/>`.)

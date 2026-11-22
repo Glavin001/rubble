@@ -4,7 +4,7 @@
 //! the wide frame's GPU ms per pass kind (each dispatch in its own timed pass: the
 //! passes add their own cost). For wide-frame-design.md.
 //!
-//!   cargo run --release -p engine-webgpu --example wide_vs_workgroup -- 1 32 128
+//!   cargo run --release -p engine-webgpu-lab --example wide_vs_workgroup -- 1 32 128
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use engine_webgpu::{default_device, ExplicitBeamsGpu};
 use glam::Vec3;

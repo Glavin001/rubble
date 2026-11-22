@@ -5,7 +5,7 @@ One soft-body car (the 2 kHz explicit solver) in a GPU World, and the things a t
 - Page: `engine/crates/engine-webgpu/vehicle-lab.html`
 - Logic (Rust): `engine/crates/engine-world/src/vehicle_lab/` (`mod.rs` the lab, `monitor.rs` the measurements, `mountain.rs` the terrain, `cpu.rs` the CPU reference)
 - Wasm host: `engine/crates/engine-world-wasm/src/vehicle_lab.rs`
-- Offline: `engine/crates/engine-world/examples/vehicle_lab.rs`
+- Offline: `engine/crates/engine-world-lab/examples/vehicle_lab.rs`
 - Recorder: `engine/crates/engine-webgpu/vehicle-lab-record.mjs`, run through `engine/tools/vehicle-lab/run.sh`
 - Scenarios: `engine/crates/engine-webgpu/vehicle-lab-scripts/*.json`
 
@@ -74,10 +74,10 @@ The recorder is frame-locked: one World step per 1/60 s video frame, each step r
 Offline, the same scenarios run without a browser:
 
 ```bash
-cargo run --release -p engine-world --example vehicle_lab -- --script engine/crates/engine-webgpu/vehicle-lab-scripts/shoot-box.json            # CPU reference
-cargo run --release -p engine-world --example vehicle_lab -- --mode gpu --script …                                                           # GPU World
-cargo run --release -p engine-world --example vehicle_lab -- --measure plates|spheres|mountain [--mode gpu]
-cargo run --release -p engine-world --example vehicle_lab -- --mode gpu --crash offset --kmh 56 --overlap 0.4
+cargo run --release -p engine-world-lab --example vehicle_lab -- --script engine/crates/engine-webgpu/vehicle-lab-scripts/shoot-box.json            # CPU reference
+cargo run --release -p engine-world-lab --example vehicle_lab -- --mode gpu --script …                                                           # GPU World
+cargo run --release -p engine-world-lab --example vehicle_lab -- --measure plates|spheres|mountain [--mode gpu]
+cargo run --release -p engine-world-lab --example vehicle_lab -- --mode gpu --crash offset --kmh 56 --overlap 0.4
 ```
 
 The CPU reference is the explicit solver with `explicit_rigid`'s proxies and **no rigid solver**: between their contacts with the car, bodies fly free, fall and stop on the flat ground. That is the coupling exactly for one projectile, one plate or static rock. It is not the World for piles: a brick stack does not stack there.

@@ -3,7 +3,7 @@
 //!
 //! ```sh
 //! cd engine
-//! cargo run --release -p engine-world --example destruction_reactions -- \
+//! cargo run --release -p engine-world-lab --example destruction_reactions -- \
 //!   crush-wall:1.4x reference-building-crush:ordinary reference-building-crush:gravity \
 //!   [--seconds 6] [--json out.json] [--md out.md] \
 //!   [--crush] [--support-loss] [--blast-loading] [--blast x,y,z,kg [--blast-at 2]]
@@ -20,11 +20,11 @@
 //! The tall building partially destroyed (`engine/docs/destruction-reactions.md`):
 //!
 //! ```sh
-//! cargo run --release -p engine-world --example destruction_reactions -- \
+//! cargo run --release -p engine-world-lab --example destruction_reactions -- \
 //!   reference-building-crush:gravity --crush --support-loss --blast -0.9,2.1,-1.70,50 --seconds 6
 //! ```
 
-#[path = "../tests/support/reactions.rs"]
+#[path = "../../engine-world/tests/support/reactions.rs"]
 mod reactions;
 
 fn main() -> anyhow::Result<()> {

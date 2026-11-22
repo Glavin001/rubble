@@ -2,7 +2,7 @@
 //! (contact-groups-design.md): wall time of `create_compute_pipeline` for each, with
 //! workgroup zeroing on and off. No dispatch. Local measurement tool.
 //!
-//!   cargo run --release -p engine-webgpu --example contact_compile_time
+//!   cargo run --release -p engine-webgpu-lab --example contact_compile_time
 fn main() {
     let (_, device, _queue) = engine_webgpu::default_device().unwrap();
     let all = engine_webgpu::explicit_beams_shipped_wgsl();

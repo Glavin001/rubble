@@ -1,7 +1,7 @@
 //! The README's quick start: a box, a destructible arch and a ray, stepped
 //! without stalling the GPU.
 //!
-//! `cargo run -p engine-world --release --example quickstart`
+//! `cargo run -p engine-world-lab --release --example quickstart`
 
 use rubble::*;
 

@@ -49,18 +49,3 @@ reactions-crush = ["stress"]
 reactions-blast = ["stress"]
 reactions-support = ["stress"]
 
-[[example]]
-name = "destruction_reactions"
-required-features = ["stress"]
-
-[[example]]
-name = "reaction_replay"
-required-features = ["stress"]
-
-[[example]]
-name = "vehicle_lab"
-required-features = ["stress"]
-
-[[example]]
-name = "showcase_probe"
-required-features = ["stress"]

@@ -4,7 +4,7 @@
 //! Local measurement tool:
 //!
 //! ```text
-//! cargo run --release -p engine-webgpu --example explicit_dispatch_cost [module …]
+//! cargo run --release -p engine-webgpu-lab --example explicit_dispatch_cost [module …]
 //! ```
 
 fn main() {

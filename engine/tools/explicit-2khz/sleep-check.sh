@@ -29,7 +29,7 @@ cd "$engine" || exit 1
 if [ -z "$FAST_CHECK_LOCKED" ]; then
   [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
   # shellcheck disable=SC2086
-  cargo build $flag -p engine-world --example vehicle_lab 2>&1 | grep -E "^error" -A12
+  cargo build $flag -p engine-world-lab --example vehicle_lab 2>&1 | grep -E "^error" -A12
   # The kernels compiled for the current sources before the GPU lock is taken (with the
   # fast profile they are compiled at run time, on first use: engine-webgpu kernel_store).
   cargo run -q $flag -p engine-webgpu --bin kernels >/dev/null || exit 1

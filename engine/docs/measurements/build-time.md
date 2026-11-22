@@ -1,7 +1,7 @@
 # Build time: edit to ready
 
 What an edit costs before the fast loop's harness is built again
-(`cargo build --profile fast -p engine-world --example vehicle_lab`, the build
+(`cargo build --profile fast -p engine-world-lab --example vehicle_lab`, the build
 `fast-check.sh` and the scenario matrix run). Measured with
 `python3 tools/build-time/measure.py` (from `engine/`): each edit is new (a kernel
 comment or an unused Rust function no build has seen, so caches miss as after a real

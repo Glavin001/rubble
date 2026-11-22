@@ -6,7 +6,7 @@
 //! workgroup barrier) inside a dispatch. The same WGSL runs in headless Chrome
 //! (`engine/tools/contact-groups/dispatch.mjs`). Local measurement tool.
 //!
-//!   cargo run --release -p engine-webgpu --example contact_dispatch_cost
+//!   cargo run --release -p engine-webgpu-lab --example contact_dispatch_cost
 use wgpu::util::DeviceExt;
 
 const SRC: &str = include_str!("../../../tools/contact-groups/dispatch_cost.wgsl");

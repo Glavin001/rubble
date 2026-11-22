@@ -5,7 +5,7 @@
 //! same few words: contended), `store` (a plain store). us a phase =
 //! (2041 phases - 1) / 2040.
 //!
-//!   cargo run --release -p engine-webgpu --example gpu_atomic_cost
+//!   cargo run --release -p engine-webgpu-lab --example gpu_atomic_cost
 use wgpu::util::DeviceExt;
 
 const SRC: &str = r#"

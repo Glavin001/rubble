@@ -145,9 +145,9 @@ Tools:
 - Probes on `fix/etk-strength`:
   - `engine-softbody/examples/crush_probe.rs`: rigid-wall crush on the CPU reference;
   - `engine-softbody-lab/examples/coupling_probe.rs`: native shape vs coupled rigid body, CPU;
-  - `engine-world/examples/coupling_wall_gpu.rs`: the ETK in a small GPU World.
-- `engine/crates/engine-world/examples/brick_ring_drive_probe.rs`: native ring drive, which stops at the first NaN or loop-cap error.
-- `engine/crates/engine-world/examples/rigid_gate.rs`: the rigid-only regression gate.
+  - `engine-world-lab/examples/coupling_wall_gpu.rs`: the ETK in a small GPU World.
+- `engine/crates/engine-world-lab/examples/brick_ring_drive_probe.rs`: native ring drive, which stops at the first NaN or loop-cap error.
+- `engine/crates/engine-world-lab/examples/rigid_gate.rs`: the rigid-only regression gate.
 
 Artifacts (not in git): `~/Development/rubble-artifacts/`, under `brick-ring-drive/`, `crash-orbit/`, `post-crash/`, `etk-strength/`, `explicit-2khz/`, `integration/`, `showcase-etk/`.
 

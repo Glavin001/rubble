@@ -7,7 +7,7 @@
 //! self-collision): the cost of the wide structure's chain itself. Native wgpu; prints
 //! ms a frame (median of 30) and the module compile times.
 //!
-//!   cargo run --release -p engine-webgpu --example wide_proto -- <truck|jbeam-dir:pc> 1 32 128
+//!   cargo run --release -p engine-webgpu-lab --example wide_proto -- <truck|jbeam-dir:pc> 1 32 128
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use wgpu::util::DeviceExt;
 

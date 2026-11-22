@@ -13,7 +13,7 @@
 //! barrier pair after each; in a phase the first `active` lanes take `items` items of
 //! `loads` loads and a store each.
 //!
-//!   cargo run --release -p engine-webgpu --example gpu_cost_model [-- quick]
+//!   cargo run --release -p engine-webgpu-lab --example gpu_cost_model [-- quick]
 use wgpu::util::DeviceExt;
 
 const WIDE: &str = r#"

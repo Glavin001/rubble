@@ -4,7 +4,7 @@
 //! first, so the driver's shader cache (keyed by source) cannot serve it: the time is
 //! a user's first load. Diagnostic only.
 //!
-//!   cargo run --release -p engine-webgpu --example explicit_compile_time [name filter...]
+//!   cargo run --release -p engine-webgpu-lab --example explicit_compile_time [name filter...]
 //!
 //! (bounded: perl -e 'alarm 1200; exec @ARGV'; one module at a time.)
 fn main() -> anyhow::Result<()> {

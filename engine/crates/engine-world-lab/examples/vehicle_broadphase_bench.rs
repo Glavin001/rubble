@@ -12,7 +12,7 @@
 //! * a World step's span (submit to completion, its wait), both modes.
 //!
 //! ```text
-//! perl -e 'alarm 900; exec @ARGV' cargo run --release -p engine-world --example \
+//! perl -e 'alarm 900; exec @ARGV' cargo run --release -p engine-world-lab --example \
 //!     vehicle_broadphase_bench -- --cars 1 --n 10000,30000,100000 [--side 1000]
 //! ```
 

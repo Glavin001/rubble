@@ -3769,15 +3769,7 @@ impl ExplicitBeamsGpu {
                 mapped_at_creation: false,
             }));
         }
-        let read = |name: &str| -> String {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let path = crate::explicit_wgsl_path(name);
-                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-            }
-            #[cfg(target_arch = "wasm32")]
-            panic!("{name}: the test-only kernel variants are native only")
-        };
+        let read = crate::explicit_modules::variant_wgsl;
         let (aero, big, lanes) = self.module_kind;
         let (prefix, suffix) = match variant {
             KernelVariant::Baseline => ("explicit_baseline_", ""),

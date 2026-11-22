@@ -25,7 +25,7 @@
 //! - **Behaviour (the solver's beam law, as spawned):** every hinge beam
 //!   stretched by [`TRAVEL_MM`], and squeezed by as much (at most half its
 //!   length), quasi-statically: it yields, and it does not break. (A whole-car
-//!   check is the mountain run of `engine-world/examples/hinge_breaks.rs`.)
+//!   check is the mountain run of `engine-world-lab/examples/hinge_breaks.rs`.)
 use engine_softbody_authoring::authoring::gen2::build::Role;
 use engine_softbody_authoring::authoring::gen2::rig::{crush_member, HINGE_REACH};
 use engine_softbody_authoring::authoring::gen2::{rig as lattice, vg_input};

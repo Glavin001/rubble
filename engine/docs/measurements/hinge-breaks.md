@@ -6,7 +6,7 @@ hinge should hold the panel while the panel crumples.
 
 ## The measurement
 
-`engine-world/examples/hinge_breaks.rs` runs the page's mountain on the CPU reference
+`engine-world-lab/examples/hinge_breaks.rs` runs the page's mountain on the CPU reference
 (`vehicle_lab::cpu`, the same scene and car as the page; `CpuLab::step_observed` hands it
 the car after every 2 kHz step) and reports, for every break group, the step it broke
 at, the beam that set it off (the one past its strength), that beam's force, strength,
@@ -15,7 +15,7 @@ broken, largest plastic strain); then when each part left the main body and the 
 of the car's mass still on it.
 
 ```bash
-cargo run --release -p engine-world --example hinge_breaks -- \
+cargo run --release -p engine-world-lab --example hinge_breaks -- \
   [--car DIR] [--secs 30] [--seed 1] [--steepness 55] [--roughness 0.25] [--launch 12] \
   [--surface 0] [--drag 0] [--json FILE]
 ```

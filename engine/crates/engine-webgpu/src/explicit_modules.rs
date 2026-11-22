@@ -105,3 +105,15 @@ fn test_module(name: &str) -> &'static str {
     #[cfg(target_arch = "wasm32")]
     panic!("explicit beams: no WGSL module {name} (the test-only modules are native only)")
 }
+
+/// A kernel variant's WGSL by module name (the bitwise suites' baseline, reference and
+/// deterministic-hits builds: the build's modules or the test-only ones). Native only.
+pub(crate) fn variant_wgsl(name: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = crate::explicit_wgsl_path(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+    #[cfg(target_arch = "wasm32")]
+    panic!("{name}: the test-only kernel variants are native only")
+}

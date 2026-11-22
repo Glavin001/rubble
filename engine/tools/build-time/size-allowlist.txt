@@ -7,8 +7,6 @@ crates/engine-exec/src/rigid_plan.rs 2269
 crates/engine-ffi/src/lib.rs 3650
 crates/engine-fracture/src/plan.rs 1548
 crates/engine-metal/src/world.rs 1759
-crates/engine-softbody-lab/examples/sedan_stiffness.rs 1589
-crates/engine-softbody-lab/examples/showcase_probe.rs 2724
 crates/engine-softbody-authoring/src/authoring/gen2/model.rs 3762
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs 5303
 crates/engine-softbody-authoring/src/authoring/gen2/sedan.rs 1628
@@ -19,9 +17,11 @@ crates/engine-softbody-authoring/src/authoring/skeleton.rs 1573
 crates/engine-softbody-authoring/src/authoring/skin.rs 3107
 crates/engine-softbody-authoring/src/authoring/vehicle.rs 6386
 crates/engine-softbody-authoring/src/vehicle_compare.rs 3323
-crates/engine-softbody-authoring/tests/authoring_census.rs 1511
 crates/engine-softbody-authoring/tests/crash_invariants.rs 2586
+crates/engine-softbody-authoring/tests/host/authoring_census.rs 1511
 crates/engine-softbody-authoring/tests/showcase_car.rs 9195
+crates/engine-softbody-lab/examples/sedan_stiffness.rs 1589
+crates/engine-softbody-lab/examples/showcase_probe.rs 2724
 crates/engine-softbody/src/explicit_beams.rs 5881
 crates/engine-softbody/src/explicit_contact.rs 1761
 crates/engine-softbody/src/explicit_drive.rs 1576
@@ -32,13 +32,13 @@ crates/engine-terrain/src/material.rs 1938
 crates/engine-terrain/src/plan.rs 2313
 crates/engine-vehiclegen/src/solid.rs 1707
 crates/engine-webgpu/src/bin/explicit_beams_scaling.rs 2193
-crates/engine-webgpu/src/explicit_beams_gpu.rs 5135
+crates/engine-webgpu/src/explicit_beams_gpu.rs 5132
 crates/engine-webgpu/src/gpu.rs 4952
 crates/engine-webgpu/src/gpu_tests.rs 5313
 crates/engine-webgpu/tests/vehicle.rs 1922
 crates/engine-webgpu/tests/vehicle_debug.rs 1606
+crates/engine-world-lab/examples/vehicle_lab.rs 3357
 crates/engine-world-wasm/src/explicit.rs 1506
-crates/engine-world/examples/vehicle_lab.rs 3357
 crates/engine-world/src/destruction.rs 1609
 crates/engine-world/src/lab.rs 1775
 crates/engine-world/src/lib.rs 3840

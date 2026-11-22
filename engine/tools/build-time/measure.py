@@ -31,7 +31,7 @@ import time
 
 ENGINE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-DEFAULT_CMD = ["cargo", "build", "--profile", "fast", "-p", "engine-world", "--example", "vehicle_lab"]
+DEFAULT_CMD = ["cargo", "build", "--profile", "fast", "-p", "engine-world-lab", "--example", "vehicle_lab"]
 
 # name: (file under engine/, what it stands for)
 EDITS = {

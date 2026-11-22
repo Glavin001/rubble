@@ -3,9 +3,9 @@
 //!
 //! ```bash
 //! # hash of every body (bytes of `download_bodies`) at checkpoints up to STEPS steps
-//! GATE_MODE=hash cargo run --release -p engine-world --example rigid_gate
+//! GATE_MODE=hash cargo run --release -p engine-world-lab --example rigid_gate
 //! # ms per step (step + poll_blocking), median of STEPS after WARM, per scene
-//! GATE_MODE=time GATE_SCENES="Brick Ring (110k)" cargo run --release -p engine-world --example rigid_gate
+//! GATE_MODE=time GATE_SCENES="Brick Ring (110k)" cargo run --release -p engine-world-lab --example rigid_gate
 //! ```
 //!
 //! `GATE_SCENES` (comma-separated scene names), `GATE_SLEEP=on|off` (default on), `STEPS`,

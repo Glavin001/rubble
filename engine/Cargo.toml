@@ -4,6 +4,8 @@ members = [
     "crates/engine-kernel-manifest",
     "crates/engine-softbody-authoring",
     "crates/engine-softbody-lab",
+    "crates/engine-world-lab",
+    "crates/engine-webgpu-lab",
     "crates/engine-schema",
     "crates/engine-exec",
     "crates/engine-metal",

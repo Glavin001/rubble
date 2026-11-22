@@ -2,7 +2,7 @@
 //! pass timestamps, under switches (each from the same snapshot): the coupling's shape
 //! cull on and off, vehicle contact off, the coupling off. Diagnostic only.
 //!
-//! cargo run --release -p engine-world --example explicit_frame_probe -- <cars> <steps before>
+//! cargo run --release -p engine-world-lab --example explicit_frame_probe -- <cars> <steps before>
 //! (EV_HZ, EV_RAYCAST as explicit_vehicles_bench; bounded: perl -e 'alarm 600; exec @ARGV').
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};

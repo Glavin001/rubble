@@ -14,7 +14,7 @@ trajectory (the speeds match to 0.1 km/h at every second) or, where marked, on t
 state.
 
 ```bash
-cargo build --release -j 4 -p engine-world --example vehicle_lab
+cargo build --release -j 4 -p engine-world-lab --example vehicle_lab
 python3 engine/scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 RUBBLE_SURFACE_SPLIT=0 \
   engine/target/release/examples/vehicle_lab --mode gpu --measure mountain-perf --secs 30 \
   --car ~/Development/rubble-artifacts/sedan-live/mods/sedan_new --surface 1 \

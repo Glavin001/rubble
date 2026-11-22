@@ -3089,7 +3089,7 @@ ablation (done in §8.35, as a standalone microbenchmark).
 
 ### 8.35 Why a single workgroup's phase costs 3× its loads: a microbenchmark (2026-11-16)
 
-`cargo run --release -p engine-webgpu --example phase_cost` (native wgpu on Metal, M3 Max,
+`cargo run --release -p engine-webgpu-lab --example phase_cost` (native wgpu on Metal, M3 Max,
 through the GPU lock). One dispatch of 256-lane workgroups runs 1 or 1025 barrier phases;
 in each, every lane takes `items` items of `k` dependent loads (each load's value addresses
 the next), optionally with a store, an atomic or strict arithmetic, then a barrier; µs a
@@ -5821,11 +5821,11 @@ rigid scenes' bits, which is the owner's decision (the rigid gate holds them to 
 
 **To run again** (from `engine/`):
 ```sh
-GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world --example rigid_gate   # the default
-RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world --example rigid_gate
-RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=time GATE_SLEEP=off GATE_SCENES="Brick Ring (110k),Box Pile (32k)" cargo run --profile fast -p engine-world --example rigid_gate
+GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world-lab --example rigid_gate   # the default
+RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=hash GATE_SLEEP=off cargo run --profile fast -p engine-world-lab --example rigid_gate
+RUBBLE_RIGID_SHADER_CHECKS_OFF=0 GATE_MODE=time GATE_SLEEP=off GATE_SCENES="Brick Ring (110k),Box Pile (32k)" cargo run --profile fast -p engine-world-lab --example rigid_gate
 tools/scenario-matrix/run.sh checks=15:7     # the explicit pipelines' zeroing (ON:OFF masks)
-RUBBLE_RIGID_BOUNDS_OFF_NAMES=narrowphase_fresh_copy_persistent GATE_MODE=hash GATE_SLEEP=off GATE_SCENES="Brick Ring (28k)" cargo run --profile fast -p engine-world --example rigid_gate   # differs from step 20
+RUBBLE_RIGID_BOUNDS_OFF_NAMES=narrowphase_fresh_copy_persistent GATE_MODE=hash GATE_SLEEP=off GATE_SCENES="Brick Ring (28k)" cargo run --profile fast -p engine-world-lab --example rigid_gate   # differs from step 20
 ```
 
 ### 8.50 A module without the coupling's code for a vehicle with an empty proxy set: measured, not built (2026-11-21)

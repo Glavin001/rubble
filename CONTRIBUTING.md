@@ -67,7 +67,7 @@ the cross-engine review it comes from and the phase plan are in
   length goes through `src/coords.rs` with the right class (polar vector,
   pseudovector, rotation, length), and gets a round-trip test.
 - **The quick start compiles:** the README example is
-  `engine/crates/engine-world/examples/quickstart.rs`; keep them in sync.
+  `engine/crates/engine-world-lab/examples/quickstart.rs`; keep them in sync.
 - **Format only your files.** Parts of the tree aren't `rustfmt`-clean, so
   run `rustfmt <your files>` rather than `cargo fmt` across the workspace.
 

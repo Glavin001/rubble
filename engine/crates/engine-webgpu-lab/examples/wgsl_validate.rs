@@ -2,7 +2,7 @@
 //! a CPU check for shaders that cannot be run here. Chrome (Tint) is stricter
 //! about uniformity; run `explicit-wgsl-check.mjs`-style checks on a GPU too.
 //!
-//! `cargo run -p engine-webgpu --release --example wgsl_validate -- a.wgsl b.wgsl`
+//! `cargo run -p engine-webgpu-lab --release --example wgsl_validate -- a.wgsl b.wgsl`
 //! (the showcase skin: `node showcase-wgsl-dump.mjs out/` writes its modules).
 fn main() {
     let mut bad = 0;

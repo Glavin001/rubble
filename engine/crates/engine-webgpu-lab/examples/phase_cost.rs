@@ -7,7 +7,7 @@
 //! time from the base: a read-write storage buffer of 2^16 records (1 MB), 2 items, both
 //! barriers (storage and workgroup, as the kernels' sync()), no store, one workgroup.
 //!
-//!   cargo run --release -p engine-webgpu --example phase_cost
+//!   cargo run --release -p engine-webgpu-lab --example phase_cost
 use wgpu::util::DeviceExt;
 
 const SRC: &str = r#"

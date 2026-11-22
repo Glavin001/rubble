@@ -6,7 +6,7 @@
 //! the wide passes on and off and with the coupling built and on (no proxies), for the
 //! coupling's own cost.
 //!
-//! cargo run --release -p engine-world --example explicit_vehicles_bench -- 1 16 64
+//! cargo run --release -p engine-world-lab --example explicit_vehicles_bench -- 1 16 64
 //! (one at a time on a quiet GPU; bounded: run it under `perl -e 'alarm 900; exec @ARGV'`).
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};

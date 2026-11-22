@@ -5,10 +5,10 @@
 // requests them. Native wgpu (naga) accepts barriers under non-uniform control flow
 // that Chrome rejects, so run this after kernel changes.
 //
-//   cargo run -p engine-webgpu --release --example explicit_wgsl_dump
+//   cargo run -p engine-webgpu-lab --release --example explicit_wgsl_dump
 //   node --experimental-websocket explicit-wgsl-check.mjs
 // The fast setting's modules (bit-exact results off, the World's default):
-//   cargo run -p engine-webgpu --release --example explicit_wgsl_dump -- --fast
+//   cargo run -p engine-webgpu-lab --release --example explicit_wgsl_dump -- --fast
 //   EXPLICIT_WGSL_DIR=generated/explicit-wgsl-fast node --experimental-websocket explicit-wgsl-check.mjs
 //
 // Needs Chrome (CHROME env to override). Exits non-zero when a module fails.

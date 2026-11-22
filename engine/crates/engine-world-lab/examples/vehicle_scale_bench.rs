@@ -23,7 +23,7 @@
 //! VS_SLEEP=0 (vehicle sleep off; the World's default is on), VS_LABEL (a CSV column),
 //! VS_CAR (sedan, etkk or fixture: [`template`]).
 //!
-//! cargo run --release -p engine-world --example vehicle_scale_bench -- fleet 64 128
+//! cargo run --release -p engine-world-lab --example vehicle_scale_bench -- fleet 64 128
 //! (one run at a time; bounded: perl -e 'alarm 900; exec @ARGV' ...).
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};

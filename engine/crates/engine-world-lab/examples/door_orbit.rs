@@ -15,7 +15,7 @@
 //! with the ground or the body, air). Writes a CSV and an SVG of the paths.
 //!
 //! ```text
-//! cargo run --release -p engine-world --example door_orbit -- --car <sedan_new dir> \
+//! cargo run --release -p engine-world-lab --example door_orbit -- --car <sedan_new dir> \
 //!   [--secs 40] [--seed 1] [--terrain rolling|ledges] [--out engine/out/free-flight]
 //! ```
 //! (GPU: run under `scripts/with-gpu-lock.py --limit 600`.)

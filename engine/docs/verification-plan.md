@@ -135,7 +135,7 @@ importer code.
 * `engine-softbody-lab/examples/coupling_probe.rs`: one car into the same obstacle through
   native colliders and through the coupling's CPU reference (walls, a free box, brick
   proxies, drops).
-* `engine-world/examples/coupling_wall_gpu.rs`: the ETK into an anchored box, a free box
+* `engine-world-lab/examples/coupling_wall_gpu.rs`: the ETK into an anchored box, a free box
   or a brick wall in a small GPU World. It covers World rates, momentum while flying, and
   a rigid-only shooter.
 * Logs: `~/Development/rubble-artifacts/etk-strength/`.

@@ -8,7 +8,7 @@
 //! the car's mass still on it over the run.
 //!
 //! ```text
-//! cargo run --release -p engine-world --example hinge_breaks -- \
+//! cargo run --release -p engine-world-lab --example hinge_breaks -- \
 //!   [--car DIR] [--secs 30] [--seed 1] [--steepness 55] [--roughness 0.25] \
 //!   [--launch 12] [--surface 0] [--drag 0] [--groups hinge,latch] [--json FILE]
 //! ```

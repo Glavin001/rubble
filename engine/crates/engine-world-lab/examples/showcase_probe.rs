@@ -3,7 +3,7 @@
 //! `.pc`), or the repo sedan; each tenth of a second its broken beams and
 //! house bonds, the first car's centroid and speed; then the GPU ms per World step.
 //!
-//! cargo run --release -p engine-world --example showcase_probe -- house \
+//! cargo run --release -p engine-world-lab --example showcase_probe -- house \
 //!     engine/crates/engine-webgpu/__mods/etkk_tex etkk/kc6.pc [count] [secs]
 //! (one at a time on a quiet GPU; bounded: run it under `perl -e 'alarm 600; exec @ARGV'`).
 //! SP_SPEED (m/s) and SP_RUNUP (m): the preset's speed and run up; SP_STRENGTH the houses'

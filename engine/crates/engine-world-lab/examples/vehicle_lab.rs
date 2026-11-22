@@ -3,8 +3,8 @@
 //! ending in a table of numbers.
 //!
 //! ```text
-//! cargo run --release -p engine-world --example vehicle_lab -- --script <file.json> [--mode cpu|gpu]
-//! cargo run --release -p engine-world --example vehicle_lab -- --measure plates|spheres|mountain [--mode cpu|gpu]
+//! cargo run --release -p engine-world-lab --example vehicle_lab -- --script <file.json> [--mode cpu|gpu]
+//! cargo run --release -p engine-world-lab --example vehicle_lab -- --measure plates|spheres|mountain [--mode cpu|gpu]
 //! ```
 //! - `--script`: a scenario of `engine-webgpu/vehicle-lab-scripts/` (the page's `?script=`).
 //! - `--mode cpu` (default): the CPU reference (`vehicle_lab::cpu`): no GPU. `--mode gpu`:
