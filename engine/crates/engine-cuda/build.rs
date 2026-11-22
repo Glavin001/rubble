@@ -2,7 +2,8 @@
 //! Slang → CUDA C++ in the browser's `ENGINE_WGSL` layout, then → a fatbin with
 //! nvcc when it is installed. Emits `cuda_kernels.rs`: per entry the fatbin
 //! (empty without nvcc), thread-group size and `SLANG_globalParams` field →
-//! BIND slot.
+//! BIND slot. The explicit-beams modules, the terrain kernels and the World coupling's
+//! (`vehicle_coupling.slang`) are built the same way by the functions below.
 //!
 //! `writes_indirect` marks the kernels whose body indexes `gIndirectArgs`: the
 //! host reads binding 23 back only after one of them ran.
@@ -170,6 +171,101 @@ fn main() -> Result<()> {
     std::fs::write(out_dir.join("cuda_kernels.rs"), table)?;
     terrain_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
     explicit_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    coupling_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    Ok(())
+}
+
+/// The entries of `vehicle_coupling.slang` (the explicit vehicles' World coupling), in
+/// the order of `engine_exec::explicit_plan::coupling::world::Entry::ALL` (engine-cuda's
+/// `coupling_entries_are_the_plans` test holds the two together).
+const COUPLING_ENTRIES: &[&str] = &[
+    "cpl_bounds",
+    "cpl_plan",
+    "cpl_share",
+    "cpl_loads",
+    "cpl_loads_end",
+    "cpl_emit",
+    "cpl_emit_end",
+    "cpl_sleep_mask",
+    "cpl_query",
+];
+
+/// The World coupling's kernels (`vehicle_coupling.slang`, compiled as the WebGPU build
+/// compiles it: no defines), Slang → CUDA an entry a module, with the hazard check, the
+/// loop caps' presence, the indirect entry (`{entry}_gs`: `cpl_share`, `cpl_loads` and
+/// `cpl_emit` run over the proxied list's count) and fatbins when nvcc is present; each
+/// `SLANG_globalParams` field mapped to the module's `[[vk::binding]]`
+/// (`engine_exec::explicit_plan::coupling::world::source`). Emits
+/// `cuda_coupling_kernels.rs` (`CUDA_COUPLING_KERNELS`, `CudaWorld`).
+fn coupling_kernels(
+    slangc: &std::path::Path,
+    nvcc: Option<&std::path::Path>,
+    arch: &str,
+    sass: &[&str],
+    root: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    use engine_slang_build::cuda_layout::compile_kernel_with_defines;
+    use engine_slang_build::msl_layout::vk_binding_slots;
+    let dir = out_dir.join("cuda_coupling");
+    std::fs::create_dir_all(&dir)?;
+    let source = root.join("kernels/vehicle_coupling.slang");
+    let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+    let compiled = engine_slang_build::par_map(COUPLING_ENTRIES, |&entry| -> Compiled {
+        let cu = dir.join(format!("{entry}.cu"));
+        let kernel = compile_kernel_with_defines(slangc, root, &source, entry, &cu, &[])?;
+        let text = std::fs::read_to_string(&cu)?;
+        let hazards = deferred_load_hazards(&text);
+        if !hazards.is_empty() {
+            anyhow::bail!(
+                "{entry}: Slang's CUDA output reads a buffer element after storing to it \
+                 (use the value before the store in the .slang source):\n  {}",
+                hazards.join("\n  ")
+            );
+        }
+        // The module caps its loops in its source (explicit_loop_cap.slang, the status
+        // word's ST_LOOP): every entry with a loop carries them on this target too.
+        let code = text.split_once("SLANG_globalParams;").map_or(text.as_str(), |x| x.1);
+        anyhow::ensure!(
+            code.contains("ebLoopCapHit") || code.contains("ebLoopHit") || only_constant_loops(code),
+            "{entry}: the CUDA source has no loop caps (explicit_loop_cap.slang)"
+        );
+        std::fs::write(&cu, engine_slang_build::cuda_layout::grid_stride_entry(&text, entry)?)?;
+        if let Some(nvcc) = nvcc {
+            let threads = kernel.threads.iter().product();
+            engine_slang_build::cuda_layout::fatbin_threads(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass, threads)?;
+        }
+        Ok((kernel, text.len() as u64, nvcc.is_some(), false))
+    });
+    let mut table = String::from(
+        "/// The World coupling's kernels: entry, CUDA source bytes, fatbin, threads, globals\n\
+         /// (byte offset in `SLANG_globalParams`, field bytes 8|16, the module's binding).\n\
+         pub static CUDA_COUPLING_KERNELS: &[CouplingCudaKernel] = &[\n",
+    );
+    for (&entry, r) in COUPLING_ENTRIES.iter().zip(compiled) {
+        let (kernel, cu_bytes, has_image, _) = r?;
+        let mut binds = String::new();
+        let mut params_bytes = 0;
+        for f in &kernel.fields {
+            let slot = slots
+                .get(&f.name)
+                .ok_or_else(|| anyhow!("{entry}: global {} has no vk::binding", f.name))?;
+            write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
+            params_bytes = params_bytes.max(f.offset + f.size);
+        }
+        let image = if has_image {
+            format!("include_bytes!({:?})", dir.join(format!("{entry}.fatbin")).display().to_string())
+        } else {
+            "&[]".into()
+        };
+        writeln!(
+            table,
+            "    CouplingCudaKernel {{ entry: {entry:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, binds: &[{binds}] }},",
+            kernel.threads
+        )?;
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("cuda_coupling_kernels.rs"), table)?;
     Ok(())
 }
 
