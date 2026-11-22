@@ -408,10 +408,11 @@ fn every_shipped_explicit_loop_is_capped_and_valid() {
     // The frozen baseline, reference, test-only and ablation builds (read at run
     // time): those of the current kernel carry its Slang caps; the frozen kernels'
     // are capped by the post-process, every loop.
-    let dir = std::path::Path::new(engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR);
+    // (The build's modules, and the test-only ones compiled on demand.)
+    let dirs = [std::path::Path::new(engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR), engine_webgpu::test_kernels_dir()];
     let (mut slang, mut post) = (0, 0);
     let mut kinds = (0, 0, 0);
-    for entry in std::fs::read_dir(dir).unwrap() {
+    for entry in dirs.iter().flat_map(|d| std::fs::read_dir(d).unwrap()) {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if !name.starts_with("explicit_") || !name.ends_with(".wgsl") {

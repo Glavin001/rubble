@@ -10,7 +10,9 @@ fn main() -> anyhow::Result<()> {
         let out = std::path::PathBuf::from(args.get(i + 1).expect("--raw-fast DIR"));
         std::fs::create_dir_all(&out)?;
         let mut n = 0;
-        for e in std::fs::read_dir(engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR)? {
+        // (The build's modules and the test-only ones, compiled on demand.)
+        let dirs = [std::path::Path::new(engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR), engine_webgpu::test_kernels_dir()];
+        for e in dirs.iter().map(|d| std::fs::read_dir(d)).collect::<Result<Vec<_>, _>>()?.into_iter().flatten() {
             let path = e?.path();
             let name = path
                 .file_name()

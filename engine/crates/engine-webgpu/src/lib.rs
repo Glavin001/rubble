@@ -228,19 +228,6 @@ pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
     ("explicit_beams_selfsplit_walk_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero_wide.wgsl"))),
     ("explicit_beams_selfsplit_pairs_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero_wide.wgsl"))),
 ];
-/// Measurement only (native; the `test-kernels` feature): the self split's modules with `EB_ABLATE`, at the
-/// non-aero variants (`ExplicitBeamsGpu::set_ablation` with the split on). Not shipped
-/// to browsers.
-#[doc(hidden)]
-#[cfg(feature = "test-kernels")]
-pub const EXPLICIT_BEAMS_SELF_SPLIT_ABLATE: [(&str, &str); 6] = [
-    ("explicit_beams_selfsplit_step_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate.wgsl"))),
-    ("explicit_beams_selfsplit_walk_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_ablate.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_ablate.wgsl"))),
-    ("explicit_beams_selfsplit_step_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate_wide.wgsl"))),
-    ("explicit_beams_selfsplit_walk_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_ablate_wide.wgsl"))),
-    ("explicit_beams_selfsplit_pairs_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_ablate_wide.wgsl"))),
-];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).
 #[doc(hidden)]
@@ -576,6 +563,83 @@ fn fix_naga_loop_exits(src: &str) -> String {
 }
 
 include!("wgsl_loop_cap.rs");
+include!("explicit_post.rs");
+
+/// The test-only explicit modules' WGSL (the frozen baseline and reference, the
+/// deterministic-hits and ablation builds: `engine_kernel_manifest::explicit::test_modules`),
+/// compiled on the first call in a process (each compile cached by what it depends on,
+/// engine-slang-build) and post-processed as the shipped ones are, into
+/// `OUT_DIR/test-wgsl`. No build compiles them: only the tests and measurements that run
+/// them. Native only (it runs slangc).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn test_kernels_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        compile_test_kernels().unwrap_or_else(|e| panic!("the test-only explicit kernels: {e}"))
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compile_test_kernels() -> Result<std::path::PathBuf, String> {
+    use engine_kernel_manifest::explicit::{test_modules, TestSource};
+    use std::path::{Path, PathBuf};
+    let slang = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang/kernels");
+    let dir = PathBuf::from(concat!(env!("OUT_DIR"), "/test-wgsl"));
+    // (Compiled beside it and renamed into it, one file at a time: another process may
+    // read or write the same directory.)
+    let staging = dir.join(format!(".staging-{}", std::process::id()));
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let modules = test_modules();
+    // The shipped source (a measurement build may name another, as build.rs does).
+    let shipped = match std::env::var("RUBBLE_EB_SRC") {
+        Ok(f) => PathBuf::from(f),
+        Err(_) if std::env::var("RUBBLE_EB_REF").is_ok_and(|v| v == "1") => slang.join("explicit_beams_ref.slang"),
+        Err(_) => slang.join("explicit_beams.slang"),
+    };
+    let sources: Vec<PathBuf> = modules
+        .iter()
+        .map(|m| match m.source {
+            TestSource::File(f) => slang.join(f),
+            TestSource::Shipped => shipped.clone(),
+        })
+        .collect();
+    let outs: Vec<PathBuf> = modules.iter().map(|m| staging.join(format!("{}.wgsl", m.name))).collect();
+    let jobs: Vec<engine_slang_build::Compile> = modules
+        .iter()
+        .enumerate()
+        .map(|(k, m)| engine_slang_build::Compile {
+            source: &sources[k],
+            entry: &m.entry,
+            stage: "compute",
+            target: engine_slang_build::SlangTarget::Wgsl,
+            out: &outs[k],
+            include_dirs: &[],
+            defines: &m.defines,
+        })
+        .collect();
+    for (m, r) in modules.iter().zip(engine_slang_build::compile_many(&jobs)) {
+        r.map_err(|e| format!("{}: {e}", m.name))?;
+    }
+    for (m, out) in modules.iter().zip(&outs) {
+        let name = format!("{}.wgsl", m.name);
+        let text = std::fs::read_to_string(out).map_err(|e| format!("{name}: {e}"))?;
+        std::fs::write(out, explicit_post_text(&name, &text)?).map_err(|e| e.to_string())?;
+        std::fs::rename(out, dir.join(&name)).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(dir)
+}
+
+/// An explicit module's WGSL file: the build's (`EXPLICIT_BEAMS_WGSL_DIR`), else a
+/// test-only module's ([`test_kernels_dir`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn explicit_wgsl_path(name: &str) -> std::path::PathBuf {
+    let built = std::path::Path::new(EXPLICIT_BEAMS_WGSL_DIR).join(format!("{name}.wgsl"));
+    if built.is_file() {
+        return built;
+    }
+    test_kernels_dir().join(format!("{name}.wgsl"))
+}
 
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.

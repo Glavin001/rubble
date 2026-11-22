@@ -64,7 +64,14 @@ Direction is downward only. In particular:
   `RUBBLE_SLANG_TIMING=1` prints the phases on the build script's stderr.
 - **Do not compile what nothing reads.** Every output a build script writes has a
   reader.
+- **Test-only kernels are not a build feature.** A cargo feature that tests turn on
+  splits the build in two (the library without it, tests and examples with it, each its
+  own engine-webgpu and everything above). The test-only modules are compiled when a
+  test or measurement first asks (`engine_webgpu::test_kernels_dir`, from
+  `engine_kernel_manifest::explicit::test_modules`, cached per compile).
 - **An environment variable is a rerun trigger only if the output depends on it.**
+  Never `PATH`, `SLANGC` or the like in a crate low in the graph: they differ between
+  shells and tools, and every rerun recompiles everything above.
   (`RUBBLE_SLANG_CACHE` changes where outputs come from, not what they are.)
 
 ## Worktrees

@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=batch/slang_batch.cpp");
-    for v in ["SLANG_DIR", "SLANGC", "RUBBLE_SLANG_BATCH", "PATH"] {
+    // (Not SLANGC or PATH: they differ between shells and tools, and a rerun here
+    // recompiles every crate above this one. The tool is used only when its Slang build
+    // is the slangc's in use, checked at run time, so a stale one is never wrong.)
+    for v in ["SLANG_DIR", "RUBBLE_SLANG_BATCH"] {
         println!("cargo:rerun-if-env-changed={v}");
     }
     let built = build().unwrap_or_default();

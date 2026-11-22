@@ -39,9 +39,6 @@ engine-scenes = { path = "../engine-scenes", default-features = false }
 
 [dev-dependencies]
 engine-softbody-authoring.workspace = true
-# The examples' measurement switches (vehicle_lab --ab-ablate, the benches' ablations) use
-# engine-webgpu's test-only kernels; release and wasm builds do not compile them.
-engine-webgpu = { workspace = true, features = ["test-kernels"] }
 
 [features]
 default = ["stress"]

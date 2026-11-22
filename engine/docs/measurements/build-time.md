@@ -77,10 +77,40 @@ the rest was wasm-opt, which the crates turn off for release only
 this way and skips the world wasm's Asyncify build (Safari). For iterating only: host
 code runs slower than in release (no LTO), so pages are measured with release builds.
 
+## 2026-11-22: loop ids, kernel parts behind their define, test kernels on demand
+
+- The loop caps carry permanent ids instead of `__LINE__`: a line added to a kernel file
+  changes no WGSL module it did not change before (a blank line at the top of
+  `explicit_beams_drive.slang`: every explicit module below it before, none now), so
+  Chrome's pipeline cache keeps them.
+- The wings (`EB_AERO`) and self-split (`EB_SELF_SPLIT`) parts of `explicit_beams.slang`
+  are files of their own under their define: modules without it do not depend on them.
+- The test-only modules (84: the frozen baseline and reference, the deterministic-hits
+  and ablation builds) are no longer a cargo feature compiled by the build: a test or a
+  measurement compiles them on first use (`engine_webgpu::test_kernels_dir`), so the
+  fast loop does not, and the library, the harness and the tests share one build of
+  engine-webgpu and everything above it (before: two, with and without the feature).
+
+| Edit | Main s | Before these s | After s | slangc runs |
+|---|---|---|---|---|
+| `slang/kernels/explicit_beams.slang` | 28.9 | 18.8 | 15.9 | 173 → 143 |
+| the wings (`explicit_beams_aero.slang`; in the main file before) | 28.9 | 18.8 | 10.9 | 173 → 59 |
+| `slang/physics/common.slang` | 28.2 | 14.7 | 15.6 | 12 → 14 (batches) |
+
+Every kernel the same: `kernel_digest.py` 2856 files identical, the 84 test modules
+compiled on demand byte for byte the build's; the moved parts identical in WGSL and, with
+`#line` dropped, in MSL and CUDA. The loop ids change the kernels' constants only:
+checked on the GPU (fast-check against the previous kernels: 16 of 17 fixtures bit for
+bit, the 17th differing identically with the same kernels on both sides; the scenario
+matrix's 12 rows bit for bit; no row slower over seven samples of the closest).
+
+`engine-schema` embeds `vehicle_layout.slang` and `character_layout.slang` in
+`#[cfg(test)]` code only: an edit there recompiles no crate (checked: schema stays
+fresh), so nothing to move.
+
 ## Where the time still goes
 
-- An explicit kernel edit is slangc: 172 modules of distinct defines, about 1.3 s
-  each (a third of it parsing); 30 of them the test-only modules (`test-kernels`, on in
-  the harness through engine-world's dev-dependency).
+- An explicit kernel edit is slangc: 143 modules of distinct defines in the fast loop,
+  about 1.3 s each (a third of it parsing).
 - Every kernel edit recompiles engine-webgpu and everything above it: the build
   script embeds the kernels with `include_str!`.

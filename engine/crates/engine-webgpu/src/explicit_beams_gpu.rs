@@ -1286,18 +1286,33 @@ fn module_wgsl(name: &str) -> &'static str {
             .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
             .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
             .chain(crate::EXPLICIT_BEAMS_WIDE_LIST.iter())
-            .chain(SELF_SPLIT_ABLATE.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
-            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name} (a measurement module needs the `test-kernels` feature)")),
+            .unwrap_or_else(|| test_module(name)),
     }
 }
 
-/// The self split's ablation modules (measurement; built with the `test-kernels` feature).
-#[cfg(feature = "test-kernels")]
-const SELF_SPLIT_ABLATE: &[(&str, &str)] = &crate::EXPLICIT_BEAMS_SELF_SPLIT_ABLATE;
-#[cfg(not(feature = "test-kernels"))]
-const SELF_SPLIT_ABLATE: &[(&str, &str)] = &[];
+/// A test-only module's WGSL (measurement: the self split's ablation builds), from
+/// [`crate::test_kernels_dir`] on first use, kept for the process.
+fn test_module(name: &str) -> &'static str {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static KEPT: std::sync::Mutex<Vec<(String, &'static str)>> = std::sync::Mutex::new(Vec::new());
+        let mut kept = KEPT.lock().unwrap();
+        if let Some((_, w)) = kept.iter().find(|(n, _)| n == name) {
+            return w;
+        }
+        let path = crate::test_kernels_dir().join(format!("{name}.wgsl"));
+        let w: &'static str = match std::fs::read_to_string(&path) {
+            Ok(w) => Box::leak(w.into_boxed_str()),
+            Err(_) => panic!("explicit beams: no WGSL module {name}"),
+        };
+        kept.push((name.to_string(), w));
+        w
+    }
+    #[cfg(target_arch = "wasm32")]
+    panic!("explicit beams: no WGSL module {name} (the test-only modules are native only)")
+}
 
 /// A frame kernel's module for an upload: [`Kernel::module_for`], and with surface
 /// contact but without the World's coupling (`coupled` false) its `_nocpl` twin
@@ -3849,8 +3864,8 @@ impl ExplicitBeamsGpu {
             }));
         }
         let read = |name: &str| {
-            let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e} (the test kernels are built with engine-webgpu's `test-kernels` feature)"))
+            let path = crate::explicit_wgsl_path(name);
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
         };
         let (aero, big, lanes) = self.module_kind;
         let (prefix, suffix) = match variant {

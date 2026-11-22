@@ -16,6 +16,8 @@ engine-terrain.workspace = true
 glam.workspace = true
 serde_json.workspace = true
 engine-slang-build.workspace = true
+# The kernel lists: the test-only modules test_kernels_dir compiles on demand.
+engine-kernel-manifest.workspace = true
 bytemuck.workspace = true
 wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
@@ -36,15 +38,9 @@ objc2-metal = "0.3"
 # so it does not compile the native wgpu stack).
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster"]
-# The test-only explicit kernels (the frozen baseline and reference, the deterministic-hits
-# and ablation builds): about 84 WGSL modules no shipped build runs. On for this crate's
-# tests, examples and benches (the dev-dependency on itself below) and for crates that
-# measure with them (engine-world's dev-dependency); off in release, web and wasm builds.
-test-kernels = []
 
 [dev-dependencies]
 engine-softbody-authoring.workspace = true
-engine-webgpu = { path = ".", features = ["test-kernels"] }
 # The shared scene builders and gate, without the Metal world (Linux builds).
 engine-scenes = { path = "../engine-scenes", default-features = false }
 
@@ -95,12 +91,12 @@ required-features = ["gpu"]
 [[bin]]
 name = "explicit_beams_ablate"
 path = "src/bin/explicit_beams_ablate.rs"
-required-features = ["gpu", "test-kernels"]
+required-features = ["gpu"]
 
 [[bin]]
 name = "explicit_beams_scaling"
 path = "src/bin/explicit_beams_scaling.rs"
-required-features = ["gpu", "test-kernels"]
+required-features = ["gpu"]
 
 [[bin]]
 name = "explicit_beams_check"

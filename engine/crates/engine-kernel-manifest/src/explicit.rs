@@ -323,3 +323,123 @@ pub fn self_split_defines(aero: bool, lanes: (&'static str, &'static str)) -> Ve
 pub fn split_variants() -> [(&'static str, bool, (&'static str, &'static str)); 4] {
     VARIANTS
 }
+
+// --- Test-only modules.
+
+/// Where a test-only module's source is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestSource {
+    /// A file under `slang/kernels/`.
+    File(&'static str),
+    /// The shipped modules' source (`explicit_beams.slang`, or what a measurement build
+    /// names: `RUBBLE_EB_SRC`, `RUBBLE_EB_REF=1`).
+    Shipped,
+}
+
+/// A test-only explicit module: never shipped; compiled when a test or a measurement asks
+/// for it (engine-webgpu `test_kernels_dir`), not by the build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestModule {
+    pub source: TestSource,
+    pub name: String,
+    pub entry: String,
+    pub defines: Vec<(&'static str, &'static str)>,
+}
+
+/// Lane counts of the test builds of the frame modules.
+const TEST_LANES: [&str; 2] = ["256", "512"];
+
+/// A module name's lane tag: 256 none, 512 `_wide`, else `_l<lanes>`.
+fn lane_tag(lanes: &str) -> String {
+    match lanes {
+        "256" => String::new(),
+        "512" => "_wide".into(),
+        l => format!("_l{l}"),
+    }
+}
+
+/// Every test-only explicit module: the self split's ablation builds (EB_ABLATE, the
+/// non-aero variants); the frozen baseline (`explicit_beams_baseline.slang`) at every
+/// frame variant and plan pass, with its race-probe and deterministic-hits builds; the
+/// current kernel's deterministic-hits (EB_DET_HITS) and ablation (EB_ABLATE) frame
+/// builds; and the frozen reference (`explicit_beams_ref.slang`).
+pub fn test_modules() -> Vec<TestModule> {
+    let mut out = Vec::new();
+    for (tag, aero, lanes) in VARIANTS {
+        if aero {
+            continue;
+        }
+        for (which, fun) in [("step", SELF_STEP_ENTRY), ("walk", SELF_WALK_ENTRY), ("pairs", SELF_PAIRS_ENTRY)] {
+            let mut d = self_split_defines(aero, lanes);
+            d.push(("EB_ABLATE", "1"));
+            if which != "step" {
+                d.push(("EB_SELF_PAIRS_ABLATE", "1"));
+            }
+            out.push(TestModule {
+                source: TestSource::Shipped,
+                name: format!("explicit_beams_selfsplit_{which}_ablate{tag}"),
+                entry: fun.to_string(),
+                defines: d,
+            });
+        }
+    }
+    let base = TestSource::File("explicit_beams_baseline.slang");
+    let cur = TestSource::File("explicit_beams.slang");
+    let reference = TestSource::File("explicit_beams_ref.slang");
+    for p in ["bounds", "pairs", "group"] {
+        let n = format!("explicit_beams_vv_{p}");
+        for (source, prefix) in [(base, "explicit_baseline_"), (reference, "explicit_ref_")] {
+            out.push(TestModule { source, name: format!("{prefix}{n}"), entry: n.clone(), defines: vec![W] });
+        }
+    }
+    // (source, file prefix, lane counts, extra define)
+    let sets: [(TestSource, &str, &[&str], Option<&'static str>); 6] = [
+        (base, "explicit_baseline_", &TEST_LANES, None),
+        (base, "explicit_baseline_", &TEST_LANES, Some("EB_RACE_PROBE")),
+        (base, "explicit_baseline_", &TEST_LANES, Some("EB_DET_HITS")),
+        (cur, "explicit_det_", &TEST_LANES, Some("EB_DET_HITS")),
+        (cur, "explicit_ablate_", &TEST_LANES, Some("EB_ABLATE")),
+        // The frozen reference: the kernel before the latency work, which the current
+        // kernel must match bit for bit.
+        (reference, "explicit_ref_", &TEST_LANES, None),
+    ];
+    for (source, prefix, lanes_list, extra) in sets {
+        for &lanes in lanes_list {
+            let lanes: &'static str = if lanes == "256" { "256" } else { "512" };
+            for aero in [false, true] {
+                let tag = format!(
+                    "{}{}{}",
+                    if aero { "_aero" } else { "" },
+                    lane_tag(lanes),
+                    match extra {
+                        Some("EB_RACE_PROBE") => "_probe",
+                        Some("EB_DET_HITS") if prefix == "explicit_baseline_" => "_det",
+                        _ => "",
+                    }
+                );
+                let mut d = vec![W, ("EB_LANES", lanes)];
+                if aero {
+                    d.push(AERO);
+                }
+                if let Some(x) = extra {
+                    d.push((x, "1"));
+                }
+                // The current kernel's deterministic-hits build serves the bitwise suite's
+                // fleets, which have no surface contact: without the surface pass, as the
+                // modules those fleets ship with (native Metal runs out of threadgroup
+                // slots in a contact module with it); the ablation builds likewise (Metal
+                // binds at most 31 workgroup variables).
+                if prefix == "explicit_det_" || prefix == "explicit_ablate_" {
+                    d.push(NOSURF);
+                }
+                let entry = FRAME_ENTRY.to_string();
+                out.push(TestModule { source, name: format!("{prefix}frame{tag}"), entry: entry.clone(), defines: d.clone() });
+                d.push(SOLO);
+                out.push(TestModule { source, name: format!("{prefix}solo{tag}"), entry: entry.clone(), defines: d.clone() });
+                d.push(GROUPS);
+                out.push(TestModule { source, name: format!("{prefix}contact{tag}"), entry, defines: d });
+            }
+        }
+    }
+    out
+}

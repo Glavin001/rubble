@@ -4,6 +4,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 include!("src/wgsl_loop_cap.rs");
+include!("src/explicit_post.rs");
 
 /// Same world_step entries as `engine-metal`, minus `broadphase_grid` (thin wrapper;
 /// slangc SIGSEGV on SPIR-V — runtime aliases to `broadphase_query`).
@@ -437,14 +438,8 @@ fn main() -> Result<()> {
 
 /// Every slangc compile of this crate into `out_dir` (`spirv/`, `spirv_entries.txt`,
 /// `wgsl/`).
-/// Whether this build compiles the test-only explicit modules (the frozen baseline and
-/// reference, the deterministic-hits and ablation builds): the `test-kernels` feature.
-fn test_kernels() -> bool {
-    env::var_os("CARGO_FEATURE_TEST_KERNELS").is_some()
-}
 
 fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
-    let test_kernels = test_kernels();
     let out = out_dir.join("spirv");
     std::fs::create_dir_all(&out)?;
     let mut warnings = Vec::new();
@@ -741,27 +736,6 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     for m in engine_kernel_manifest::explicit::split_modules() {
         jobs.push((m.name, m.entry, m.defines));
     }
-    // Measurement only: the self split modules' ablation builds (EB_ABLATE), at the
-    // non-aero variants.
-    if test_kernels {
-        for (tag, aero, lanes) in engine_kernel_manifest::explicit::split_variants() {
-            if aero {
-                continue;
-            }
-            for (which, fun) in [
-                ("step", "explicit_beams_self_step"),
-                ("walk", "explicit_beams_self_walk"),
-                ("pairs", "explicit_beams_self_pairs"),
-            ] {
-                let mut d = engine_kernel_manifest::explicit::self_split_defines(aero, lanes);
-                d.push(("EB_ABLATE", "1"));
-                if which != "step" {
-                    d.push(("EB_SELF_PAIRS_ABLATE", "1"));
-                }
-                jobs.push((format!("explicit_beams_selfsplit_{which}_ablate{tag}"), fun, d));
-            }
-        }
-    }
     for r in par_map(&jobs, |(name, entry, defines)| -> Result<()> {
         let out = wgsl_dir.join(format!("{name}.wgsl"));
         compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], defines)?;
@@ -769,15 +743,10 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     }) {
         r?;
     }
-    // The frozen baseline of the explicit-beams kernel (a test oracle,
-    // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
-    // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
-    // Read from OUT_DIR at run time by the bit-identity tests only (not embedded).
-    // Test builds only (the `test-kernels` feature: the crate's own dev-dependency turns it
-    // on for its tests and examples): not shipped, not in a web or release build.
-    if test_kernels {
-        explicit_baseline(slang_root, &wgsl_dir)?;
-    }
+    // (The test-only modules, the frozen baseline and reference and the deterministic-hits
+    // and ablation builds, are not compiled here: engine-webgpu's test_kernels_dir
+    // compiles them when a test or a measurement asks, from
+    // engine_kernel_manifest::explicit::test_modules.)
     // Tests only (tests/explicit_loop_cap.rs): the explicit kernels' Slang loop caps
     // (explicit_loop_cap.slang) on a runaway, read at run time.
     compile_with_defines(
@@ -839,8 +808,6 @@ fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
     {
         std::fs::read(f)?.hash(&mut h);
     }
-    // The test kernels in or out (a test build's entry holds more modules).
-    test_kernels().hash(&mut h);
     Ok(format!("engine-webgpu-{:016x}", h.finish()))
 }
 
@@ -918,102 +885,12 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
 /// reference modules (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs`
 /// compares the capped kernel with the uncapped one bit for bit.
 fn explicit_post(out: &Path) -> Result<()> {
-    let text = std::fs::read_to_string(out)?
-        .replace(
-            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
-            "storageBarrier(); workgroupBarrier();",
-        )
-        .replace(
-            "storageBarrier(); textureBarrier(); workgroupBarrier();",
-            "storageBarrier(); workgroupBarrier();",
-        );
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    let uncapped = name.starts_with("explicit_ref_")
-        && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
-    // (The Slang caps: their flag, ebLoopHit, set by the loops' ends or ebLoopCapHit.)
-    let text = if uncapped || text.contains("ebLoopCapHit") || text.contains("ebLoopHit") {
-        text
-    } else {
-        cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?
-    };
+    let text = explicit_post_text(name, &std::fs::read_to_string(out)?).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?;
     std::fs::write(out, text)?;
     Ok(())
 }
 
-/// The frozen baseline modules (see the call site), and the test-only
-/// deterministic-hits variants (`EB_DET_HITS`) of the baseline and the current
-/// kernel (`explicit_det_*.wgsl`).
-fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
-    let base = slang_root.join("kernels/explicit_beams_baseline.slang");
-    let cur = slang_root.join("kernels/explicit_beams.slang");
-    let reference = slang_root.join("kernels/explicit_beams_ref.slang");
-    let mut jobs: Vec<(PathBuf, String, String, Vec<(&str, &str)>)> = Vec::new();
-    for p in ["bounds", "pairs", "group"] {
-        let n = format!("explicit_beams_vv_{p}");
-        jobs.push((base.clone(), format!("explicit_baseline_{n}"), n.clone(), vec![("ENGINE_WGSL", "1")]));
-        jobs.push((reference.clone(), format!("explicit_ref_{n}"), n, vec![("ENGINE_WGSL", "1")]));
-    }
-    // (source, file prefix, lane counts, extra define)
-    let sets: [(&PathBuf, &str, &[&str], Option<&str>); 6] = [
-        (&base, "explicit_baseline_", &["256", "512"], None),
-        (&base, "explicit_baseline_", &["256", "512"], Some("EB_RACE_PROBE")),
-        (&base, "explicit_baseline_", &["256", "512"], Some("EB_DET_HITS")),
-        (&cur, "explicit_det_", EXPLICIT_LANES, Some("EB_DET_HITS")),
-        (&cur, "explicit_ablate_", EXPLICIT_LANES, Some("EB_ABLATE")),
-        // The frozen reference (explicit_beams_ref.slang): the kernel before the
-        // latency work, which the current kernel must match bit for bit.
-        (&reference, "explicit_ref_", EXPLICIT_LANES, None),
-    ];
-    for (src, prefix, lanes_list, extra) in sets {
-        for &lanes in lanes_list {
-            for aero in [false, true] {
-                let tag = format!(
-                    "{}{}{}",
-                    if aero { "_aero" } else { "" },
-                    lane_tag(lanes),
-                    match extra {
-                        Some("EB_RACE_PROBE") => "_probe",
-                        Some("EB_DET_HITS") if prefix == "explicit_baseline_" => "_det",
-                        _ => "",
-                    }
-                );
-                let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
-                if aero {
-                    d.push(("EB_AERO", "1"));
-                }
-                if let Some(x) = extra {
-                    d.push((x, "1"));
-                }
-                // The current kernel's deterministic-hits build serves the bitwise
-                // suite's fleets, which have no surface contact: without the surface
-                // pass (EB_NO_SURFACE), as the modules those fleets ship with; native
-                // Metal (naga) runs out of threadgroup slots in a contact module with it.
-                // The ablation builds (measurement) likewise: Metal binds at most 31
-                // workgroup variables, which the contact module with every path exceeds.
-                if prefix == "explicit_det_" || prefix == "explicit_ablate_" {
-                    d.push(("EB_NO_SURFACE", "1"));
-                }
-                jobs.push((src.clone(), format!("{prefix}frame{tag}"), "explicit_beams_frame".into(), d.clone()));
-                d.push(("EB_VV_SOLO", "1"));
-                jobs.push((src.clone(), format!("{prefix}solo{tag}"), "explicit_beams_frame".into(), d.clone()));
-                d.push(("EB_VV_GROUPS", "1"));
-                jobs.push((src.clone(), format!("{prefix}contact{tag}"), "explicit_beams_frame".into(), d));
-            }
-        }
-    }
-    let results = par_map(&jobs, |(src, name, entry, defines)| -> Result<()> {
-        let out = dir.join(format!("{name}.wgsl"));
-        compile_with_defines(src, entry, SlangTarget::Wgsl, &out, &[], defines)?;
-        explicit_post(&out)
-    });
-    for r in results {
-        r?;
-    }
-    Ok(())
-}
-
-/// Lane counts of the current kernel's frame modules (the det variants cover each).
-const EXPLICIT_LANES: &[&str] = &["256", "512"];
 
 /// The shipped explicit-beams modules' source: `explicit_beams.slang`; for
 /// measurement builds only (each in its own target directory), `RUBBLE_EB_REF=1`
@@ -1030,11 +907,3 @@ fn explicit_beams_source(slang_root: &Path) -> PathBuf {
     }
 }
 
-/// A module name's lane tag: 256 none, 512 `_wide`, else `_l<lanes>`.
-fn lane_tag(lanes: &str) -> String {
-    match lanes {
-        "256" => String::new(),
-        "512" => "_wide".into(),
-        l => format!("_l{l}"),
-    }
-}

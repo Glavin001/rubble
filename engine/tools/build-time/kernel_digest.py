@@ -26,13 +26,13 @@ import subprocess
 import sys
 
 CRATES = ["engine-webgpu", "engine-metal", "engine-cuda", "engine-viewer"]
-# (variant: the crates built and cargo's extra arguments). The test kernels are
-# engine-webgpu's alone, and cargo applies `--features` only with that package selected
-# by itself (`-p a -p b --features a/x` builds without it).
+# The shipped set: what the four crates' build scripts write.
 VARIANTS = {
     "ship": (CRATES, []),
-    "test": (["engine-webgpu"], ["--features", "test-kernels"]),
 }
+# The test set: the shipped engine-webgpu modules and the test-only ones, which
+# engine-webgpu compiles on demand (its test_kernels bin prints their directory), under
+# the same names (wgsl/<name>.wgsl) as when a build feature put them in OUT_DIR.
 # Files a build script writes that are not kernels or kernel tables: logs and stamps.
 SKIP_SUFFIXES = (".log", ".stamp", ".tmp")
 # MSL and CUDA name their source files in `#line` directives. Where a checkout lives
@@ -119,6 +119,15 @@ def build_digest(out_path):
         for crate, out in sorted(out_dirs(profile, crates, extra).items()):
             for rel, h in digest_dir(out):
                 lines.append(f"{variant} {crate} {rel} {h}")
+    ship_webgpu = [l for l in lines if l.startswith("ship engine-webgpu ")]
+    lines += ["test" + l[len("ship"):] for l in ship_webgpu]
+    test_dir = subprocess.run(
+        ["cargo", "run", "-q", "--profile", profile, "-p", "engine-webgpu", "--bin", "test_kernels"],
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        check=True, stdout=subprocess.PIPE, text=True,
+    ).stdout.strip().splitlines()[-1]
+    for rel, h in digest_dir(test_dir):
+        lines.append(f"test engine-webgpu wgsl/{rel} {h}")
     with open(out_path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     print(f"{len(lines)} files -> {out_path}")
