@@ -32,7 +32,7 @@ crates/engine-terrain/src/material.rs 1938
 crates/engine-terrain/src/plan.rs 2313
 crates/engine-vehiclegen/src/solid.rs 1707
 crates/engine-webgpu/src/bin/explicit_beams_scaling.rs 2193
-crates/engine-webgpu/src/explicit_beams_gpu.rs 5214
+crates/engine-webgpu/src/explicit_beams_gpu.rs 5135
 crates/engine-webgpu/src/gpu.rs 4952
 crates/engine-webgpu/src/gpu_tests.rs 5313
 crates/engine-webgpu/tests/vehicle.rs 1922

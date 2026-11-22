@@ -9,6 +9,7 @@
 mod compute_spec;
 #[cfg(feature = "gpu")]
 mod explicit_beams_gpu;
+mod explicit_modules;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
 #[cfg(feature = "gpu")]
@@ -28,8 +29,9 @@ mod soft_skin;
 #[cfg(feature = "gpu")]
 pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
+pub use explicit_modules::set_explicit_module_override;
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, set_explicit_shader_checks_off, explicit_shader_module, explicit_shader_checks_off, explicit_compilation_options, SHADER_CHECKS_OFF_METAL, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
+    explicit_beams_shipped_wgsl, group_split_default, set_explicit_shader_checks_off, explicit_shader_module, explicit_shader_checks_off, explicit_compilation_options, SHADER_CHECKS_OFF_METAL, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
 #[cfg(feature = "gpu")]
