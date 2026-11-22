@@ -1192,6 +1192,23 @@ fn ledger_loop(lab: &mut CpuLab, secs: f64) -> anyhow::Result<()> {
     Ok(())
 }
 
+
+/// `--save-world FILE`: the World at the end of the run as a portable World
+/// (`engine_exec::world_portable`), with the drive inputs of the `--world-steps` (default
+/// 30) steps after it, which it runs: engine-cuda's `world_replay`, the matrix's
+/// `run.sh --world --cuda`.
+fn save_world(world: &mut World, lab: &mut Lab) -> anyhow::Result<()> {
+    let Some(out) = arg("--save-world") else { return Ok(()) };
+    let n = arg("--world-steps").and_then(|x| x.parse().ok()).unwrap_or(30);
+    let scene = arg("--scenario").or_else(|| arg("--scene")).unwrap_or_else(|| "mountain".into());
+    let scene = std::path::Path::new(&scene).file_name().and_then(|n| n.to_str()).unwrap_or(&scene).to_string();
+    let (t, note) = (lab.bench.t, format!("{scene} (vehicle_lab, wgpu)"));
+    let bytes = world.save_explicit_world(t, &note, n, &mut |w| lab.before_step(w))?;
+    std::fs::write(&out, &bytes)?;
+    println!("world portable {out} ({:.1} MB, t {t:.3}, {n} steps of inputs)", bytes.len() as f64 / 1e6);
+    Ok(())
+}
+
 fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     anyhow::ensure!(gpu, "mountain-perf runs in the GPU World (--mode gpu)");
     let secs: f64 = arg("--secs").and_then(|x| x.parse().ok()).unwrap_or(40.0);
@@ -1439,7 +1456,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         } else if reuse_ab {
             x.set_pair_reuse(on);
 
-        } else {
+        } else if !x.set_named_switch(arg("--ab-switch").as_deref().unwrap_or(""), on) {
             x.set_surface_culls(on);
         }
     };
@@ -2711,7 +2728,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 } else if reuse_ab {
                     "pair reuse"
                 } else {
-                    "surface culls"
+                    arg("--ab-switch").as_deref().and_then(engine_webgpu::ExplicitBeamsGpu::named_switch).unwrap_or("surface culls")
                 },
                 out[0].0,
                 out[1].0
@@ -2775,7 +2792,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 other => anyhow::bail!("unknown --alternate {other}"),
             }
         }
-        lab.before_step(&mut world)?;
+        lab.read_derby_blocking(&world).before_step(&mut world)?;
         let t = std::time::Instant::now();
         world.step()?;
         let frames = world.poll_blocking()?;
@@ -3082,6 +3099,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     if let Some(x) = world.explicit_vehicles() {
         x.kernel_status().map_err(anyhow::Error::msg)?;
     }
+    save_world(&mut world, &mut lab)?;
     // `--end-world N`: after the run, the World's own cost a step. N World steps timed one
     // by one (the step and its poll, as the run's), then the vehicles put back to the
     // state before them and the same explicit steps run as N frames of the vehicles' solver

@@ -75,7 +75,7 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
             {
                 // Cell j's offset stepped from j = 0 (z fastest), as triangleGridWalk.
                 int3 cj = int3(0, 0, 0);
-                for (uint j = 0u, jStop = EB_END(602, j, i, 1u); j < jStop; j++)
+                for (uint j = 0u, jStop = EB_END(649, j, i, 1u); j < jStop; j++)
                 {
                     if (gridBucket(c0 + cj) == b)
                     {
@@ -99,11 +99,11 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
             e0 = gsOff[b];
             e1 = gsOff[b + 1u];
         }
-        for (uint e = e0, eStop = EB_END_UNIFORM(603, e, e1, 1u, EB_LOOP_CAP); e < eStop; e++)
+        for (uint e = e0, eStop = EB_END_UNIFORM(644, e, e1, 1u, EB_LOOP_CAP); e < eStop; e++)
         {
             if (mode == 3u && !ebSpend())
             {
-                ebLoopCapHit(607);
+                ebLoopCapHit(652);
                 break;
             }
             uint h;

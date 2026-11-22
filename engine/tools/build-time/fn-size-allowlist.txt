@@ -131,7 +131,7 @@ crates/engine-world-lab/examples/door_orbit.rs::main 360
 crates/engine-world-lab/examples/explicit_vehicles_bench.rs::main 292
 crates/engine-world-lab/examples/hinge_breaks.rs::main 391
 crates/engine-world-lab/examples/reaction_replay.rs::run 267
-crates/engine-world-lab/examples/vehicle_lab.rs::mountain_perf 2056
+crates/engine-world-lab/examples/vehicle_lab.rs::mountain_perf 2057
 crates/engine-world-wasm/examples/surface_pole.rs::main 231
 crates/engine-world-wasm/src/explicit.rs::spawn 214
 crates/engine-world-wasm/src/showcase.rs::visual_js 259

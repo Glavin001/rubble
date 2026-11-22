@@ -133,12 +133,12 @@ void splitDrive(uint v, uint lane, uint s, uint on, bool ahead)
     uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
     if (!ahead)
     {
-        for (uint k = k0, kStop = EB_END(600, k, k1, 1u); k < kStop; k++) drvRays(c, k);
+        for (uint k = k0, kStop = EB_END(647, k, k1, 1u); k < kStop; k++) drvRays(c, k);
         sync();
         if (has && w == 0u) drvBars(c);
         sync();
     }
-    for (uint k = k0, kStop = EB_END(601, k, k1, 1u); k < kStop; k++) drvTyre(c, k, step);
+    for (uint k = k0, kStop = EB_END(648, k, k1, 1u); k < kStop; k++) drvTyre(c, k, step);
     if (has && w == 0u) drvEnd(c);
     sync();
 }
@@ -182,7 +182,7 @@ uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
     // An awake vehicle in no group: this module has no solo step for it. A group past
     // VV_MAX_GROUP members is the host's error already (contact_status: "more than 64";
     // its vehicles are not stepped that frame); any other such vehicle fails the frame.
-    if (awake && fl.y == 0u && gAcc[vvCtl(VV_TOO_BIG)].load() == 0) ebLoopCapHit(599);
+    if (awake && fl.y == 0u && gAcc[vvCtl(VV_TOO_BIG)].load() == 0) ebLoopCapHit(646);
     uint k = splitUniform(lane, awake ? G.y : 0u);
     if (k == 0u) return 0u;
     uint off = G.x;
@@ -856,4 +856,9 @@ void splitGroupLevelsOnce(uint g, uint lane, uint word)
         fleetLevelsOnce(k, off, parity, lane, tag);
     splitGroupEnd(off, k, lane, s);
 }
+#endif
+// The owners' state by vehicle and the fleet-wide front (included here, after this
+// file's own code, as explicit_beams.slang did after including this file).
+#ifdef EB_VV_FLEET
+#include "explicit_beams_fleet.slang"
 #endif

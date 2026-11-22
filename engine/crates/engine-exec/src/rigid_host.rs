@@ -194,3 +194,39 @@ pub fn convex_body(
         .collect();
     (state, colliders)
 }
+
+/// Impulse records a host's GPU pass appended for the next rigid step, after the host's
+/// own (the terrain coupling's reactions, the explicit vehicles' window impulses:
+/// `IMPULSE_COUNT` atomics, then `IMPULSE_FIRST` set to the count). The step that runs
+/// next schedules `apply_impulses` for them ([`rigid_plan::MotionInputs::impulses`]);
+/// whether that step must run although nothing is awake is the host's wake, set beside
+/// [`Self::mark`] by a pass whose records must wake the bodies.
+///
+/// [`rigid_plan::MotionInputs::impulses`]: crate::rigid_plan::MotionInputs::impulses
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuImpulses {
+    pending: bool,
+}
+
+impl GpuImpulses {
+    /// A GPU pass appended records for the next step.
+    pub fn mark(&mut self) {
+        self.pending = true;
+    }
+
+    /// Records wait for the next step that runs.
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+
+    /// `MotionInputs::impulses` of the step being encoded: the host queued `queued`
+    /// records of its own, or a GPU pass appended some.
+    pub fn this_step(&self, queued: usize) -> bool {
+        queued > 0 || self.pending
+    }
+
+    /// The step that applies them was encoded.
+    pub fn applied(&mut self) {
+        self.pending = false;
+    }
+}

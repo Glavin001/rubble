@@ -332,7 +332,7 @@ without partners a group of its own, and the module holds the member step alone.
 group past `VV_MAX_GROUP` members is the host's error as before (`contact_status`:
 "more than 64"); its vehicles still run alone in the contact module, and on the split
 group path are not stepped that frame. Any other vehicle reaching this module in no
-group fails the frame loudly (loop-cap id 599). The contact module (deferred on the lab's
+group fails the frame loudly (loop-cap id 646). The contact module (deferred on the lab's
 pages) keeps its solo half: dropping it would turn that error into a failed frame.
 
 | | before | after |

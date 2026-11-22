@@ -16,6 +16,10 @@ one state, the same build), compares every state word and times each frame apart
         the same state); fails a row where the World adds more than WORLD_MS. The rows with
         a scenario file by default (the mountain rows drive for seconds first: name them).
     matrix.py --rows ARGS...            the row names ARGS pick (for the Modal runner)
+    matrix.py --make-world [ROW ...]    each row's World at its moment as a portable World
+        (out/scenario-matrix/world/ROW.wfx) for the CUDA replay of --world (engine-cuda's
+        world_replay; run.sh --world --cuda). The row's scene run to its moment: no saved
+        state needed. WORLD_INPUTS (default 30) steps of drive inputs recorded with it.
     matrix.py --make-portable [ROW ...] each row's saved state as a portable fixture
         (out/scenario-matrix/portable/ROW.pfx) for the CUDA replay (REPLAY_BIN=explicit_replay
         runs the rows on it: tools/modal/gpu_run.sh --matrix-cuda -- SWITCH [ROW ...])
@@ -36,7 +40,7 @@ Options (environment): EXTRA (more vehicle_lab options for the replays, e.g. "--
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
 CAR, STATES (the states' directory), RETRIES (default 2: a row past the threshold runs again,
-the median run decides), BIT_EXACT (default 1: the rows run with bit-exact results, the
+the median run decides), WORST=1 (each row's worst frame of either side beside its line), BIT_EXACT (default 1: the rows run with bit-exact results, the
 engine-wide setting that is off by default since 2026-11-19, so that the verdict is bit for
 bit; 0 runs them in the fast setting). --world: WORLD_STEPS (default 20) steps each way, WORLD_MS (default
 2.5) the most the World may add a step, WORLD_ARGS extra lab arguments.
@@ -105,6 +109,56 @@ ROWS = [
 ]
 
 
+def apart(n):
+    """n cars driving side by side 8 m apart on flat ground, never touching."""
+    return {"scene": "flat", "cars": n, "surface": True,
+            "others": [{"x": 8 * k, "z": 0, "angle": 0, "kmh": 60} for k in range(1, n)],
+            "restart": {"start": {"kmh": 60}}, "events": []}
+
+
+def clash(n):
+    """n / 2 head-on pairs, 8 m apart sideways, every pair meeting in the same steps."""
+    others = [{"x": 8 * k, "z": 0, "angle": 0, "kmh": 50} for k in range(1, n // 2)]
+    others += [{"x": 8 * k, "z": 20, "angle": 180, "kmh": 50} for k in range(n // 2)]
+    return {"scene": "flat", "cars": n, "surface": True, "others": others,
+            "restart": {"start": {"kmh": 50}}, "events": []}
+
+
+def mountain(n):
+    return {"scene": "mountain", "cars": n, "surface": True, "mountain": {"terrain": "ledges", "rockslide": False}}
+
+
+def derby(n):
+    return {"scene": "derby", "cars": n, "surface": True}
+
+
+# The goal's rows (20 soft cars in real time at full fidelity: surface contact on in
+# every one). A scenario here is a dict, written to STATES/scenes/ROW.json when the row
+# runs. `run.sh --make goal` and `--baseline goal` name them all; the default rows above
+# are the gate and stay as they are.
+GOAL = (
+    [(f"apart{n}", n, apart(n), [], 1.0, f"{n} cars driving apart on flat ground (scaling, no contact)")
+     for n in (1, 2, 4, 8, 16, 20, 32)]
+    + [(f"clash{n}", n, clash(n), [], 0.7, f"{n // 2} head-on pairs at 50 km/h each, all mid-crush at once (scaling, in contact)")
+       for n in (2, 4, 8, 16, 20, 32)]
+    + [(f"mountain20_t{t}", 20, mountain(20), [], float(t), f"20 cars down the mountain's ledges, t = {t} s")
+       for t in (2, 4, 7, 12, 20)]
+    + [(f"derby20_t{t}", 20, derby(20), [], float(t), f"20 cars in the derby arena with its 86 props, t = {t} s")
+       for t in (2, 5, 10)]
+    + [
+        ("pole", 1, {"scene": "flat", "surface": True, "restart": {"crash": {"kind": "pole", "kmh": 50}}, "events": []},
+         [], 0.1, "one car into a fixed 0.15 m pole at 50 km/h, mid-crush"),
+        ("wall_s", 1, {"scene": "flat", "surface": True, "restart": {"crash": {"kind": "wall", "kmh": 56}}, "events": []},
+         [], 0.1, "the wall row with surface contact on"),
+        ("bricks_s", 1, {"scene": "flat", "surface": True, "restart": {"start": {"kmh": 40}},
+                         "events": [{"t": 0, "obstacle": {"kind": "bricks", "ahead": 5, "cols": 6, "rows": 5, "deep": 2}}]},
+         [], 0.7, "the bricks row with surface contact on"),
+        ("pile8_s", 8, mountain(8), [], 8.0, "8 cars piling up on the mountain's ledges, surface contact on"),
+    ]
+)
+ROWS_ALL = ROWS + GOAL
+
+
 def target_ms(bodies):
     """The owner's targets: one soft body 1 ms a frame (worst), 8 bodies in contact 3 ms;
     between and past them a straight line through both (an extrapolation, marked ~)."""
@@ -119,7 +173,14 @@ def lab_args(row):
         args += ["--car", CAR]
     if "--cars" not in extra:
         args += ["--cars", "1"]
-    if scenario:
+    if isinstance(scenario, dict):
+        import json
+        os.makedirs(os.path.join(STATES, "scenes"), exist_ok=True)
+        path = os.path.join(STATES, "scenes", name + ".json")
+        with open(path, "w") as f:
+            json.dump(scenario, f)
+        args += ["--scenario", path]
+    elif scenario:
         args += ["--scenario", os.path.join(SCENES, scenario)]
     return args + extra
 
@@ -130,6 +191,34 @@ def state_file(row):
 
 def portable_file(row):
     return os.path.join(STATES, "portable", row[0] + ".pfx")
+
+
+def world_file(row):
+    return os.path.join(STATES, "world", row[0] + ".wfx")
+
+
+def make_world(rows):
+    """Each row's World at its moment as a portable World (STATES/world/ROW.wfx: the
+    rigid scene, the coupling's carried state, the vehicles' portable state and the drive
+    inputs of the WORLD_INPUTS steps after it; vehicle_lab --save-world) for the CUDA
+    replay (engine-cuda's world_replay, run.sh --world --cuda). Needs no saved state: the
+    row's scene is run to its moment, as --world does."""
+    os.makedirs(os.path.join(STATES, "world"), exist_ok=True)
+    n = os.environ.get("WORLD_INPUTS", "30")
+    failed = False
+    for row in rows:
+        cmd = lab_args(row)
+        i = cmd.index("--timing")
+        del cmd[i:i + 2]
+        cmd += ["--secs", f"{row[4]:.2f}", "--save-world", world_file(row), "--world-steps", n]
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE)
+        line = next((l for l in p.stdout.splitlines() if l.startswith("world portable ")), None)
+        if p.returncode != 0 or line is None:
+            failed = True
+            print(f"{row[0]}: FAILED\n" + "\n".join((p.stdout + p.stderr).splitlines()[-8:]))
+        else:
+            print(f"{row[0]}: {line}")
+    return 1 if failed else 0
 
 
 def make_portable(rows):
@@ -153,9 +242,16 @@ def make_portable(rows):
 def pick(names):
     if not names:
         return ROWS
-    rows = [r for r in ROWS if any(n == r[0] or n in r[0] for n in names)]
+    # (`goal`: every goal row; `all`: both lists. An exact name wins over a substring,
+    # so `pile8` is not also `pile8_s`.)
+    rows = []
+    for n in names:
+        exact = [r for r in ROWS_ALL if r[0] == n]
+        rows += (GOAL if n == "goal" else ROWS_ALL if n == "all" else exact
+                 or [r for r in ROWS_ALL if n in r[0]])
+    rows = [r for k, r in enumerate(rows) if r not in rows[:k]]
     if not rows:
-        sys.exit(f"no row matches {names}; rows: {', '.join(r[0] for r in ROWS)}")
+        sys.exit(f"no row matches {names}; rows: {', '.join(r[0] for r in ROWS_ALL)}")
     return rows
 
 
@@ -547,6 +643,8 @@ def main():
         sys.exit(__doc__)
     if args[0] == "--make-portable":
         return make_portable(pick(args[1:]))
+    if args[0] == "--make-world":
+        return make_world(pick(args[1:]) if args[1:] else [r for r in ROWS if r[2]])
     if args[0] == "--end-state" and len(args) >= 2:
         return end_state(args[1], pick(args[2:]))
     if args[0] == "--compare-end" and len(args) >= 3:
@@ -583,7 +681,7 @@ def main():
     bad = []
     if baseline:
         print(f"scenario matrix baseline ({ROUNDS} x {FRAMES} frames of 34 steps, each frame's best round, mean ms a frame; {os.path.basename(CAR)})")
-        print(f"{'row':<8} {'bodies':>6} {'ms/frame':>9} {'target':>7} {'':>6} {'run s':>5}  what")
+        print(f"{'row':<14} {'bodies':>6} {'ms/frame':>9} {'worst':>8} {'target':>7} {'':>6} {'run s':>5}  what")
     else:
         if switch == "bitexact":
             print(f"(bitexact: 'on' is bit-exact, 'off' the fast setting; 'bit4bit' is the tolerance verdict: <= {TOL_MM:g} mm, <= {TOL_BROKEN} + 1 % broken beams' difference, finite; the scene-calibrated tolerance is tests/fast_arithmetic_gpu.rs)")
@@ -594,7 +692,7 @@ def main():
         if not r["ok"] or r["on"] is None or r["off"] is None:
             bad.append(row[0])
             print(f"{row[0]:<8} FAILED to run ({r['secs']:.1f} s)")
-            print("\n".join("    " + l for l in r["out"].splitlines()[-10:]))
+            print("\n".join("    " + l for l in r["out"].splitlines()[-24:]))
             continue
         on, off = r["on"][0], r["off"][0]
         if baseline:
@@ -602,7 +700,9 @@ def main():
             ms = min(on, off)
             tgt, stated = target_ms(row[1])
             mark = "ok" if ms <= tgt else "over"
-            print(f"{row[0]:<8} {row[1]:>6} {ms:>9.3f} {('' if stated else '~') + format(tgt, '.2f'):>7} {mark:>6} {r['secs']:>5.1f}  {row[5]}")
+            # (The worst frame of either half's rounds, the smaller: a run is judged by its peak.)
+            worst = min(r["on"][2], r["off"][2])
+            print(f"{row[0]:<14} {row[1]:>6} {ms:>9.3f} {worst:>8.3f} {('' if stated else '~') + format(tgt, '.2f'):>7} {mark:>6} {r['secs']:>5.1f}  {row[5]}")
             continue
         delta = 100.0 * (on - off) / off
         past = lambda on, off: 100.0 * (on - off) / off > THRESHOLD and on - off > NOISE_MS
@@ -623,6 +723,8 @@ def main():
             delta = 100.0 * (on - off) / off
             note = f" ({len(runs)} runs: " + ", ".join(f"{100.0 * (a - b) / b:+.1f}%" for a, b, _ in runs) + ")"
             r["secs"] = sum(x[2] for x in runs)
+        if os.environ.get("WORST") == "1":
+            note += f" [worst frame on {r['on'][2]:.3f} / off {r['off'][2]:.3f} ms]"
         slower = past(on, off)
         flag = "SLOWER" if slower else ("faster" if delta < -THRESHOLD and off - on > NOISE_MS else "")
         if not r["bfb"] or slower:

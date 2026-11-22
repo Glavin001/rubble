@@ -6086,3 +6086,905 @@ Both halves run in the same dispatch, each vehicle's workgroup taking one, so sp
 them costs a second dispatch every substep (34 a frame) for good, to save a compile that
 happens once and that Chrome then caches. Not done; it stays the longest kernel of a
 cold load.
+
+### 8.52 The goal's baseline: 20 cars, surface contact on, by peak and by car count (2026-11-22)
+
+The goal: 20 soft cars on the mountain and in the derby in real time with headroom, at
+full fidelity (surface contact on), judged by the **worst** step of a run, not its median.
+The target is a worst step of 8.3 ms of vehicles' GPU time (half of 1/60 s).
+
+New rows in the scenario matrix (`tools/scenario-matrix/matrix.py`, `GOAL`; `run.sh --make
+goal`, `--baseline goal`), every one with surface contact on: `apartN` (N cars driving
+8 m apart, never touching), `clashN` (N / 2 head-on pairs all mid-crush in the same
+steps), `mountain20_tT`, `derby20_tT` (the AI driving, which the native harness now
+feeds from the cars' poses), `pole`, and `wall_s`, `bricks_s`, `pile8_s` (existing rows
+with surface contact). CUDA now builds the segmented frame and the surface pass's
+pipelines (known bug P1's surface half), so these rows replay on Modal.
+
+Measured at 369b6472 plus this section's commits, bit-exact on, ms a frame of 34 steps
+(mean of each frame's best round; in brackets the worst frame). Mac: M3 Max, native
+Metal, `run.sh --baseline`. T4: Modal, CUDA, `ENGINE_CUDA_FMAD=0 run.sh --cuda --baseline`.
+
+| row | Mac | T4 |
+|---|---|---|
+| drive (1 car, no surface contact) | 3.14 (3.52) | 3.89 (7.14) |
+| apart1 | 69.72 (70.33) | 31.40 (32.06) |
+| apart2 | 8.33 (8.45) | 14.51 (14.76) |
+| apart4 | 12.87 (14.34) | 23.92 (25.87) |
+| apart8 | 13.59 (14.93) | 25.85 (27.95) |
+| apart16 | 14.07 (15.41) | 28.04 (30.52) |
+| apart20 | 14.30 (15.59) | 30.10 (33.74) |
+| apart32 | 15.26 (16.59) | 38.01 (41.90) |
+| clash2 | 15.86 (16.84) | 24.96 (29.40) |
+| clash4 | 16.44 (17.75) | 28.55 (33.69) |
+| clash8 | 23.41 (24.14) | 40.19 (43.53) |
+| clash16 | 24.85 (25.62) | 46.04 (49.74) |
+| clash20 | 25.41 (26.25) | 49.98 (54.16) |
+| clash32 | 30.79 (33.37) | 61.74 (66.49) |
+| mountain20_t2 | 19.32 (22.44) | 36.58 (38.54) |
+| mountain20_t4 | 38.31 (41.89) | 78.10 (95.03) |
+| mountain20_t7 | 37.89 (39.66) | 75.87 (77.69) |
+| mountain20_t12 | 41.40 (46.03) | 86.15 (91.96) |
+| mountain20_t20 | 68.11 (70.38) | not run |
+| derby20_t2 / t5 / t10 (AI driving) | 23.03 / 30.61 / 29.32 (24.53 / 33.62 / 31.20) | not run with the AI |
+| pole | 82.64 (99.09) | 48.36 (78.64) |
+| wall_s | 73.73 (79.23) | 34.37 (35.21) |
+| bricks_s | 78.91 (82.42) | 48.12 (49.84) |
+| pile8 / pile8_s | 13.13 / 25.34 | 20.87 / 48.28 |
+| pile32 (no surface contact) | 36.15 (40.29) | 75.74 (80.58) |
+
+Whole runs on the Mac, 20 s, 20 cars, surface contact on (`vehicle_lab --measure
+mountain-perf --scenario ... --secs 20`, GPU ms a World step):
+
+| scene | vehicles: median / p95 / worst | whole step: median / p95 / worst |
+|---|---|---|
+| mountain, ledges | 40.4 / 66.0 / 71.8 (at t 19.6; it grows with the pile) | 43.2 / 69.6 / 98.9 (t 14.6) |
+| derby | 29.6 / 32.5 / 35.3 | 33.5 / 40.4 / 383.0 (t 1.95) |
+
+What the baseline says:
+
+1. **The explicit frame is the cost.** The rigid step is 0.4 to 1.2 ms and the coupling's
+   passes 0.1 ms of a 30 to 70 ms step.
+2. **One car alone with surface contact on is the slowest row: 70 to 83 ms on the Mac.**
+   A fleet with surface contact and no contact plan runs the frame in segments
+   (`Kernel::FrameSeg`) with the surface pass's nine pipelines between them, 341 launches
+   a frame. On the T4 the segments are 28.0 of 31.7 ms (0.8 ms each); the nine surface
+   pipelines together are 3.6 ms.
+3. **Cars that touch nothing cost 14 ms on the Mac** (apart2 to apart32: 8.3 to 15.3). The
+   count scales almost flat past four cars, so the GPU does take cars side by side; the
+   floor is the cost. On the T4, apart20 is one `Solo` launch of 28.8 ms: every car alone
+   in its workgroup for 34 steps, 0.85 ms a step, with self-collision and the surface
+   pass inside the workgroup. Without surface contact one car is 3.1 ms on the wide
+   passes: `has_surface()` refuses the wide list, self-collision split and self split
+   with vehicle contact (`explicit_plan/schedule.rs`).
+4. **In contact, the members' step is 64 to 74 % of the frame** (T4: clash20 36.3 of 49.8
+   ms, mountain20_t12 55.1 of 85.9), then vehicle contact's tests (5.3; 22.5 on the
+   mountain) and the groups' levels (5.9). Surface contact doubles a pile (pile8 13.1 →
+   25.3 on the Mac) for the same reason as in 3.
+5. **A peak that is not physics:** the derby's whole step is 383 ms once, at t 1.95 s,
+   while its vehicles' time stays under 36 ms. Its cause is not yet identified (the
+   first step that needs a pipeline not used before is the candidate).
+
+### 8.53 Surface contact on the fast schedules: the pass as pipelines after each step's hits (2026-11-22)
+
+§8.52's baseline says a fleet with surface contact pays for the schedule it is refused,
+not for the pass. This section lets such a fleet run the same schedules as one without:
+the surface pass runs as its own pipelines (`explicit_beams_surface_pipes.slang`,
+`SURF_PASSES`: the prep, each kind's find, each kind's apply, a workgroup a vehicle)
+at the point of each step where the frame kernel runs `surfaceStep`.
+`FramePlanner::set_surface_fast` (`--ab-switch surffast` in `vehicle_lab` and in
+engine-cuda's `explicit_replay`; `RUBBLE_SURFACE_FAST=0|1`).
+
+**What the pass reads and writes.** All of it is device memory; the pass keeps nothing
+in workgroup memory but uniform flags (`explicit_beams_surface.slang`, its header).
+
+| | reads | writes |
+|---|---|---|
+| prep (the snapshot) | each node's force slot and its beams' forces of this step's parity (`beamSum`), its accumulator (`accForce`), the groups broken this step | `gBeams[surfSnap]` a node, `gAcc[surfSplit]` a node (cleared), a proxy body's hit count and this step's earliest cast (cleared); with a fast proxy the casts' times; on the pair path each shape's bounds and the listed pairs (`gNext`), their count; its decisions in `gMisc[segRec(v)]` |
+| find | positions, the static slots, the proxies' bodies and shapes (`gMisc`), the spheres the coupling's step wrote (`gNext`), the listed pairs | each node's hit count, each body's, the elements' slot masks (`gAcc[surfMark]`), the pair path's hits |
+| apply | the same, the snapshot and the counts, velocities and masses, the bodies' velocities | the nodes' accumulators and contact-force readout, the position steps (`shiftAt`), a proxy shape's reaction sums of this step (`cplAcc`) |
+
+What it needs current when it starts: the step's beam forces and group breaks (after
+the beam phase), the accumulators after the step's self-collision hits (`selfApply`),
+the proxies' poses and spheres as this step's coupling integrated them. What must not
+have run yet: anything of the next step that reads what it writes, which is the next
+node phase (accumulators, position steps), the next coupling step (the shapes' reaction
+sums, the bodies' poses: it integrates them) and the next step's tyres (their hubs'
+accumulators). The pass writes no position and no velocity, so vehicle sleep's motion
+mark, the pair lists' tracking, the kept candidates' tracking and a wheel's rays and bars
+(which read nodes, static shapes and the drive's records) are indifferent to which side
+of it they run on.
+
+**The hit flag.** The frame kernel's node phase skips a node's accumulators when no hit
+was possible since the last one (`gsHit`: set by a self-collision hit, the wheels, the
+surface pass for a vehicle with the flag). The pipelines carry it in the vehicle's
+segment record (`segRec(v)`, `.x`): the dispatch before them saves the flag, the prep
+writes 1 for a vehicle with surface contact (or leaves it), the next step's dispatch
+loads it. The record is the wide passes' rebase shift, which those passes read only at
+the frame's start (`wide_begin`, `wide_rebase`); a wide frame's node pass takes every
+node's accumulators whatever the flag, so there the record is the prep's alone and
+needs no place of its own.
+
+**Each schedule.**
+
+| schedule | where the pass goes | before it | after it |
+|---|---|---|---|
+| The wide passes, with or without the reused pair list (a lone car, or vehicle contact off) | after each step's `wide_hits` (a workgroup a vehicle: the deferred breaks, `selfApply`) | nothing: every value is in device memory, the step is `gMisc[v].w + pad2` until `wide_close` | nothing: the next step's aux pass (the coupling's step, the wheels) and node pass follow |
+| … with the fused aux work (`PERF_WIDE_FUSED`, and with it `PERF_AHEAD_APART`, `PERF_TYRE_AHEAD`, `PERF_TYRE_EARLY`, `PERF_WHEELS_APART`) | **cannot host it as built**: step s + 1's coupling step runs on step s's list kernel and its tyres at the end of step s's hits kernel, both before the pass could run. The coupling's step integrates the proxies the pass must meet at step s's pose and reads the shapes' reaction sums the pass adds to; the tyres read their hubs' accumulators, which the pass adds to | | a surface fleet's wide frames run the aux pass every step (`Switches::wide_fused_on`) |
+| Self split with vehicle contact, a solo vehicle (`explicit_beams_selfsplit_member_vv`: its step cut at its tests; the walk and the pairs; step s's rest at the start of step s + 1's dispatch) | between the rest's `selfApply` and its slide nodes, which are in one dispatch | a dispatch of its own for the rest's first half (`explicit_beams_solo_rest`, a small module: the walk's list recorded, the hit flag, `selfApply` or its local form; the flag and the list's state saved as the step saves them) | step s + 1's dispatch skips that half (`surfPiped`) and runs the slide nodes, the closing barrier and the step |
+| … a group's member (its step, the walk, the pairs, its rest `memberRest`, then the groups' pass) | after the members' rest, before the groups' pass: where `contactGroup` and `splitMember` run `surfaceStep`, after the member's step (its slide nodes included) | nothing (the member's node pass takes its accumulators whatever the flag) | nothing |
+| The split group path without self split (`explicit_beams_split_member`) | unchanged: that module holds the pass (it is not built without it) | | |
+| Self split without vehicle contact (several cars with contact off, or a fleet the wide passes do not take) | the same cut as the solo vehicle above | **left gated** (`self_split_on`): the kernel's rest entry serves it, the hosts' launch of it without vehicle contact is not built. No goal or default row takes this path; such a fleet keeps the frame in segments | |
+
+Vehicle sleep: the pipelines skip a sleeping vehicle themselves (`surfPipeSkip`), are
+dispatched over every vehicle and bind the step's own parameter copy; the solo rest is
+dispatched as the vehicles' step is (awake-indexed when the list is on).
+
+**The pipelines' own cost, found on the way.** Two things made the pass as pipelines
+dearer than the pass in a kernel, and both are fixed here for every path that runs them.
+
+1. *naga's zeroing of workgroup memory* (Metal, natively). The pipelines hold the
+   coupling's workgroup copies (2,080 words). naga's MSL zeroes them from one lane at
+   every workgroup's start: 0.16 to 0.19 ms a dispatch on the M3 Max, nine dispatches a
+   step. Of the one-car segmented frame's 69.5 ms, 52 ms were this (each dispatch timed
+   apart: the nine pipelines 5.5 to 6.4 ms a frame each, the segments 19.2). Every
+   workgroup value the pipelines read is written in the same dispatch before the
+   barrier the reads follow (the header's copies and the empty sphere table by
+   `coupleBegin` and `cplGsClear` in `surfPipeSkip`, the prep's pair-path flag, the
+   sleep rule's flag), so they are now made without the zeroing, as the wide and split
+   pipelines are (`surface_pipes_zeroed`; `--ab-switch checks=21:5` puts it back for an
+   A/B). The frame in segments, which is still what a fleet off the fast schedules
+   runs, drops from 69.5 to 21.4 ms for one car with no other change.
+2. *A workgroup a vehicle.* A vehicle's elements were walked `LANES` at a time, each
+   lane a chain (the sedan's 4,251 segments: 17 a lane), and 20 vehicles filled 20
+   workgroups of a GPU that runs hundreds. On the T4, 20 cars apart: the nine pipelines
+   12.4 of the frame's 29.9 ms, the segments' find alone 4.2. An element's find and
+   apply read what the prep and the finds left and write order-free sums, counts and
+   masks, so the fast schedules' pipelines (`SURF_FAST_PASSES`) run **a thread an
+   element across the GPU**, with no barrier and no workgroup memory (the coupling's
+   header from the buffer, `EB_CPL_DIRECT`), each dispatch **sized on the GPU** by the
+   prep (`gSurfArgs`, as the self split's walk and pairs are sized): a kind no vehicle
+   has work for in a step gets no workgroup, exactly (the per-element loops need static
+   slots or proxies left to them; the pair path a listed pair). The pair path's listing
+   (`surfPairCull`, every element against every proxy shape's bounds: the prep's
+   longest phase beside proxies, 19.3 of the 20-car mountain frame's 89 ms on the T4)
+   is a dispatch a thread an element too (`explicit_surface_cull`), and its decision a
+   small one after it (`explicit_surface_plan`). Eleven launches a step in place of
+   nine; on the mountain the prep's 19.3 ms become 8.6 (the prep 3.2, the listing 3.8,
+   the plan 1.6).
+
+**What a host launches.** A wide frame of a lone car: each step's aux pass, node pass,
+beam pass, list kernel, walk, pairs and hits pass as before, then the eleven surface
+launches. Self split with vehicle contact: the vehicles' step, the walk, the pairs, the
+members' rest, the solo vehicles' rest, the eleven surface launches, then the groups'
+pass. The eleven: the prep (a workgroup a vehicle; it binds the argument buffer), the
+listing (indirect), the plan (a workgroup a vehicle; it binds the buffer too), four
+finds and four applies (indirect). No launch binds as storage the buffer it is sized
+from (WebGPU forbids it; `schedule::surf_args_offset`, held by the schedule's tests).
+Until a browser has compiled the pipelines, a fleet keeps the pass in its kernels (a
+wide frame: the nine pipelines of a workgroup a vehicle).
+
+**Left gated, and why.**
+
+- *The wide passes' fused aux work with surface contact* (`wide_fused_on`): step s + 1's
+  coupling and tyres would run before step s's surface pass (the table above). A lone
+  car with surface contact pays one aux dispatch a step for it.
+- *Self split without vehicle contact* (`self_split_on`): can host the pass the same way
+  (the kernel's rest entry serves it); the launch of that entry outside the vehicle
+  contact schedule is not built. No goal or default row takes it.
+- *The split group path without self split*: its member module holds the pass; unchanged.
+- *A browser*: `surface_fast_default` is off on wasm32. Chrome accepts every module
+  (below); its bit-for-bit A/B on the lab page (AGENTS.md rung 3) has not been run.
+- *engine-metal*: its host replays the planner's own commands and never turns the
+  setting on.
+
+**Results.** Bit-exact on, ms a frame of 34 steps. Every row of both tables ends bit
+for bit, every state word and every coupling word (`--ab-switch surffast`, one build,
+both ways from the row's saved state).
+
+T4 (Modal, CUDA, `ENGINE_CUDA_FMAD=0`; both parts on, the CUDA host's default). Before:
+§8.52's table (7459c5ce). After: `run.sh --cuda --baseline` at f12eee6c, mean of each
+frame's best round (worst frame). On / off: `run.sh --cuda surffast`, 10 frames, 3
+rounds.
+
+| row | before | after | on / off in one build |
+|---|---|---|---|
+| apart1 | 31.40 (32.06) | 7.34 (7.54) | 7.35 / 31.46, −76.6 % |
+| apart2 | 14.51 (14.76) | 12.81 (12.94) | 12.74 / 14.45, −11.8 % |
+| apart4 | 23.92 (25.87) | 18.12 (20.14) | 18.11 / 23.81, −23.9 % |
+| apart8 | 25.85 (27.95) | 19.62 (21.66) | 19.62 / 25.71, −23.7 % |
+| apart16 | 28.04 (30.52) | 23.91 (25.79) | 23.98 / 28.31, −15.3 % |
+| apart20 | 30.10 (33.74) | 26.79 (28.49) | 26.82 / 30.38, −11.7 % |
+| apart32 | 38.01 (41.90) | 35.55 (37.98) | 35.57 / 37.78, −5.8 % |
+| clash2 | 24.96 (29.40) | 20.65 (23.34) | 20.66 / 24.97, −17.3 % |
+| clash4 | 28.55 (33.69) | 23.39 (25.69) | 23.35 / 28.47, −18.0 % |
+| clash8 | 40.19 (43.53) | 32.77 (35.17) | 32.79 / 39.74, −17.5 % |
+| clash16 | 46.04 (49.74) | 39.55 (42.51) | 39.52 / 45.97, −14.0 % |
+| clash20 | 49.98 (54.16) | 43.96 (47.33) | 43.99 / 50.01, −12.0 % |
+| clash32 | 61.74 (66.49) | 57.31 (61.48) | 57.36 / 61.52, −6.8 % |
+| mountain20_t2 | 36.58 (38.54) | 34.87 (36.07) | 34.85 / 36.48, −4.5 % |
+| mountain20_t4 | 78.10 (95.03) | 65.11 (75.29) | 65.22 / 77.82, −16.2 % |
+| mountain20_t7 | 75.87 (77.69) | 65.52 (66.76) | 65.54 / 76.04, −13.8 % |
+| mountain20_t12 | 86.15 (91.96) | 77.55 (83.54) | 77.44 / 86.50, −10.5 % |
+| pole | 48.36 (78.64) | 22.44 (51.34) | 22.10 / 48.56, −54.5 % |
+| wall_s | 34.37 (35.21) | 8.97 (9.93) | 8.95 / 34.38, −74.0 % |
+| bricks_s | 48.12 (49.84) | 14.71 (15.15) | 14.72 / 48.28, −69.5 % |
+| pile8_s | 48.28 | 31.67 (33.27) | 31.68 / 48.10, −34.1 % |
+| drive (no surface contact) | 3.89 (7.14) | 3.90 (3.94) | not on the path |
+| pile8 / pile32 (no surface contact) | 20.87 / 75.74 (80.58) | 20.91 (21.52) / 75.83 (80.49) | not on the path |
+
+mountain20_t20 and the derby rows were not run on the T4 (as in §8.52). The 12 default
+rows, base 7459c5ce against f12eee6c as two builds (`run.sh --cuda --base 7459c5ce
+--head f12eee6c`): every end state word for word, −0.5 to +0.2 %, PASS.
+
+Mac (M3 Max, native Metal, the GPU shared with other jobs through the lock). Before:
+§8.52's table. On / off: `run.sh surffast`, 10 frames, 3 rounds, both parts switched;
+its off half already has the pipelines without the zeroing (above), which is why a
+lone car's off is 21 ms and not §8.52's 70.
+
+| row | before (§8.52) | after, the default | both parts: on / off in one build |
+|---|---|---|---|
+| apart1 | 69.72 (70.33) | 6.43 (6.61) | 6.51 / 21.49, −69.7 % |
+| apart2 | 8.33 (8.45) | 8.34 (8.45) | 7.57 / 8.35, −9.3 % |
+| apart4 | 12.87 (14.34) | 12.86 (14.29) | 10.89 / 12.91, −15.7 % |
+| apart8 | 13.59 (14.93) | 13.53 (14.85) | 12.68 / 13.63, −7.0 % |
+| apart16 | 14.07 (15.41) | 14.07 (15.35) | 13.33 / 14.16, −5.8 % |
+| apart20 | 14.30 (15.59) | 14.27 (15.60) | 13.93 / 14.37, −3.0 % |
+| apart32 | 15.26 (16.59) | 15.30 (16.62) | 15.61 / 15.39, +1.4 % |
+| clash2 | 15.86 (16.84) | 15.73 (16.79) | 14.49 / 15.80, −8.3 % |
+| clash4 | 16.44 (17.75) | 16.39 (17.70) | 14.78 / 16.16, −8.5 % |
+| clash8 | 23.41 (24.14) | 23.48 (24.17) | 23.55 / 23.35, +0.9 % |
+| clash16 | 24.85 (25.62) | 24.54 (25.58) | 25.50 / 24.61, +3.6 % |
+| clash20 | 25.41 (26.25) | 25.14 (26.05) | 26.51 / 25.31, +4.7 % |
+| clash32 | 30.79 (33.37) | 31.14 (33.23) | 29.99 / 32.83, −8.6 % |
+| mountain20_t2 | 19.32 (22.44) | 19.01 (19.86) | 18.02 / 18.60, −3.1 % |
+| mountain20_t4 | 38.31 (41.89) | 37.04 (40.54) | 33.83 / 36.72, −7.9 % |
+| mountain20_t7 | 37.89 (39.66) | 36.74 (37.63) | 33.32 / 36.19, −7.9 % |
+| mountain20_t12 | 41.40 (46.03) | 40.73 (44.63) | 39.53 / 40.36, −2.0 % |
+| mountain20_t20 | 68.11 (70.38) | 66.32 (67.65) | 65.32 / 66.72, −2.1 % |
+| derby20_t2 | 23.03 (24.53) | 21.95 (24.63) | 22.99 / 22.40, +2.6 % |
+| derby20_t5 | 30.61 (33.62) | 29.74 (31.60) | 32.78 / 29.88, +9.7 % |
+| derby20_t10 | 29.32 (31.20) | 28.32 (30.02) | 30.52 / 28.40, +7.5 % |
+| pole | 82.64 (99.09) | 16.81 (31.24) | 16.10 / 32.90, −51.1 % |
+| wall_s | 73.73 (79.23) | 7.50 (9.31) | 7.51 / 24.55, −69.4 % |
+| bricks_s | 78.91 (82.42) | 11.19 (11.89) | 11.28 / 29.64, −61.9 % |
+| pile8_s | 25.34 | 25.07 (26.69) | 20.92 / 25.22, −17.1 % |
+
+"After, the default" is `run.sh --baseline` at c76d09ba: a wide frame's part on, the
+vehicle-contact part off, so the rows of several cars run the kernels of 7459c5ce and
+keep its times. The 12 default rows (no surface contact), this build's lab against
+7459c5ce's built beside it, each `run.sh --baseline` in a run of its own on the shared
+GPU (not a paired A/B): drive 3.26 / 3.55, tumble 3.36 / 3.45, wall 3.91 / 3.89, pile2
+8.02 / 7.92, pile8 12.47 / 12.34, pile32 35.57 / 36.28, headon 11.76 / 12.10, side 8.47
+/ 8.44, bricks 3.36 / 3.62, rocks 3.68 / 4.07, barrier 7.01 / 7.32, truss 1.51 / 1.69:
+−10.6 to +1.2 %, none slower past the runs' own spread.
+The pipelines with naga's zeroing put back against without it, 6 frames, 2 rounds,
+every state word the same on every row: the frame in segments
+(`RUBBLE_SURFACE_FAST=0 run.sh checks=21:5`) apart1 69.58 / 21.62 ms, pole 87.30 /
+39.18, wall_s 73.27 / 25.08; the fast schedules (`run.sh checks=21:5`) apart1 17.31 /
+6.55, pole 33.42 / 23.30, bricks_s 22.24 / 11.63.
+
+The Mac gate fails on time on two rows, **derby20_t5 (+9.7 %) and derby20_t10
+(+7.5 %)**, and clash16 and clash20 are 3.6 and 4.7 % slower (inside the gate's 5 %).
+Every one of them is a row of 16 to 20 cars in contact groups. Each dispatch timed
+apart on derby20_t5 (the timing inflates each): the eleven surface launches are 12.6 of
+the frame's 33 ms (the pair path's find 3.7, the prep 1.5, the segments' find and apply
+1.4 and 1.3, the triangles' find 1.3), where the same work inside 20 members'
+workgroups costs less on this GPU; the T4 is the other way round (20 workgroups fill
+half of it). So the setting has two parts with their own defaults
+(`schedule::surface_fast_default`, `surface_fast_contact_default`):
+
+- **A wide frame's part** (a lone car, or vehicle contact off): on natively and on
+  CUDA. Faster on every row of both machines that takes it.
+- **The vehicle-contact part** (self split with vehicle contact): on for CUDA, **off
+  for wgpu** unless `RUBBLE_SURFACE_FAST=1`. A change that slows a row is not made a
+  default. On Metal, of the 21 rows that take it, 14 are 2 to 17 % faster, three are
+  within 3 % (clash8 +0.9, apart32 +1.4, derby20_t2 +2.6), clash16 and clash20 are 3.6
+  and 4.7 % slower and the two derby rows are past the gate. With it off those rows
+  run exactly the kernels of 7459c5ce (every module they launch is byte for byte the
+  same).
+
+What would make the vehicle-contact part pass on Metal (not built): fewer launches a
+step there (the three per-element kinds' finds in one dispatch over one index, as the
+listing is, and their applies in another: eleven to seven, if the fused kernels stay
+under the browser's compile cap); the solo vehicles' rest in the members' rest dispatch
+(one launch fewer when a group exists); an early return for a pair thread past its
+vehicle's list before it loads the vehicle's records (the pair kinds are sized by the
+longest list of the fleet). Tried and taken out: the applies sized by their finds (a
+second argument buffer the finds write: no apply for a kind that found nothing); bit
+for bit, no gain on the T4 and 3 % slower on the Mac's clash20, since a car's wheels
+and skin meet a static slot on most steps.
+
+**Proofs** (2026-11-22; commands from `engine/`):
+
+- `tools/scenario-matrix/run.sh surffast ROW...` on the Mac: 25 goal rows bit for bit.
+- `ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda surffast ROW...`: 21 goal
+  rows bit for bit, PASS.
+- `ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda --base 7459c5ce --head
+  f12eee6c`: 12 default rows bit for bit, PASS.
+- `cargo test --profile fast -p engine-webgpu --test explicit_surface_fast_gpu` (new):
+  a lone car into a wall slot and a static or a free proxy pole on the wide passes; three
+  cars with vehicle contact, a head-on pair and one alone, with and without vehicle
+  sleep: every state and coupling word against the pass in the kernels, 6 tests.
+- `explicit_loop_cap` 6, `explicit_surface_proxy_gpu` 4 (GPU against the CPU reference),
+  engine-world-wasm `surface_contact_gpu` 3, `self_split_gpu` 8, `group_split_gpu` 3,
+  engine-softbody `host explicit_surface` 21 (CPU), engine-exec 21 (the schedule's
+  launches for both paths), engine-webgpu's library tests 72: pass.
+- Chrome: `EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
+  explicit-wgsl-check.mjs`: all 155 modules. `tools/build-time/compile_cost.py --check`:
+  the new modules are predicted 0.0 to 2.2 s (cap 10 s). `tools/build-time/check.py`:
+  nothing new (it fails on `vehicle_lab.rs`, 3,365 lines against its 3,357, as it does
+  at 7459c5ce; this change adds no line there).
+- Of the 425 modules of 7459c5ce, eight differ: the self split's step and vehicles'
+  step modules (the rest's skip, a uniform test of a parameter). Fifteen are new.
+
+**Not verified.** Chrome's bit-for-bit A/B on the lab page and whole 40 s runs (rungs 3
+and 4); engine-metal's parity suite (its host is unchanged); the T4's derby rows.
+One run of the T4's `pole` row of fourteen (three rounds of ten frames) ended with one
+word different between the halves, the car's step count (200 on, 540 off: the
+snapshot's own count on the on half, every other word the same), and did not repeat in
+44 further rounds of that row or in any other run; its cause was not found. `explicit_replay` now also fails a half that
+does not repeat its own last round and names it, so that a difference between the
+halves is not read as the switch's.
+
+### 8.54 After §8.53: where 20 cars' time is on the Mac (2026-11-22)
+
+Checked at the merge of §8.53 (7dff0d41), Mac, `run.sh surffast` (both parts on / off):
+apart1 5.72 / 21.41, pole 17.10 / 33.26, wall_s 8.41 / 24.62 (bit for bit), and the
+vehicle-contact part slower on clash20 (+7.0 %) and derby20_t5 (+10.9 %), as §8.53 says;
+it stays off for wgpu.
+
+By dispatch kind (`PROFILE_SPLIT=1 run.sh perf=0`, wgpu's default, each dispatch a timed
+pass; Metal's timestamps misattribute between kinds, the dispatch counts are exact):
+
+| row | frame, untimed | members' step | fleet walk | levels | the rest |
+|---|---|---|---|---|---|
+| apart20 | 13.8 | one `Solo` dispatch of 13.0 (every car alone in its workgroup, 34 steps: 0.38 ms a step) | — | — | 334 of 378 dispatches are empty |
+| clash20 | 25.2 | 17.3 (34 × 0.51) | 0.2 | 3.8 | 3.6 |
+| mountain20_t12 | 42.8 | 23.8 (34 × 0.70) | 10.2 (34 × 0.30) | 3.3 | 6.5 |
+| mountain20_t20 | 66.9 | 26.0 (34 × 0.76) | 30.7 (34 × 0.90) | 6.4 | 7.5 |
+
+Cars apart with vehicle contact off, so that the fleet runs the wide passes with the
+surface pipelines (live runs of 2 s, GPU ms a step of the explicit frame, median / p95):
+1 car 5.47 / 5.50, 8 cars 6.40 / 6.47, 20 cars 9.07 / 12.36, 32 cars 10.74 / 14.28. That
+is about 5.3 ms of launches (19 a step) plus 0.17 ms a car. With vehicle contact on and
+no group the same cars are 9.2 / 14.3 at 20.
+
+Reading:
+
+1. A car's whole step in one workgroup costs 0.4 to 0.8 ms a step on the Mac whatever
+   else happens; across the GPU (the wide passes) 20 cars' steps cost about 0.1 ms a
+   step together. The members' step is the largest part of every row in contact.
+2. The fleet walk grows with the pile: 0.3 ms a dispatch at t 12, 0.9 at t 20. It is
+   the mountain run's growth from 40 to 70 ms.
+3. The frame's floor is its launches: 19 a step for a lone surface car is 5.3 ms before
+   any car's work.
+
+### 8.55 The fleet walk on the mountain: the kept candidates are never used there (2026-11-22)
+
+§8.54's second reading asked why `explicit fleet walk` grows with the pile. Measured at
+the merge of §8.54, Mac, wgpu's default, each row's fixture replayed for 6 frames (204
+contact passes; `vehicle_lab --from-fixture ROW.fx --ab-switch perf=0 --ab-frames 6`,
+its `kept candidates` line):
+
+| row | builds | passes that reused the kept pairs | passes on the front's own path |
+|---|---|---|---|
+| clash20 | 17 (232,378 pairs a build, most an owner 17,385) | 502 of 519, 96.7 % | 0 |
+| mountain20_t12 | 0 | 0 | 204 of 204 |
+| mountain20_t20 | 0 | 0 | 204 of 204 |
+
+Measured: on both mountain rows vehicle contact's kept candidates (`PERF_FLEET_KEEP`,
+§8.28, §8.39) do no pass at all. Every pass takes the front's own path: the gather, the
+grids, the sorted copy and the walk of every listed triangle (`fleetWideTests`, `flWalk`),
+which is the dispatch §8.54 timed at 0.30 ms (t 12) and 0.90 ms (t 20), against 0.2 ms a
+frame on clash20 where 96.7 % of the passes test the kept pairs alone. So the walk does
+not scale badly in itself; it runs on every pass because the list that replaces it is
+off, and its work is the pile's listed triangles.
+
+Not yet measured (hypothesis): why no build is tried in 204 passes. The code has two
+ways there: a build past the fleet's room or an owner's share voids the list and is
+followed by a wait on the front's own path that doubles with each such build in a row,
+to `FK_BACKOFF << 4` = 2,176 passes (`explicit_beams_fleet_track.slang` `fkWaitLeft`,
+its setter; the room is `vehicles · FK_CAP`, `fkRoom`), and a list that lasted fewer
+than `FK_SHORT` passes waits `FK_THRASH_WAIT`. A pile of 20 cars on ledges has every
+car near several others, where clash20 has ten separate pairs. The next step is the
+fixture's own control words (`fkCtl(FK_WAIT)`, the last build's counts by owner), then
+the bound: the mountain rows with the walk's dispatch done twice (time only), which
+says what a pass that reused its pairs would give back at most (clash20's ratio
+suggests most of 10.2 ms a frame at t 12 and of 30.7 ms at t 20).
+
+Not built in this section: every car's own step across the GPU under vehicle contact
+(§8.54's first reading), and fewer surface launches a step. What the first needs that
+the wide passes do not hold today, from the members' step (`contactMemberStep`,
+`explicitBeamsFrameStep` under `EB_VV_SOLO`): the solo vehicles' frame-bounds check in
+the node pass (`nodeUpdateSolo`, `vvReportOutside`, the allowed box in workgroup
+memory), each member's contact box by step parity (`memberBox`, `vvBoxKey`), the
+pending-beam reset of a member's triangle throttles (`VV_FLAGS.w`), the members' pair
+lists' state kept between steps in the solo-step words (`memberListLoad`), the kept
+candidates' tracking of every node (`fkTrackVehicle`), and wheels on each other
+(`wheelsPartners`) between a step's coupling and its nodes. Each is per element or per
+vehicle and none reads workgroup state of another, so none is a reason it cannot be
+hosted; each is kernel work in the wide node pass and its proof.
+
+### 8.56 The fleet walk on a pile: why the kept candidates are off, and the walk made cheap without them (2026-11-22)
+
+§8.55 left two questions: which rule keeps the kept candidates off on the mountain, and
+what the walk costs when it has to run. Branch `claude/fleet-walk-kept`, from 25ea30b4.
+Mac: M3 Max, native Metal, the GPU shared with other sessions through the lock. T4:
+Modal, CUDA, `ENGINE_CUDA_FMAD=0`. Bit-exact on everywhere.
+
+**The cause (measured).** `FK_DEBUG=1 vehicle_lab <row> --from-fixture ROW.fx --ab-switch
+perf=0 --ab-frames 3` prints the kept candidates' control words and the plan's adjacency
+(`ExplicitBeamsGpu::fleet_keep_debug`, new):
+
+| row | a vehicle's partners in the plan (20 vehicles) | partners a build covers | the control words |
+|---|---|---|---|
+| mountain20_t12 | 19, 19, 8, 17, 19, 12, 14, 18, 18, 18, 15, 13, 15, 17, 17, 18, 15, 15, 19, 14 | 8 (`FK_COVER`) | no list; 1,897 passes of the wait left (of 2,176), 4 failed builds in a row; the last build covered 0 partners for 19 vehicles |
+| mountain20_t20 | 18, 19, 8, 17, 19, 14, 14, 18, 18, 18, 17, 13, 18, 17, 18, 18, 18, 15, 19, 18 | 8 | no list; 1,136 left, 4 in a row |
+| clash20 | 1 or 0 | 8 | list valid, 15 builds and 334 reused passes in 10 frames |
+| derby20_t5 | 0 to 4 | 8 | list valid, 1 build and 33 reused passes a frame |
+| derby20_t10 | 0 to 6 | 8 | list valid, 1 build and 33 reused passes a frame; most pairs an owner kept 43,495 |
+
+So it is neither the fleet's pair room nor an owner's share nor a short life: it is the
+third rule of `fkDecide`, **a vehicle with more partners in the plan than a build covers**
+(`tooMany`: `FK_COVER` = 8, the words a vehicle has for its build's partners). In a pile of
+20 on the ledges every car but one has 12 to 19 partners (their boxes with the 5 cm margin
+overlap), so every build attempt ends before its gather, takes the back-off (136 passes
+doubling to 2,176) and the fleet stays on the front's own path: one attempt in 2,176
+passes, 64 frames. §8.39 met the same rule at 32 cars ("a car with more partners than a
+build covers, 8"). The derby keeps its list: at t 5 and t 10 it is rebuilt about once a
+frame and reused on 33 passes of 34.
+
+**What a build would need** (not built): the cover's words a vehicle are part of the
+buffers' layout (`fleet_keep_words`), so 19 partners is a layout change; the build's run
+is sized `VV_PART` (8) times the fleet's contact points (87,680 here) where the front's own
+run has the fleet's room (19 times: 208,240); and a build pads every triangle's box by
+0.25 to 0.9 m, in a pile where a triangle's cells hold candidates of every neighbour. §8.39
+tried 16 partners at 32 cars: 505,000 pairs a build, 8 % slower, reverted. With the walk
+at its cost below, what a kept list could still give back on these rows is the front's
+other dispatches, 6 to 7 of 34 ms (below).
+
+**What the walk does on a pile (measured, counters in a time-only build; a frame is 34
+passes).**
+
+| a frame of 34 passes | mountain20_t12 | mountain20_t20 |
+|---|---|---|
+| listed triangles walked | 336,396 (9,894 a pass: every owner lists its 528; a partner approaches fast on every pass and resets the throttles) | 334,662 |
+| cells their boxes cover | 3.43 million (10 a triangle) | 3.34 million |
+| candidates visited in those cells' buckets | 9.20 million | 12.48 million |
+| of them inside the triangle's box at its largest pad | **698** | **55,397** |
+| triangles over the grid's 64 cells, which test every candidate of their owner | 544 (16 a pass, every one over 4,096 cells: a torn panel's triangle, metres long) | 1,444 (42 a pass: the same 16, and 26 of 64 to 4,096 cells) |
+| candidates those test | 1.64 million (3,000 a triangle) | 7.84 million (5,400 a triangle) |
+| iterations of the walk's search for a bucket met twice | 19.5 million | 19.0 million |
+
+Two things, both of the repo's known kinds. (1) A visited candidate cost three loads, two
+of them dependent (`vvInBox` loads the candidate's vehicle for the anti-clip flag and its
+velocity for its pad) before the comparison that rejects 9,199,000 of 9,200,000. (2) A
+triangle over the cells tests every candidate of its owner on its three threads, chains
+of 1,000 to 3,000 loads each, and the dispatch waits for its longest thread: a loop that
+one lane runs for the whole GPU.
+
+**The bound, time only** (20 frames from the fixture, wall): the walk's work done twice
+(a second, dry copy of `vvTriangleCandsList` that lists nothing and keeps a checksum
+alive) adds 7.3 ms a frame at t 12 (43.3 → 50.5) and 19.4 ms at t 20 (67.1 → 86.5). So
+the walk costs that much, and a walk at clash20's 0.2 ms a frame would give 36.2 ms at
+t 12 and 47.9 ms at t 20. (§8.54's timed passes said 10.2 and 30.7 ms: Metal's
+timestamps overstate it, as that section warned.) With the candidates' position test in
+(below), each part left out in turn (time only, results differ): no test of every
+candidate −3.9 ms at t 12 and −23.0 at t 20 (the hits those triangles find go with it);
+no bucket scans −3.0 and −2.5; no search for a bucket met twice −0.1 and −0.1; the
+thread's own start (the triangle's frame, three nodes) 1.7 ms.
+
+**What changed** (`explicit_beams_fleet.slang`: `flWalkBoxed`, `flWalkBig`, `flBigHint`;
+perf flag 536870912, `PERF_FLEET_WALK_BOX`; the walk of the front's own path only: the
+kept candidates' build and tests, the groups' own dispatches and the larger groups' pass
+are untouched). Each lossless: the same (triangle, candidate) pairs listed, each once.
+
+1. **A candidate's position first.** The walk already has the triangle's box grown by
+   the largest pad any candidate of the owner can have (it sizes the cells from it: the
+   owner's fastest candidate, `FL_FAST`). `vvInBox`'s pad for a candidate is the same
+   expression of that candidate's own speed, which is at most the fastest's, and every
+   operation in it is monotone, so a candidate outside the larger box fails `vvInBox`:
+   it is skipped before the two dependent loads. A NaN compares false and goes on to
+   `vvInBox` as before. The first test's box is 0.1 mm and a millionth of the
+   coordinates larger still: with fast arithmetic (the default outside the tests) a
+   compiler may fuse the multiply-add of one pad and not of the other, a last place
+   apart; inside that room `vvInBox` alone decides, so the pairs are the same in either
+   setting. Alone: mountain20_t12 39.7 → 36.6 ms, mountain20_t20 66.8 → 64.7.
+2. **A big triangle's test on threads of its own.** The throttles' dispatch marks a listed
+   triangle whose box covers more than the walk's 64 cells (`flBigHint`, in a pass that
+   walks: bit 1 of the triangle's listed word, `fkListed`) and puts it in the fleet's list
+   of big triangles (`flListAt`: a region of a word a triangle that the layout has held
+   since stage 2 and nothing used; an atomic count in a free control word, cleared by the
+   first plan). The walk's plan adds 128 threads for each (`FL_BIG_PARTS`) after the
+   listed triangles' own, and thread p of a big triangle tests candidates p, p + 128, ...
+   of its owner, 20 to 70 each. The stored mark alone decides who tests a triangle: the
+   walk's threads leave a marked one to its own threads, which test every candidate
+   whatever the walk's own count of cells would be (the cells only leave out candidates
+   that fail the box test, so testing every candidate lists the same pairs). No value is
+   worked out in two places and compared, so fast arithmetic cannot make two threads
+   disagree about a triangle. Which triangles are marked is a choice of schedule. No
+   change of the buffers' layout.
+
+The fleet's parameter copies have no free bit in their perf word (bits 27 to 31 are the
+level slots there), so the planner keeps the switch in bit 30 of the word after the beam
+order (`FramePlanner::set_perf_flags` and `perf_flags` carry it as bit 29 for their
+callers: `perf=536870912`, `RUBBLE_PERF_FLAGS`, the lab page's `--ab`).
+
+**Results.** On against off in one build from each row's saved state, 3 rounds of 10
+frames, every state word the same on every row of both machines
+(`tools/scenario-matrix/run.sh perf=536870912`, and `--cuda`). ms a frame of 34 steps.
+
+| row | Mac on / off (worst frame on / off) | Mac, default before → after: mean (worst frame) | T4 on / off (worst frame on / off) |
+|---|---|---|---|
+| mountain20_t2 | 19.13 / 19.31, −0.9 % (19.82 / 19.95) | 18.84 (19.87) → 19.19 (19.87) | 34.61 / 34.89, −0.8 % (35.73 / 36.13) |
+| mountain20_t4 | 37.04 / 37.12, −0.2 % (40.37 / 40.43) | 36.94 (40.48) → 36.60 (40.39) | 64.40 / 64.98, −0.9 % (75.92 / 75.86) |
+| mountain20_t7 | 35.66 / 36.80, −3.1 % (36.40 / 37.67) | 36.83 (37.71) → 35.18 (36.35) | 62.91 / 65.34, −3.7 % (64.33 / 66.93) |
+| **mountain20_t12** | **34.24 / 40.84, −16.1 % (37.91 / 44.84)** | **40.57 (44.85) → 34.21 (37.99)** | **64.72 / 77.44, −16.4 % (70.10 / 83.35)** |
+| **mountain20_t20** | **43.09 / 66.60, −35.3 % (45.98 / 74.89)** | **66.52 (69.13) → 43.16 (44.41)** | **81.00 / 125.46, −35.4 % (83.37 / 129.71)** |
+| derby20_t2 | 22.23 / 22.03, +0.9 % (31.88 / 30.37) | 22.02 (23.97) → 22.40 (23.42) | 37.78 / 37.78, +0.0 % (39.46 / 39.47) |
+| derby20_t5 | 30.00 / 30.31, −1.0 % (38.09 / 38.19) | 29.43 (31.12) → 29.76 (31.61) | 55.80 / 55.80, −0.0 % (58.55 / 58.51) |
+| derby20_t10 | 30.26 / 29.80, +1.5 % (37.23 / 35.72) | 28.20 (29.67) → 28.69 (30.21) | 51.77 / 51.81, −0.1 % (55.09 / 55.30) |
+| clash2 / 4 / 8 | +0.1 / +0.1 / +0.3 % | 15.41 (16.30) → 15.60 (16.76); 16.11 (17.76) → 16.35 (17.62); 23.55 (24.17) → 23.52 (24.19) | +0.0 / +0.1 / +0.0 % |
+| clash16 / 20 / 32 | +0.1 / +0.2 / −0.2 % (clash20 25.39 / 25.34, worst 26.16 / 26.18) | 24.64 (27.64) → 24.71 (25.56); 25.17 (26.15) → 25.45 (26.25); 30.93 (33.20) → 30.83 (33.32) | −0.0 / +0.1 / +0.0 % (clash20 43.81 / 43.79, worst 47.18 / 47.09) |
+| apart1 to apart32 | −0.1 to +0.8 % | 6.17 (6.61) → 6.41 (6.61); 8.33 (8.41) → 8.33 (8.46); 12.86 (14.24) → 12.87 (14.28); 13.54 (14.81) → 13.56 (14.92); 14.06 (15.36) → 14.05 (15.39); 14.26 (15.64) → 14.25 (15.66); 15.27 (16.62) → 15.27 (16.60) | −0.2 to +0.1 % |
+| pole / wall_s / bricks_s / pile8_s | −0.2 / +0.1 / −0.0 / −0.0 % | 16.13 (30.40) → 16.68 (31.45); 7.51 (8.85) → 8.12 (9.34); 10.24 (10.80) → 11.15 (11.98); 24.98 (26.62) → 25.17 (26.76) | within 0.6 % |
+| drive / tumble / wall | +1.1 / +0.4 / +1.6 % | 3.52 (3.62) → 3.42 (3.67); 3.38 (3.54) → 3.43 (3.52); 4.05 (4.41) → 4.24 (4.45) | +0.0 / +0.4 / +0.1 % |
+| pile2 / pile8 / pile32 | +0.2 / +0.0 / −0.2 % | 8.24 (8.44) → 8.22 (8.41); 12.80 (13.25) → 12.99 (13.36); 36.13 (40.07) → 35.51 (39.39) | +0.0 / +0.1 / −3.0 % (pile32 73.42 / 75.71, worst 78.98 / 81.04) |
+| headon / side / bricks | −0.1 / −0.1 / +3.1 % (bricks 3.78 / 3.67) | 11.81 (12.53) → 11.89 (12.52); 8.41 (11.16) → 8.83 (11.67); 3.34 (3.50) → 3.72 (3.83) | within 0.1 % |
+| rocks / barrier / truss | +0.4 / +1.1 / +0.5 % | 4.01 (4.27) → 3.96 (4.18); 7.35 (8.27) → 7.29 (8.25); 1.71 (1.84) → 1.70 (1.91) | within 0.2 % |
+
+"On / off" is the paired A/B (the verdict: PASS on both machines, 37 rows, none slower
+past 5 % and 0.05 ms; `WORST=1` prints the slowest frame of any round of each half). Both
+columns are the last run, on the kernel as committed; two earlier runs of each machine on
+the kernel before the first test's rounding room gave the same verdicts and the same
+deltas to 0.5 % (mountain20_t12 −16.2 and −16.5 %, mountain20_t20 −32.9 and −35.5 %). On
+the T4 the other rows' worst frames are within 0.3 ms between the halves but for one
+frame of the on half on three rows: drive 7.61, wall 9.78 and pile2 24.10 ms against 3.94,
+6.69 and 12.34 in one run, 9.28, 8.68 and 28.57 in the next. It is not the switch: the
+same rows with `perf=0`, same against same, give pile2 22.46 / 12.26 (the lone cars 4.59 /
+4.60 and 3.93 / 3.92 that time). The on half is the first of each round; why its pile2
+has one slow frame was not looked into (a hypothesis: a module's first load in a timed
+frame). Each frame's best round, the number compared, does not see it. "Default before →
+after" is two `run.sh --baseline` runs of this
+build one after the other on the shared GPU, the first with `RUBBLE_PERF_FLAGS=165150661`
+(the defaults without the switch), each row a process of its own: not a paired A/B, and
+the one-car rows change level between processes by more than this change could (bricks
+3.34 → 3.72 and bricks_s 10.24 → 11.15 there are −0.6 % and −0.8 % in the paired run; a
+lone car launches no fleet dispatch).
+
+The worst frame of the mountain's last fixture goes from 69.1 to 44.4 ms on the Mac. From
+t 12 to t 20 the frame now grows from 34.2 to 43.2 ms where it grew from 40.6 to 66.5.
+
+By dispatch kind on the Mac (`--ab-profile`, each dispatch a timed pass, ms a frame;
+Metal's timestamps overstate a kind, the comparison is like for like):
+
+| kind | t 12 before → after | t 20 before → after |
+|---|---|---|
+| fleet walk | 10.17 → 2.25 (299 → 66 µs a dispatch) | 30.97 → 3.31 (911 → 98 µs) |
+| fleet triangles, points (the marks are made here) | 1.87 → 1.90 | 2.80 → 2.82 |
+| members' step | 23.89 → 23.83 | 25.98 → 25.98 |
+| levels | 3.31 → 3.31 | 6.42 → 6.41 |
+
+**Default: on natively and on CUDA** (`perf_flags_default`), off in a browser until
+Chrome's bit-for-bit A/B on the lab page (AGENTS.md rung 3) is run.
+
+**What is left of 20 cars on the mountain, and next.** After this the walk is within 1
+to 2 ms a frame of no walk at all (the time-only "no walk" frames above also lose the
+hits' work, so that is an upper bound of what is left). The frame at t 12 is the members'
+step (23.8 ms in §8.54's split), the levels (3.3) and the front's seven other dispatches
+a pass (the triangles and points, the owners' parts, the grids, three prefixes, the
+pairs: 6 to 7 ms a frame, mostly launches). A kept list that holds on a pile would
+replace those with one dispatch; it needs the cover for 19 partners (a layout change)
+and a build whose pairs fit the fleet's room, which §8.39's attempt at 16 partners did
+not reach. Not built here.
+
+**A bug found on the way, fixed because the proof needed it.** `explicit_replay` (the
+CUDA matrix's row runner) set a `perf=MASK` switch, ran one untimed frame, put the state
+back and timed: `CudaExplicitBeams::restore` puts the planner's words back with the
+bindings, the perf flags among them, so **both halves of every `perf=MASK` A/B on CUDA ran
+the snapshot's flags**, same against same (this switch's first T4 run: mountain20_t20
+124.86 / 124.79 ms, every row within 0.3 %). The switch is now applied again after the
+state is put back (80.94 / 125.56). Earlier T4 verdicts of `perf=` switches were
+same-against-same and say nothing; the host switches (`surffast`, `groupsplit`,
+`selfsplit`, `widelist`, `fused`, `wide`, `devindirect`) are fields of the host and were
+not affected.
+
+**Proofs** (2026-11-22; commands from `engine/`):
+
+- `WORST=1 tools/scenario-matrix/run.sh perf=536870912 ROW...` (all 37 rows named), Mac:
+  every row bit for bit, `verdict: PASS; 37 rows in 95.2 s` (before the rounding room:
+  `run.sh perf=536870912`, `verdict: PASS; 12 rows in 20.3 s`, and `... goal`, `verdict:
+  PASS; 25 rows in 97.8 s`).
+- `ENGINE_CUDA_FMAD=0 MODAL_OPTS="--pack 4 --env WORST=1" tools/scenario-matrix/run.sh
+  --cuda perf=536870912 ROW...` (all 37 rows named): every row bit for bit, `verdict:
+  PASS; 37 rows on Modal T4, in 4 container(s)`, three times (twice before the room).
+- `tools/explicit-2khz/perf-verify.sh default webgpu:fleet_walk_gpu webgpu:fleet_contact_gpu
+  webgpu:group_split_gpu webgpu:explicit_contact_gpu` (release, bit-exact on, the switch
+  on by default): PASS, 1, 1, 3 and 13 tests. `perf-verify.sh 701988805` (the defaults
+  with the kept candidates off, so that every contact pass walks) on `fleet_contact_gpu`,
+  `group_split_gpu` and `explicit_contact_gpu`: PASS, 1, 3 and 13. (`fleet_walk_gpu` and
+  the second run's `group_split_gpu` and `explicit_contact_gpu` on the kernel as
+  committed, the others before the rounding room.) On the kernel as committed again:
+  `perf-verify.sh default webgpu:fleet_contact_gpu metal:vehicle_parity`: PASS, 1 and 4.
+- `cargo test --profile fast -p engine-webgpu --test fleet_walk_gpu` (new, bit-exact on):
+  a column of ten and a column of six with torn panels (a triangle's node of two cars
+  moved 4 m, so that triangles are over the cells), the kept candidates off so that every
+  pass walks, with and without self split: 40 frames each, every state word the same with
+  the switch on as off; up to 9 and 18 big triangles a pass on threads of their own.
+- `cargo test --profile fast -p engine-webgpu --test explicit_loop_cap`: 6 passed (the
+  new loops are capped, ids 640 to 643). `cargo test --profile fast -p engine-exec`: 25.
+- Chrome: `EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
+  explicit-wgsl-check.mjs`: all 155 modules compile. `tools/build-time/compile_cost.py
+  --check`: 0 failing. `tools/build-time/check.py`: the two `vehicle_lab.rs` lines of the
+  base (3,383 lines against 3,375; `mountain_perf`), nothing new.
+
+**Not verified.** Chrome's bit-for-bit A/B on the lab page (rung 3: the web build needs
+the fracture lab's Git LFS assets, which this worktree does not hold; the switch stays
+off in a browser, where Chrome accepts every module); whole 20 and 40 s runs (rung 4)
+and the lab's own runs with the AI driving; the fast setting's tolerance suite
+(`fast_arithmetic_gpu`, `run.sh bitexact`). The time-only
+figures (the bound, the parts left out) are from builds that were not committed.
+
+### 8.57 Every car's own step on the wide passes under vehicle contact: the map, and the frames without a group (2026-11-22)
+
+§8.54's first reading: a car's whole step in one workgroup costs 0.4 to 0.8 ms a step on
+the Mac, the same cars' steps across the GPU (the wide passes) about 0.1 ms a step
+together. A fleet with vehicle contact on never takes the wide passes today
+(`FramePlanner::is_wide` needs contact off). This section is the map of what a car's own
+step is on each path, then the first part built: the frames in which the contact plan
+holds no group.
+
+**The paths today** (contact on, `schedule::frame`):
+
+| the fleet | the plan holds no group | the plan holds a group |
+|---|---|---|
+| surface contact, its pass in the kernels (wgpu's default: `surface_fast_contact_default(false)`) | one `Solo` dispatch, a workgroup a vehicle for the whole frame (`explicit_beams_frame` under `EB_VV_SOLO`), sized by the plan (`vvArgs` words 0..2: the vehicles, or 0 with a group) | every vehicle a step a dispatch on `explicit_beams_split_member` (`Member(s)`, sized by words 20..22: 0 without a group): a solo vehicle `explicitBeamsFrameStep`, a member `splitMember` |
+| no surface contact, or its pass as pipelines with vehicle contact (CUDA's default): self split with vehicle contact | every vehicle a step a dispatch whatever the plan (`SelfMember(s)`, words 28..30: the vehicles always), the walk, the pairs, the members' rest (none without a group), the solo vehicles' rest and the surface pipelines (surface fleets) | the same dispatches, then the fleet's front, tests and levels |
+
+**The map.** What a vehicle's own step runs on the members' path and on the solo
+vehicles' (`contactMemberStep`, `splitMember`, `memberRestStep`, `contactMemberBegin`,
+`contactMemberEnd`, `splitGroupBegin`, `splitGroupEnd`; `explicitBeamsFrameStep` under
+`EB_VV_SOLO`), against the wide passes (`explicit_beams_wide_*`, `explicit_beams_wide_list`).
+"Reading" marks what is read from the code and not yet held by a test.
+
+| item | today: where, what it reads and writes | on the wide step | status |
+|---|---|---|---|
+| the frame's start: the origin's rebase | solo: the step dispatch of step 0 (every lane reads node 0, the nodes shifted, `gMisc[v].xyz`, `cplRebase`); member: `contactMemberBegin` in the groups' begin dispatch | `wide_begin` (the shift into `gMisc[wideMisc + 1 + v]`, `cplRebase`), `wide_rebase` (a thread a node), then the host's copy of the origins and step counts into the vehicle table | built for a frame without a group (the same arithmetic: `P − first` when `length(first) > REBASE_RADIUS`). With a group: the groups' begin must then skip `contactMemberBegin` (reading) |
+| the coupling's step, the wheels | solo: `coupleStep`, `driveStep` (or `PERF_DRIVE_AHEAD`'s parts); member: `splitCoupleStep` (the members' partition of lanes; a group past `CPL_GS_VEHICLES` members or header bit 4 runs `cplIntegrate` with no `cplReactBy` before it, where `coupleStep` runs both) and `splitDriveStep` / `splitTyres` | `wide_aux` (a workgroup a vehicle: `coupleStep`, `driveStep`); with `PERF_WIDE_FUSED` on the list and hits kernels | built without a group. With a group (reading): the fused form cannot be taken, since step s + 1's tyres would read their hubs' accumulators before step s's contact levels add to them; and `splitCoupleStep`'s large-group branch must be shown the same as `coupleStep` or kept |
+| the solo vehicles' frame-bounds check | `nodeUpdateSolo` / `nodeUpdateShapes` / `nodeUpdateCoupled` with `solo`: each node's position before its update against the allowed box (`gsVvBounds`: centre and half extents from `vvRec(v, VV_ALLOWED_LO/HI)` minus the origin, in workgroup memory), not for a retired node; every node again at the frame's end. Writes `gAcc[vvCtl(VV_OUTSIDE)]` by an atomic maximum | the node pass's thread, before its `nodeUpdate`: the box from the two records and the table's origin, a thread a node; the frame's last positions in the close pass | **built** (`explicit_beams_wide_nodes_vv`, `explicit_beams_wide_close_vv`): the same expression per node; the half sum times 0.5 is exact, so no rounding differs from the workgroup's stored copy |
+| each member's contact box by step parity | `memberBox` after the member's node phase (and again after centred damping): atomic minima and maxima of `nf3(origin + P)` into `vvBoxKey(v, parity)`, the other parity's keys cleared for the next step, the allowed box checked (`vvReportOutside`); `contactMemberEnd` clears all twelve | the node pass's thread after `nodeUpdate` (and the centred nodes' pass): order-free atomics a node; the other parity's clear in the pass's per-vehicle part | not built. Reading: exact (minima, maxima); the fleet's front reads the keys after the members' steps, which the wide step keeps |
+| the pending-beam reset of a member's triangle throttles | `VV_FLAGS.w`, set by the contact pass on a fast approach (`explicit_beams.slang` 10085, 11085; `explicit_beams_fleet.slang` 121): at the next step's throttle update every triangle's wait is zeroed and the triangle listed; cleared after the update (`contactMemberStep`, lane 0, s > 0), and in `contactMemberEnd` | the list kernel's throttle loop (it reads the flag per vehicle) and `wide_end`; `PERF_WIDE_GEO`'s `triangleFinishPeek` in the beams pass must then fill every triangle of a pending member | not built. Reading: exact, per vehicle |
+| the members' pair-list state between steps | `memberListLoad` / `memberListKeep` / `memberListSave`: the list's state (`gsCount` past the buckets, `REUSE_WORDS` words) in `soloStepAt(v)` | the list kernel keeps the same words there (`soloStepSave`, `soloStepLoad`) | the same words already: nothing to host. `pairReuseBegin` at step 0 on both |
+| the kept candidates' tracking of every node | `fkTrackVehicle` at the end of `memberRest` when the host sets `PERF_KEEP_TRACK_REST`; otherwise the scans' dispatch tracks (`fkTrack`, a thread a node) | not hosted: without the members' rest the host does not set the flag and the scans' dispatch tracks, one launch a step in a frame with a group | a schedule choice, no kernel work (the fleet's kept candidates are being changed in parallel: left to that work) |
+| wheels on each other | `wheelsPartners` in a dispatch of its own a workgroup a group before each step's vehicles (`GroupOp::Wheels`): the staged reactions into the partners' accumulators, the rays | the same dispatch before the step's aux pass | not built: a fleet whose wheels see bodies stays on today's path |
+| the node, beam, centred and list phases, the walk, the pairs, the hits | the member's or the solo vehicle's workgroup; a member's node phase always takes the accumulators (`hits` true) | `wide_nodes` (always `hits` true), `wide_centred_*`, `wide_beams`, the list kernel, the walk and pairs dispatches, `wide_hits` | the wide frame against the frame kernel is held bit for bit already with contact off (`explicit_beams_bitwise`, the matrix's one-car rows) |
+| the surface pass | in the member's or solo vehicle's kernel, or as pipelines after the rests (§8.53) | the pipelines after `wide_hits` (§8.53) | built without a group |
+| the frame's end | solo: `coupleEnd`, `pairReuseEnd`, the triangles' last throttle update, the last group breaks, the step count, the last bounds check; member: `splitGroupEnd` (`coupleEndMembers`, `contactMemberEnd`) | the list kernel's end, `wide_aux` at `steps`, `wide_end`, `wide_close` | built without a group. With a group: `splitGroupEnd` must skip what the wide end ran (reading) |
+| the step parity | a member's own step uses its own count (`gMisc[v].w + s`); the groups' pass its first member's | the wide passes clear every vehicle's group slots by vehicle 0's parity: every vehicle must have run the same steps | holds while no vehicle sleeps (every vehicle steps every frame): vehicle sleep stays on today's path |
+
+Nothing in the list reads another vehicle's workgroup memory; the two rows marked as
+needing a proof before they move are the coupling's large-group branch and the order of
+the tyres against the contact levels.
+
+**Measured before building: what the wide passes cost these cars.** §8.54's figures for
+cars apart with contact off (20 cars 9.07 ms a step at the median, 12.36 at p95) are a
+live run's GPU time. The matrix's rows are one saved moment timed by wall clock
+(encode, submit, wait), and that moment is at the run's p95. The same fixtures replayed
+with vehicle contact off, so that the fleet runs the wide passes
+(`EXTRA="--vv 0" run.sh perf=0 ROW`, Mac, bit-exact on), against today's frame with
+contact on:
+
+| row | contact on today (`Solo`) | contact off (the wide passes) |
+|---|---|---|
+| apart2 | 8.29 | 6.07 to 6.34 |
+| apart8 | 13.61 | 9.92 to 10.55 |
+| apart20 | 14.30 | 12.50 to 12.52 |
+| apart32 | 15.34 | 14.64 to 14.83 |
+
+So the most this part can give on the Mac is 14.3 → 12.5 ms at 20 cars (−12.5 %), 27 %
+at 8, 4 % at 32: a workgroup a vehicle costs that GPU the same for 2 cars as for 32
+(8.3 to 15.3 ms), the wide passes' work grows with the cars.
+
+**Built: the frames without a group** (`FramePlanner::set_vv_wide`, `--ab-switch vvwide`
+in `vehicle_lab` and in engine-cuda's `explicit_replay`; `RUBBLE_VV_WIDE=0|1`;
+`explicit_plan/vv_wide.rs`, `explicit_beams_vvwide.slang`). The plan decides on the GPU,
+so such a frame holds both schedules and each is sized there:
+
+- `explicit_vv_gate` (one workgroup after the plan's passes, every frame): from the
+  plan's group count (`vvArgs` word 3, which every snapshot carries) the wide passes'
+  workgroup counts into a buffer of its own (`ArgBuf::Wide`, ten slots): each pass's
+  count when the plan holds no group, else 0; and the vehicles' count for today's
+  launches that run every frame (`SelfMember`, `SoloRest`) when it holds one, else 0.
+- Every wide launch is sized from that buffer, in the order of a wide frame with the
+  reused pair list. The node and close passes are two new modules, the wide ones with
+  the bounds check ahead of them (`explicit_beams_wide_nodes_vv`,
+  `explicit_beams_wide_close_vv`); every other launch is a module the hosts had.
+- With self split and vehicle contact (no surface contact, or CUDA's surface pipelines)
+  the walk, the pairs and the surface pipelines are today's own dispatches, and one
+  launch of each serves both schedules: a step is the wide passes up to the list
+  kernel, the vehicles' step, the walk, the pairs, the wide hits, then the rests, the
+  surface pipelines and the groups' passes. With the surface pass in the kernels (wgpu's
+  default) the wide frame brings its own walk, pairs and surface pipelines ahead of each
+  step's members' dispatch, the prep and the plan sized by the gate; their argument
+  slots (the self split's and the surface pass's) are zeroed at the frame's start by the
+  gate's module again, since a slot is otherwise cleared by the step before it, which
+  gets no workgroup in a frame with a group. Zeroing every slot at a frame's start
+  changes nothing for a frame that writes them.
+- The steps' parameter copies carry the wide passes' flags (`PERF_WIDE_LIST`, the fused
+  aux work where a wide frame takes it, `PERF_HIT_SLOT_MAP`); no kernel of the split
+  group path reads them (the groups' pass reads `lvSlots` from other copies when its
+  tests are split, which this schedule requires).
+- No launch binds as storage the buffer it is sized from (held by the schedule's tests).
+
+**A launch is not free when the GPU gives it no workgroup.** The brief for this part
+took §8.54's "334 of 378 dispatches are empty" as costing nothing; that was GPU time.
+With both schedules in every frame (the first build), every row with a group was slower
+by wall clock, bit for bit:
+
+| | Mac (Metal), on / off, ms a frame | T4 (CUDA) |
+|---|---|---|
+| pile2 | 10.48 / 9.28, +13.0 % | 12.91 / 11.53, +11.9 % |
+| barrier | 7.66 / 7.06, +8.5 % | 11.78 / 10.62, +10.9 % |
+| side | 9.08 / 8.47, +7.2 % | 14.78 / 13.53, +9.3 % |
+| headon | 12.56 / 11.84, +6.1 % | 18.65 / 17.41, +7.1 % |
+| clash2 | 19.11 / 17.46, +9.4 % | 22.20 / 20.90, +6.2 % |
+| clash20 | 29.62 / 27.73, +6.8 % | 45.08 / 44.02, +2.4 % |
+| mountain20_t12 | 42.21 / 40.74, +3.6 % | 79.21 / 78.08, +1.4 % |
+
+That is 0.6 to 1.9 ms a frame for 200 to 700 launches without a workgroup: 2 to 5 µs
+each on the Mac (wgpu's encoding and Metal's, not the GPU), and on CUDA an indirect
+launch always runs its resident blocks to read a count of zero. The same holds for
+today's frames: a frame without a group already carries about 340 launches of the
+groups' path that get no workgroup, which is the difference between this part's result
+and the contact-off column above (13.6 against 12.5 ms at 20 cars).
+
+So a frame holds both schedules only when the host expects no group: the host reads the
+plan's group count back without waiting (wgpu: four bytes copied after a frame's passes
+and mapped asynchronously, every fourth frame; CUDA: at `wait`, where the stream is
+idle) and gives it to the planner (`FramePlanner::set_vv_wide_seen`). After a plan
+without a group the next frames hold both; until then, and after a plan with a group,
+a frame is today's, which serves a plan without a group as before. Either frame is
+right for either plan, so the hint costs or saves time and cannot change a result: a
+frame that holds both schedules while the plan forms a group runs today's launches
+(sized by the gate), and `explicit_vv_wide_gpu` holds such frames bit for bit. This is
+the same kind of read as the levels' slots (`level_want`).
+
+**Results** (2026-11-22, bit-exact on, ms a frame of 34 steps; `run.sh vvwide ROW...`, 10
+frames, 3 rounds, the switch forced on whatever the fleet's size). Every one of the 37
+rows ends bit for bit on both machines, every state word and every coupling word.
+
+| row | Mac (Metal), on / off | T4 (CUDA, `ENGINE_CUDA_FMAD=0`), on / off |
+|---|---|---|
+| apart2 | 7.59 / 8.33, −8.9 % | 10.75 / 12.91, −16.7 % |
+| apart4 | 10.97 / 12.86, −14.7 % | 15.97 / 18.19, −12.2 % |
+| apart8 | 11.52 / 13.63, −15.5 % | 18.20 / 19.64, −7.3 % |
+| apart16 | 13.69 / 14.16, −3.3 % | 23.18 / 23.98, −3.3 % |
+| apart20 | 13.59 / 14.39, −5.6 % | 25.97 / 26.87, −3.4 % |
+| apart32 | 15.89 / 15.32, +3.8 % | 33.64 / 35.68, −5.7 % |
+| apart1, drive, tumble, wall, bricks, rocks, truss, pole, wall_s, bricks_s (one vehicle: contact not active) | −4.8 to +2.2 % | −0.1 to +0.2 % |
+| pile2, pile8, pile32, headon, side, barrier | −0.8 to +0.6 % | −0.1 to +0.2 % |
+| clash2 to clash32 | −0.5 to +0.3 % | 0.0 to +0.1 % |
+| mountain20_t2, t4, t7, t12, t20 | −0.6 to +0.1 % | −0.1 to +0.3 % |
+| derby20_t2, t5, t10 | −0.1 to +0.1 % | +0.1 % |
+| pile8_s | −0.1 % | 0.0 % |
+| verdict | PASS (37 rows) | PASS (37 rows) |
+
+The rows with a group run today's frame (the host has read a plan with a group back),
+so they are the same launches as before plus the read. On the Mac the cars-apart rows
+were measured five more times on a GPU other sessions shared: apart2 −6 to −19 %,
+apart4 −8 to −15 %, apart8 −12 to −20 %, apart16 −3.3 to +1.3 %, apart20 −5.6 to
++4.5 %, apart32 0.0 to +10.3 % (past the gate's 5 % in three of five runs). On the T4
+every count is faster.
+
+The defaults, before → after, mean of each frame's best round (worst frame), each
+`run.sh --baseline` a run of its own (`RUBBLE_VV_WIDE=0` before; the two T4 runs were
+two containers, whose rows off this path differ by 1 to 6 % between them, so only the
+rows this path changes are listed):
+
+| row | Mac before → after | T4 before → after |
+|---|---|---|
+| apart2 | 8.31 (8.46) → 7.53 (7.91) | 13.20 (13.38) → 10.92 (11.15) |
+| apart4 | 12.84 (14.21) → 10.31 (12.56) | 18.41 (20.44) → 15.88 (17.96) |
+| apart8 | 13.54 (14.84) → 11.51 (13.30) | 20.49 (22.66) → 18.28 (20.32) |
+| apart16 | 14.07 (15.34) → 14.07 (15.37), not taken | 26.02 (28.81) → 23.17 (25.27) |
+| apart20 | 14.24 (15.64) → 14.26 (15.62), not taken | 29.54 (32.00) → 25.96 (27.74) |
+| apart32 | 15.22 (16.54) → 15.24 (16.60), not taken | 39.70 (42.82) → 33.59 (36.31) |
+
+**Defaults.**
+
+- *CUDA*: on (`vv_wide_default(true)`). Passes the gate on every row.
+- *wgpu, natively*: on for a fleet of at most 8 vehicles (`DEFAULT_MOST_VEHICLES`,
+  `explicit_vv_wide_gpu.rs`), where every measured row is faster; off above, where it
+  is a tie at 16 and 20 and slower at 32. `RUBBLE_VV_WIDE=1` any fleet, 0 none. It acts
+  only where the host's wide passes with the reused pair list are on (the lab's
+  options; the World's own defaults leave them off).
+- *wasm*: off. Chrome accepts the three new modules; its bit-for-bit A/B on the lab
+  page (AGENTS.md rung 3) was not run, and a browser's compiles ahead do not list them.
+- *engine-metal*: its host replays the planner's commands and never turns it on.
+
+**Proofs** (commands from `engine/`).
+
+- `tools/scenario-matrix/run.sh vvwide ROW...` on the Mac, 37 rows: bit for bit, PASS.
+- `ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda vvwide ROW...`, 37 rows
+  (mountain20_t20 and the derby rows among them): bit for bit, PASS.
+- `ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda --base 25ea30b4 --head
+  a973e8cf`, the 12 default rows as two builds: every end state word for word, −0.2 to
+  +0.2 %, PASS.
+- `cargo test --profile fast -p engine-webgpu --test explicit_vv_wide_gpu` with
+  `RUBBLE_BIT_EXACT=1` (new, 6 tests): three cars apart with and without surface
+  contact, 24 frames; a pair closing head-on and one alone, 40 frames, with and without
+  surface contact (24 frames held the wide schedule, 18 had a group, 3 held the wide
+  schedule while the plan formed a group); a vehicle falling out of its frame bounds
+  reported in the same words from the solo frame and from the wide passes.
+- `cargo test --profile fast -p engine-exec` 28 (three new: the gate's slots are the wide
+  plan's counts; each path's launches in order; no launch binds the buffer it is sized
+  from), engine-webgpu `explicit_plan_modules` 1, `explicit_loop_cap` 6: pass.
+- The suites that hold the GPU to the CPU reference, bit-exact, with the host's
+  defaults and again with the wide frame forced where the plan allows it
+  (`RUBBLE_VV_WIDE=1 RUBBLE_WIDE=1 RUBBLE_WIDE_LIST=1 RUBBLE_GROUP_SPLIT=1
+  RUBBLE_SELF_SPLIT=1`), `--profile fast`, each under the GPU lock: `fleet_contact_gpu` 1,
+  `group_split_gpu` 3, `self_split_gpu` 8, `explicit_contact_gpu` 13,
+  `explicit_surface_fast_gpu` 6 pass both ways. (How many of their frames took the wide
+  schedule in the forced runs was not counted; `explicit_vv_wide_gpu` counts its own.)
+- Chrome: `EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
+  explicit-wgsl-check.mjs`: all 158 modules. `tools/build-time/compile_cost.py --check`:
+  0 failing (the new modules 0.0 to 0.5 s). `tools/build-time/check.py`: the two
+  `vehicle_lab.rs` lines of the base, nothing new. `explicit_beams.slang` keeps its
+  11,645 lines: its include of the fleet's file moved to the end of
+  `explicit_beams_split.slang`, and of the base's 440 generated WGSL modules every one
+  is byte for byte the same (three are new).
+- Not added: budget lines for the three new modules in
+  `tools/build-time/inline-budget.txt` (116, 300 and 34,203 inlined lines); that check
+  already fails at the base on 15 modules of §8.53 without a line.
+
+**Left on today's path, and why.**
+
+- *Every frame with a group* (the map above: nothing of it is built).
+- *A fleet whose wheels see bodies* (`Switches::wheels_bodies`): the wheels' dispatch is
+  a group's; its place in a wide step is not built.
+- *Vehicle sleep*: the wide passes need one step parity for the fleet.
+- *A fleet past 8 vehicles on wgpu, a browser*: the defaults above.
+
+**What the frames with a group would gain, measured before building them.** The same
+fixtures with vehicle contact off run every car's own step on the wide passes (the
+surface pass as pipelines) and nothing of vehicle contact. Against today's frame with
+its own-step dispatches named (Mac: §8.54's table, the members' step holds the surface
+pass; T4: `PROFILE_SPLIT=1 run.sh --cuda perf=0`, the vehicles' step, the walk, the
+pairs, the rests and the surface pipelines):
+
+| row | Mac: today, of it the members' step | Mac: own steps on the wide passes | T4: today, of it the cars' own dispatches | T4: own steps on the wide passes |
+|---|---|---|---|---|
+| clash20 | 25.2, 17.3 | 16.3 | 44.3, 31.4 | 28.0 |
+| mountain20_t12 | 42.8, 23.8 | 22.3 | 78.0, 46.8 | 44.0 |
+| mountain20_t20 | 66.9, 26.0 | 23.9 | 125.9, about 50 | 46.9 |
+| derby20_t5 | 29.8 | 19.1 | 56.7 | 32.7 |
+| pile8_s | 25.1 | 13.3 | 32.2 | 21.9 |
+| pile8 (no surface contact) | 12.4, 9.1 (timed apart: each inflated) | 5.4 | 21.2, 15.7 | 10.2 |
+| pile32 (no surface contact) | 37.7, 13.0 (timed apart) | 10.9 | 77.2, 35.4 | 30.3 |
+
+On the Mac the 20-car rows with surface contact would gain at most 1.0 to 2.1 ms a
+frame (3 to 4 %): the wide frame runs the surface pass as pipelines, which at 16 to 20
+cars costs that GPU about what the pass inside the members' workgroups does (§8.53's
+finding for the vehicle-contact part), so the cars' own steps across the GPU are not
+"far less" there. On the T4, where §8.53 already took the surface pass out of the
+vehicles' step, the step dispatch is 12 to 33 % of these frames and the wide passes
+would save 3 to 5 ms: 7 % of clash20, 4 % of mountain20_t12, 2 % of mountain20_t20,
+and more only without surface contact (pile8 about 26 %, pile32 about 7 %; on the Mac
+pile8 at most 30 %, pile32 6 %). These are upper bounds: with contact off the wide
+frame of a fleet without surface contact also fuses its aux work, which a frame with a
+group cannot (the map's second row). The frames
+are elsewhere: on the T4's mountain20_t20 the fleet's tests are 59 of 126 ms, the
+levels 10, the surface pass's pair path (its find, listing, prep and plan) 23.
+
+So the frames with a group were not built: the map above is what they need, and the
+table is what they would return. In order of return: the fleet's tests on the mountain
+(§8.55), the surface pass's pair path, the launches a step (a launch costs the Mac's
+host 2 to 5 µs with or without a workgroup, and a frame has 850), and only then the
+members' step.
+
+**Not verified.** Chrome's bit-for-bit A/B on the lab page and whole 40 s runs (rungs 3
+and 4); engine-metal's parity suite (its host is unchanged); `explicit_beams_bitwise`
+and the World's suites (`explicit_vehicles`, `vehicle_lab_reset`); the T4's rows with
+wgpu through Vulkan. The Mac's timings are from a GPU other sessions were using through
+the lock: deltas within one process are paired, the two baseline runs are not.

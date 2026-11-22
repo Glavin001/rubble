@@ -6085,7 +6085,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.pad2 > 0u)
     {
         uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
-        if (lane == 0u)
+        if (lane == 0u && !surfPiped())
         {
             selfSplitHits(v);
             // (PERF_SELF_HITS_LOCAL: 2, the hits from workgroup memory; uniform after the
@@ -6093,9 +6093,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (selfHitsLocalOn(v)) gsUniformHits = 2u;
         }
 #ifdef EB_ABLATE
-        if (selfOn != 0u && !EB_A2(64u))
+        if (selfOn != 0u && !surfPiped() && !EB_A2(64u))
 #else
-        if (selfOn != 0u)
+        if (selfOn != 0u && !surfPiped())
 #endif
         {
             sync();
@@ -11280,7 +11280,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                     uint h = gNext[base + 2u * i + 1u];
                     // (The four nodes at one call site, in the same order: tn.x, tn.y, tn.z, h. The
                     // compilers inline every call; opaqueCount keeps the loop from being unrolled back.)
-                    for (uint q = 0u, qStop = EB_END(605, q, opaqueCount(4u), 1u); q < qStop; q++)
+                    for (uint q = 0u, qStop = EB_END(651, q, opaqueCount(4u), 1u); q < qStop; q++)
                         vvSnapNode(q == 0u ? tn.x : (q == 1u ? tn.y : (q == 2u ? tn.z : h)),
                                    q < 3u ? tn.w : gStatic[gP.nodeInfoBase + h].w, parity, tag);
                 }
@@ -11544,7 +11544,7 @@ void contactGroup(uint g, uint lane)
 #ifdef EB_VV_SPLIT
 #include "explicit_beams_fleet_track.slang"
 #include "explicit_beams_split.slang"
-#ifdef EB_VV_FLEET
-#include "explicit_beams_fleet.slang"
 #endif
+#ifdef EB_VV_WIDE
+#include "explicit_beams_vvwide.slang"
 #endif
