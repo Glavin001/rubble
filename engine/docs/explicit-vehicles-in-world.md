@@ -706,7 +706,7 @@ members of a contact group sleep together, when every member's count has reached
 sleeping vehicle is not stepped at all, its step counter stands, and on waking it resumes
 exactly where it was frozen.
 
-**Thresholds, from the solver's resting floor** (`engine-softbody/examples/sleep_probe.rs`).
+**Thresholds, from the solver's resting floor** (`engine-softbody-lab/examples/sleep_probe.rs`).
 The repo sedan parked on its beam tyres never comes to rest: a tyre node chatters against the
 ground for good at 0.112 m/s with a 57 µm stroke (the RoR ground rule's two-step limit
 cycle), RMS node speed 6 to 10 mm/s, KE 2–5·10⁻⁵ J/kg, while no node leaves a 57 µm box. An

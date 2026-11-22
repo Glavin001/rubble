@@ -144,7 +144,7 @@ Tools:
 - `engine/tools/explicit-2khz/`: vehicle GPU profiling.
 - Probes on `fix/etk-strength`:
   - `engine-softbody/examples/crush_probe.rs`: rigid-wall crush on the CPU reference;
-  - `engine-softbody/examples/coupling_probe.rs`: native shape vs coupled rigid body, CPU;
+  - `engine-softbody-lab/examples/coupling_probe.rs`: native shape vs coupled rigid body, CPU;
   - `engine-world/examples/coupling_wall_gpu.rs`: the ETK in a small GPU World.
 - `engine/crates/engine-world/examples/brick_ring_drive_probe.rs`: native ring drive, which stops at the first NaN or loop-cap error.
 - `engine/crates/engine-world/examples/rigid_gate.rs`: the rigid-only regression gate.

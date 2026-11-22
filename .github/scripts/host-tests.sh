@@ -36,11 +36,12 @@ case "$group" in
       -p engine-vehicle -p engine-fracture -p engine-vehiclegen
     ;;
   softbody)
-    # engine-softbody and engine-softbody-authoring (the vehicle authoring split out of
-    # it, with most of the long tests), sharded together.
+    # engine-softbody, engine-softbody-authoring (the vehicle authoring split out of it,
+    # with most of the long tests) and engine-softbody-lab (their tools: examples,
+    # checked), sharded together.
     shard="${2:?shard}"
     total="${3:?shards}"
-    packages=engine-softbody,engine-softbody-authoring
+    packages=engine-softbody,engine-softbody-authoring,engine-softbody-lab
     plan="$(python3 "$scripts/host-test-shards.py" "$packages" "$shard" "$total")" || exit 1
     for package in ${packages//,/ }; do
       tests=()

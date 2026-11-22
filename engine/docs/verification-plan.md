@@ -132,7 +132,7 @@ importer code.
 
 * `engine-softbody/examples/crush_probe.rs`: a car into a rigid wall on the CPU
   reference.
-* `engine-softbody/examples/coupling_probe.rs`: one car into the same obstacle through
+* `engine-softbody-lab/examples/coupling_probe.rs`: one car into the same obstacle through
   native colliders and through the coupling's CPU reference (walls, a free box, brick
   proxies, drops).
 * `engine-world/examples/coupling_wall_gpu.rs`: the ETK into an anchored box, a free box

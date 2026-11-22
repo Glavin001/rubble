@@ -59,7 +59,7 @@ From the census (`beamng-authoring-census.md` §3: door hinges k 0.5-3e6 N/m, de
   40 mm (at most half its length) quasi-statically by the solver's own beam law yields
   and does not break (before: all 204 pulls broke at 26.7 mm without yielding).
 
-Regenerated with `cargo run --release -p engine-softbody-authoring --example vehicle_gen_rig --
+Regenerated with `cargo run --release -p engine-softbody-lab --example vehicle_gen_rig --
 sedan --out ~/Development/rubble-artifacts/sedan-live/mods/sedan_new` (the generator
 on `feat/sedan-body`, merged into `integration/lab-skin` at 040b55a1; it reproduced the
 old export byte for byte before the change). The previous export is kept beside it as

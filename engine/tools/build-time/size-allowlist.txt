@@ -7,8 +7,8 @@ crates/engine-exec/src/rigid_plan.rs 2269
 crates/engine-ffi/src/lib.rs 3650
 crates/engine-fracture/src/plan.rs 1548
 crates/engine-metal/src/world.rs 1759
-crates/engine-softbody-authoring/examples/sedan_stiffness.rs 1589
-crates/engine-softbody-authoring/examples/showcase_probe.rs 2724
+crates/engine-softbody-lab/examples/sedan_stiffness.rs 1589
+crates/engine-softbody-lab/examples/showcase_probe.rs 2724
 crates/engine-softbody-authoring/src/authoring/gen2/model.rs 3762
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs 5303
 crates/engine-softbody-authoring/src/authoring/gen2/sedan.rs 1628

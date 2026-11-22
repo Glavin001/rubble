@@ -155,7 +155,7 @@ copy of the game's `content/vehicles/<vehicle>.zip` and `common.zip`):
 
 ```bash
 cd engine
-cargo run --release -p engine-softbody-authoring --example community_cache -- \
+cargo run --release -p engine-softbody-lab --example community_cache -- \
   <vehicles-dir> etkk all crates/engine-webgpu/__mods/etkk_tex size=1024 label="ETK K-series"
 ```
 

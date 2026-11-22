@@ -1778,7 +1778,7 @@ cd engine && RUBBLE_STRUCTURE_OUT=<dir> \
 
 # §7.2: modes, whole-car ω·h, spawn, half-sine loads and the bump (CPU, about 4 minutes for four cars).
 # RUBBLE_COMPARE_MODS is a folder of links: <label> -> the mod's vehicles/ folder.
-cd engine && RUBBLE_COMPARE_MODS=<mods> cargo run --release -p engine-softbody-authoring --example sedan_stiffness -- \
+cd engine && RUBBLE_COMPARE_MODS=<mods> cargo run --release -p engine-softbody-lab --example sedan_stiffness -- \
   etkk=etkk,kc6.pc ccf=ccf,f4_sport_M.pc vertex=gavril_vertex,gavril_vertex.pc fullsuv=fullsuv,mid-sport.pc
 ```
 
