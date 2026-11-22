@@ -156,6 +156,8 @@ enum Launch {
 pub struct CudaExplicitBeams {
     ctx: sys::CUcontext,
     stream: sys::CUstream,
+    /// The stream is this host's own (not another host's: [`Self::use_stream`]).
+    owns_stream: bool,
     device_name: String,
     layout: ExplicitLayout,
     planner: FramePlanner,
@@ -247,29 +249,57 @@ impl CudaExplicitBeams {
     /// [`Self::modules_for_layout`], vehicle sleep's list, and the split paths' modules at
     /// the fleet's frame variant (the device code a matrix build embeds).
     pub fn modules_for_replay(layout: &ExplicitLayout) -> Vec<String> {
+        let mut out: Vec<String> = Self::keys_for_replay(layout).iter().map(|k| Self::key_module(layout, k)).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The kernels behind [`Self::modules_for_replay`].
+    fn keys_for_replay(layout: &ExplicitLayout) -> Vec<Key> {
         let (aero, lanes) = (layout.aero, layout.lanes);
-        let mut out: Vec<String> = Self::modules_for_layout(layout).into_iter().map(str::to_string).collect();
+        let mut out: Vec<Key> = Self::kernels_for_layout(layout).into_iter().map(Key::Plan).collect();
         if layout.sleep.is_some() {
-            out.push(Kernel::Sleep.module_for(aero, lanes, layout.surface).to_string());
+            out.push(Key::Plan(Kernel::Sleep));
         }
         for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
-            out.push(plan::split_module_name(which, aero, lanes));
+            out.push(Key::Split(plan::split_module_name(which, aero, lanes)));
         }
         for vv in [false, true] {
-            out.extend(plan::self_split_module_names(aero, lanes, vv).into_iter().map(|(m, _, _)| m));
+            out.extend(plan::self_split_module_names(aero, lanes, vv).into_iter().map(|(m, _, _)| Key::Split(m)));
         }
         if !aero {
-            out.push(plan::wide_list_module_name(lanes).to_string());
+            out.push(Key::Split(plan::wide_list_module_name(lanes).to_string()));
         }
         // (Surface contact on the frame modules, split: the segments and the pass's
         // pipelines, which the saving host's planner may ask for.)
         if layout.surface {
-            out.push(Kernel::FrameSeg.module(aero, lanes).to_string());
-            out.extend(plan::SURF_PASSES.iter().map(|(m, _)| m.to_string()));
+            out.push(Key::Plan(Kernel::FrameSeg));
+            out.extend((0..plan::SURF_PASSES.len()).map(|i| Key::Plan(Kernel::Surf(i))));
         }
-        out.sort();
-        out.dedup();
         out
+    }
+
+    /// The module a kernel of a fleet of `layout` comes from.
+    fn key_module(layout: &ExplicitLayout, key: &Key) -> String {
+        match key {
+            Key::Plan(k) => k.module_for(layout.aero, layout.lanes, layout.surface).to_string(),
+            Key::Split(name) => name.clone(),
+        }
+    }
+
+    /// Load now every module a replay of this fleet may launch that this build embeds
+    /// (measurement: a module is otherwise loaded at its first launch, host work inside
+    /// a timed frame, and the stream's events around the frame count it).
+    pub fn preload(&mut self) -> Result<(), ExecError> {
+        self.bind_ctx()?;
+        for key in Self::keys_for_replay(&self.layout) {
+            let name = Self::key_module(&self.layout, &key);
+            if CUDA_EXPLICIT_KERNELS.iter().any(|t| t.name == name.as_str() && !t.image.is_empty()) {
+                self.load(&key)?;
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::modules_for_layout`] of `vehicles` (host only, no device): e.g. the
@@ -286,7 +316,18 @@ impl CudaExplicitBeams {
     /// [`Self::new`] with room for rigid-body proxies per vehicle (the coupling,
     /// `explicit_beams_rigid.slang`); off until [`Self::set_coupling_on`].
     pub fn with_coupling(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> anyhow::Result<Self> {
-        let upload = ExplicitUpload::new(vehicles, cap);
+        Self::with_settings(vehicles, cap, None)
+    }
+
+    /// [`Self::with_coupling`] with room for vehicle sleep when `sleep` is set (on from
+    /// the first frame; `engine_softbody::explicit_sleep`), as the WebGPU host's
+    /// `with_sleep`.
+    pub fn with_settings(
+        vehicles: &[ExplicitBeams],
+        cap: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> anyhow::Result<Self> {
+        let upload = ExplicitUpload::with_sleep(vehicles, cap, sleep);
         let bindings = (0..BIND_COUNT as u32).map(|b| upload.bytes(b)).collect();
         Self::from_parts(upload.layout, bindings)
     }
@@ -388,6 +429,7 @@ impl CudaExplicitBeams {
         Ok(Self {
             ctx,
             stream,
+            owns_stream: true,
             device_name,
             layout,
             planner,
@@ -428,6 +470,47 @@ impl CudaExplicitBeams {
 
     fn bind_ctx(&self) -> Result<(), ExecError> {
         unsafe { result::ctx::set_current(self.ctx) }.map_err(backend)
+    }
+
+    pub(crate) fn context(&self) -> sys::CUcontext {
+        self.ctx
+    }
+
+    /// Queue everything on `stream` from now on (another host's in this context: the
+    /// World's rigid step and its coupling share one, so their launches and this
+    /// host's run in the order they were queued with no wait between). The stream
+    /// must outlive this host.
+    pub(crate) fn use_stream(&mut self, stream: sys::CUstream) -> Result<(), ExecError> {
+        self.bind_ctx()?;
+        unsafe { result::stream::synchronize(self.stream) }.map_err(backend)?;
+        if self.owns_stream {
+            unsafe { result::stream::destroy(self.stream) }.map_err(backend)?;
+        }
+        self.stream = stream;
+        self.owns_stream = false;
+        Ok(())
+    }
+
+    /// Binding `b`'s device buffer and its bytes (the coupling's passes bind the nodes
+    /// and gMisc beside the rigid buffers).
+    pub(crate) fn buffer(&self, b: u32) -> (sys::CUdeviceptr, u64) {
+        (self.bufs[b as usize], self.sizes[b as usize])
+    }
+
+    /// Binding `b` as words (waits; tests and tools).
+    pub fn download_words(&mut self, b: u32) -> Result<Vec<u32>, ExecError> {
+        self.wait()?;
+        self.download::<u32>(b)
+    }
+
+    /// Vehicle sleep is on (only with room: [`Self::with_settings`]).
+    pub fn sleep_on(&self) -> bool {
+        self.planner.sleep_on()
+    }
+
+    /// gMisc record of the retired nodes' bits (0: none retired).
+    pub fn retire_base(&self) -> u32 {
+        self.planner.words[plan::W_RETIRE_BASE]
     }
 
     pub fn set_vehicle_contact(&mut self, on: bool) {
@@ -853,6 +936,15 @@ impl CudaExplicitBeams {
         Ok(())
     }
 
+    /// [`Self::set_drive_input`] from the input's words (`explicit_plan::drive::input_words`:
+    /// a portable World's recorded inputs).
+    pub fn set_drive_input_words(&mut self, v: usize, words: [u32; 4]) -> Result<(), ExecError> {
+        let Some(d) = self.layout.drive else { return Ok(()) };
+        self.upload(plan::BIND_MISC, d.input_offset(v), bytemuck::cast_slice(&words))?;
+        self.planner.request_replan();
+        Ok(())
+    }
+
     /// Read vehicle `v`'s raycast wheels' state back into `drive` (waits).
     pub fn read_drive(&mut self, v: usize, drive: &mut engine_softbody::explicit_drive::Drive) -> Result<(), ExecError> {
         let Some(l) = self.layout.drive else { return Ok(()) };
@@ -942,7 +1034,9 @@ impl Drop for CudaExplicitBeams {
             for &(b, _) in self.arg_bufs.values() {
                 let _ = result::free_sync(b);
             }
-            let _ = result::stream::destroy(self.stream);
+            if self.owns_stream {
+                let _ = result::stream::destroy(self.stream);
+            }
         }
     }
 }

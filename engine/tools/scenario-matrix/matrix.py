@@ -16,6 +16,10 @@ one state, the same build), compares every state word and times each frame apart
         the same state); fails a row where the World adds more than WORLD_MS. The rows with
         a scenario file by default (the mountain rows drive for seconds first: name them).
     matrix.py --rows ARGS...            the row names ARGS pick (for the Modal runner)
+    matrix.py --make-world [ROW ...]    each row's World at its moment as a portable World
+        (out/scenario-matrix/world/ROW.wfx) for the CUDA replay of --world (engine-cuda's
+        world_replay; run.sh --world --cuda). The row's scene run to its moment: no saved
+        state needed. WORLD_INPUTS (default 30) steps of drive inputs recorded with it.
     matrix.py --make-portable [ROW ...] each row's saved state as a portable fixture
         (out/scenario-matrix/portable/ROW.pfx) for the CUDA replay (REPLAY_BIN=explicit_replay
         runs the rows on it: tools/modal/gpu_run.sh --matrix-cuda -- SWITCH [ROW ...])
@@ -187,6 +191,34 @@ def state_file(row):
 
 def portable_file(row):
     return os.path.join(STATES, "portable", row[0] + ".pfx")
+
+
+def world_file(row):
+    return os.path.join(STATES, "world", row[0] + ".wfx")
+
+
+def make_world(rows):
+    """Each row's World at its moment as a portable World (STATES/world/ROW.wfx: the
+    rigid scene, the coupling's carried state, the vehicles' portable state and the drive
+    inputs of the WORLD_INPUTS steps after it; vehicle_lab --save-world) for the CUDA
+    replay (engine-cuda's world_replay, run.sh --world --cuda). Needs no saved state: the
+    row's scene is run to its moment, as --world does."""
+    os.makedirs(os.path.join(STATES, "world"), exist_ok=True)
+    n = os.environ.get("WORLD_INPUTS", "30")
+    failed = False
+    for row in rows:
+        cmd = lab_args(row)
+        i = cmd.index("--timing")
+        del cmd[i:i + 2]
+        cmd += ["--secs", f"{row[4]:.2f}", "--save-world", world_file(row), "--world-steps", n]
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE)
+        line = next((l for l in p.stdout.splitlines() if l.startswith("world portable ")), None)
+        if p.returncode != 0 or line is None:
+            failed = True
+            print(f"{row[0]}: FAILED\n" + "\n".join((p.stdout + p.stderr).splitlines()[-8:]))
+        else:
+            print(f"{row[0]}: {line}")
+    return 1 if failed else 0
 
 
 def make_portable(rows):
@@ -611,6 +643,8 @@ def main():
         sys.exit(__doc__)
     if args[0] == "--make-portable":
         return make_portable(pick(args[1:]))
+    if args[0] == "--make-world":
+        return make_world(pick(args[1:]) if args[1:] else [r for r in ROWS if r[2]])
     if args[0] == "--end-state" and len(args) >= 2:
         return end_state(args[1], pick(args[2:]))
     if args[0] == "--compare-end" and len(args) >= 3:

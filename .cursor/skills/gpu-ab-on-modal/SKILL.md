@@ -91,8 +91,17 @@ within 0.7 %.
   matrix once (`tools/scenario-matrix/run.sh SWITCH` under the lock, rung 1.5). A
   default-on change also needs Chrome's A/B (rung 3, AGENTS.md).
 - **Absolute numbers for docs.** Those come from rung 4 on a dedicated GPU.
-- **Code without a CUDA host.** The matrix rows cover the explicit soft-body frame. The
-  World's coupling, fracture and terrain are not on CUDA yet
+- **The World around the frame, as an A/B.** The matrix rows and the two-build A/B
+  cover the explicit soft-body frame. The World step around it (the rigid step and the
+  explicit vehicles' coupling) runs on CUDA as a report, not an A/B:
+  `tools/scenario-matrix/run.sh --world --cuda` replays each row's portable World
+  (`run.sh --make-world` once, on the Mac) and prints every step's GPU time, the gate's
+  line (World step, frame alone, the World adds) and whether two replays end bit for
+  bit. It has no switch and no two-build mode: to compare two commits, run it for each
+  and trust only differences well past the run-to-run spread (Modal README, "The
+  World's own cost on CUDA"). The plan by the World broadphase (`cpl_query`) does not
+  run there: CUDA plans by the scan, the same proxies.
+- **Code without a CUDA host.** Fracture and terrain are not on CUDA yet
   (`engine/docs/world-on-cuda.md`).
 - **States the base cannot read.** Both builds replay the same portable fixtures
   (`out/scenario-matrix/portable/`). If the head changes what a fixture holds, make the
