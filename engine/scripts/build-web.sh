@@ -73,13 +73,35 @@ if [[ -n "$CACHE" ]]; then
   CACHE="$(cd "$CACHE" && pwd)"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE/cargo-target}"
   # Cargo never deletes stale artifacts (old dependency versions, a new toolchain), and
-  # Vercel's build cache holds 1 GB. Past the cap, start the target dir over: one cold
-  # build, then it fits again.
+  # Vercel's build cache holds 1 GB. Past the cap, start one part of the target dir over,
+  # not all of it: a build of everything from nothing takes about 55 minutes on Vercel's
+  # 2 cores, past its 45-minute limit, and a build that fails keeps no cache, so the
+  # branch would start cold and fail every time (PR #144, 2026-11-21). The part is one
+  # top-level directory (the host's `release`, `wasm32-unknown-unknown`), the one
+  # started over longest ago (a stamp each; the largest of those never started over), so
+  # the stale artifacts are gone after two builds and each build keeps the other part.
   CAP_MB="${RUBBLE_TARGET_CAP_MB:-1600}"
   if [[ -d "$CARGO_TARGET_DIR" ]] \
     && (( $(du -sm "$CARGO_TARGET_DIR" | cut -f1) > CAP_MB )); then
-    echo "==> $CARGO_TARGET_DIR is over ${CAP_MB} MB: starting it over"
-    rm -rf "$CARGO_TARGET_DIR"
+    stamps="$CACHE/target-started-over"
+    part="" part_at="" part_mb=0
+    for d in "$CARGO_TARGET_DIR"/*/; do
+      [[ -d "$d" ]] || continue
+      n="$(basename "$d")"
+      mb="$(du -sm "$d" | cut -f1)"
+      (( mb >= 100 )) || continue
+      at=0
+      if [[ -f "$stamps/$n" ]]; then at="$(cat "$stamps/$n")"; fi
+      if [[ -z "$part" ]] || (( at < part_at )) || (( at == part_at && mb > part_mb )); then
+        part="$n" part_at="$at" part_mb="$mb"
+      fi
+    done
+    if [[ -n "$part" ]]; then
+      echo "==> $CARGO_TARGET_DIR is over ${CAP_MB} MB: starting $part (${part_mb} MB) over"
+      rm -rf "${CARGO_TARGET_DIR:?}/$part"
+      mkdir -p "$stamps"
+      date +%s > "$stamps/$part"
+    fi
   fi
   export RUBBLE_SLANG_CACHE="$CACHE/slang"
   echo "==> Build cache: $CACHE"
