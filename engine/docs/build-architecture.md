@@ -67,6 +67,19 @@ Direction is downward only. In particular:
 - **An environment variable is a rerun trigger only if the output depends on it.**
   (`RUBBLE_SLANG_CACHE` changes where outputs come from, not what they are.)
 
+## Worktrees
+
+Each worktree has its own `engine/target` (cargo locks a target directory while it
+builds, so a shared one would make parallel sessions wait on each other). What is
+shared instead:
+
+- the kernels: the per-compile cache in `~/.cache/rubble/slang-obj` (above), so a new
+  worktree compiles no kernel another one already compiled;
+- optionally, the third-party crates: install sccache (`brew install sccache`) and set
+  `RUSTC_WRAPPER=sccache` in your shell. It caches rustc's output by its inputs, so a
+  new worktree's wgpu, naga, winit and the rest come from the cache. It does not help
+  the workspace's own crates (incremental builds, which sccache does not cache).
+
 ## Checked in CI
 
 `python3 tools/build-time/check.py` (from `engine/`; the "Build architecture" job):
