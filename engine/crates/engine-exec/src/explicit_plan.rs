@@ -475,8 +475,8 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// `selfApplyLocal`). The same slots, so the same bits. vehicle-perf-first-principles.md §8.46.
 pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// For [`FramePlanner::set_perf_flags`]'s callers; kept as bit 30 of the word after [`W_BEAM_ORDER`] (the fleet
-/// copies' perf word has no free bit): the fleet-wide walk tests a candidate's position before it loads its
-/// vehicle and velocity (the kernel's flWalkBox; vehicle-perf-first-principles.md §8.56). The same pairs.
+/// copies' perf word has no free bit): the fleet-wide walk tests a candidate's position before it loads its records,
+/// its big triangles on threads of their own (flWalkBox; §8.56). On by default but in a browser (rung 3 not run).
 pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
@@ -510,7 +510,8 @@ pub fn perf_flags_default() -> u32 {
             | PERF_HITS_LOCAL
             | PERF_WHEELS_APART
             | PERF_FLEET_KEEP
-            | PERF_HIT_SLOT_MAP,
+            | PERF_HIT_SLOT_MAP
+            | if cfg!(target_arch = "wasm32") { 0 } else { PERF_FLEET_WALK_BOX },
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.
