@@ -8628,24 +8628,29 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
         }
         sync();
     }
+    // The grid's walk below: the step's own, or the self split's when its listed pairs
+    // are past the list's room (selfSplitTestsOrWalk): one call site of triangleGrid.
+    bool walk = candCount > 0u && cell > 0.0 && gridOn != 0u;
+    bool listedTests = false;
 #ifdef EB_SOLO_STEP
     if (gridOn != 0u && reuse != 0u)
     {
+        listedTests = true;
 #ifdef EB_SELF_SPLIT
         // The solo step's cut: the build's walk and the listed pairs' tests in the walk
         // and pairs dispatches after this one.
         if (reuse == 1u)
             selfSplitBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount, parity);
-        selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                       groupCount, parity);
+        walk = selfSplitTestsOrWalk(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff,
+                                    groupOff, groupCount, parity);
 #else
         memberListTests(v, lane, reuse, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
                         beamOff, groupOff, groupCount, parity);
+        walk = false;
 #endif
     }
-    else
 #endif
-    if (candCount > 0u && cell > 0.0 && gridOn != 0u)
+    if (walk)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
         for (uint p = lane, pStop = EB_END(152, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
@@ -8655,7 +8660,7 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
                          groupCount, parity, 0u);
         }
     }
-    else if (candCount > 0u && cell > 0.0)
+    else if (!listedTests && candCount > 0u && cell > 0.0)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
         uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
@@ -8667,7 +8672,7 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
                               groupOff, groupCount, parity);
         }
     }
-    else if (candCount > 0u)
+    else if (!listedTests && candCount > 0u)
     {
         uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
         uint stride = (LANES / lanes) * lanes;

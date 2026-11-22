@@ -411,3 +411,23 @@ fast-check (16 of 17 bit for bit, the known quirk), `groupsplit`, the scenario m
 (12 rows bit for bit, none slower), the group-split, fleet-contact, contact and
 vehicle-grid GPU suites in bit-exact mode (19 tests), `sleep-check.sh` (21), Chrome's
 validation of all 140 modules.
+
+### The members' module: what its compile spends, by ablation
+
+Cutting one part of the member step at a time (measurement builds, their results
+meaningless) and compiling cold in Chrome: all of it 26 s; without the coupling's step
+24.9 s, the wheels' 24.4 s, the hits' tail 18.6 s, the self split's tests
+(`selfSplitTests`) 12.1 s. The tests cost half the compile for a fraction of the
+instructions; inside them the pieces' tests (`piecesTests`) were called at two places
+(the building step and a listed one) and the grid's walk at two (the self split's
+fallback past the list's room, and the step's own).
+
+Both are one call site now: `selfSplitTests` calls `piecesTests` once, and returns "walk"
+(`selfSplitTestsOrWalk`) for the member step to run its own grid walk instead of a copy.
+The same tests in the same order. `explicit_beams_selfsplit_member_vv_wide` Chrome cold
+26 -> 19.8 s (the pieces) -> 16.5 s (the walk), while the instructions fell only 76k ->
+73k: which copies cost the compile shows in a cold compile, not in the count. Checked:
+fast-check (16 of 17 bit for bit, the known quirk), `groupsplit`, the scenario matrix (12
+rows bit for bit, none slower), the self-split, group-split, contact and pair-reuse GPU
+suites in bit-exact mode (26 tests), `sleep-check.sh` (21), Chrome's validation of all
+140 modules.
