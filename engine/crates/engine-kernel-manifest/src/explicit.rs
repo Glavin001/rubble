@@ -456,6 +456,54 @@ pub fn test_modules() -> Vec<TestModule> {
     out
 }
 
+/// The surface pass's pipelines of the fast schedules, in dispatch order: (module,
+/// entry). The prep sizes the others' dispatches (`EB_SURF_ARGS`: binding 10, the
+/// surface arguments), each of which runs a thread an element (`EB_SURF_SPREAD`).
+pub const SURF_FAST_PASSES: [(&str, &str); 11] = [
+    ("explicit_surface_prep_args", "explicit_surface_prep"),
+    // The pair path's listing, a thread an element, then its decision, a workgroup a
+    // vehicle (binding 10 as the prep).
+    ("explicit_surface_cull_x", "explicit_surface_cull"),
+    ("explicit_surface_plan", "explicit_surface_plan"),
+    ("explicit_surface_find_tri_x", "explicit_surface_find"),
+    ("explicit_surface_find_seg_x", "explicit_surface_find"),
+    ("explicit_surface_find_point_x", "explicit_surface_find"),
+    ("explicit_surface_find_pair_x", "explicit_surface_find"),
+    ("explicit_surface_apply_tri_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_seg_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_point_x", "explicit_surface_apply"),
+    ("explicit_surface_apply_pair_x", "explicit_surface_apply"),
+];
+
+/// [`SURF_FAST_PASSES`] with their defines, for every host's build.
+pub fn surface_fast_modules() -> Vec<SplitModule> {
+    let mut out = vec![
+        SplitModule {
+            name: SURF_FAST_PASSES[0].0.to_string(),
+            entry: SURF_FAST_PASSES[0].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_ARGS", "1")],
+        },
+        SplitModule {
+            name: SURF_FAST_PASSES[1].0.to_string(),
+            entry: SURF_FAST_PASSES[1].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", "5"), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+        },
+        SplitModule {
+            name: SURF_FAST_PASSES[2].0.to_string(),
+            entry: SURF_FAST_PASSES[2].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", "6"), ("EB_SURF_ARGS", "1")],
+        },
+    ];
+    for (i, kind) in ["1", "2", "3", "4", "1", "2", "3", "4"].into_iter().enumerate() {
+        out.push(SplitModule {
+            name: SURF_FAST_PASSES[3 + i].0.to_string(),
+            entry: SURF_FAST_PASSES[3 + i].1,
+            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+        });
+    }
+    out
+}
+
 /// The modules of a fleet with surface contact on the frame modules, split
 /// (`Kernel::FrameSeg`, `Kernel::Surf`): the frame in segments at its four variants
 /// (`EB_FRAME_SEG`), then the surface pass's pipelines (`EB_SURF_PIPE`: the prep, then

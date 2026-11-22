@@ -266,8 +266,10 @@ impl CudaExplicitBeams {
         if layout.surface {
             out.push(Kernel::FrameSeg.module(aero, lanes).to_string());
             out.extend(plan::SURF_PASSES.iter().map(|(m, _)| m.to_string()));
-            // (And on the fast schedules, FramePlanner::set_surface_fast: the solo
-            // vehicles' rest, and the wide passes where they could run the fleet.)
+            // (And on the fast schedules, FramePlanner::set_surface_fast: the pass's
+            // pipelines there, the solo vehicles' rest, and the wide passes where they
+            // could run the fleet.)
+            out.extend(plan::SURF_FAST_PASSES.iter().map(|(m, _)| m.to_string()));
             out.push(plan::solo_rest_module_name(aero, lanes, true));
             if layout.wide_capable() {
                 out.extend((0..plan::WIDE_PASSES.len()).map(|i| Kernel::Wide(i).module_for(aero, lanes, true).to_string()));
@@ -400,6 +402,7 @@ impl CudaExplicitBeams {
             (ArgBuf::Fleet2, FLEET_ARGS_BYTES),
             (ArgBuf::Spare1, FLEET_ARGS_BYTES),
             (ArgBuf::Spare2, FLEET_ARGS_BYTES),
+            (ArgBuf::Surf, schedule::SURF_ARGS_BYTES),
         ] {
             let ptr = unsafe { result::malloc_sync(bytes as usize) }.map_err(map)?;
             unsafe { result::memset_d8_sync(ptr, 0, bytes as usize) }.map_err(map)?;

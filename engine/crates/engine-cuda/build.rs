@@ -187,7 +187,7 @@ fn explicit_kernels(
     root: &std::path::Path,
     out_dir: &std::path::Path,
 ) -> Result<()> {
-    use engine_kernel_manifest::explicit::{split_modules, surface_split_modules, MODULES};
+    use engine_kernel_manifest::explicit::{split_modules, surface_fast_modules, surface_split_modules, MODULES};
     use engine_slang_build::cuda_layout::compile_kernel_with_defines;
     use engine_slang_build::msl_layout::vk_binding_slots;
     // The plan's modules and the split paths' (one list for every host's build).
@@ -198,6 +198,8 @@ fn explicit_kernels(
         // (Surface contact on the frame modules, split: the frame in segments and the
         // surface pass's pipelines, as the WebGPU host runs a fleet with no contact groups.)
         .chain(surface_split_modules().into_iter().map(|m| (m.name, m.entry, m.defines)))
+        // (And the pass's pipelines of the fast schedules.)
+        .chain(surface_fast_modules().into_iter().map(|m| (m.name, m.entry, m.defines)))
         .collect();
     let dir = out_dir.join("cuda_explicit");
     std::fs::create_dir_all(&dir)?;

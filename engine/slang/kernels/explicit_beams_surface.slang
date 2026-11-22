@@ -1189,7 +1189,10 @@ uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 // module (built without the pass, EB_NO_SURFACE) run for a fleet with surface contact,
 // which a host does only with the pipelines (engine_exec explicit_plan
 // FramePlanner::surface_piped). A solo vehicle's step then leaves its self-collision hits
-// to a dispatch before the pipelines (explicit_beams_selfsplit_frame.slang soloRest).
+// to a dispatch before the pipelines (explicit_beams_selfsplit_frame.slang
+// explicit_beams_solo_rest), and its next step's dispatch skips them (the rest at the
+// start of explicitBeamsFrameStep: the hit flag it loaded is that dispatch's and the
+// pipelines' prep's).
 #if defined(EB_NO_SURFACE) && defined(EB_SELF_SPLIT)
 bool surfPiped() { return gP.surfSplit != 0u; }
 #else
