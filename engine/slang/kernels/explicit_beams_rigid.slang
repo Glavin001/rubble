@@ -1459,7 +1459,8 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         // Measurement only: 65536 the node's proxy contact.
         float3 fr = (gP.ablate & 65536u) != 0u ? f : cplContacts(vehicle, local, pos, f, vel, mass, V.w);
 #else
-        float3 fr = cplContacts(vehicle, local, pos, f, vel, mass, V.w);
+        // (Measurement, reverted: perfFlags bit 2^27 leaves the proxy contact out.)
+        float3 fr = (gP.perfFlags & 134217728u) != 0u ? f : cplContacts(vehicle, local, pos, f, vel, mass, V.w);
 #endif
         cfAdd(gi, fr - f);
         f = fr;
