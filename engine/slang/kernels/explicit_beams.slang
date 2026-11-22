@@ -9910,9 +9910,16 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
 // only the hits on one contact point depend on each other: one lane per contact
 // point runs its hits in triangle order (each reads the ones before), the points
 // side by side.
-void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot)
+// `bk` (the small groups' pass with its hit buckets, vvHitBuckets): each hit's earlier
+// and later hits of its point searched among its bucket's (sorted at vvOrderAt + 2 VV_PART
+// points, ranges in gsOff) instead of all n; the same answers (any earlier, the smallest
+// later), so the same tries in the same order. One function for both, so one copy of
+// vvTry where a pass takes either (the compilers inline every call).
+void vvApplyOrderedIn(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot, bool bk,
+                      uint runOff, uint points)
 {
     float3 oa = vvRel(va, va);
+    uint sorted = vvOrderAt(runOff, 0u, 0u, 0u) + 2u * VV_PART * points;
     for (uint i = lane, iStop = EB_END(191, i, n, lanes); i < iStop; i += lanes)
     {
         uint gt = gNext[base + 2u * i];
@@ -9920,15 +9927,24 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         bool first = true;
 #ifdef EB_ABLATE
         // Measurement only: 1048576 * 2 each hit applied alone, unordered (no scans).
-        if ((gP.ablate & 2097152u) != 0u)
+        if (!bk && (gP.ablate & 2097152u) != 0u)
         {
             uint vh2 = gStatic[gP.nodeInfoBase + h].w;
             vvTry(vvTriangle(gt, oa, r), gt, h, nf3(vvRel(vh2, va) + gNodes[h * 3u].xyz), vh2, r, parity, slot);
             continue;
         }
 #endif
-        for (uint j = 0u, jStop = EB_END(192, j, n, 1u); j < jStop; j++)
+        uint e0 = 0u;
+        uint e1 = n;
+        if (bk)
         {
+            uint b = vvHitBucket(slot, h);
+            e0 = gsOff[b];
+            e1 = gsOff[b + 1u];
+        }
+        for (uint e = e0, eStop = EB_END(192, e, e1, 1u); e < eStop; e++)
+        {
+            uint j = bk ? gNext[sorted + e] : e;
             if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
             {
                 first = false;
@@ -9943,8 +9959,9 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
             vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, slot);
             // The point's next hit: the smallest later triangle.
             uint next = 0xFFFFFFFFu;
-            for (uint j = 0u, jStop = EB_END(194, j, n, 1u); j < jStop; j++)
+            for (uint e = e0, eStop = EB_END(194, e, e1, 1u); e < eStop; e++)
             {
+                uint j = bk ? gNext[sorted + e] : e;
                 uint gj = gNext[base + 2u * j];
                 if (gNext[base + 2u * j + 1u] == h && gj > gt && gj < next) next = gj;
             }
@@ -9952,6 +9969,10 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
             gt = next;
         }
     }
+}
+void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot)
+{
+    vvApplyOrderedIn(va, base, n, r, parity, lane, lanes, slot, false, 0u, 0u);
 }
 
 // The listed hits of owner va, in order (vvApplyOrdered).
@@ -10986,48 +11007,6 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     sync();
 }
 
-// vvApplyOrdered with each hit's point's hits from its bucket.
-void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint parity, uint lane, uint runOff, uint points)
-{
-    float3 oa = vvRel(va, va);
-    uint sorted = vvOrderAt(runOff, 0u, 0u, 0u) + 2u * VV_PART * points;
-    for (uint i = lane, iStop = EB_END(243, i, n, LANES); i < iStop; i += LANES)
-    {
-        uint gt = gNext[base + 2u * i];
-        uint h = gNext[base + 2u * i + 1u];
-        uint b = vvHitBucket(a, h);
-        uint e0 = gsOff[b];
-        uint e1 = gsOff[b + 1u];
-        bool first = true;
-        for (uint e = e0, eGuard = 0u; e < e1; e++)
-        {
-            EB_PASS(244, eGuard);
-            uint j = gNext[sorted + e];
-            if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
-            {
-                first = false;
-                break;
-            }
-        }
-        if (!first) continue;
-        uint vh = gStatic[gP.nodeInfoBase + h].w;
-        for (uint it = 0u, itStop = EB_END(245, it, n, 1u); it < itStop; it++)
-        {
-            VvTri t = vvTriangle(gt, oa, r);
-            vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, a);
-            uint next = 0xFFFFFFFFu;
-            for (uint e = e0, eGuard = 0u; e < e1; e++)
-            {
-                EB_PASS(246, eGuard);
-                uint j = gNext[sorted + e];
-                uint gj = gNext[base + 2u * j];
-                if (gNext[base + 2u * j + 1u] == h && gj > gt && gj < next) next = gj;
-            }
-            if (next == 0xFFFFFFFFu) break;
-            gt = next;
-        }
-    }
-}
 
 // vvPassSmall in three parts (the split group path, contact-groups-design.md, runs the
 // tests across workgroups between the first and the last): the scans, candidates and
@@ -11425,10 +11404,9 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
             uint va = vvMember(off, a);
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
-            if (hits <= vvHitRoom(a, points) && vvGrid)
-                vvApplyOrderedBuckets(va, a, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, runOff, points);
-            else if (hits <= vvHitRoom(a, points))
-                vvApplyOrdered(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES, a);
+            if (hits <= vvHitRoom(a, points))
+                vvApplyOrderedIn(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES, a, vvGrid, runOff,
+                                 points);
             else
             {
                 uint4 ra1 = gStatic[va * 4u + 1u];

@@ -398,3 +398,16 @@ the known quirk), the scenario matrix (12 rows bit for bit, none slower), the
 group-split, fleet-contact, contact and vehicle-grid GPU suites in bit-exact mode (19
 tests), `sleep-check.sh` (21), Chrome's validation of all 140 modules. Tried and dropped:
 `opaqueCount` on `vvSumsOf`'s loop (the same instructions and time: not unrolled).
+
+### The levels kernel under 10 s: one ordered application for both scans
+
+`vvApplyOrderedBuckets` was `vvApplyOrdered` with each hit's earlier and later hits of
+its point searched among its bucket's instead of all n: the same answers (any earlier
+hit, the smallest later one), so the same tries in the same order. Both are one function
+now (`vvApplyOrderedIn`, `bk` choosing the range), and the small groups' pass calls it
+once: one copy of `vvTry` where it had two. `explicit_beams_split_grouplevels_wide`:
+56,910 -> 53,664 optimized instructions, Chrome cold 10.3 -> 9.8 / 9.6 s. Checked:
+fast-check (16 of 17 bit for bit, the known quirk), `groupsplit`, the scenario matrix
+(12 rows bit for bit, none slower), the group-split, fleet-contact, contact and
+vehicle-grid GPU suites in bit-exact mode (19 tests), `sleep-check.sh` (21), Chrome's
+validation of all 140 modules.
