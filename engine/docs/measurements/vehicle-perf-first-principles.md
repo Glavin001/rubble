@@ -6459,3 +6459,49 @@ Reading:
    the mountain run's growth from 40 to 70 ms.
 3. The frame's floor is its launches: 19 a step for a lone surface car is 5.3 ms before
    any car's work.
+
+### 8.55 The fleet walk on the mountain: the kept candidates are never used there (2026-11-22)
+
+§8.54's second reading asked why `explicit fleet walk` grows with the pile. Measured at
+the merge of §8.54, Mac, wgpu's default, each row's fixture replayed for 6 frames (204
+contact passes; `vehicle_lab --from-fixture ROW.fx --ab-switch perf=0 --ab-frames 6`,
+its `kept candidates` line):
+
+| row | builds | passes that reused the kept pairs | passes on the front's own path |
+|---|---|---|---|
+| clash20 | 17 (232,378 pairs a build, most an owner 17,385) | 502 of 519, 96.7 % | 0 |
+| mountain20_t12 | 0 | 0 | 204 of 204 |
+| mountain20_t20 | 0 | 0 | 204 of 204 |
+
+Measured: on both mountain rows vehicle contact's kept candidates (`PERF_FLEET_KEEP`,
+§8.28, §8.39) do no pass at all. Every pass takes the front's own path: the gather, the
+grids, the sorted copy and the walk of every listed triangle (`fleetWideTests`, `flWalk`),
+which is the dispatch §8.54 timed at 0.30 ms (t 12) and 0.90 ms (t 20), against 0.2 ms a
+frame on clash20 where 96.7 % of the passes test the kept pairs alone. So the walk does
+not scale badly in itself; it runs on every pass because the list that replaces it is
+off, and its work is the pile's listed triangles.
+
+Not yet measured (hypothesis): why no build is tried in 204 passes. The code has two
+ways there: a build past the fleet's room or an owner's share voids the list and is
+followed by a wait on the front's own path that doubles with each such build in a row,
+to `FK_BACKOFF << 4` = 2,176 passes (`explicit_beams_fleet_track.slang` `fkWaitLeft`,
+its setter; the room is `vehicles · FK_CAP`, `fkRoom`), and a list that lasted fewer
+than `FK_SHORT` passes waits `FK_THRASH_WAIT`. A pile of 20 cars on ledges has every
+car near several others, where clash20 has ten separate pairs. The next step is the
+fixture's own control words (`fkCtl(FK_WAIT)`, the last build's counts by owner), then
+the bound: the mountain rows with the walk's dispatch done twice (time only), which
+says what a pass that reused its pairs would give back at most (clash20's ratio
+suggests most of 10.2 ms a frame at t 12 and of 30.7 ms at t 20).
+
+Not built in this section: every car's own step across the GPU under vehicle contact
+(§8.54's first reading), and fewer surface launches a step. What the first needs that
+the wide passes do not hold today, from the members' step (`contactMemberStep`,
+`explicitBeamsFrameStep` under `EB_VV_SOLO`): the solo vehicles' frame-bounds check in
+the node pass (`nodeUpdateSolo`, `vvReportOutside`, the allowed box in workgroup
+memory), each member's contact box by step parity (`memberBox`, `vvBoxKey`), the
+pending-beam reset of a member's triangle throttles (`VV_FLAGS.w`), the members' pair
+lists' state kept between steps in the solo-step words (`memberListLoad`), the kept
+candidates' tracking of every node (`fkTrackVehicle`), and wheels on each other
+(`wheelsPartners`) between a step's coupling and its nodes. Each is per element or per
+vehicle and none reads workgroup state of another, so none is a reason it cannot be
+hosted; each is kernel work in the wide node pass and its proof.
