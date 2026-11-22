@@ -297,6 +297,15 @@ fn pairs(set: &[Option<wgpu::Buffer>]) -> (Vec<usize>, Vec<&wgpu::Buffer>) {
     (idx, bufs)
 }
 
+/// Copy every buffer of `from_set` (the copyable ones) over the sim's bindings.
+fn restore_all(enc: &mut wgpu::CommandEncoder, sim: &WgpuSim, from_set: &[Option<wgpu::Buffer>]) {
+    for (i, src) in from_set.iter().enumerate() {
+        if let Some(src) = src {
+            enc.copy_buffer_to_buffer(src, 0, &sim.bufs[i], 0, src.size());
+        }
+    }
+}
+
 /// WebGPU's cap on a query set's size.
 const MAX_QUERIES: u32 = 4096;
 
@@ -455,7 +464,6 @@ impl WgpuSim {
 
         // The state before anything of the replay, restored at the end (taken before the
         // step's host writes, which reach the GPU at the next submission).
-        let n = self.bufs.len();
         let copyable = |b: &wgpu::Buffer| b.usage().contains(wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST);
         let mk = |b: &wgpu::Buffer, what: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -516,13 +524,6 @@ impl WgpuSim {
             queue.submit([enc.finish()]);
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
         }
-        let restore_all = |enc: &mut wgpu::CommandEncoder, sim: &WgpuSim, from_set: &[Option<wgpu::Buffer>]| {
-            for i in 0..n {
-                if let Some(src) = &from_set[i] {
-                    enc.copy_buffer_to_buffer(src, 0, &sim.bufs[i], 0, src.size());
-                }
-            }
-        };
         let mut report = KernelReplayReport {
             step,
             reps,
@@ -532,40 +533,64 @@ impl WgpuSim {
         };
 
         // 5. The empty pass.
-        {
-            let noop = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("kernel replay noop"),
-                layout: None,
-                module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("kernel replay noop"),
-                    source: wgpu::ShaderSource::Wgsl("@compute @workgroup_size(1) fn main() {}".into()),
-                }),
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-            timer.room(&device, &queue, reps + 1);
-            for r in 0..=reps {
-                wait_idle(&device, &queue);
-                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
-                {
-                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("replay:empty"), timestamp_writes: Some(timer.writes(r)) });
-                    pass.set_pipeline(&noop);
-                    pass.dispatch_workgroups(1, 1, 1);
-                }
-                queue.submit([enc.finish()]);
-            }
-            let enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
-            let t = timer.finish(&device, &queue, enc, reps + 1);
-            report.empty_pass_ms = t[1..].iter().map(|&x| timer.ms(x)).collect();
-        }
-
+        report.empty_pass_ms = self.replay_empty_pass(&mut timer, reps);
         // 1-3. The whole step in its three shapes, each rep from the step's input.
         let n_items = items.len() as u32;
         anyhow::ensure!(n_items < MAX_QUERIES / 2, "{} dispatches exceed one query set", n_items);
+        let mut in_seq = self.replay_shapes(&mut timer, &items, &input, reps, &mut report);
+        // Indirect workgroup counts as each dispatch sees them, and 4. the isolated replay.
+        report.dispatches = self.replay_isolated(&mut timer, &items, &input, &opts, &mut in_seq);
+        report.unwritten_passes = timer.unwritten.get();
+        // Everything back as it was before the replay.
+        {
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay restore") });
+            restore_all(&mut enc, self, &saved);
+            queue.submit([enc.finish()]);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        Ok(report)
+    }
+
+    /// The empty pass (a one-workgroup no-op), `reps` timed runs after a warm-up: the floor
+    /// every single-pass time includes.
+    fn replay_empty_pass(&self, timer: &mut Timer, reps: u32) -> Vec<f64> {
+        let (device, queue) = (self.device.clone(), self.queue.clone());
+        let noop = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("kernel replay noop"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("kernel replay noop"),
+                source: wgpu::ShaderSource::Wgsl("@compute @workgroup_size(1) fn main() {}".into()),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        timer.room(&device, &queue, reps + 1);
+        for r in 0..=reps {
+            wait_idle(&device, &queue);
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("replay:empty"), timestamp_writes: Some(timer.writes(r)) });
+                pass.set_pipeline(&noop);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            queue.submit([enc.finish()]);
+        }
+        let enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
+        let t = timer.finish(&device, &queue, enc, reps + 1);
+        t[1..].iter().map(|&x| timer.ms(x)).collect()
+    }
+
+    /// The whole step from its input in three shapes (one pass, a pass per phase, a pass per
+    /// dispatch), `reps` timed runs each after a warm-up. Fills the report's step shapes and
+    /// phases; returns each dispatch's in-sequence times (completion to completion).
+    fn replay_shapes(&self, timer: &mut Timer, items: &[Item], input: &[Option<wgpu::Buffer>], reps: u32, report: &mut KernelReplayReport) -> Vec<Vec<f64>> {
+        let (device, queue) = (self.device.clone(), self.queue.clone());
+        let n_items = items.len() as u32;
         let phases: Vec<&'static str> = {
             let mut v: Vec<&'static str> = Vec::new();
-            for it in &items {
+            for it in items {
                 if v.last() != Some(&it.phase) {
                     v.push(it.phase);
                 }
@@ -581,7 +606,7 @@ impl WgpuSim {
                 // pass's begin timestamp is taken when Metal starts it, which can be before
                 // the work encoded ahead of it has finished.
                 let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay restore") });
-                restore_all(&mut enc, self, &input);
+                restore_all(&mut enc, self, input);
                 queue.submit([enc.finish()]);
                 wait_idle(&device, &queue);
                 timer.room(&device, &queue, n_items);
@@ -589,7 +614,7 @@ impl WgpuSim {
                 let slots = match shape {
                     0 => {
                         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("replay:step"), timestamp_writes: Some(timer.writes(0)) });
-                        for it in &items {
+                        for it in items {
                             self.replay_one(&mut pass, it);
                         }
                         1
@@ -655,8 +680,17 @@ impl WgpuSim {
         }
         report.phases = phases.iter().zip(&phase_samples).map(|(p, s)| (p.to_string(), median(s))).collect();
         report.phase_gaps_ms = gap_samples.iter().map(|s| median(s)).collect();
+        in_seq
+    }
 
-        // Indirect workgroup counts as each dispatch sees them, and 4. the isolated replay.
+    /// Each dispatch alone (4.): the buffers it binds restored to the state just before it,
+    /// `reps` timed runs after a warm-up; its output becomes the next dispatch's input.
+    /// Returns the report's rows, indirect workgroup counts as each dispatch saw them.
+    fn replay_isolated(&self, timer: &mut Timer, items: &[Item], input: &[Option<wgpu::Buffer>], opts: &KernelReplayOptions, in_seq: &mut [Vec<f64>]) -> Vec<ReplayedDispatch> {
+        let (device, queue) = (self.device.clone(), self.queue.clone());
+        let n = self.bufs.len();
+        let reps = opts.reps;
+        let n_items = items.len() as u32;
         let args = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kernel replay args"),
             size: 16 * u64::from(n_items),
@@ -666,7 +700,7 @@ impl WgpuSim {
         {
             // Back to the step's input.
             let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay rewind input") });
-            restore_all(&mut enc, self, &input);
+            restore_all(&mut enc, self, input);
             queue.submit([enc.finish()]);
         }
         let mut isolated: Vec<Vec<f64>> = vec![Vec::new(); items.len()];
@@ -723,7 +757,7 @@ impl WgpuSim {
             }
         }
         let arg_words: Vec<u32> = bytemuck::cast_slice(&read_mapped(&device, &args, 16 * u64::from(n_items))).to_vec();
-        report.dispatches = items
+        items
             .iter()
             .enumerate()
             .map(|(k, it)| {
@@ -744,17 +778,7 @@ impl WgpuSim {
                     in_sequence_ms: std::mem::take(&mut in_seq[k]),
                 }
             })
-            .collect();
-
-        report.unwritten_passes = timer.unwritten.get();
-        // Everything back as it was before the replay.
-        {
-            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay restore") });
-            restore_all(&mut enc, self, &saved);
-            queue.submit([enc.finish()]);
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        }
-        Ok(report)
+            .collect()
     }
 
     /// A digest (FNV-1a 64) of every copyable buffer of the step, waiting for the GPU:
