@@ -6692,12 +6692,20 @@ not affected.
 
 **Proofs** (2026-11-22; commands from `engine/`):
 
-- `tools/scenario-matrix/run.sh perf=536870912` (12 default rows) and `... goal` (25 goal
-  rows), Mac: every row bit for bit, `verdict: PASS; 12 rows in 20.3 s`, `verdict: PASS;
-  25 rows in 97.8 s`.
-- `ENGINE_CUDA_FMAD=0 MODAL_OPTS="--pack 4" tools/scenario-matrix/run.sh --cuda
-  perf=536870912 ROW...` (all 37 rows named): every row bit for bit, `verdict: PASS; 37
-  rows on Modal T4, in 4 container(s)`.
+- `WORST=1 tools/scenario-matrix/run.sh perf=536870912 ROW...` (all 37 rows named), Mac:
+  every row bit for bit, `verdict: PASS; 37 rows in 95.2 s` (before the rounding room:
+  `run.sh perf=536870912`, `verdict: PASS; 12 rows in 20.3 s`, and `... goal`, `verdict:
+  PASS; 25 rows in 97.8 s`).
+- `ENGINE_CUDA_FMAD=0 MODAL_OPTS="--pack 4 --env WORST=1" tools/scenario-matrix/run.sh
+  --cuda perf=536870912 ROW...` (all 37 rows named): every row bit for bit, `verdict:
+  PASS; 37 rows on Modal T4, in 4 container(s)`, three times (twice before the room).
+- `tools/explicit-2khz/perf-verify.sh default webgpu:fleet_walk_gpu webgpu:fleet_contact_gpu
+  webgpu:group_split_gpu webgpu:explicit_contact_gpu` (release, bit-exact on, the switch
+  on by default): PASS, 1, 1, 3 and 13 tests. `perf-verify.sh 701988805` (the defaults
+  with the kept candidates off, so that every contact pass walks) on `fleet_contact_gpu`,
+  `group_split_gpu` and `explicit_contact_gpu`: PASS, 1, 3 and 13. (`fleet_walk_gpu` and
+  the second run's `group_split_gpu` and `explicit_contact_gpu` on the kernel as
+  committed, the others before the rounding room.)
 - `cargo test --profile fast -p engine-webgpu --test fleet_walk_gpu` (new, bit-exact on):
   a column of ten and a column of six with torn panels (a triangle's node of two cars
   moved 4 m, so that triangles are over the cells), the kept candidates off so that every
@@ -6709,3 +6717,10 @@ not affected.
   explicit-wgsl-check.mjs`: all 155 modules compile. `tools/build-time/compile_cost.py
   --check`: 0 failing. `tools/build-time/check.py`: the two `vehicle_lab.rs` lines of the
   base (3,383 lines against 3,375; `mountain_perf`), nothing new.
+
+**Not verified.** Chrome's bit-for-bit A/B on the lab page (rung 3: the web build needs
+the fracture lab's Git LFS assets, which this worktree does not hold; the switch stays
+off in a browser, where Chrome accepts every module); whole 20 and 40 s runs (rung 4)
+and the lab's own runs with the AI driving; the fast setting's tolerance suite
+(`fast_arithmetic_gpu`, `run.sh bitexact`); engine-metal's parity suite. The time-only
+figures (the bound, the parts left out) are from builds that were not committed.
