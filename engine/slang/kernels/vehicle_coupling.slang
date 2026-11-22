@@ -309,7 +309,7 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (lane == 0u && gP.extraBase != 0u) gWork[wCandCount(v)].store(0u);
     uint nodes = keep ? 0u : vt.y;
     float3 origin = asfloat(gMisc[v].xyz);
-    for (uint i = lane, iStop = EB_END(i, nodes, 256u); i < iStop; i += 256u)
+    for (uint i = lane, iStop = EB_END(561, i, nodes, 256u); i < iStop; i += 256u)
     {
         // Retired debris is not where the vehicle is (it meets nothing).
         if (gP.retireBase != 0u && cplRetired(vt.x + i)) continue;
@@ -463,7 +463,7 @@ void restChain(uint v, uint h, int3 cell, uint level, float cs, bool hier, float
     uint jGuard = 0u;
     while (j != 0xFFFFFFFFu && guard < gP.colliders + 1u)
     {
-        EB_PASS(jGuard);
+        EB_PASS(562, jGuard);
         guard++;
         uint next = gIds[restLinksW() + j];
         bool mine = hier ? (hierLevelW(gAabbs[2u * (gP.aabbBase + j)].w) == level && all(entryCell(j, cs, true) == cell))
@@ -482,7 +482,7 @@ void restRange(uint v, uint h, int3 a, int3 b, uint level, float cs, bool hier, 
     uint jGuard = 0u;
     while (j != 0xFFFFFFFFu && guard < gP.colliders + 1u)
     {
-        EB_PASS(jGuard);
+        EB_PASS(563, jGuard);
         guard++;
         uint next = gIds[restLinksW() + j];
         int3 c = entryCell(j, cs, hier);
@@ -525,10 +525,10 @@ void cpl_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             {
                 // More cells than heads (a box far larger than the level's cells): every
                 // head once, its entries of this level whose cell is in the range.
-                for (uint h = lane, hStop = EB_END(h, gP.hashSize, 256u); h < hStop; h += 256u) restRange(v, h, a, b, level, cs, true, lo, hi);
+                for (uint h = lane, hStop = EB_END(564, h, gP.hashSize, 256u); h < hStop; h += 256u) restRange(v, h, a, b, level, cs, true, lo, hi);
                 continue;
             }
-            for (uint k = lane, kStop = EB_END(k, cells, 256u); k < kStop; k += 256u)
+            for (uint k = lane, kStop = EB_END(565, k, cells, 256u); k < kStop; k += 256u)
             {
                 int3 cell = a + int3(int(k % uint(span.x)), int((k / uint(span.x)) % uint(span.y)), int(k / (uint(span.x) * uint(span.y))));
                 restChain(v, hierHashW(cell, level), cell, level, cs, true, lo, hi);
@@ -536,7 +536,7 @@ void cpl_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         // Oversized statics (header 11..20).
         uint large = min(gIds[hdr + 10u], 10u);
-        for (uint k = lane, kStop = EB_END(k, large, 256u); k < kStop; k += 256u) candTry(v, gIds[hdr + 11u + k], lo, hi);
+        for (uint k = lane, kStop = EB_END(566, k, large, 256u); k < kStop; k += 256u) candTry(v, gIds[hdr + 11u + k], lo, hi);
     }
     else
     {
@@ -550,27 +550,27 @@ void cpl_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint cells = uint(span.x) * uint(span.y) * uint(span.z);
         if (cells > gP.hashSize)
         {
-            for (uint h = lane, hStop = EB_END(h, gP.hashSize, 256u); h < hStop; h += 256u) restRange(v, h, a, b, 0u, cs, false, lo, hi);
+            for (uint h = lane, hStop = EB_END(567, h, gP.hashSize, 256u); h < hStop; h += 256u) restRange(v, h, a, b, 0u, cs, false, lo, hi);
         }
         else
         {
-            for (uint k = lane, kStop = EB_END(k, cells, 256u); k < kStop; k += 256u)
+            for (uint k = lane, kStop = EB_END(568, k, cells, 256u); k < kStop; k += 256u)
             {
                 int3 cell = a + int3(int(k % uint(span.x)), int((k / uint(span.x)) % uint(span.y)), int(k / (uint(span.x) * uint(span.y))));
                 restChain(v, gridHashW(cell), cell, 0u, cs, false, lo, hi);
             }
         }
         uint large = min(gIds[hdr + 10u], 16u);
-        for (uint k = lane, kStop = EB_END(k, large, 256u); k < kStop; k += 256u) candTry(v, gIds[hdr + 11u + k], lo, hi);
+        for (uint k = lane, kStop = EB_END(569, k, large, 256u); k < kStop; k += 256u) candTry(v, gIds[hdr + 11u + k], lo, hi);
         uint statics = min(gIds[hdr + 28u], 1024u);
-        for (uint k = lane, kStop = EB_END(k, statics, 256u); k < kStop; k += 256u) candTry(v, gScratch[gP.largeStaticBase + k].load(), lo, hi);
+        for (uint k = lane, kStop = EB_END(570, k, statics, 256u); k < kStop; k += 256u) candTry(v, gScratch[gP.largeStaticBase + k].load(), lo, hi);
     }
     // The step's moving colliders (awake at its start), and every collider of a body
     // whose pose or sleep state changed in it (pose_pack).
     uint nm = gScratch[6].load();
-    for (uint i = lane, iStop = EB_END(i, nm, 256u); i < iStop; i += 256u) candTry(v, gIds[restLinksW() + gP.colliders + i], lo, hi);
+    for (uint i = lane, iStop = EB_END(571, i, nm, 256u); i < iStop; i += 256u) candTry(v, gIds[restLinksW() + gP.colliders + i], lo, hi);
     uint nb = gMovedHeader[0];
-    for (uint i = lane, iStop = EB_END(i, nb, 256u); i < iStop; i += 256u)
+    for (uint i = lane, iStop = EB_END(572, i, nb, 256u); i < iStop; i += 256u)
     {
         uint body = gMoved[2u * i].w & 0x0FFFFFFFu;
         uint l = 0u;
@@ -578,11 +578,11 @@ void cpl_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint lGuard = 0u;
         while (l < h)
         {
-            EB_PASS(lGuard);
+            EB_PASS(573, lGuard);
             uint mid = (l + h) >> 1;
             if (gColliders[4u * mid].x < body) l = mid + 1u; else h = mid;
         }
-        for (uint c = l, cStop = EB_END(c, gP.colliders, 1u); c < cStop && gColliders[4u * c].x == body; c++) candTry(v, c, lo, hi);
+        for (uint c = l, cStop = EB_END(574, c, gP.colliders, 1u); c < cStop && gColliders[4u * c].x == body; c++) candTry(v, c, lo, hi);
     }
     ebLoopCapFlush();
 }
@@ -607,14 +607,14 @@ uint hullGeometry(uint v, uint base, float scale, uint at)
     uint head = gHulls[4u * base];
     uint nv = head & 255u;
     uint ne = (head >> 16) & 255u;
-    for (uint i = 0u, iStop = EB_END(i, nv, 1u); i < iStop; i++)
+    for (uint i = 0u, iStop = EB_END(575, i, nv, 1u); i < iStop; i++)
     {
         uint w = 4u * (base + 4u + i);
         float3 p = asfloat(uint3(gHulls[w], gHulls[w + 1u], gHulls[w + 2u])) * scale;
         gMisc[prec(v, at + i)] = asuint(float4(p, 0.0));
     }
     uint edgeWord = gHulls[4u * base + 2u];
-    for (uint r = 0u, rStop = EB_END(r, (ne + 3u) / 4u, 1u); r < rStop; r++)
+    for (uint r = 0u, rStop = EB_END(576, r, (ne + 3u) / 4u, 1u); r < rStop; r++)
     {
         uint4 rec = uint4(0u, 0u, 0u, 0u);
         for (uint m = 0u; m < 4u; m++)
@@ -640,7 +640,7 @@ void cplPlanShapes(uint v, uint lane, uint n)
 {
     uint nb = 0u;
     uint planes = 0u;
-    for (uint k = lane, kStop = EB_END(k, n, 256u); k < kStop; k += 256u)
+    for (uint k = lane, kStop = EB_END(577, k, n, 256u); k < kStop; k += 256u)
     {
         uint body = gsBody[k];
         // Its body's first shape, the bodies first seen before it, the planes before it.
@@ -648,7 +648,7 @@ void cplPlanShapes(uint v, uint lane, uint n)
         uint slot = 0u;
         uint po = 0u;
         uint last = k;
-        for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(578, j, n, 1u); j < jStop; j++)
         {
             uint bj = gsBody[j];
             if (j < k) po += gsFaces[j] & 0xFFFFu;
@@ -658,7 +658,7 @@ void cplPlanShapes(uint v, uint lane, uint n)
                 last = j;
             }
         }
-        for (uint j = 0u, jStop = EB_END(j, f, 1u); j < jStop; j++) slot += gsFaces[j] >> 31;
+        for (uint j = 0u, jStop = EB_END(579, j, f, 1u); j < jStop; j++) slot += gsFaces[j] >> 31;
         uint c = gsSorted[k];
         uint b2, kind;
         float4 sph = colliderSphere(c, b2, kind);
@@ -698,7 +698,7 @@ void cplPlanShapes(uint v, uint lane, uint n)
             uint head = gHulls[4u * base];
             uint nvh = head & 255u;
             uint nf = (head >> 8) & 255u;
-            for (uint fi = 0u, fiStop = EB_END(fi, nf, 1u); fi < fiStop; fi++)
+            for (uint fi = 0u, fiStop = EB_END(580, fi, nf, 1u); fi < fiStop; fi++)
             {
                 uint w = 4u * (base + 4u + nvh + fi);
                 float3 nn = asfloat(uint3(gHulls[w], gHulls[w + 1u], gHulls[w + 2u]));
@@ -748,7 +748,7 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.mode == 0u)
     {
         float pr = sweptReach(v);
-        for (uint c = lane, cStop = EB_END(c, gP.colliders, 256u); c < cStop; c += 256u)
+        for (uint c = lane, cStop = EB_END(581, c, gP.colliders, 256u); c < cStop; c += 256u)
         {
             if (!cplAccept(c, lo, hi)) continue;
             if (!pieceAccept(v, c, pr)) continue;
@@ -762,11 +762,11 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // cpl_query's candidates (each passed the exact test), one copy of each: the
         // resting entry and the moving or moved list can both hold a collider.
         uint nc = min(gWork[wCandCount(v)].load(), gP.candCap);
-        for (uint i = lane, iStop = EB_END(i, nc, 256u); i < iStop; i += 256u)
+        for (uint i = lane, iStop = EB_END(582, i, nc, 256u); i < iStop; i += 256u)
         {
             uint c = gWork[wCands(v) + i].load();
             bool dup = false;
-            for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+            for (uint j = 0u, jStop = EB_END(583, j, i, 1u); j < jStop; j++)
             {
                 if (gWork[wCands(v) + j].load() == c) { dup = true; break; }
             }
@@ -785,11 +785,11 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint total = gsCount.load();
     uint n = min(total, min(gP.S, LIST_CAP));
     if (lane == 0u && (total > gP.S || total > LIST_CAP)) gWork[1].or(ST_SHAPES);
-    for (uint i = lane, iStop = EB_END(i, n, 256u); i < iStop; i += 256u)
+    for (uint i = lane, iStop = EB_END(584, i, n, 256u); i < iStop; i += 256u)
     {
         uint x = gsList[i];
         uint rank = 0u;
-        for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++) rank += gsList[j] < x ? 1u : 0u;
+        for (uint j = 0u, jStop = EB_END(585, j, n, 1u); j < jStop; j++) rank += gsList[j] < x ? 1u : 0u;
         gsSorted[rank] = x;
     }
     if (lane == 0u)
@@ -799,7 +799,7 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
     // Each shape's engine body and hull faces; its body's first appearance counted.
-    for (uint k = lane, kStop = EB_END(k, n, 256u); k < kStop; k += 256u)
+    for (uint k = lane, kStop = EB_END(586, k, n, 256u); k < kStop; k += 256u)
     {
         uint body, kind;
         colliderSphere(gsSorted[k], body, kind);
@@ -816,10 +816,10 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
     // (gsFaces bit 31: the shape is its body's first.)
-    for (uint k = lane, kStop = EB_END(k, n, 256u); k < kStop; k += 256u)
+    for (uint k = lane, kStop = EB_END(587, k, n, 256u); k < kStop; k += 256u)
     {
         bool first = true;
-        for (uint j = 0u, jStop = EB_END(j, k, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(588, j, k, 1u); j < jStop; j++)
         {
             if (gsBody[j] == gsBody[k]) { first = false; break; }
         }
@@ -841,14 +841,14 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     if (lane != 0u) return ebLoopCapFlush();
     // Collider order: an insertion sort (the lists are short).
-    for (uint a = 1u, aStop = EB_END(a, n, 1u); a < aStop; a++)
+    for (uint a = 1u, aStop = EB_END(589, a, n, 1u); a < aStop; a++)
     {
         uint x = gsSorted[a];
         uint b = a;
         uint bGuard = 0u;
         while (b > 0u && gsSorted[b - 1u] > x)
         {
-            EB_PASS(bGuard);
+            EB_PASS(590, bGuard);
             gsSorted[b] = gsSorted[b - 1u];
             b--;
         }
@@ -857,14 +857,14 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint nb = 0u;
     uint planes = 0u;
     uint ns = 0u;
-    for (uint k = 0u, kStop = EB_END(k, n, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(591, k, n, 1u); k < kStop; k++)
     {
         uint c = gsSorted[k];
         uint body, kind;
         float4 sph = colliderSphere(c, body, kind);
         // Its body's slot (first appearance).
         uint j = NONE;
-        for (uint q = 0u, qStop = EB_END(q, nb, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(592, q, nb, 1u); q < qStop; q++)
         {
             if (gMisc[brec(v, q) + 3u].w == body) { j = q; break; }
         }
@@ -907,7 +907,7 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             uint nf = (head >> 8) & 255u;
             uint recs = hullRecords(base);
             if (planes + recs > gP.planes) { gWork[1].or(ST_PLANES); continue; }
-            for (uint f = 0u, fStop = EB_END(f, nf, 1u); f < fStop; f++)
+            for (uint f = 0u, fStop = EB_END(593, f, nf, 1u); f < fStop; f++)
             {
                 uint w = 4u * (base + 4u + nv + f);
                 float3 nn = asfloat(uint3(gHulls[w], gHulls[w + 1u], gHulls[w + 2u]));
@@ -945,7 +945,7 @@ void cpl_share(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = listed(gid.x);
     if (v == NONE) return ebLoopCapFlush();
-    for (uint j = lid.x, jStop = EB_END(j, gMisc[vrec(v)].x, 64u); j < jStop; j += 64u)
+    for (uint j = lid.x, jStop = EB_END(594, j, gMisc[vrec(v)].x, 64u); j < jStop; j += 64u)
     {
         uint b = brec(v, j);
         uint body = gMisc[b + 3u].w;
@@ -998,7 +998,7 @@ void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint v = listed(gid.x);
     if (v == NONE) return ebLoopCapFlush();
     if (gP.ingestRows == 0u) return ebLoopCapFlush();
-    for (uint k = lid.x, kStop = EB_END(k, gMisc[vrec(v)].y, 64u); k < kStop; k += 64u) shapeLoad(v, k);
+    for (uint k = lid.x, kStop = EB_END(595, k, gMisc[vrec(v)].y, 64u); k < kStop; k += 64u) shapeLoad(v, k);
     ebLoopCapFlush();
 }
 
@@ -1017,7 +1017,7 @@ void proxyImpulse(uint v, uint j, float3 c, out float3 J, out float3 L)
     J = float3(0.0);
     L = float3(0.0);
     uint ns = gMisc[vrec(v)].y;
-    for (uint q = 0u, qStop = EB_END(q, ns, 1u); q < qStop; q++)
+    for (uint q = 0u, qStop = EB_END(596, q, ns, 1u); q < qStop; q++)
     {
         uint aq = srec(v, q);
         if (gMisc[aq].y != j) continue;
@@ -1093,13 +1093,13 @@ void cpl_emit(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // (Tests, gP.serialPlan: lane 0 alone, the shapes one after another.)
     uint lanes = gP.serialPlan != 0u ? 1u : 64u;
     if (lid.x >= lanes) return ebLoopCapFlush();
-    for (uint k = lid.x, kStop = EB_END(k, ns, lanes); k < kStop; k += lanes)
+    for (uint k = lid.x, kStop = EB_END(597, k, ns, lanes); k < kStop; k += lanes)
     {
         uint at = srec(v, k);
         uint j = gMisc[at].y;
         uint body = gColliders[4u * gMisc[at].z].x;
         bool first = true;
-        for (uint q = 0u, qStop = EB_END(q, k, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(598, q, k, 1u); q < qStop; q++)
         {
             uint aq = srec(v, q);
             if (gMisc[aq].y == j && gColliders[4u * gMisc[aq].z].x == body) { first = false; break; }

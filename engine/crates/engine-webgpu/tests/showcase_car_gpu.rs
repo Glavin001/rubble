@@ -1,8 +1,8 @@
-//! The showcase sedan (`engine_softbody::authoring`) on `ExplicitBeamsGpu` against
+//! The showcase sedan (`engine_softbody_authoring::authoring`) on `ExplicitBeamsGpu` against
 //! the CPU reference: at rest, into a wall at 56 km/h, and sideways into a pole at
 //! 32 km/h. Turbulence off on both (the GPU draws its noise differently).
 
-use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::{
     ExplicitBeams, ExplicitBeamsSettings, FrameClock, StaticBox, StaticShape,
 };
@@ -334,7 +334,7 @@ fn one_tier_at_rest_step_parity() {
 
 /// `rubble_damper_tear` on the GPU (the kernel's `damperTorn`) as on the CPU: a skin
 /// node with every spring on it broken, 3 m out and leaving at 5 m/s (the CPU's
-/// `engine-softbody/tests/damper_tear.rs`). After each of 40 single steps the same
+/// `engine-softbody-authoring/tests/damper_tear.rs`). After each of 40 single steps the same
 /// dashpots are broken on both, and at the end the node has kept its speed on both.
 #[test]
 fn a_torn_off_nodes_dashpot_tears_as_on_the_cpu() {

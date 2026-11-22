@@ -9,7 +9,7 @@
 #
 #   engine/tools/modal/gpu_run.sh -- -p engine-webgpu --test explicit_beams_bitwise
 #   engine/tools/modal/gpu_run.sh --variant old:RUBBLE_COUPLING_LIST=0 --variant new: \
-#     -- -p engine-world --example vehicle_lab -- --mode gpu --measure mountain-perf --secs 4
+#     -- -p engine-world-lab --example vehicle_lab -- --mode gpu --measure mountain-perf --secs 4
 #
 # Options:
 #   --gpu T4|L4|L40S     GPU (default T4; L40S only for a reason, ~3x the price)
@@ -143,7 +143,7 @@ if [ "$fanout" = matrix ]; then
     fi
     set -- -p engine-cuda --example explicit_replay
   else
-    set -- -p engine-world --example vehicle_lab
+    set -- -p engine-world-lab --example vehicle_lab
   fi
 fi
 case "$gpu" in T4|L4|L40S) ;; *) echo "gpu_run: --gpu must be T4, L4 or L40S" >&2; exit 2 ;; esac

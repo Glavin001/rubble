@@ -1,10 +1,10 @@
 //! Layer 1 of the vehicle test strategy on the GPU kernel: the same small analytic
-//! cases as `engine-softbody/tests/invariants_small.rs` (shared bodies in
+//! cases as `engine-softbody-authoring/tests/invariants_small.rs` (shared bodies in
 //! `invariants_common`), each against its closed form with the same tolerances.
 //! Skipped when no adapter is found.
 //! Run: `cargo test --release -p engine-webgpu --test invariants_small_gpu -- --nocapture`
 
-#[path = "../../engine-softbody/tests/invariants_common/mod.rs"]
+#[path = "../../engine-softbody-authoring/tests/invariants_common/mod.rs"]
 mod invariants_common;
 use invariants_common::*;
 

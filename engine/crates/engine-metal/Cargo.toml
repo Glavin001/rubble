@@ -26,9 +26,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [build-dependencies]
+engine-kernel-manifest.workspace = true
 engine-slang-build.workspace = true
-engine-exec.workspace = true
-engine-terrain.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]

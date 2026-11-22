@@ -13,7 +13,7 @@ Rods repository instead. Both generated vehicles stay in the code, documented he
 ## Hi-res car: unstable after a crash, in Rigs of Rods too. Retired from the test set.
 
 Measured 100 km/h into a rigid wall, followed for 30 s:
-- **Rubble:** `cargo run --release -p engine-softbody --example explicit_settle -- vehicles/rubble_hires_jbeam.truck scene=wall secs=30`, on branch `feat/explicit-beams-web`.
+- **Rubble:** `cargo run --release -p engine-softbody-lab --example explicit_settle -- vehicles/rubble_hires_jbeam.truck scene=wall secs=30`, on branch `feat/explicit-beams-web`.
 - **Rigs of Rods:** the unmodified harness, `ror_ref <truck> scale scene=settling/ror-hires/scene.txt frames=N steps=17 roll=1 drag=0`, for N = 300 … 3600.
 
 | | Rubble | Rigs of Rods |

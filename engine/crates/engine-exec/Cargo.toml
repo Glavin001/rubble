@@ -6,6 +6,7 @@ license.workspace = true
 description = "Phase graph and backend trait"
 
 [dependencies]
+engine-kernel-manifest.workspace = true
 engine-schema.workspace = true
 # The explicit-beams plan packs the solver's records (explicit_plan.rs).
 engine-softbody.workspace = true
@@ -14,3 +15,7 @@ bytemuck.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# The generated sedan in the plan's tests.
+engine-softbody-authoring.workspace = true

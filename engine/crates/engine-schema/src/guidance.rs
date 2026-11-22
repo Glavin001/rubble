@@ -13,13 +13,7 @@ pub const GUIDE_SCRATCH_BINDING: usize = 58;
 pub const GUIDE_SLOTS_BINDING: usize = 59;
 
 /// The guidance entries (`guide_step.slang`), in step order.
-pub const GUIDE_ENTRIES: &[&str] = &[
-    "guide_scan",
-    "guide_select",
-    "guide_rank",
-    "guide_plan",
-    "guide_commit",
-];
+pub use engine_kernel_manifest::rigid::GUIDE_ENTRIES;
 
 /// Bodies per scan block (`GUIDE_BLOCK`); also the most plans per step.
 pub const GUIDE_BLOCK: u32 = 256;

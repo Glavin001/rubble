@@ -9,8 +9,8 @@
 //! triangles) into a wall at 100 km/h (yields, breaks and group cascades), and beside a
 //! Rigs of Rods truck (plain kinds, the cold path) in one upload.
 
-use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
-use engine_softbody::authoring::rig;
+use engine_softbody_authoring::authoring::gen2::{rig as lattice, vg_input};
+use engine_softbody_authoring::authoring::rig;
 use engine_softbody::desc::SoftVehicleDesc;
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use engine_webgpu::{default_device, ExplicitBeamsGpu};

@@ -7,7 +7,7 @@
 //! pass whole in its workgroup, and split with workgroup memory zeroed: every state word
 //! the same.
 
-use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use engine_webgpu::{default_device, ExplicitBeamsGpu};
 use glam::Vec3;

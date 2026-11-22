@@ -489,7 +489,7 @@ uint surfTriangleProxies(uint v, uint4 tn, float3 x0, float3 x1, float3 x2, floa
     // The top bit of `proxies`: the fast proxies only (the pair path meets the rest).
     bool fastOnly = (proxies >> 31) != 0u;
     uint count = proxies & 0x7FFFFFFFu;
-    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(521, k, count, 1u); k < kStop; k++)
     {
         uint b = boxCount + k;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
@@ -557,7 +557,7 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
     float3 x1 = nf3(origin + gNodes[tn.y * 3u].xyz);
     float3 x2 = nf3(origin + gNodes[tn.z * 3u].xyz);
     uint found = 0u;
-    for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
+    for (uint b = 0u, bStop = EB_END(522, b, boxCount, 1u); b < bStop; b++)
     {
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 lo;
@@ -610,7 +610,7 @@ uint surfSegmentProxies(uint v, uint4 bn, float3 x0, float3 x1, float r, uint bo
     // The top bit of `proxies`: the fast proxies only (the pair path meets the rest).
     bool fastOnly = (proxies >> 31) != 0u;
     uint count = proxies & 0x7FFFFFFFu;
-    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(523, k, count, 1u); k < kStop; k++)
     {
         uint b = boxCount + k;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
@@ -687,7 +687,7 @@ void surfSegment(uint v, uint gj, uint mk, float3 origin, float r, uint boxOff, 
     float3 l0 = nf3(gNodes[bn.x * 3u].xyz);
     float3 l1 = nf3(gNodes[bn.y * 3u].xyz);
     uint found = 0u;
-    for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
+    for (uint b = 0u, bStop = EB_END(524, b, boxCount, 1u); b < bStop; b++)
     {
         float3 x0 = w0;
         float3 x1 = w1;
@@ -733,7 +733,7 @@ uint surfPointProxies(uint v, uint gi, float3 x, float r, uint boxCount, uint pr
     // The top bit of `proxies`: the fast proxies only (the pair path meets the rest).
     bool fastOnly = (proxies >> 31) != 0u;
     uint count = proxies & 0x7FFFFFFFu;
-    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(525, k, count, 1u); k < kStop; k++)
     {
         uint b = boxCount + k;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
@@ -795,7 +795,7 @@ void surfPoint(uint v, uint gi, uint mk, float3 origin, float r, uint boxOff, ui
     // Proxy records are vehicle-local (relative to the origin).
     float3 xl = nf3(gNodes[gi * 3u].xyz);
     uint found = 0u;
-    for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
+    for (uint b = 0u, bStop = EB_END(526, b, boxCount, 1u); b < bStop; b++)
     {
         float3 x = xw;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
@@ -831,7 +831,7 @@ void surfGatherTriangle(uint v, uint gt, float3 origin, float r, uint proxies, u
     float3 x0 = nf3(gNodes[tn.x * 3u].xyz);
     float3 x1 = nf3(gNodes[tn.y * 3u].xyz);
     float3 x2 = nf3(gNodes[tn.z * 3u].xyz);
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(527, k, proxies, 1u); k < kStop; k++)
     {
         float3 vb;
         if (!surfProxyFast(v, k, vb)) continue;
@@ -857,7 +857,7 @@ void surfGatherSegment(uint v, uint gj, float3 origin, float r, uint proxies, ui
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
     float3 x0 = nf3(gNodes[bn.x * 3u].xyz);
     float3 x1 = nf3(gNodes[bn.y * 3u].xyz);
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(528, k, proxies, 1u); k < kStop; k++)
     {
         float3 vb;
         if (!surfProxyFast(v, k, vb)) continue;
@@ -884,7 +884,7 @@ void surfGatherPoint(uint v, uint gi, float3 origin, float r, uint proxies, uint
     if (gP.retireBase != 0u && nodeRetired(gi)) return;
     if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) return;
     float3 x = nf3(gNodes[gi * 3u].xyz);
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(529, k, proxies, 1u); k < kStop; k++)
     {
         float3 vb;
         if (!surfProxyFast(v, k, vb)) continue;
@@ -903,7 +903,7 @@ void surfGatherPoint(uint v, uint gi, float3 origin, float r, uint proxies, uint
 // Whether vehicle v has a fast proxy this step (every lane reads its proxies).
 bool surfAnyFast(uint v, uint proxies)
 {
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(530, k, proxies, 1u); k < kStop; k++)
     {
         float3 vb;
         if (surfProxyFast(v, k, vb)) return true;
@@ -961,7 +961,7 @@ void surfStore3(uint at, float3 x)
 // fqBounds of surfProxyShape), and the counts cleared.
 void surfPairBounds(uint v, uint lane, uint proxies)
 {
-    for (uint k = lane, kStop = EB_END(k, proxies, LANES); k < kStop; k += LANES)
+    for (uint k = lane, kStop = EB_END(531, k, proxies, LANES); k < kStop; k += LANES)
     {
         uint j;
         FqShape s = surfProxyShape(v, k, j);
@@ -1002,7 +1002,7 @@ bool surfPairSeparated(uint v, uint k, float3 x0, float3 x1, float3 x2, float r)
 void surfPairList(uint v, uint kind, uint i, float3 tlo, float3 thi, uint proxies, bool sep, float3 x0, float3 x1,
                   float3 x2, float r)
 {
-    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(532, k, proxies, 1u); k < kStop; k++)
     {
         uint at = surfBoundsAt(v, k);
         float3 lo = surfLoad3(at);
@@ -1018,7 +1018,7 @@ void surfPairList(uint v, uint kind, uint i, float3 tlo, float3 thi, uint proxie
 void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1, uint4 sr, uint groupOff,
                   uint parity, uint triCount, uint segCount, uint nodeCount, uint proxies)
 {
-    for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+    for (uint t = lane, tStop = EB_END(533, t, triCount, LANES); t < tStop; t += LANES)
     {
         uint gt = r1.x + t;
         if (gP.retireBase != 0u && surfTriRetired(gt)) continue;
@@ -1031,7 +1031,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
         float3 thi = sadd3(max(max(x0, x1), x2), float3(r, r, r));
         surfPairList(v, SURF_TRI, t, tlo, thi, proxies, true, x0, x1, x2, r);
     }
-    for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+    for (uint j = lane, jStop = EB_END(534, j, segCount, LANES); j < jStop; j += LANES)
     {
         uint gj = gLists[sr.x + j];
         if (gP.retireBase != 0u && surfSegRetired(gj)) continue;
@@ -1043,7 +1043,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
         float3 thi = sadd3(max(x0, x1), float3(r, r, r));
         surfPairList(v, SURF_SEG, j, tlo, thi, proxies, true, x0, x1, x1, r);
     }
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(535, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
         if (gP.retireBase != 0u && nodeRetired(gi)) continue;
@@ -1243,7 +1243,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     if (lane == 0u) gsUniformSurf = pairs ? 1u : 0u;
     sync();
     pairs = gsUniformSurf != 0u;
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(536, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
         float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + gi], r0.z, r2.z, r2.w, parity, false);
@@ -1251,18 +1251,18 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
         gAcc[gP.surfSplit + gi].store(0);
     }
 #ifndef EB_NO_COUPLING
-    for (uint j = lane, jStop = EB_END(j, bodies, LANES); j < jStop; j += LANES)
+    for (uint j = lane, jStop = EB_END(537, j, bodies, LANES); j < jStop; j += LANES)
     {
         gAcc[surfBodyBase() + v * cplB() + j].store(0);
         gAcc[surfTminAt(v, j, parity + 1u)].store(0);
     }
     if (anyFast)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(538, t, triCount, LANES); t < tStop; t += LANES)
             surfGatherTriangle(v, r1.x + t, origin, r, proxies, parity);
-        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+        for (uint j = lane, jStop = EB_END(539, j, segCount, LANES); j < jStop; j += LANES)
             surfGatherSegment(v, gLists[sr.x + j], origin, r, proxies, r2.z, parity);
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(540, i, nodeCount, LANES); i < iStop; i += LANES)
             surfGatherPoint(v, r0.x + i, origin, r, proxies, parity);
     }
     if (pairs) surfPairBounds(v, lane, proxies);
@@ -1294,17 +1294,17 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
         bool apply = phase != 0u;
         if (loops)
         {
-            for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+            for (uint t = lane, tStop = EB_END(541, t, triCount, LANES); t < tStop; t += LANES)
                 surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, apply);
-            for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+            for (uint j = lane, jStop = EB_END(542, j, segCount, LANES); j < jStop; j += LANES)
                 surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, apply);
-            for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+            for (uint i = lane, iStop = EB_END(543, i, nodeCount, LANES); i < iStop; i += LANES)
                 surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, apply);
         }
 #ifndef EB_NO_COUPLING
         if (pairs && !apply)
         {
-            for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+            for (uint p = lane, pStop = EB_END(544, p, listed, LANES); p < pStop; p += LANES)
                 surfPairFind(v, p, origin, r, r0, r1, sr);
         }
         if (pairs && apply)
@@ -1312,12 +1312,12 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
             uint found = uint(gAcc[surfHitCount(v)].load());
             if (found <= SURF_HIT_CAP)
             {
-                for (uint h = lane, hStop = EB_END(h, found, LANES); h < hStop; h += LANES)
+                for (uint h = lane, hStop = EB_END(545, h, found, LANES); h < hStop; h += LANES)
                     surfHitApply(v, h, r, r0, r1, sr);
             }
             else
             {
-                for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+                for (uint p = lane, pStop = EB_END(546, p, listed, LANES); p < pStop; p += LANES)
                     surfPairApply(v, p, origin, r, r0, r1, sr);
             }
         }

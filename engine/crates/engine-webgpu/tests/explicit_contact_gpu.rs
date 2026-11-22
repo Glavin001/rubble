@@ -572,7 +572,7 @@ fn contact_breaks_step_like_the_cpu() {
 /// (chaotic, GPU sums order-free in fixed point) broken and bent counts close.
 #[test]
 fn self_collision_two_body_steps_like_the_cpu() {
-    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
     let b = build(
         &style("sedan").unwrap(),
         &BuildParams {

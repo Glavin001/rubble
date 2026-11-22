@@ -1,4 +1,4 @@
-"""Plots a torn-off part's path from `door_orbit`'s CSV (engine-world/examples/door_orbit.rs):
+"""Plots a torn-off part's path from `door_orbit`'s CSV (engine-world-lab/examples/door_orbit.rs):
 left, relative to the body's centre of mass (what the lab's chase camera shows); right,
 in the world (both centres of mass), side by side as one SVG. Also prints the part's and
 the body's centre-of-mass accelerations less gravity (what pushes each).

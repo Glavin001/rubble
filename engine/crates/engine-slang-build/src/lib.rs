@@ -57,6 +57,16 @@ pub fn find_slangc() -> Result<PathBuf> {
     bail!("slangc not found; install 2026.19 and set SLANGC or PATH (see engine/TOOLCHAIN.md)")
 }
 
+/// slangc's version report (`slangc -version`, both streams), for keys of caches.
+pub fn slangc_version() -> Result<String> {
+    let out = Command::new(find_slangc()?).arg("-version").output()?;
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
 /// `nvcc` for Slang-emitted CUDA → PTX: `NVCC`, `PATH`, then the toolkit's
 /// default prefix. Only build hosts need it; the PTX runs on any driver.
 pub fn find_nvcc() -> Result<PathBuf> {
@@ -129,6 +139,9 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec
         .collect()
 }
 
+mod batch;
+pub use batch::{compile_many, Compile};
+
 pub fn compile(
     source: &Path,
     entry: &str,
@@ -161,90 +174,292 @@ pub fn compile_stage(
     include_dirs: &[&Path],
     defines: &[(&str, &str)],
 ) -> Result<()> {
-    let slangc = find_slangc()?;
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
+    compile_entries_to(source, &[(entry, stage)], target, out, include_dirs, defines)
+}
+
+/// Several entries of one source in one output module (one slangc run, one cache
+/// entry): the standalone WGSL modules with more than one entry point.
+pub fn compile_entries_to(
+    source: &Path,
+    entries: &[(&str, &str)],
+    target: SlangTarget,
+    out: &Path,
+    include_dirs: &[&Path],
+    defines: &[(&str, &str)],
+) -> Result<()> {
+    Slangc {
+        source,
+        entries,
+        target: target.flag(),
+        include_dirs,
+        defines,
+        out,
+        out_ext: "",
+        reflection: None,
     }
-    // One compile's output kept by what it depends on (`compile_key`): an edit to one
-    // kernel file recompiles the modules that include it, not every module.
-    let cached = compile_key(&slangc, source, entry, stage, target.flag(), include_dirs, defines)
-        .and_then(|key| compile_cache_dir().map(|dir| dir.join(key)));
-    if let Some(hit) = cached.as_deref().filter(|p| p.is_file()) {
-        std::fs::copy(hit, out)?;
-        return Ok(());
+    .run()
+}
+
+/// One slangc run and its place in the per-compile cache. Every compile in the build
+/// goes through here, so every one is cached by what it depends on ([`compile_key`]).
+///
+/// slangc runs in the Slang tree's root (the nearest `slang` directory above the
+/// source) and is given paths relative to it, so its output (the `#line` directives of
+/// the MSL and CUDA targets name the files) is the same in every checkout and from
+/// every crate's build script: one cache serves them all.
+pub(crate) struct Slangc<'a> {
+    pub(crate) source: &'a Path,
+    /// `(entry, stage)`.
+    pub(crate) entries: &'a [(&'a str, &'a str)],
+    pub(crate) target: &'a str,
+    pub(crate) include_dirs: &'a [&'a Path],
+    pub(crate) defines: &'a [(&'a str, &'a str)],
+    pub(crate) out: &'a Path,
+    /// The output's extension in the cache (`""`: the key alone).
+    pub(crate) out_ext: &'a str,
+    /// Slang's reflection JSON, written beside the output and cached with it.
+    pub(crate) reflection: Option<&'a Path>,
+}
+
+impl Slangc<'_> {
+    pub(crate) fn run(&self) -> Result<()> {
+        let slangc = find_slangc()?;
+        if let Some(parent) = self.out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let cached = self.cache_entry(&slangc);
+        if self.restore(cached.as_deref())? {
+            return Ok(());
+        }
+        self.spawn(&slangc)?;
+        self.store(cached.as_deref());
+        Ok(())
     }
-    let mut cmd = Command::new(&slangc);
-    cmd.arg("-target")
-        .arg(target.flag())
-        .arg("-stage")
-        .arg(stage)
-        .arg("-entry")
-        .arg(entry)
-        .arg("-o")
-        .arg(out);
-    for dir in include_dirs {
-        cmd.arg("-I").arg(dir);
+
+    /// slangc itself, for this compile (no cache).
+    pub(crate) fn spawn(&self, slangc: &Path) -> Result<()> {
+        let base = slang_base(self.source);
+        let mut cmd = Command::new(slangc);
+        if let Some(b) = &base {
+            cmd.current_dir(b);
+        }
+        cmd.arg("-target").arg(self.target);
+        for (entry, stage) in self.entries {
+            cmd.arg("-entry").arg(entry).arg("-stage").arg(stage);
+        }
+        cmd.arg("-o").arg(self.out);
+        if let Some(r) = self.reflection {
+            cmd.arg("-reflection-json").arg(r);
+        }
+        for dir in self.include_dirs {
+            cmd.arg("-I").arg(rel_to(base.as_deref(), dir));
+        }
+        for (name, value) in self.defines {
+            cmd.arg(format!("-D{name}={value}"));
+        }
+        cmd.arg(rel_to(base.as_deref(), self.source));
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to spawn {}", slangc.display()))?;
+        if !output.status.success() {
+            let names: Vec<&str> = self.entries.iter().map(|(e, _)| *e).collect();
+            return Err(anyhow!(
+                "slangc failed for {} entry {} target {}:\n{}",
+                self.source.display(),
+                names.join(","),
+                self.target,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
     }
-    for (name, value) in defines {
-        cmd.arg(format!("-D{name}={value}"));
+
+    /// The compile's place in the per-compile cache (None: not cached).
+    pub(crate) fn cache_entry(&self, slangc: &Path) -> Option<PathBuf> {
+        let base = slang_base(self.source);
+        let mut kind = self.target.to_string();
+        if self.reflection.is_some() {
+            kind.push_str("+reflection-json");
+        }
+        let key = compile_key(slangc, self.source, base.as_deref(), self.entries, &kind, self.include_dirs, self.defines)?;
+        compile_cache_dir().map(|d| d.join(key))
     }
-    cmd.arg(source);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to spawn {}", slangc.display()))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "slangc failed for {} entry {} target {}:\n{}",
-            source.display(),
-            entry,
-            target.flag(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+
+    fn outputs(&self) -> Vec<(&Path, &str)> {
+        let mut outputs: Vec<(&Path, &str)> = vec![(self.out, self.out_ext)];
+        if let Some(r) = self.reflection {
+            outputs.push((r, "json"));
+        }
+        outputs
     }
-    if let Some(entry) = &cached {
-        // (Written beside its name and renamed: another build may store the same key.)
-        if let Some(dir) = entry.parent() {
+
+    /// Copies the outputs from the cache when every one of them is there.
+    pub(crate) fn restore(&self, cached: Option<&Path>) -> Result<bool> {
+        let Some(cached) = cached else { return Ok(false) };
+        let outputs = self.outputs();
+        if !outputs.iter().all(|(_, ext)| kept(cached, ext).is_file()) {
+            return Ok(false);
+        }
+        // Restore the reflection first: a reader takes the module as the sign of a
+        // finished compile.
+        for (dest, ext) in outputs.iter().rev() {
+            let hit = kept(cached, ext);
+            std::fs::copy(&hit, dest)?;
+            // (A hit is marked used: the cache is trimmed least recently used first.)
+            let _ = std::fs::File::options()
+                .append(true)
+                .open(&hit)
+                .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+        }
+        Ok(true)
+    }
+
+    /// Keeps the outputs in the cache: written beside their names and renamed, the
+    /// module last (a hit needs every output), as another build may store the same key.
+    pub(crate) fn store(&self, cached: Option<&Path>) {
+        let Some(cached) = cached else { return };
+        if let Some(dir) = cached.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let tmp = entry.with_extension(format!("tmp{}", std::process::id()));
-        if std::fs::copy(out, &tmp).is_ok() {
-            let _ = std::fs::rename(&tmp, entry);
+        for (from, ext) in self.outputs().iter().rev() {
+            let to = kept(cached, ext);
+            let tmp = to.with_extension(format!("tmp{}-{}", std::process::id(), unique()));
+            if std::fs::copy(from, &tmp).is_ok() {
+                let _ = std::fs::rename(&tmp, &to);
+            }
         }
     }
-    Ok(())
+}
+
+/// A cache entry's file for one output (`""`: the key alone).
+fn kept(cached: &Path, ext: &str) -> PathBuf {
+    if ext.is_empty() {
+        cached.to_path_buf()
+    } else {
+        cached.with_extension(ext)
+    }
+}
+
+/// `p` relative to the Slang root `base` (as slangc is given it), else as it is.
+pub(crate) fn rel_to(base: Option<&Path>, p: &Path) -> PathBuf {
+    let full = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    match base {
+        Some(b) => full.strip_prefix(b).map(Path::to_path_buf).unwrap_or(full),
+        None => full,
+    }
+}
+
+/// A number no other compile of this process uses at the same time (temporary names).
+pub(crate) fn unique() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The Slang tree's root above `source`: the nearest ancestor directory named `slang`.
+pub(crate) fn slang_base(source: &Path) -> Option<PathBuf> {
+    let full = source.canonicalize().ok()?;
+    full.ancestors()
+        .skip(1)
+        .find(|a| a.file_name().is_some_and(|n| n == "slang"))
+        .map(Path::to_path_buf)
 }
 
 /// Where single compiles are kept: `RUBBLE_SLANG_OBJ_CACHE` (a directory; `0` or empty:
-/// no cache), else `slang-obj-cache` in the cargo target directory this build script
-/// runs for. None outside a build script.
+/// no cache), else `~/.cache/rubble/slang-obj`, one cache for every checkout and
+/// worktree (its entries do not depend on where a checkout is), else `slang-obj-cache`
+/// in the cargo target directory this build script runs for.
 fn compile_cache_dir() -> Option<PathBuf> {
-    match std::env::var_os("RUBBLE_SLANG_OBJ_CACHE") {
-        Some(v) if v.is_empty() || v == "0" => None,
-        Some(v) => Some(PathBuf::from(v)),
-        // OUT_DIR is <target>/<profile>/build/<package>-<hash>/out (with a target triple,
-        // one level deeper: the cache is then that triple's).
-        None => {
-            let out = PathBuf::from(std::env::var_os("OUT_DIR")?);
-            Some(out.ancestors().nth(4)?.join("slang-obj-cache"))
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = match std::env::var_os("RUBBLE_SLANG_OBJ_CACHE") {
+            Some(v) if v.is_empty() || v == "0" => return None,
+            Some(v) => PathBuf::from(v),
+            None => match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+                Some(home) => PathBuf::from(home).join(".cache/rubble/slang-obj"),
+                // OUT_DIR is <target>/<profile>/build/<package>-<hash>/out (with a
+                // target triple, one level deeper: the cache is then that triple's).
+                None => {
+                    let out = PathBuf::from(std::env::var_os("OUT_DIR")?);
+                    out.ancestors().nth(4)?.join("slang-obj-cache")
+                }
+            },
+        };
+        trim_cache(&dir);
+        Some(dir)
+    })
+    .clone()
+}
+
+/// Keeps the per-compile cache under `RUBBLE_SLANG_OBJ_CACHE_GIB` (default 8): past
+/// it, the least recently used entries go until it is at three quarters. Looks at
+/// most once an hour (a stamp file in the cache), so a build pays for it rarely.
+fn trim_cache(dir: &Path) {
+    let stamp = dir.join(".trimmed");
+    let fresh = std::fs::metadata(&stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < 3600);
+    if fresh {
+        return;
+    }
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(&stamp, b"");
+    let cap_gib: f64 = std::env::var("RUBBLE_SLANG_OBJ_CACHE_GIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8.0);
+    let cap = (cap_gib * (1u64 << 30) as f64) as u64;
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = read
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            if !m.is_file() || e.file_name() == ".trimmed" {
+                return None;
+            }
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= cap {
+        return;
+    }
+    files.sort();
+    for (_, len, path) in files {
+        if total <= cap / 4 * 3 {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
         }
     }
 }
 
 /// A key of everything one compile's output depends on: slangc itself (path, size,
-/// modification time), its arguments, and the bytes of the source and of every file it
-/// reaches by `#include "..."`. None (no cache for this compile) when a file in that
-/// closure uses `import` or `__include`, whose modules slangc finds by its own search:
-/// such a compile runs every time, as before.
+/// modification time), its arguments, and the names (relative to the Slang root,
+/// as slangc is given them) and bytes of the source and of every file it reaches by
+/// `#include "..."`. None (no cache for this compile) when a file in that closure
+/// uses `import` or `__include`, whose modules slangc finds by its own search: such a
+/// compile runs every time.
 fn compile_key(
     slangc: &Path,
     source: &Path,
-    entry: &str,
-    stage: &str,
+    base: Option<&Path>,
+    entries: &[(&str, &str)],
     target: &str,
     include_dirs: &[&Path],
     defines: &[(&str, &str)],
 ) -> Option<String> {
     use std::hash::{Hash, Hasher};
+    let rel = |p: &Path| -> PathBuf {
+        let full = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        match base {
+            Some(b) => full.strip_prefix(b).map(Path::to_path_buf).unwrap_or(full),
+            None => full,
+        }
+    };
     // The files reached, twice: first every `#include` (and every macro name any of
     // them defines), then only those not inside an `#ifdef NAME` whose NAME neither a
     // `-D` nor any of those files defines (such a block is never compiled: the split
@@ -252,7 +467,7 @@ fn compile_key(
     // `#ifdef NAME` keeps its includes.
     let all = include_closure(source, include_dirs, None)?;
     let mut known: std::collections::HashSet<String> = defines.iter().map(|(n, _)| n.to_string()).collect();
-    for text in &all {
+    for (_, text) in &all {
         for line in text.lines() {
             if let Some(rest) = line.trim_start().strip_prefix("#define") {
                 if let Some(name) = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).find(|t| !t.is_empty()) {
@@ -261,7 +476,7 @@ fn compile_key(
             }
         }
     }
-    let texts = include_closure(source, include_dirs, Some(&known))?;
+    let files = include_closure(source, include_dirs, Some(&known))?;
     // Two independent 64-bit hashes (std's SipHash with two seeds' worth of prefix).
     let hash = |seed: u8| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -271,24 +486,29 @@ fn compile_key(
             m.len().hash(&mut h);
             m.modified().ok().hash(&mut h);
         }
-        (entry, stage, target).hash(&mut h);
+        (entries, target).hash(&mut h);
         for d in include_dirs {
-            d.hash(&mut h);
+            rel(d).hash(&mut h);
         }
         defines.hash(&mut h);
-        source.file_name().hash(&mut h);
-        for t in &texts {
-            t.hash(&mut h);
+        rel(source).hash(&mut h);
+        for (path, text) in &files {
+            rel(path).hash(&mut h);
+            text.hash(&mut h);
         }
         h.finish()
     };
     Some(format!("{:016x}{:016x}", hash(1), hash(2)))
 }
 
-/// The texts of `source` and of every file it reaches by `#include "..."` (None: a
-/// file missing, or one that uses `import` / `__include`). With `known`, an include
-/// inside an `#ifdef NAME` block whose NAME is not in `known` is not followed.
-fn include_closure(source: &Path, include_dirs: &[&Path], known: Option<&std::collections::HashSet<String>>) -> Option<Vec<String>> {
+/// The paths and texts of `source` and of every file it reaches by `#include "..."`
+/// (None: a file missing, or one that uses `import` / `__include`). With `known`, an
+/// include inside an `#ifdef NAME` block whose NAME is not in `known` is not followed.
+pub(crate) fn include_closure(
+    source: &Path,
+    include_dirs: &[&Path],
+    known: Option<&std::collections::HashSet<String>>,
+) -> Option<Vec<(PathBuf, String)>> {
     let mut files = vec![source.canonicalize().ok()?];
     let mut texts = Vec::new();
     let mut at = 0;
@@ -329,7 +549,7 @@ fn include_closure(source: &Path, include_dirs: &[&Path], known: Option<&std::co
                 files.push(found);
             }
         }
-        texts.push(text);
+        texts.push((file, text));
     }
     Some(texts)
 }
@@ -509,27 +729,21 @@ pub mod msl_layout {
         dest: &Path,
         defines: &[(&str, &str)],
     ) -> Result<(String, [u32; 3])> {
+        let _ = slangc;
         let reflection = dest.with_extension("json");
-        let output = std::process::Command::new(slangc)
-            .args(["-target", "metal", "-stage", "compute", "-entry", entry])
-            .args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
-            .arg("-I")
-            .arg(root.join("physics"))
-            .arg("-I")
-            .arg(root.join("kernels"))
-            .arg("-o")
-            .arg(dest)
-            .arg("-reflection-json")
-            .arg(&reflection)
-            .arg(source)
-            .output()
-            .with_context(|| format!("spawn {}", slangc.display()))?;
-        if !output.status.success() {
-            bail!(
-                "slangc {entry}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        let include_dirs = [root.join("physics"), root.join("kernels")];
+        super::Slangc {
+            source,
+            entries: &[(entry, "compute")],
+            target: "metal",
+            include_dirs: &include_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            defines,
+            out: dest,
+            out_ext: "metal",
+            reflection: Some(&reflection),
         }
+        .run()
+        .with_context(|| format!("slangc {entry}"))?;
         let json = std::fs::read_to_string(&reflection)?;
         Ok((
             std::fs::read_to_string(dest)?,
@@ -603,69 +817,21 @@ pub mod cuda_layout {
         dest: &Path,
         defines: &[(&str, &str)],
     ) -> Result<CudaKernel> {
+        let _ = slangc;
         let reflection = dest.with_extension("json");
-        // Kept by what the compile depends on (`compile_key`, as for the other targets;
-        // the source's whole path too, which the CUDA source names in its #line
-        // directives): an edit to one kernel file runs slangc again only for the
-        // entries that include it. Both outputs are kept; a hit needs both.
         let include_dirs = [root.join("physics"), root.join("kernels")];
-        let cached = super::compile_key(
-            slangc,
+        super::Slangc {
             source,
-            entry,
-            "compute",
-            &format!("cuda+reflection-json {}", source.display()),
-            &include_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            entries: &[(entry, "compute")],
+            target: "cuda",
+            include_dirs: &include_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
             defines,
-        )
-        .and_then(|key| super::compile_cache_dir().map(|dir| dir.join(key)));
-        let kept = |ext: &str| cached.as_ref().map(|c| c.with_extension(ext));
-        if let (Some(cu), Some(json)) = (kept("cu"), kept("json")) {
-            if cu.is_file() && json.is_file() {
-                std::fs::copy(&json, &reflection)?;
-                std::fs::copy(&cu, dest)?;
-                // (A hit is marked used: tools/modal/fatbin_cache.py drops the least
-                // recently used entries of a shared cache.)
-                let now = std::time::SystemTime::now();
-                for p in [&json, &cu] {
-                    let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(now));
-                }
-                return read_kernel(&reflection, entry);
-            }
+            out: dest,
+            out_ext: "cu",
+            reflection: Some(&reflection),
         }
-        let output = std::process::Command::new(slangc)
-            .args(["-target", "cuda", "-stage", "compute", "-entry", entry])
-            .args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
-            .arg("-I")
-            .arg(root.join("physics"))
-            .arg("-I")
-            .arg(root.join("kernels"))
-            .arg("-o")
-            .arg(dest)
-            .arg("-reflection-json")
-            .arg(&reflection)
-            .arg(source)
-            .output()
-            .with_context(|| format!("spawn {}", slangc.display()))?;
-        if !output.status.success() {
-            bail!(
-                "slangc {entry}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        if let (Some(cu), Some(json)) = (kept("cu"), kept("json")) {
-            // (Written beside their names and renamed, the CUDA source last: another
-            // build may store the same key.)
-            if let Some(dir) = cu.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            for (from, to) in [(&reflection, &json), (&dest.to_path_buf(), &cu)] {
-                let tmp = to.with_extension(format!("tmp{}-{entry}-{}", std::process::id(), to.extension().map_or("", |e| e.to_str().unwrap_or(""))));
-                if std::fs::copy(from, &tmp).is_ok() {
-                    let _ = std::fs::rename(&tmp, to);
-                }
-            }
-        }
+        .run()
+        .with_context(|| format!("slangc {entry}"))?;
         read_kernel(&reflection, entry)
     }
 

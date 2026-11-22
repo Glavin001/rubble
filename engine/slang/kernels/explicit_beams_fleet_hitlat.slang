@@ -107,7 +107,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     uint open = 0u;
     if (lane == 0u)
     {
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(386, m, k, 1u); m < mStop; m++)
         {
             uint own = flOwn(vvMember(off, m));
             open += uint(gAcc[own + FL_OFFERED].load()) + uint(gAcc[own + FL_RESET].load()) + uint(gAcc[own + FL_FIX].load());
@@ -123,7 +123,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     // its room (then fleetLevelsAny, whose levels re-walk such an owner).
     if (lane == 0u) gsCount[0].store(0u);
     sync();
-    for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+    for (uint m = lane, mStop = EB_END(387, m, k, LANES); m < mStop; m += LANES)
     {
         if (flHits(vvMember(off, m)) != 0u) gsOff[gsCount[0].add(1u)] = m;
     }
@@ -133,7 +133,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     {
         uint H = gsCount[0].load();
         uint run = 0u;
-        for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(388, j, H, 1u); j < jStop; j++)
         {
             uint v = vvMember(off, gsOff[j]);
             uint n = flHits(v);
@@ -157,7 +157,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     // The snapshot: a lane a node of a listed hit.
     if (gP.vvSplit != 0u)
     {
-        for (uint x = lane, xStop = EB_END(x, 4u * T, LANES); x < xStop; x += LANES)
+        for (uint x = lane, xStop = EB_END(389, x, 4u * T, LANES); x < xStop; x += LANES)
         {
             uint g = x >> 2u;
             uint j = latOwner(H, g);
@@ -175,18 +175,18 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
         gVvTag = tag;
     }
     // The owners' levels: fleetLevelsAny's rule, partners and rounds.
-    for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+    for (uint m = lane, mStop = EB_END(390, m, k, LANES); m < mStop; m += LANES)
     {
         uint v = vvMember(off, m);
         gNext[flLevelAt(v)] = flHits(v) != 0u ? 1u : 0u;
     }
-    for (uint j = lane, jStop = EB_END(j, H, LANES); j < jStop; j += LANES)
+    for (uint j = lane, jStop = EB_END(391, j, H, LANES); j < jStop; j += LANES)
     {
         uint m = gsOff[j];
         uint v = vvMember(off, m);
         uint2 p = uint2(0u, 0u);
         uint e1 = gNext[flAdjFirst(v + 1u)];
-        for (uint e = gNext[flAdjFirst(v)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+        for (uint e = gNext[flAdjFirst(v)], eStop = EB_END(392, e, e1, 1u); e < eStop; e++)
         {
             uint d = gNext[flAdjAt(e)];
             if ((gNext[flBitsAt(d)] & 5u) != 1u) continue;
@@ -206,12 +206,12 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
         if (lane == 0u) gsUniformLanes = 0u;
         sync();
         bool changed = false;
-        for (uint j = lane, jStop = EB_END(j, H, LANES); j < jStop; j += LANES)
+        for (uint j = lane, jStop = EB_END(393, j, H, LANES); j < jStop; j += LANES)
         {
             uint m = gsOff[j];
             uint v = vvMember(off, m);
             uint l = 1u;
-            for (uint c = 0u, cStop = EB_END(c, H, 1u); c < cStop; c++)
+            for (uint c = 0u, cStop = EB_END(394, c, H, 1u); c < cStop; c++)
             {
                 uint mc = gsOff[c];
                 if (mc >= m) continue;
@@ -233,24 +233,24 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     uint top = 1u;
     if (lane == 0u)
     {
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) top = max(top, gNext[flLevelAt(vvMember(off, m))]);
+        for (uint m = 0u, mStop = EB_END(395, m, k, 1u); m < mStop; m++) top = max(top, gNext[flLevelAt(vvMember(off, m))]);
     }
     top = splitUniform(lane, top);
     // The hits, level by level; with the first, every listed triangle's throttle update and
     // a later owner's reset (unless the throttles' own dispatch made them).
     for (uint l = 1u, lGuard = 0u; l <= top; l++)
     {
-        EB_PASS_UNIFORM(lGuard, EB_MAX_MEMBERS + 1u);
+        EB_PASS_UNIFORM(396, lGuard, EB_MAX_MEMBERS + 1u);
         if (l == 1u && !flPostOn())
         {
-            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            for (uint a = 0u, aStop = EB_END(397, a, k, 1u); a < aStop; a++)
             {
                 uint va = vvMember(off, a);
                 uint own = flOwn(va);
                 uint triOff = gStatic[va * 4u + 1u].x;
                 uint listed = uint(gAcc[own + FL_LISTED].load());
                 bool fix = gAcc[own + FL_FIX].load() != 0;
-                for (uint i = lane, iStop = EB_END(i, listed, LANES); i < iStop; i += LANES)
+                for (uint i = lane, iStop = EB_END(398, i, listed, LANES); i < iStop; i += LANES)
                 {
                     uint gt = triOff + gNext[vvTestedAt(triOff + i)];
                     vvThrottleEnd(gt);
@@ -258,7 +258,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
                 }
             }
         }
-        for (uint x = lane, xStop = EB_END(x, T, LANES); x < xStop; x += LANES)
+        for (uint x = lane, xStop = EB_END(399, x, T, LANES); x < xStop; x += LANES)
         {
             uint j = latOwner(H, x);
             uint a = gsOff[j];
@@ -280,7 +280,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
             kept.f1 = float3(0.0, 0.0, 0.0);
             for (uint ph = 0u; ph < 3u; ph++)
             {
-                for (uint x = lane, xStop = EB_END(x, T, LANES); x < xStop; x += LANES)
+                for (uint x = lane, xStop = EB_END(400, x, T, LANES); x < xStop; x += LANES)
                 {
                     uint j = latOwner(H, x);
                     uint a = gsOff[j];
@@ -303,7 +303,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     // The two-body counts the hits wrote, once all levels are applied.
     if (gP.vvSplit != 0u)
     {
-        for (uint x = lane, xStop = EB_END(x, T, LANES); x < xStop; x += LANES)
+        for (uint x = lane, xStop = EB_END(401, x, T, LANES); x < xStop; x += LANES)
         {
             uint j = latOwner(H, x);
             uint a = gsOff[j];
@@ -319,7 +319,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     gVvTag = 0u;
     gFl = 0u;
     sync();
-    for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
+    for (uint m = lane, mStop = EB_END(402, m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
     flArgsZero(lane);
 }
 
@@ -334,7 +334,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
 void fuseScans(uint lane, uint s)
 {
     uint pairs = gNext[flAdjFirst(gP.vehicles)] / 2u;
-    for (uint p = lane, pStop = EB_END(p, pairs, LANES); p < pStop; p += LANES)
+    for (uint p = lane, pStop = EB_END(403, p, pairs, LANES); p < pStop; p += LANES)
     {
         uint va = gNext[gP.vvPairs + 2u * p];
         if (!flVehicleOn(va))
@@ -355,7 +355,7 @@ void fuseSortCands(uint va, uint lane, bool build)
     sync();
     // (A build of the kept candidates, PERF_FLEET_KEEP: its own run's, fkSortCand's.)
     uint cands = build ? fkCands(va) : flCands(va);
-    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+    for (uint e = lane, eStop = EB_END(404, e, cands, LANES); e < eStop; e += LANES)
     {
         if (build) fkSortCandOf(va, e);
         else flSortCand(va, e);

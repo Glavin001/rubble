@@ -294,7 +294,7 @@ Tests:
 | World: vehicle into a free 1200 kg box (`engine-world/tests/explicit_vehicles.rs`) | ΔP 1.4e-6 of P through the World's impulse path; box 13.1 m/s in [11.37, 22.75]; kinetic energy lost |
 | World: vehicle at 20 m/s into the prefractured cuboid house (826 chunks, threshold) | bonds break in the step of first contact, the house splits, freed pieces move, none faster than 2 × 20 m/s (fastest 0.72 m/s) |
 
-Frame times (`engine-world/examples/explicit_vehicles_bench.rs`): the crash town, repo sedans at
+Frame times (`engine-world-lab/examples/explicit_vehicles_bench.rs`): the crash town, repo sedans at
 15–18 m/s, one house per four vehicles, World steps of 1/60 s (33–34 explicit steps each), GPU ms
 per World step from the step's own timestamps (median / p95):
 
@@ -706,7 +706,7 @@ members of a contact group sleep together, when every member's count has reached
 sleeping vehicle is not stepped at all, its step counter stands, and on waking it resumes
 exactly where it was frozen.
 
-**Thresholds, from the solver's resting floor** (`engine-softbody/examples/sleep_probe.rs`).
+**Thresholds, from the solver's resting floor** (`engine-softbody-lab/examples/sleep_probe.rs`).
 The repo sedan parked on its beam tyres never comes to rest: a tyre node chatters against the
 ground for good at 0.112 m/s with a 57 µm stroke (the RoR ground rule's two-step limit
 cycle), RMS node speed 6 to 10 mm/s, KE 2–5·10⁻⁵ J/kg, while no node leaves a 57 µm box. An

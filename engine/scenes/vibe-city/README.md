@@ -20,7 +20,7 @@ cd engine/scenes/vibe-city
 bun install
 bun run export.ts            # all presets, ~8 s, ~90 MB
 bun run export.ts hut tower  # a subset
-cargo test --release --manifest-path ../../Cargo.toml -p engine-fracture --test pack -- --nocapture
+cargo test --release --manifest-path ../../Cargo.toml -p engine-fracture --test host pack:: -- --nocapture
 ```
 
 `tsconfig.json` maps `@/lib/stress/*` to `src/`, Rapier to the shim and

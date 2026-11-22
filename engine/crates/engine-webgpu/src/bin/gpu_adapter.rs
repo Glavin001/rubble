@@ -87,7 +87,7 @@ fn compile_timing(device: &wgpu::Device, spec: &str) {
     let path = if name.contains('/') {
         name.to_string()
     } else {
-        format!("{}/{name}.wgsl", engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR)
+        engine_webgpu::explicit_wgsl_path(name).display().to_string()
     };
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let entries: Vec<String> = src

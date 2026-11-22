@@ -15,10 +15,10 @@ on CPU, the GPU solver, the page's `?mod=`. It is plain, editable JBeam. sedan1 
 the two-tier sedan are untouched; gen2 is a new selectable car.
 
 ```bash
-cargo run --release -p engine-softbody --example gen2_export          # writes engine/crates/engine-webgpu/__mods/gen2 (gitignored)
-cargo run --release -p engine-softbody --example gen2_crash -- \
+cargo run --release -p engine-softbody-lab --example gen2_export          # writes engine/crates/engine-webgpu/__mods/gen2 (gitignored)
+cargo run --release -p engine-softbody-lab --example gen2_crash -- \
     engine/crates/engine-webgpu/__mods/gen2 gen2 gen2.pc rest wall pole   # CPU references
-cargo run --release -p engine-softbody --example vehicle_compare -- --cars sedan1,etkk,gen2
+cargo run --release -p engine-softbody-lab --example vehicle_compare -- --cars sedan1,etkk,gen2
 # page: softbody.html?solver=explicit&mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast&xscene=wall56
 ```
 

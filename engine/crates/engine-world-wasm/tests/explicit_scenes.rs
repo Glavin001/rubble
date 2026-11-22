@@ -291,7 +291,7 @@ fn mdb_side_impact_of(label: &str, vehicle: serde_json::Value, assert_band: bool
     // MDB_WHO=1: the struck car's yielded and broken beams on its struck
     // half, by part pair (the showcase car's skeleton names the parts).
     if std::env::var("MDB_WHO").is_ok() && label == "showcase" {
-        use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+        use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
         let b = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None }).unwrap();
         let sk = &b.skeleton;
         let name = |i: u32| -> String {
@@ -408,7 +408,7 @@ fn mdb_into_the_sedan_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
 #[test]
 #[ignore = "open: the showcase car's residual side crush is 364 mm (spread 98-219 mm)"]
 fn mdb_into_the_showcase_car_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
-    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
     // (SHOWCASE_STYLE picks the car, `sedan` by default.)
     let st = std::env::var("SHOWCASE_STYLE").unwrap_or_else(|_| "sedan".into());
     let truck = build(&style(&st).unwrap(), &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None })
@@ -424,7 +424,7 @@ fn mdb_into_the_showcase_car_conserves_energy_and_crushes_in_the_fmvss_214_sprea
 /// 483 mm at the bumper), so the barrier never collapses to a sheet.
 #[test]
 fn mdb_keeps_its_shape_against_the_sedan_and_the_showcase_car() {
-    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
     let showcase = build(
         &style("sedan").unwrap(),
         &BuildParams { resolution: Resolution::parse("medium").unwrap(), strength: 1.0, paint: None },

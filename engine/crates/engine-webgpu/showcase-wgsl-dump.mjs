@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Write the showcase car renderer's skin modules (SHOWCASE_SKIN_WGSL: the
 // solver-buffer and positions-buffer variants) to a directory, for
-// `cargo run -p engine-webgpu --release --example wgsl_validate`.
+// `cargo run -p engine-webgpu-lab --release --example wgsl_validate`.
 //   node showcase-wgsl-dump.mjs <dir>
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';

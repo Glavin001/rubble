@@ -1,0 +1,53 @@
+# Sources over the size limit (tools/build-time/check.py: Rust 1500 lines,
+# Slang 3000) when the limit was set, each with the most lines it may have.
+# They may shrink (check.py --shrink lowers the numbers), not grow: split a
+# file instead, or raise its line in the same change, where review sees it.
+crates/engine-exec/src/explicit_plan.rs 3899
+crates/engine-exec/src/rigid_plan.rs 2269
+crates/engine-ffi/src/lib.rs 3650
+crates/engine-fracture/src/plan.rs 1548
+crates/engine-metal/src/world.rs 1759
+crates/engine-softbody-authoring/src/authoring/gen2/model.rs 3762
+crates/engine-softbody-authoring/src/authoring/gen2/rig.rs 5303
+crates/engine-softbody-authoring/src/authoring/gen2/sedan.rs 1628
+crates/engine-softbody-authoring/src/authoring/parts/body.rs 1637
+crates/engine-softbody-authoring/src/authoring/parts/design.rs 1690
+crates/engine-softbody-authoring/src/authoring/sedan.rs 3217
+crates/engine-softbody-authoring/src/authoring/skeleton.rs 1573
+crates/engine-softbody-authoring/src/authoring/skin.rs 3107
+crates/engine-softbody-authoring/src/authoring/vehicle.rs 6386
+crates/engine-softbody-authoring/src/vehicle_compare.rs 3323
+crates/engine-softbody-authoring/tests/crash_invariants.rs 2586
+crates/engine-softbody-authoring/tests/host/authoring_census.rs 1511
+crates/engine-softbody-authoring/tests/showcase_car.rs 9195
+crates/engine-softbody-lab/examples/sedan_stiffness.rs 1589
+crates/engine-softbody-lab/examples/showcase_probe.rs 2724
+crates/engine-softbody/src/explicit_beams.rs 5881
+crates/engine-softbody/src/explicit_contact.rs 1761
+crates/engine-softbody/src/explicit_drive.rs 1576
+crates/engine-softbody/src/explicit_jbeam_ext.rs 1697
+crates/engine-softbody/src/jbeam.rs 2446
+crates/engine-softbody/src/truck.rs 2469
+crates/engine-terrain/src/material.rs 1938
+crates/engine-terrain/src/plan.rs 2313
+crates/engine-vehiclegen/src/solid.rs 1707
+crates/engine-webgpu/src/bin/explicit_beams_scaling.rs 2193
+crates/engine-webgpu/src/explicit_beams_gpu.rs 5132
+crates/engine-webgpu/src/gpu.rs 4952
+crates/engine-webgpu/src/gpu_tests.rs 5313
+crates/engine-webgpu/tests/vehicle.rs 1922
+crates/engine-webgpu/tests/vehicle_debug.rs 1606
+crates/engine-world-lab/examples/vehicle_lab.rs 3357
+crates/engine-world-wasm/src/explicit.rs 1506
+crates/engine-world/src/destruction.rs 1609
+crates/engine-world/src/lab.rs 1775
+crates/engine-world/src/lib.rs 3840
+crates/engine-world/src/play/showcase.rs 1963
+crates/engine-world/src/threshold.rs 4061
+crates/engine-world/src/vehicle_lab/mod.rs 3630
+experiments/gpu-floor/src/floor.rs 1950
+slang/kernels/explicit_beams.slang 11645
+slang/kernels/explicit_beams_baseline.slang 3609
+slang/kernels/explicit_beams_ref.slang 4932
+slang/kernels/terrain_mpm.slang 3729
+slang/kernels/world_step.slang 8307

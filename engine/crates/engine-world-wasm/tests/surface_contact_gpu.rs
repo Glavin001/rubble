@@ -4,7 +4,7 @@
 //! position and velocity after each frame, surface contact off (the default path
 //! unchanged) and on. Then the oblique (75°) pole and the frontal pole with it on.
 
-use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::FrameClock;
 use engine_world_wasm::ExplicitSim;
 use glam::Vec3;

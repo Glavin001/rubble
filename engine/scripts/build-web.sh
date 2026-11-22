@@ -29,6 +29,23 @@
 #            (needs the other three parts' outputs in engine-webgpu/generated/)
 set -euo pipefail
 
+# RUBBLE_WEB_PROFILE=fast: a local build to iterate on. The engine's wasm and host tools
+# build with the `fast` profile (no link-time optimisation, incremental) and no wasm-opt,
+# and the world wasm gets no Asyncify build (pages that need it, Safari's, need a release
+# build). A Rust edit rebuilds the world wasm in about 5 s instead of 44, and the world
+# wasm reads its kernels at run time from generated/kernels/, so a kernel edit needs no
+# wasm rebuild at all: `cargo run --profile fast -p engine-webgpu --bin kernels --
+# --copy-to crates/engine-webgpu/generated/kernels` and a reload
+# (engine/docs/measurements/build-time.md). The physics is the same; the host code runs
+# slower than in release, so never measure with it. Default release: Vercel and CI.
+WEB_PROFILE="${RUBBLE_WEB_PROFILE:-release}"
+case "$WEB_PROFILE" in
+  release) PROFILE_ARGS=(--release); WASM_PACK_PROFILE=(--release) ;;
+  fast) PROFILE_ARGS=(--profile fast); WASM_PACK_PROFILE=(--profile fast --no-opt) ;;
+  *) echo "RUBBLE_WEB_PROFILE: release or fast, not '$WEB_PROFILE'" >&2; exit 1 ;;
+esac
+export RUBBLE_WEB_PROFILE="$WEB_PROFILE"
+
 PARTS=" ${RUBBLE_WEB_PARTS:-kernels world stress site} "
 for web_part in $PARTS; do
   case "$web_part" in
@@ -174,19 +191,30 @@ done
 if part kernels; then
   step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
   # Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
-  cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
+  cargo run "${PROFILE_ARGS[@]}" -p engine-webgpu --no-default-features --bin wgsl_export
+  # (A release build embeds them: no kernels/ folder ships, not even a fast build's.)
+  rm -rf "$WEB/generated/kernels"
+  if [[ "$WEB_PROFILE" == fast ]]; then
+    # The fast build's world wasm reads its kernels at run time from generated/kernels/
+    # (engine-webgpu kernel_store): the native store for the current sources, copied. A
+    # kernel edit for the pages is then this step and a reload, no wasm rebuild.
+    cargo run -q --profile fast -p engine-webgpu --bin kernels -- --copy-to "$WEB/generated/kernels" >/dev/null
+  fi
 fi
 if part stress; then
   step "Fracture scene wasm (the unit tests; the page loads it inside the world wasm)"
-  wasm-pack build crates/engine-fracture-wasm --release --target web \
+  wasm-pack build crates/engine-fracture-wasm "${WASM_PACK_PROFILE[@]}" --target web \
     --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
 fi
 if part world; then
   step "World wasm (engine-world-wasm: the pages' physics host, the fracture lab's scenes, Broadside)"
   # the vehicle generator (engine-vehiclegen) for the vehicle designer page
-  wasm-pack build crates/engine-vehiclegen-wasm --release --target web \
+  wasm-pack build crates/engine-vehiclegen-wasm "${WASM_PACK_PROFILE[@]}" --target web \
     --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
-  CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
+  # (The fast build's world wasm reads its kernels from generated/kernels/ at run time.)
+  world_kernels=embed
+  [[ "$WEB_PROFILE" == fast ]] && world_kernels=runtime
+  RUBBLE_KERNELS=$world_kernels CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm "${WASM_PACK_PROFILE[@]}" --target web \
     --out-dir ../engine-webgpu/generated/world-wasm
 fi
 if part stress; then
@@ -237,7 +265,10 @@ world_asyncify() {
   mkdir -p "$WORLD_ASYNCIFY"
   "$WASM_OPT" "$WORLD_WASM" "${ASYNCIFY_ARGS[@]}" -o "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm"
 }
-if part world; then
+if part world && [[ "$WEB_PROFILE" == fast ]]; then
+  # (No Asyncify build in a fast build: an older one would not match the new wasm.)
+  rm -f "${WORLD_WASM%.wasm}.asyncify.wasm"
+elif part world; then
   WORLD_ASYNCIFY="$(mktemp -d)/asyncify"
   cached world-asyncify "$( (cat "$WORLD_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
     "$WORLD_ASYNCIFY" world_asyncify
@@ -251,8 +282,10 @@ if ! part site; then
 fi
 # The site takes engine-webgpu/generated/ as it is: the other parts' outputs must be
 # there (built above, or by the runs that built those parts).
+world_asyncify_file=world-wasm/engine_world_wasm_bg.asyncify.wasm
+[[ "$WEB_PROFILE" == fast ]] && world_asyncify_file=""
 for f in wgsl/manifest.json vehicle_wasm fracture-wasm vehiclegen-wasm \
-  "${WORLD_WASM#"$WEB/generated/"}" world-wasm/engine_world_wasm_bg.asyncify.wasm \
+  "${WORLD_WASM#"$WEB/generated/"}" $world_asyncify_file \
   "${STRESS_WASM#"$WEB/generated/"}" stress-web/stress_web_bg.asyncify.wasm; do
   if [[ ! -e "$WEB/generated/$f" ]]; then
     echo "error: generated/$f is missing: build the part that makes it (RUBBLE_WEB_PARTS)" >&2
@@ -260,11 +293,11 @@ for f in wgsl/manifest.json vehicle_wasm fracture-wasm vehiclegen-wasm \
   fi
 done
 step "Scene snapshots (scene_export, host build)"
-cargo run --release -p engine-scenes --no-default-features --bin scene_export
+cargo run "${PROFILE_ARGS[@]}" -p engine-scenes --no-default-features --bin scene_export
 
 step "Generated sedan (the generator and rigger, run)"
 # Rubble's generated sedan is built here from its code (engine-vehiclegen's design,
-# engine-softbody's rigger: the vehicle_gen_rig example), never committed: the BeamNG mod
+# engine-softbody-lab's rigger: the vehicle_gen_rig example), never committed: the BeamNG mod
 # folder the vehicle lab and softbody.html load from __mods/sedan_new (JBeam, .pc, .glb,
 # .rskin and files.json). A local $OUT/__mods that is a link to one's own mods folder
 # (which may hold community cars, local only) is kept as it is and used instead.
@@ -275,14 +308,15 @@ if [[ -L "$OUT/__mods" ]]; then
 else
   SEDAN_DIR="$(mktemp -d)/sedan_new"
   gen_sedan() {
-    cargo run --release -p engine-softbody --example vehicle_gen_rig -- sedan --out "$SEDAN_DIR"
+    cargo run "${PROFILE_ARGS[@]}" -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out "$SEDAN_DIR"
   }
   # The design is built in memory from the generator's own parameters: its output
   # depends only on these crates' sources, the lock file and the compiler.
   sedan_key="$( ( (git ls-files -z crates/engine-vehiclegen crates/engine-softbody \
-    crates/engine-vehicle crates/engine-schema Cargo.toml Cargo.lock rust-toolchain.toml \
+    crates/engine-softbody-authoring crates/engine-vehicle crates/engine-schema Cargo.toml \
+    Cargo.lock rust-toolchain.toml \
     ':(exclude,glob)crates/*/tests/**' ':(exclude,glob)crates/*/examples/**'
-    printf '%s\0' crates/engine-softbody/examples/vehicle_gen_rig.rs) | sort -z | xargs -0 cat
+    printf '%s\0' crates/engine-softbody-lab/examples/vehicle_gen_rig.rs) | sort -z | xargs -0 cat
     rustc --version) | key)"
   cached sedan "$sedan_key" "$SEDAN_DIR" gen_sedan
 fi

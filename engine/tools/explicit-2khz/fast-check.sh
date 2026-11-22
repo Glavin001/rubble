@@ -36,7 +36,10 @@ bin="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 # The machine's one GPU job at a time: the whole check under one hold of the lock (a hold
 # a fixture would wait behind another job's minutes each time), the build before it.
 if [ -z "$FAST_CHECK_LOCKED" ]; then
-  cargo build $flag -p engine-world --example vehicle_lab 2>&1 | grep -E "^error" -A12
+  cargo build $flag -p engine-world-lab --example vehicle_lab 2>&1 | grep -E "^error" -A12
+  # The kernels compiled for the current sources before the GPU lock is taken (with the
+  # fast profile they are compiled at run time, on first use: engine-webgpu kernel_store).
+  cargo run -q $flag -p engine-webgpu --bin kernels >/dev/null || exit 1
   [ -x "$bin" ] || { echo "no $bin"; exit 1; }
   exec python3 "$engine/scripts/with-gpu-lock.py" --limit "${LIMIT:-590}" -- env RUBBLE_GPU_LOCK=0 FAST_CHECK_LOCKED=1 sh "$0" "$@"
 fi

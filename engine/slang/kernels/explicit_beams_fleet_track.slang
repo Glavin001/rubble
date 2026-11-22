@@ -163,7 +163,7 @@ void fkTrackVehicle(uint v, uint lane)
     int3 sum = int3(0, 0, 0);
     bool sampled = false;
     uint hot = (gNext[fkCtl(FK_PASS)] >> 8u) + FK_HOT;
-    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(446, i, r0.y, LANES); i < iStop; i += LANES)
     {
         uint n = r0.x + i;
         float4 ref = gBeams[fkRef(n)];

@@ -16,7 +16,7 @@ shift || true
 ALL=(building-blast-20 building-blast-60 slab-columns-on slab-columns-off block-columns-on block-columns-off crush-wall-conserve)
 RUNS=("${@:-${ALL[@]}}")
 mkdir -p "$OUT/json"
-(cd "$ENGINE" && cargo build --release -p engine-world --example reaction_replay)
+(cd "$ENGINE" && cargo build --release -p engine-world-lab --example reaction_replay)
 BIN="$ENGINE/target/release/examples/reaction_replay"
 JSONS=()
 for run in "${RUNS[@]}"; do

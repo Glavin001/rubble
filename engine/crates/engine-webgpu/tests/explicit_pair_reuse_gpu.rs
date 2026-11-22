@@ -59,7 +59,7 @@ fn compare(label: &str, fleet: &[ExplicitBeams], frames: u32, steps: u32) -> Opt
 }
 
 fn gen_sedan() -> String {
-    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
     build(
         &style("sedan").unwrap(),
         &BuildParams {

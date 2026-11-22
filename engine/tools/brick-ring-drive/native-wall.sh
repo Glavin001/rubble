@@ -3,7 +3,7 @@
 # brick_ring_drive_probe with the car spawned 20 m out at 30 m/s, 4 s, BR_PHASES=1 (segment
 # means over the run), n = 1 then n = 2; each run under tools/explicit-2khz/bounded.sh
 # (the GPU lock, a 600 s kill). From engine/ after
-#   cargo build --release -p engine-world --example brick_ring_drive_probe
+#   cargo build --release -p engine-world-lab --example brick_ring_drive_probe
 cd "$(dirname "$0")/../.." || exit 1
 for n in ${NS:-1 2}; do
   echo "== native ETK n=$n, struck at 30 m/s"

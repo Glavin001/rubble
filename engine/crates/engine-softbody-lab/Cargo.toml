@@ -1,0 +1,16 @@
+[package]
+name = "engine-softbody-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The soft-body crates' tools and probes (examples), apart from the crates so their tests do not build them"
+publish = false
+
+[dependencies]
+engine-softbody.workspace = true
+engine-softbody-authoring.workspace = true
+engine-vehiclegen.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+png = "0.18"
+bcdec_rs = "0.2.1"

@@ -48,7 +48,7 @@ void splitCplTable(uint off, uint k)
     if (k > CPL_GS_VEHICLES) return;
     uint base = 0u;
     uint nodeBase = 0u;
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END(502, m, k, 1u); m < mStop; m++)
     {
         cplGsAdd(m, vvMember(off, m), base, nodeBase);
         base += gsCpl[CPL_GS_TAB + 5u * m + 2u];
@@ -227,11 +227,11 @@ void splitGroupBegin(uint g, uint lane)
     {
         if (sleepGroupSkip(off, k, lane)) return;
     }
-    for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(503, i, k, LANES); i < iStop; i += LANES)
     {
         uint v = gNext[gP.vvMembers + off + i];
         uint rank = 0u;
-        for (uint j = 0u, jStop = EB_END(j, k, 1u); j < jStop; j++) rank += gNext[gP.vvMembers + off + j] < v ? 1u : 0u;
+        for (uint j = 0u, jStop = EB_END(504, j, k, 1u); j < jStop; j++) rank += gNext[gP.vvMembers + off + j] < v ? 1u : 0u;
         gNext[gP.vvMembers + gP.vehicles + off + rank] = v;
         gMisc[vvRec(v, VV_MEMBER)].x = rank;
     }
@@ -241,12 +241,12 @@ void splitGroupBegin(uint g, uint lane)
     if (gP.vvFleetNext != 0u)
     {
         uint base = gMisc[vvMember(off, 0u)].w;
-        for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES) gNext[flVehAt(0u, vvMember(off, i))] = base;
+        for (uint i = lane, iStop = EB_END(505, i, k, LANES); i < iStop; i += LANES) gNext[flVehAt(0u, vvMember(off, i))] = base;
     }
     if (lane == 0u)
     {
         uint run = 0u;
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(506, m, k, 1u); m < mStop; m++)
         {
             gNext[vvPrefixAt(off, m)] = run;
             run += vvCpCount(vvMember(off, m));
@@ -254,10 +254,10 @@ void splitGroupBegin(uint g, uint lane)
         // The coupling list's frame maxima cleared (contactGroup's frame start;
         // cplListBegin reads the header from workgroup memory: coupleBegin first).
         coupleBegin();
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplListBegin(vvMember(off, m));
+        for (uint m = 0u, mStop = EB_END(507, m, k, 1u); m < mStop; m++) cplListBegin(vvMember(off, m));
     }
     sync();
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END_UNIFORM(508, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
 }
 
 // The step word of a parameter copy (gP.pad2): the step, with the phase in its top bits.
@@ -377,7 +377,7 @@ void splitGroupStep(uint g, uint lane, uint word)
         {
             if (lane == 0u)
             {
-                for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
+                for (uint m = 0u, mStop = EB_END(509, m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
             }
             longest = splitUniform(lane, longest);
         }
@@ -465,7 +465,7 @@ void splitGroupEnd(uint off, uint k, uint lane, uint s)
     // Vehicle sleep: each member's rule on the motion its steps marked; the members fall
     // asleep together (contactGroup's, its marks already in the flags).
     if (gP.sleepRec != 0u) sleepGroupEnd(off, k, lane, uint2(0u, 0u), gP.steps);
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END_UNIFORM(510, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }
 
 #ifdef EB_VV_GLOBAL
@@ -500,17 +500,17 @@ void splitTests(uint g, uint part, uint lane, uint word)
     if ((word & SPLIT_LEVELS) == 0u)
     {
         uint total = 0u;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += uint(gAcc[gVvC + 3u * VV_PART + a].load());
+        for (uint a = 0u, aStop = EB_END(511, a, k, 1u); a < aStop; a++) total += uint(gAcc[gVvC + 3u * VV_PART + a].load());
         // (Parts of a triangle's cells or candidates: as many as the group's threads
         // here hold, the same pairs listed whatever the count.)
         uint subs = clamp(stride / max(total, 1u), 1u, 64u);
-        for (uint p = at0, pStop = EB_END(p, total * subs, stride); p < pStop; p += stride)
+        for (uint p = at0, pStop = EB_END(512, p, total * subs, stride); p < pStop; p += stride)
         {
             uint q = p / subs;
             uint a = 0u;
             for (uint c = 0u, cGuard = 0u; c + 1u < k; c++)
             {
-                EB_PASS(cGuard);
+                EB_PASS(513, cGuard);
                 uint n = uint(gAcc[gVvC + 3u * VV_PART + a].load());
                 if (q < n) break;
                 q -= n;
@@ -533,18 +533,18 @@ void splitTests(uint g, uint part, uint lane, uint word)
     if (!vvList) return;
     // The listed pairs, a lane each; an owner past the list's room tests inline.
     uint total = 0u;
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(514, a, k, 1u); a < aStop; a++)
     {
         uint n = uint(gAcc[gVvC + a].load());
         total += n <= TRI_PAIR_CAP ? n : 0u;
     }
-    for (uint p = at0, pStop = EB_END(p, total, stride); p < pStop; p += stride)
+    for (uint p = at0, pStop = EB_END(515, p, total, stride); p < pStop; p += stride)
     {
         uint q = p;
         uint a = 0u;
         for (uint c = 0u, cGuard = 0u; c < k; c++)
         {
-            EB_PASS(cGuard);
+            EB_PASS(516, cGuard);
             uint n = uint(gAcc[gVvC + c].load());
             n = n <= TRI_PAIR_CAP ? n : 0u;
             if (q < n)
@@ -559,16 +559,16 @@ void splitTests(uint g, uint part, uint lane, uint word)
         vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
     }
     uint over = 0u;
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END(517, a, k, 1u); a < aStop; a++)
         over += uint(gAcc[gVvC + a].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 3u * VV_PART + a].load()) : 0u;
     uint subs = clamp(stride / max(over, 1u), 1u, 64u);
-    for (uint p = at0, pStop = EB_END(p, over * subs, stride); p < pStop; p += stride)
+    for (uint p = at0, pStop = EB_END(518, p, over * subs, stride); p < pStop; p += stride)
     {
         uint q = p / subs;
         uint a = 0u;
         for (uint c = 0u, cGuard = 0u; c < k; c++)
         {
-            EB_PASS(cGuard);
+            EB_PASS(519, cGuard);
             uint n = uint(gAcc[gVvC + c].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 3u * VV_PART + c].load()) : 0u;
             if (q < n)
             {
@@ -809,7 +809,7 @@ void splitGroupLevelsOnce(uint g, uint lane, uint word)
     {
         if (lane == 0u)
         {
-            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
+            for (uint m = 0u, mStop = EB_END(520, m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
         }
         longest = splitUniform(lane, longest);
     }

@@ -16,6 +16,7 @@
 //! as on the Metal and CUDA hosts; this file only creates the wgpu objects and
 //! replays the commands.
 
+use crate::explicit_modules::{host_wgsl, module_wgsl};
 use crate::{
     EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
     EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_WGSL,
@@ -1143,18 +1144,6 @@ fn params_window(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
     })
 }
 
-/// Measurement only: the explicit modules' WGSL read from another build's generated
-/// directory (`NAME.wgsl`, e.g. a copy of an older build's `OUT_DIR/wgsl`) instead of
-/// this build's, for the pipelines created after the call (`None`: this build's). With
-/// it, one process runs an older kernel against the current one from one snapshot
-/// (`vehicle_lab --ab-switch kernel`): bit for bit and time. Process-wide.
-#[doc(hidden)]
-pub fn set_explicit_module_override(dir: Option<std::path::PathBuf>) {
-    *MODULE_OVERRIDE.lock().unwrap() = dir;
-}
-
-static MODULE_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
-
 /// Which of wgpu's injected runtime checks the explicit modules created after the call
 /// are compiled without (a mask: 1 the bounds checks on every array and buffer access, 2
 /// the forced bound on every loop, 4 the integer-division guards; 0: every check).
@@ -1233,74 +1222,6 @@ pub(crate) fn shader_module_without(device: &wgpu::Device, desc: wgpu::ShaderMod
     // every state word of every fixture and scenario row is the checked build's (§8.48).
     unsafe { device.create_shader_module_trusted(desc, checks) }
 }
-
-fn module_override(name: &str) -> Option<&'static str> {
-    type Cache = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, &'static str>>;
-    static READ: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
-    let dir = MODULE_OVERRIDE.lock().unwrap().clone()?;
-    let path = dir.join(format!("{name}.wgsl"));
-    let mut cache = READ.get_or_init(Default::default).lock().unwrap();
-    let text = cache.entry(path.clone()).or_insert_with(|| {
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        Box::leak(text.into_boxed_str())
-    });
-    Some(*text)
-}
-
-/// A module's WGSL as the host creates its pipeline: the uniform-load rewrite
-/// ([`crate::uniformize_workgroup_lanes`]), then with bit-exact results off the strict
-/// arithmetic's rewrite ([`crate::fast_float_wgsl`]; `bit_exact`: the build's text as
-/// before).
-fn host_wgsl(src: &str, bit_exact: bool) -> String {
-    let u = crate::uniformize_workgroup_lanes(src);
-    if bit_exact {
-        u
-    } else {
-        crate::fast_float_wgsl(&u).into_owned()
-    }
-}
-
-/// The WGSL of a plan module ([`engine_exec::explicit_plan::MODULES`]).
-fn module_wgsl(name: &str) -> &'static str {
-    if let Some(text) = module_override(name) {
-        return text;
-    }
-    match name {
-        "explicit_beams" => EXPLICIT_BEAMS_WGSL,
-        "explicit_beams_wide" => EXPLICIT_BEAMS_WIDE_WGSL,
-        "explicit_beams_aero" => EXPLICIT_BEAMS_AERO_WGSL,
-        "explicit_beams_aero_wide" => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
-        "explicit_beams_solo" => EXPLICIT_BEAMS_SOLO_WGSL,
-        "explicit_beams_solo_wide" => EXPLICIT_BEAMS_SOLO_WIDE_WGSL,
-        "explicit_beams_solo_aero" => EXPLICIT_BEAMS_SOLO_AERO_WGSL,
-        "explicit_beams_solo_aero_wide" => EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
-        "explicit_beams_contact" => EXPLICIT_BEAMS_CONTACT_WGSL,
-        "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
-        "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
-        "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
-        "explicit_beams_sleep_list" => crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL,
-        _ => EXPLICIT_BEAMS_VV_PASSES
-            .iter()
-            .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
-            .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
-            .chain(crate::EXPLICIT_BEAMS_NOCPL.iter())
-            .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
-            .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
-            .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
-            .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
-            .chain(crate::EXPLICIT_BEAMS_WIDE_LIST.iter())
-            .chain(SELF_SPLIT_ABLATE.iter())
-            .find(|(n, _)| *n == name)
-            .map(|(_, w)| *w)
-            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name} (a measurement module needs the `test-kernels` feature)")),
-    }
-}
-
-/// The self split's ablation modules (measurement; built with the `test-kernels` feature).
-#[cfg(feature = "test-kernels")]
-const SELF_SPLIT_ABLATE: &[(&str, &str)] = &crate::EXPLICIT_BEAMS_SELF_SPLIT_ABLATE;
-#[cfg(not(feature = "test-kernels"))]
-const SELF_SPLIT_ABLATE: &[(&str, &str)] = &[];
 
 /// A frame kernel's module for an upload: [`Kernel::module_for`], and with surface
 /// contact but without the World's coupling (`coupled` false) its `_nocpl` twin
@@ -3859,10 +3780,7 @@ impl ExplicitBeamsGpu {
                 mapped_at_creation: false,
             }));
         }
-        let read = |name: &str| {
-            let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e} (the test kernels are built with engine-webgpu's `test-kernels` feature)"))
-        };
+        let read = crate::explicit_modules::variant_wgsl;
         let (aero, big, lanes) = self.module_kind;
         let (prefix, suffix) = match variant {
             KernelVariant::Baseline => ("explicit_baseline_", ""),
@@ -3955,7 +3873,7 @@ impl ExplicitBeamsGpu {
         let plan = ["bounds", "pairs", "group"].map(|p| {
             let e = format!("explicit_beams_vv_{p}");
             if matches!(variant, KernelVariant::CurrentDet | KernelVariant::Ablate) && prefix != "explicit_baseline_" {
-                let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1;
+                let wgsl = EXPLICIT_BEAMS_VV_PASSES.iter().find(|(n, _)| *n == e).unwrap().1.text();
                 make(&e, wgsl, &plan_layout)
             } else if variant == KernelVariant::Reference {
                 make(&e, &read(&format!("explicit_ref_{e}")), &plan_layout)
@@ -5107,18 +5025,18 @@ impl Wide {
 pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     let u = crate::uniformize_workgroup_lanes;
     let mut out: Vec<(String, &'static str, String)> = vec![
-        ("explicit_beams".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_WGSL)),
-        ("explicit_beams_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_WIDE_WGSL)),
-        ("explicit_beams_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_AERO_WGSL)),
-        ("explicit_beams_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_AERO_WIDE_WGSL)),
-        ("explicit_beams_solo".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_WGSL)),
-        ("explicit_beams_solo_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_WIDE_WGSL)),
-        ("explicit_beams_solo_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_AERO_WGSL)),
-        ("explicit_beams_solo_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL)),
-        ("explicit_beams_contact".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WGSL)),
-        ("explicit_beams_contact_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WIDE_WGSL)),
-        ("explicit_beams_contact_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WGSL)),
-        ("explicit_beams_contact_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL)),
+        ("explicit_beams".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_WGSL)),
+        ("explicit_beams_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_WIDE_WGSL)),
+        ("explicit_beams_aero".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_AERO_WGSL)),
+        ("explicit_beams_aero_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_AERO_WIDE_WGSL)),
+        ("explicit_beams_solo".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_WGSL)),
+        ("explicit_beams_solo_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_WIDE_WGSL)),
+        ("explicit_beams_solo_aero".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_AERO_WGSL)),
+        ("explicit_beams_solo_aero_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL)),
+        ("explicit_beams_contact".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_WGSL)),
+        ("explicit_beams_contact_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_WIDE_WGSL)),
+        ("explicit_beams_contact_aero".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_AERO_WGSL)),
+        ("explicit_beams_contact_aero_wide".into(), "explicit_beams_frame", u(&EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL)),
     ];
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
@@ -5127,7 +5045,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         let entry = if n.contains("contact_big") { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
         out.push((n.to_string(), entry, u(w)));
     }
-    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
+    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(&crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
         let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
         out.push((n.to_string(), entry, u(w)));

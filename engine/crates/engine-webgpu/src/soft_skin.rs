@@ -37,7 +37,7 @@ impl SoftSkinner {
         let device = sim.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("soft_skin"),
-            source: wgpu::ShaderSource::Wgsl(SOFT_SKIN_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(SOFT_SKIN_WGSL.text().into()),
         });
         let pipe = |entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

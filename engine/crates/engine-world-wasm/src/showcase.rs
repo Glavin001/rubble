@@ -1,4 +1,4 @@
-//! The authored showcase vehicles (`engine_softbody::authoring`) for pages: the
+//! The authored showcase vehicles (`engine_softbody_authoring::authoring`) for pages: the
 //! node–beam skeleton as `.truck` text for `WebWorld::explicitSim` (and every
 //! other `.truck` consumer), and the visual skin bound to it, as typed arrays for
 //! `showcase-car-render.mjs`.
@@ -8,8 +8,8 @@
 //! paint: [r, g, b] (linear) }`.
 
 use crate::err;
-use engine_softbody::authoring::skin::{showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES};
-use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
+use engine_softbody_authoring::authoring::skin::{showcase_visual_lod, ShowcaseVisual, MATERIAL_NAMES};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Built, Resolution};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
@@ -117,7 +117,7 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     // (`skin::raycast_visual`).
     let fix = |mut v: ShowcaseVisual| -> Result<ShowcaseVisual, JsValue> {
         if raycast {
-            engine_softbody::authoring::skin::raycast_visual(&mut v, &b.truck).map_err(err)?;
+            engine_softbody_authoring::authoring::skin::raycast_visual(&mut v, &b.truck).map_err(err)?;
         }
         Ok(v)
     };
@@ -132,9 +132,9 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     let no_alt = p.get("alt").and_then(|s| s.as_bool()) == Some(false);
     let make = |detail: f32| {
         let v = if legacy {
-            engine_softbody::authoring::skin::showcase_visual_legacy_lod(&b, detail)
+            engine_softbody_authoring::authoring::skin::showcase_visual_legacy_lod(&b, detail)
         } else if triangles {
-            engine_softbody::authoring::skin::showcase_visual_triangles_lod(&b, detail)
+            engine_softbody_authoring::authoring::skin::showcase_visual_triangles_lod(&b, detail)
         } else {
             showcase_visual_lod(&b, detail)
         };
@@ -221,7 +221,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     set(
         &vis,
         "edgeLength",
-        &JsValue::from(engine_softbody::authoring::skin::median_edge(v)),
+        &JsValue::from(engine_softbody_authoring::authoring::skin::median_edge(v)),
     );
     set(
         &vis,
@@ -374,7 +374,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         "nodeRestNormal",
         &flat(&v.node_rest_normal),
     );
-    // Weighted skins (engine_softbody::flexskin, a Rubble extension): per
+    // Weighted skins (engine_softbody_authoring::flexskin, a Rubble extension): per
     // vertex its entries (CSR wtStart, vertexCount + 1; empty: none), each
     // entry's solver node and (A, dA/dT, dA/dB), per vertex its detail
     // offset and normal coefficients. showcase-car-render.mjs weightedVertex().
@@ -384,7 +384,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         set(&vis, "wtOff", &flat(&v.wt_off));
         set(&vis, "wtNrm", &flat(&v.wt_nrm));
     }
-    // The node-frame skin (engine_softbody::authoring::node_frames): per node
+    // The node-frame skin (engine_softbody_authoring::authoring::node_frames): per node
     // its neighbourhood (CSR frameStart, nodeCount + 1; frameNode, frameW),
     // rest basis (frameBasis, 6 a node), part (framePart) and tear beams (CSR
     // tearStart; tearNode, tearRest); per vertex its BLEND nodes (blNode,
@@ -395,9 +395,9 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     // modes are CPU-only and never exported.)
     if !v.bl_node.is_empty()
         && f.start.len() == v.node_count as usize + 1
-        && f.mode == engine_softbody::authoring::node_frames::Binding::Breaks
+        && f.mode == engine_softbody_authoring::authoring::node_frames::Binding::Breaks
     {
-        use engine_softbody::authoring::node_frames::BLEND;
+        use engine_softbody_authoring::authoring::node_frames::BLEND;
         set(&vis, "frameStart", &Uint32Array::from(f.start.as_slice()).into());
         set(&vis, "frameNode", &Uint32Array::from(f.node.as_slice()).into());
         set(&vis, "frameW", &f32v(&f.w));
@@ -410,7 +410,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         let bn: Vec<u32> = v.bl_node.iter().flatten().copied().collect();
         set(&vis, "blNode", &Uint32Array::from(bn.as_slice()).into());
         set(&vis, "blW", &flat(&v.bl_w));
-        use engine_softbody::authoring::node_frames as nf;
+        use engine_softbody_authoring::authoring::node_frames as nf;
         // The break graph (node_frames::Binding::Breaks, the renderer's only
         // mode): per node its part's stiff beams (CSR adjStart; adjNode,
         // adjBeam: vehicle-local solver beams), its neighbourhood's local
@@ -450,7 +450,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// bytes; a generated car's are 110 MB instead of 220), else as `wtNode` (u32) and
 /// `wtW` (f32). Copied out in chunks (no temporary of the whole in the wasm heap).
 fn wt_entries_js(vis: &Object, v: &ShowcaseVisual) {
-    use engine_softbody::flexskin::{steps, Q_A, Q_D};
+    use engine_softbody_authoring::flexskin::{steps, Q_A, Q_D};
     let exact = v.wt_node.iter().zip(&v.wt_w).all(|(&n, &w)| steps(n, w).is_some());
     if !exact {
         set(vis, "wtNode", &Uint32Array::from(v.wt_node.as_slice()).into());
@@ -499,7 +499,7 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
 /// [`jbeam_visual`] for a vehicle whose flexbodies are a glTF render model
 /// (`glb`, the vehicle art spec's `.glb`: its meshes by name, in the JBeam
 /// frame through each row's `pos`) with weighted skins (`skin`, the `.rskin`
-/// sidecar the rows name with `"rubbleSkin"`: engine_softbody::flexskin), read
+/// sidecar the rows name with `"rubbleSkin"`: engine_softbody_authoring::flexskin), read
 /// verbatim. `meshes` may add Collada files. One level of detail
 /// (`visualLod` and `visualFar` are null).
 #[wasm_bindgen(js_name = jbeamVisualSkinned)]
@@ -509,7 +509,7 @@ pub fn jbeam_visual_skinned(spec: JsValue, meshes: Array, glb: &[u8], skin: &[u8
 
 fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Option<&[u8]>) -> Result<JsValue, JsValue> {
     use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
-    use engine_softbody::flexmesh;
+    use engine_softbody_authoring::flexmesh;
     use glam::Vec3;
     let v: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
     let files: Vec<(String, String)> = v
@@ -585,13 +585,13 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
         all.extend(flexmesh::read_collada(&text).map_err(|e| err(format!("{name}: {e}")))?);
     }
     if let Some(g) = glb {
-        let g = engine_softbody::glb::read(g).map_err(err)?;
-        all.extend(g.meshes.iter().map(|m| engine_softbody::flexskin::glb_mesh(&g, m)));
+        let g = engine_softbody_authoring::glb::read(g).map_err(err)?;
+        all.extend(g.meshes.iter().map(|m| engine_softbody_authoring::flexskin::glb_mesh(&g, m)));
     }
     // Read in place (flexskin::SkinBytes): the same values as decoded, without the
     // decoded copy (320 MB for a generated car) in a wasm heap that never shrinks.
     let skin = match skin {
-        Some(b) => Some(engine_softbody::flexskin::SkinBytes::parse(b).map_err(err)?),
+        Some(b) => Some(engine_softbody_authoring::flexskin::SkinBytes::parse(b).map_err(err)?),
         None => None,
     };
     let mut mats = std::collections::HashMap::new();
@@ -606,7 +606,7 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
         ));
     }
     let (vis, rep) =
-        flexmesh::jbeam_visual_skin(&flex, &props, &desc, &sim, &all, &mats, paint, skin.as_ref().map(engine_softbody::flexskin::SkinRef::Bytes)).map_err(err)?;
+        flexmesh::jbeam_visual_skin(&flex, &props, &desc, &sim, &all, &mats, paint, skin.as_ref().map(engine_softbody_authoring::flexskin::SkinRef::Bytes)).map_err(err)?;
     if skin.is_some() {
         let out = Object::new();
         set(&out, "visual", &visual_js(&vis).into());
@@ -653,7 +653,7 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
     if raycast && !desc.wheels.is_empty() {
         let (config, _) = engine_softbody::explicit_drive::DriveConfig::from_desc(&desc).map_err(err)?;
         for l in [&mut vis, &mut lod, &mut far_vis] {
-            engine_softbody::authoring::skin::bind_raycast_wheels(l, &config).map_err(err)?;
+            engine_softbody_authoring::authoring::skin::bind_raycast_wheels(l, &config).map_err(err)?;
         }
     }
     let out = Object::new();
@@ -683,21 +683,21 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
 
 /// A vehicle model in the vehicle art spec's glTF binary (`.glb`: an
 /// artist's delivery or `gen2`'s `sedan.glb`) as the showcase renderer's visual
-/// at rest (`engine_softbody::glb::visual`). `spec`: `{ paint?: [r, g, b] }`
+/// at rest (`engine_softbody_authoring::glb::visual`). `spec`: `{ paint?: [r, g, b] }`
 /// (default: the model's own `paint` colour).
 /// Returns `{ visual, parts, markers, triangles }`.
 #[wasm_bindgen(js_name = glbVisual)]
 pub fn glb_visual(bytes: &[u8], spec: JsValue) -> Result<JsValue, JsValue> {
     let v: serde_json::Value = serde_wasm_bindgen::from_value(spec).unwrap_or(serde_json::Value::Null);
-    let g = engine_softbody::glb::read(bytes).map_err(err)?;
+    let g = engine_softbody_authoring::glb::read(bytes).map_err(err)?;
     let paint = v
         .get("paint")
         .and_then(|p| p.as_array())
         .filter(|a| a.len() == 3)
         .map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.5) as f32))
-        .or_else(|| engine_softbody::glb::paint_of(&g))
+        .or_else(|| engine_softbody_authoring::glb::paint_of(&g))
         .unwrap_or([0.42, 0.035, 0.03]);
-    let vis = engine_softbody::glb::visual(&g, paint);
+    let vis = engine_softbody_authoring::glb::visual(&g, paint);
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "parts", &JsValue::from(g.meshes.len() as u32));

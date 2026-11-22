@@ -423,8 +423,8 @@ no-ops for scripts that pass them.
 
 ```sh
 cd engine
-cargo run --release -p engine-world --example destruction_reactions -- --list
-cargo run --release -p engine-world --example destruction_reactions -- \
+cargo run --release -p engine-world-lab --example destruction_reactions -- --list
+cargo run --release -p engine-world-lab --example destruction_reactions -- \
   crush-wall:1.4x reference-building-crush:8x reference-building-crush:gravity \
   --seconds 8 --json /tmp/reactions.json --md /tmp/reactions.md
 cargo test --release -p engine-world --test reactions -- --test-threads=1
@@ -534,7 +534,7 @@ on the whole demand 66.4 kN and 96.4 kN (high). The factor is not tuned to these
   crush-wall:1.4x:crush0 crush-wall:1.4x:crush1 --orbit 400,-60` (`:crushN` or `--crush N`
   sets the lab's Crush; the URL is `fracture/?pack=crush-wall&shot=1.4x&crush=1`).
 - `World` only (blast loading, support loss, `Conserve` fragments): `cargo run --release -p
-  engine-world --example reaction_replay -- <scenario>` dumps poses, shapes and events to
+  engine-world-lab --example reaction_replay -- <scenario>` dumps poses, shapes and events to
   JSON; `engine/tools/reaction-replay/` plays it in three.js and records it.
   `bash engine/tools/reaction-replay/record-all.sh OUT_DIR` runs every scenario
   (`building-blast` is the tall building's charge above: 20 kg, `--tnt` to change it, outside

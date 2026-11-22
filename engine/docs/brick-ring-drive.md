@@ -2,7 +2,7 @@
 
 Page: `engine/crates/engine-webgpu/brick-ring-drive.html`. Scene: `rubble::brick_ring_drive`
 (`engine-world/src/brick_ring_drive.rs`). Wasm host: `engine-world-wasm/src/ring_drive.rs`.
-Probe: `engine-world/examples/brick_ring_drive_probe.rs`. Recorder:
+Probe: `engine-world-lab/examples/brick_ring_drive_probe.rs`. Recorder:
 `engine-webgpu/brick-ring-drive-record.mjs`.
 
 A soft-body car driven by the keys through the 110k brick ring of the rigid demos, in one

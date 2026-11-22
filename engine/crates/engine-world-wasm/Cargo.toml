@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = false
 
 [dependencies]
+engine-softbody-authoring.workspace = true
 engine-world = { path = "../engine-world" }
 engine-schema.workspace = true
 engine-softbody.workspace = true

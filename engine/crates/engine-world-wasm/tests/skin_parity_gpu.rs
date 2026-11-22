@@ -1,4 +1,4 @@
-//! Weighted skins (`engine_softbody::flexskin`): the renderer's
+//! Weighted skins (`engine_softbody_authoring::flexskin`): the renderer's
 //! `weightedVertex()` (read from `showcase-car-render.mjs`, the shader the
 //! pages run) against the CPU's `flexskin::eval` on the same deformed nodes.
 //! Every vertex of a bound lattice, packed as `showcase-car-render.mjs`
@@ -9,7 +9,7 @@
 //! entries give.
 //!
 //! Skips (passes) without a GPU adapter.
-use engine_softbody::flexskin;
+use engine_softbody_authoring::flexskin;
 use glam::{Quat, Vec3};
 
 const RENDER: &str = include_str!("../../engine-webgpu/showcase-car-render.mjs");

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Units, handles, GPU layouts, commands, and scene ABI"
 
 [dependencies]
+engine-kernel-manifest.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 serde.workspace = true

@@ -255,7 +255,7 @@ fn run_probe(cases: &[ProbeCase]) -> Vec<ProbeResult> {
     let (_, device, queue) = default_device().expect("wgpu");
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("mpm_material_probe"),
-        source: wgpu::ShaderSource::Wgsl(MPM_MATERIAL_PROBE_WGSL.into()),
+        source: wgpu::ShaderSource::Wgsl(MPM_MATERIAL_PROBE_WGSL.text().into()),
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("mpm_material_probe"),

@@ -82,7 +82,7 @@ limiter, and the scenario matrix to admit any change.
 cd engine
 cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
 wasm-pack build crates/engine-world-wasm --release --target web --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
-cargo build --release -p engine-world --example vehicle_lab --example brick_ring_drive_probe
+cargo build --release -p engine-world-lab --example vehicle_lab --example brick_ring_drive_probe
 cargo test --release -p engine-world --test kernel_replay --no-run
 ```
 
