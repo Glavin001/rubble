@@ -13,8 +13,8 @@ than, the ETK. The findings are written as design goals for the generator.
 ## The harness
 
 ```bash
-cargo run --release -p engine-softbody --example vehicle_compare            # every manifest car, about 1 min
-cargo run --release -p engine-softbody --example vehicle_compare -- --cars etkk,gen2 [--quick] [--out DIR]
+cargo run --release -p engine-softbody-lab --example vehicle_compare            # every manifest car, about 1 min
+cargo run --release -p engine-softbody-lab --example vehicle_compare -- --cars etkk,gen2 [--quick] [--out DIR]
 node --experimental-websocket engine/crates/engine-webgpu/crash-lab-compare.mjs --cars sedan1,etkk --preset wall56
 ```
 

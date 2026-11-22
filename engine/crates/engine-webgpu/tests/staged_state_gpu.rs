@@ -3,7 +3,7 @@
 //! mapped is what the blocking readers give natively, so a page's verdict is the native
 //! harness's verdict (`vehicle_lab --ab-switch`).
 
-use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use engine_webgpu::{default_device, state_differences, ExplicitBeamsGpu};
 use glam::Vec3;

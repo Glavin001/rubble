@@ -10,7 +10,7 @@ use engine_webgpu::{default_device, ExplicitBeamsGpu};
 use glam::Vec3;
 
 fn sedan(at: Vec3) -> ExplicitBeams {
-    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
     let text = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::Low, ..Default::default() })
         .unwrap()
         .truck;

@@ -10,7 +10,7 @@ ART=${2:-$HOME/Development/rubble-artifacts/vehicle-gen-physics}
 ROOT=$(pwd)
 B=${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}
 mkdir -p "$ART/stills"
-(cd engine && cargo build --release -p engine-softbody --example vehicle_film)
+(cd engine && cargo build --release -p engine-softbody-lab --example vehicle_film)
 for S in drive wall pole c2c; do
   F="$ROOT/out/film/$D/$S"
   [ -f "$F/scene.json" ] || "$ROOT/engine/target/release/examples/vehicle_film" "$S" "$F" "$D"

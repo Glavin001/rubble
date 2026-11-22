@@ -1,0 +1,8 @@
+[package]
+name = "engine-kernel-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Which kernels exist (names, entries, defines, sources): data only, read by the plans and the kernel build scripts"
+
+[dependencies]

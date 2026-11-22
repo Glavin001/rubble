@@ -1,6 +1,6 @@
 //! The crash lab's scenes on the CPU reference (`ExplicitSim::spawn_cpu` +
 //! `ExplicitBeamsWorld`): a page's scene link reproduced without a GPU.
-use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
 use engine_world_wasm::ExplicitSim;
 

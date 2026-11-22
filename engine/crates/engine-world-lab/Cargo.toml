@@ -1,0 +1,51 @@
+[package]
+name = "engine-world-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "engine-world's tools and probes (examples), apart from the crate so its tests do not build them"
+publish = false
+
+[dependencies]
+engine-world = { path = "../engine-world" }
+engine-schema.workspace = true
+engine-webgpu.workspace = true
+engine-terrain.workspace = true
+engine-vehicle.workspace = true
+engine-softbody.workspace = true
+engine-softbody-authoring.workspace = true
+engine-exec.workspace = true
+engine-fracture.workspace = true
+engine-gpu-wait.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+web-time.workspace = true
+bytemuck.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stress-gpu = { path = "../../stress-oracle/crates/stress-gpu" }
+stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
+stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"] }
+engine-scenes = { path = "../engine-scenes", default-features = false }
+
+[features]
+# (engine-world's default: its examples need the stress oracle.)
+stress = []
+default = ["stress"]
+
+[[example]]
+name = "destruction_reactions"
+required-features = ["stress"]
+
+[[example]]
+name = "reaction_replay"
+required-features = ["stress"]
+
+[[example]]
+name = "vehicle_lab"
+required-features = ["stress"]
+
+[[example]]
+name = "showcase_probe"
+required-features = ["stress"]

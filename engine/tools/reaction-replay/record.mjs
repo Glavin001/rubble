@@ -3,7 +3,7 @@
 // contact sheet: headless Chrome steps the player frame-locked (window.__REPLAY__.show),
 // every frame is a CDP screenshot, ffmpeg encodes them at 60 fps.
 //
-//   cargo run --release -p engine-world --example reaction_replay -- slab-columns --out /tmp/x.json
+//   cargo run --release -p engine-world-lab --example reaction_replay -- slab-columns --out /tmp/x.json
 //   node engine/tools/reaction-replay/record.mjs /tmp/x.json [--out DIR] [--name NAME]
 //        [--size 1280x720] [--eye x,y,z --target x,y,z] [--every 1] [--png]
 //

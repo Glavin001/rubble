@@ -1,0 +1,6 @@
+# seconds = K * inlined statements ^ B (tools/build-time/compile_cost.py).
+# Fitted 2026-11-22: M3 Max, Chrome (Metal), cold compiles of the vehicle lab's 28
+# modules in the fast setting (explicit-wgsl-check.mjs, EXPLICIT_WGSL_COLD=1), the 8 of
+# 1 s or more (41-119 s predicted within 15 %). Refit: --calibrate TIMES.txt.
+K 2.327e-07
+B 1.7578

@@ -96,7 +96,7 @@ uint sleepPick(uint g, uint lane)
 bool sleepTrack(uint nodeOff, uint nodeCount, uint lane, bool moving)
 {
     float speed = asfloat(sleepHdr().z);
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop && !moving; i += LANES)
+    for (uint i = lane, iStop = EB_END(486, i, nodeCount, LANES); i < iStop && !moving; i += LANES)
         moving = sleepMoving(nodeOff + i, speed);
     return moving;
 }
@@ -128,7 +128,7 @@ bool sleepSettle(uint v, uint lane, uint steps, bool solo)
     bool anchored = !moving && (rec.y & SLEEP_ANCHORED) != 0u;
     if (anchored)
     {
-        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(487, i, r0.y, LANES); i < iStop; i += LANES)
         {
             uint gi = r0.x + i;
             float3 d = abs(ssub3(gNodes[gi * 3u].xyz, gBeams[sleepAnchor(gi)].xyz));
@@ -139,7 +139,7 @@ bool sleepSettle(uint v, uint lane, uint steps, bool solo)
     bool displaced = !moving && (!anchored || gAcc[acc + 1u].load() != 0);
     if (displaced)
     {
-        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(488, i, r0.y, LANES); i < iStop; i += LANES)
         {
             uint gi = r0.x + i;
             gBeams[sleepAnchor(gi)] = float4(gNodes[gi * 3u].xyz, 0.0);
@@ -173,7 +173,7 @@ void sleepSettleOne(uint v, uint steps)
     bool far = false;
     if (anchored)
     {
-        for (uint i = 0u, iStop = EB_END(i, r0.y, 1u); i < iStop && !far; i++)
+        for (uint i = 0u, iStop = EB_END(489, i, r0.y, 1u); i < iStop && !far; i++)
         {
             uint gi = r0.x + i;
             float3 d = abs(ssub3(gNodes[gi * 3u].xyz, gBeams[sleepAnchor(gi)].xyz));
@@ -183,7 +183,7 @@ void sleepSettleOne(uint v, uint steps)
     bool displaced = !moving && (!anchored || far);
     if (displaced)
     {
-        for (uint i = 0u, iStop = EB_END(i, r0.y, 1u); i < iStop; i++)
+        for (uint i = 0u, iStop = EB_END(490, i, r0.y, 1u); i < iStop; i++)
         {
             uint gi = r0.x + i;
             gBeams[sleepAnchor(gi)] = float4(gNodes[gi * 3u].xyz, 0.0);
@@ -206,11 +206,11 @@ bool sleepGroupSkip(uint off, uint k, uint lane)
     {
         uint base = sleepHdr().x;
         bool awake = false;
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(491, m, k, 1u); m < mStop; m++)
             awake = awake || (gMisc[base + gNext[gP.vvMembers + off + m]].y & SLEEP_ASLEEP) == 0u;
         if (awake)
         {
-            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(492, m, k, 1u); m < mStop; m++)
             {
                 uint r = base + gNext[gP.vvMembers + off + m];
                 if ((gMisc[r].y & SLEEP_ASLEEP) != 0u) gMisc[r] = uint4(0u, 0u, 0u, 0u);
@@ -226,13 +226,13 @@ bool sleepGroupSkip(uint off, uint k, uint lane)
 uint2 sleepTrackMembers(uint off, uint k, uint lane, uint2 mask)
 {
     float speed = asfloat(sleepHdr().z);
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END(493, m, k, 1u); m < mStop; m++)
     {
         uint bit = 1u << (m & 31u);
         if (((m < 32u ? mask.x : mask.y) & bit) != 0u) continue;
         uint4 r0 = gStatic[vvMember(off, m) * 4u];
         bool moving = false;
-        for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop && !moving; i += LANES)
+        for (uint i = lane, iStop = EB_END(494, i, r0.y, LANES); i < iStop && !moving; i += LANES)
             moving = sleepMoving(r0.x + i, speed);
         if (moving)
         {
@@ -247,10 +247,10 @@ uint2 sleepTrackMembers(uint off, uint k, uint lane, uint2 mask)
 // when every one reached the dwell.
 void sleepGroupEnd(uint off, uint k, uint lane, uint2 mask, uint steps)
 {
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END(495, m, k, 1u); m < mStop; m++)
         sleepMark(vvMember(off, m), ((m < 32u ? mask.x : mask.y) & (1u << (m & 31u))) != 0u);
     bool all = true;
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END_UNIFORM(496, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
     {
         bool reached = sleepSettle(vvMember(off, m), lane, steps, false);
         all = all && reached;
@@ -258,7 +258,7 @@ void sleepGroupEnd(uint off, uint k, uint lane, uint2 mask, uint steps)
     if (lane == 0u && all)
     {
         uint base = sleepHdr().x;
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) gMisc[base + vvMember(off, m)].y |= SLEEP_ASLEEP;
+        for (uint m = 0u, mStop = EB_END(497, m, k, 1u); m < mStop; m++) gMisc[base + vvMember(off, m)].y |= SLEEP_ASLEEP;
     }
 }
 
@@ -283,14 +283,14 @@ void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
     // so that the list holds them. A lane a group; a vehicle is in one group.
     if (gP.sleepPad0 == 2u && gP.vvOn != 0u)
     {
-        for (uint g = lane, gStop = EB_END(g, gArgs[3], 256u); g < gStop; g += 256u)
+        for (uint g = lane, gStop = EB_END(498, g, gArgs[3], 256u); g < gStop; g += 256u)
         {
             uint4 G = gMisc[gP.vvGroups + g];
             bool awake = false;
-            for (uint m = 0u, mStop = EB_END(m, G.y, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(499, m, G.y, 1u); m < mStop; m++)
                 awake = awake || (gMisc[base + gNext[gP.vvMembers + G.x + m]].y & SLEEP_ASLEEP) == 0u;
             if (!awake) continue;
-            for (uint m = 0u, mStop = EB_END(m, G.y, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END(500, m, G.y, 1u); m < mStop; m++)
             {
                 uint r = base + gNext[gP.vvMembers + G.x + m];
                 if ((gMisc[r].y & SLEEP_ASLEEP) != 0u) gMisc[r] = uint4(0u, 0u, 0u, 0u);
@@ -299,7 +299,7 @@ void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
     uint run = 0u;
-    for (uint c = 0u, cStop = EB_END_UNIFORM(c, (nv + 255u) / 256u, 1u, EB_MAX_CHUNKS); c < cStop; c++)
+    for (uint c = 0u, cStop = EB_END_UNIFORM(501, c, (nv + 255u) / 256u, 1u, EB_MAX_CHUNKS); c < cStop; c++)
     {
         uint v = 256u * c + lane;
         bool awake = v < nv && (gMisc[base + v].y & SLEEP_ASLEEP) == 0u;

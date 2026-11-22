@@ -29,15 +29,15 @@ render model; it now rigs any design through one input trait.)
 
 ```bash
 # Rig the Rust sedan in memory and write the mod (default __mods/sedan, gitignored)
-cargo run --release -p engine-softbody --example vehicle_gen_rig -- sedan [--params p.json]
+cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan [--params p.json]
 # Checks
-cargo run --release -p engine-softbody --example vehicle_lint -- sedan
-GEN3_RIG_DESIGN=sedan cargo test --release -p engine-softbody --test gen3_rig -- rest_
-cargo test --release -p engine-softbody --test vehicle_lint
+cargo run --release -p engine-softbody-lab --example vehicle_lint -- sedan
+GEN3_RIG_DESIGN=sedan cargo test --release -p engine-softbody-authoring --test gen3_rig -- rest_
+cargo test --release -p engine-softbody-authoring --test host vehicle_lint::
 # Drive and crash on the CPU reference
-cargo run --release -p engine-softbody --example vehicle_drive -- sedan 40
-cargo run --release -p engine-softbody --example vehicle_c2c -- sedan 50 0.6
-SURFACE_CONTACT=1 cargo run --release -p engine-softbody --example vehicle_compare -- --cars sedan
+cargo run --release -p engine-softbody-lab --example vehicle_drive -- sedan 40
+cargo run --release -p engine-softbody-lab --example vehicle_c2c -- sedan 50 0.6
+SURFACE_CONTACT=1 cargo run --release -p engine-softbody-lab --example vehicle_compare -- --cars sedan
 # Clips: CPU reference simulation, skinned mesh rendered in Blender (frames in out/film)
 sh engine/tools/vehicle-gen/tools/film_all.sh sedan
 # The page

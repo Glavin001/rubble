@@ -135,7 +135,7 @@ drive-through goal) and `ccd_scale.rs` (100 and 500 CCD balls through brick wall
 Scenes that are built in Rust code move to a shared scene function both hosts call;
 scenes from assets go through portable fixtures (bodies and colliders in the
 `rigid_plan` layout, written once on the Mac), so nothing on Modal loads an asset. The World-level scenes of
-`engine-world/examples/rigid_gate.rs` (Brick Ring 110k, Ragdoll Pile 10k, Hinge Chains 10k,
+`engine-world-lab/examples/rigid_gate.rs` (Brick Ring 110k, Ragdoll Pile 10k, Hinge Chains 10k,
 Sphere Pile 10k, 100k Grid; `GATE_MODE=hash` prints body hashes at checkpoints) are the
 next ones: the ragdolls and chains need joints, which `CudaSim`'s fixed inputs leave out
 and C3 brings. If a scene turns on the sleep

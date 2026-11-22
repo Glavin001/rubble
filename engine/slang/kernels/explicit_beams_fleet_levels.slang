@@ -84,7 +84,7 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
     uint open = 0u;
     if (lane == 0u && allowed && (gP.ablate & (65536u | 32768u | 16384u | 262144u)) == 0u)
     {
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(405, m, k, 1u); m < mStop; m++)
         {
             uint own = flOwn(vvMember(off, m));
             open += uint(gAcc[own + FL_OFFERED].load()) + uint(gAcc[own + FL_RESET].load()) + uint(gAcc[own + FL_FIX].load());
@@ -97,7 +97,7 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
         // The owners with hits (gsOff), and whether every hit list is within its room.
         if (lane == 0u) gsCount[0].store(0u);
         sync();
-        for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+        for (uint m = lane, mStop = EB_END(406, m, k, LANES); m < mStop; m += LANES)
         {
             if (flHits(vvMember(off, m)) != 0u) gsOff[gsCount[0].add(1u)] = m;
         }
@@ -106,7 +106,7 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
         uint fits = 1u;
         if (lane == 0u)
         {
-            for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
+            for (uint j = 0u, jStop = EB_END(407, j, H, 1u); j < jStop; j++)
             {
                 uint v = vvMember(off, gsOff[j]);
                 if (flHits(v) > 2u * uint(gAcc[flOwn(v) + FL_OFFERED].load())) fits = 0u;
@@ -116,18 +116,18 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
         if (H != 0u && fits != 0u)
         {
             // fleetLevelsAny's levels: the same rule, partners and rounds.
-            for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+            for (uint m = lane, mStop = EB_END(408, m, k, LANES); m < mStop; m += LANES)
             {
                 uint v = vvMember(off, m);
                 gNext[flLevelAt(v)] = flHits(v) != 0u ? 1u : 0u;
             }
-            for (uint j = lane, jStop = EB_END(j, H, LANES); j < jStop; j += LANES)
+            for (uint j = lane, jStop = EB_END(409, j, H, LANES); j < jStop; j += LANES)
             {
                 uint m = gsOff[j];
                 uint v = vvMember(off, m);
                 uint2 p = uint2(0u, 0u);
                 uint e1 = gNext[flAdjFirst(v + 1u)];
-                for (uint e = gNext[flAdjFirst(v)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+                for (uint e = gNext[flAdjFirst(v)], eStop = EB_END(410, e, e1, 1u); e < eStop; e++)
                 {
                     uint d = gNext[flAdjAt(e)];
                     if ((gNext[flBitsAt(d)] & 5u) != 1u) continue;
@@ -146,12 +146,12 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
                 if (lane == 0u) gsUniformLanes = 0u;
                 sync();
                 bool changed = false;
-                for (uint j = lane, jStop = EB_END(j, H, LANES); j < jStop; j += LANES)
+                for (uint j = lane, jStop = EB_END(411, j, H, LANES); j < jStop; j += LANES)
                 {
                     uint m = gsOff[j];
                     uint v = vvMember(off, m);
                     uint l = 1u;
-                    for (uint c = 0u, cStop = EB_END(c, H, 1u); c < cStop; c++)
+                    for (uint c = 0u, cStop = EB_END(412, c, H, 1u); c < cStop; c++)
                     {
                         uint mc = gsOff[c];
                         if (mc >= m) continue;
@@ -174,14 +174,14 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
             if (lane == 0u)
             {
                 uint top = 0u;
-                for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++) top = max(top, gNext[flLevelAt(vvMember(off, gsOff[j]))]);
+                for (uint j = 0u, jStop = EB_END(413, j, H, 1u); j < jStop; j++) top = max(top, gNext[flLevelAt(vvMember(off, gsOff[j]))]);
                 gAcc[flCtl(LV_REPORT)].max(int(top));
                 gAcc[flCtl(LV_REPORT + 1u)].max(int(H - min(top, H)));
             }
             ok = lvSlots() != 0u ? 1u : 0u;
         }
     }
-    for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+    for (uint m = lane, mStop = EB_END(414, m, k, LANES); m < mStop; m += LANES)
         gNext[flLvMark(vvMember(off, m))] = ok != 0u ? (s | LV_MARK) : 0u;
     sync();
     return ok != 0u;
@@ -211,7 +211,7 @@ void fleetLevelsEnd(uint g, uint lane, uint word)
     // The owners with hits (gsOff) and the highest level.
     if (lane == 0u) gsCount[0].store(0u);
     sync();
-    for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+    for (uint m = lane, mStop = EB_END(415, m, k, LANES); m < mStop; m += LANES)
     {
         if (flHits(vvMember(off, m)) != 0u) gsOff[gsCount[0].add(1u)] = m;
     }
@@ -220,13 +220,13 @@ void fleetLevelsEnd(uint g, uint lane, uint word)
     uint top = 0u;
     if (lane == 0u)
     {
-        for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++) top = max(top, gNext[flLevelAt(vvMember(off, gsOff[j]))]);
+        for (uint j = 0u, jStop = EB_END(416, j, H, 1u); j < jStop; j++) top = max(top, gNext[flLevelAt(vvMember(off, gsOff[j]))]);
     }
     top = splitUniform(lane, top);
     for (uint l = L + 1u, lGuard = 0u; l <= top; l++)
     {
-        EB_PASS_UNIFORM(lGuard, EB_MAX_MEMBERS + 1u);
-        for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
+        EB_PASS_UNIFORM(417, lGuard, EB_MAX_MEMBERS + 1u);
+        for (uint j = 0u, jStop = EB_END(418, j, H, 1u); j < jStop; j++)
         {
             uint a = gsOff[j];
             uint va = vvMember(off, a);
@@ -238,7 +238,7 @@ void fleetLevelsEnd(uint g, uint lane, uint word)
         {
             for (uint ph = 0u; ph < 3u; ph++)
             {
-                for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
+                for (uint j = 0u, jStop = EB_END(419, j, H, 1u); j < jStop; j++)
                 {
                     uint a = gsOff[j];
                     uint va = vvMember(off, a);
@@ -252,12 +252,12 @@ void fleetLevelsEnd(uint g, uint lane, uint word)
     // The two-body counts the hits wrote, once all levels are applied (every list fits).
     if (gP.vvSplit != 0u)
     {
-        for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
+        for (uint j = 0u, jStop = EB_END(420, j, H, 1u); j < jStop; j++)
         {
             uint a = gsOff[j];
             uint base = vvHitSmall(0u, 0u, a, 0u);
             uint n = flHits(vvMember(off, a));
-            for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+            for (uint i = lane, iStop = EB_END(421, i, n, LANES); i < iStop; i += LANES)
             {
                 uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
                 gAcc[vvSplitTri(tn.x)].store(0);
@@ -270,7 +270,7 @@ void fleetLevelsEnd(uint g, uint lane, uint word)
     gVvTag = 0u;
     gFl = 0u;
     sync();
-    for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+    for (uint m = lane, mStop = EB_END(422, m, k, LANES); m < mStop; m += LANES)
     {
         uint v = vvMember(off, m);
         flOwnerEnd(v);
@@ -298,7 +298,7 @@ void lvScan(uint n, uint lane)
         if (lane == 0u)
         {
             uint run = 0u;
-            for (uint i = 0u, iStop = EB_END(i, n, 1u); i < iStop; i++)
+            for (uint i = 0u, iStop = EB_END(423, i, n, 1u); i < iStop; i++)
             {
                 gNext[flLvPrefix(i)] = run;
                 run += flHits(gNext[flLvOwner(i)]);
@@ -313,13 +313,13 @@ void lvScan(uint n, uint lane)
     uint i1 = min(i0 + chunk, n);
     uint block = LANES / GRID_BLOCKS;
     uint sum = 0u;
-    for (uint i = i0, iStop = EB_END(i, i1, 1u); i < iStop; i++) sum += flHits(gNext[flLvOwner(i)]);
+    for (uint i = i0, iStop = EB_END(424, i, i1, 1u); i < iStop; i++) sum += flHits(gNext[flLvOwner(i)]);
     gsPart[lane] = sum;
     sync();
     if (lane < GRID_BLOCKS)
     {
         uint run = 0u;
-        for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+        for (uint q = 0u, qStop = EB_END(425, q, block, 1u); q < qStop; q++)
         {
             uint x = gsPart[lane * block + q];
             gsPart[lane * block + q] = run;
@@ -342,7 +342,7 @@ void lvScan(uint n, uint lane)
     sync();
     {
         uint run = gsPart[lane] + gsBlk[lane / block];
-        for (uint i = i0, iStop = EB_END(i, i1, 1u); i < iStop; i++)
+        for (uint i = i0, iStop = EB_END(426, i, i1, 1u); i < iStop; i++)
         {
             gNext[flLvPrefix(i)] = run;
             run += flHits(gNext[flLvOwner(i)]);
@@ -360,7 +360,7 @@ void fleetLevelsPlan(uint lane, uint word)
     uint L = lvLevel(word);
     if (lane < LV_MAX + 3u) gsCount[lane].store(0u);
     sync();
-    for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
+    for (uint v = lane, vStop = EB_END(427, v, nv, LANES); v < vStop; v += LANES)
     {
         uint sl = flLvSlot(v, L);
         if (sl != 0u) gsCount[sl].add(1u);
@@ -369,7 +369,7 @@ void fleetLevelsPlan(uint lane, uint word)
     if (lane == 0u)
     {
         uint run = 0u;
-        for (uint l = 1u, lStop = EB_END(l, L + 2u, 1u); l < lStop; l++)
+        for (uint l = 1u, lStop = EB_END(428, l, L + 2u, 1u); l < lStop; l++)
         {
             uint c = gsCount[l].load();
             gsOff[l] = run;
@@ -382,7 +382,7 @@ void fleetLevelsPlan(uint lane, uint word)
         gsUniformOpen = run;
     }
     sync();
-    for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
+    for (uint v = lane, vStop = EB_END(429, v, nv, LANES); v < vStop; v += LANES)
     {
         uint sl = flLvSlot(v, L);
         if (sl != 0u) gNext[flLvOwner(gsOff[sl] + gsCount[sl].add(1u))] = v;
@@ -391,13 +391,13 @@ void fleetLevelsPlan(uint lane, uint word)
     lvScan(n, lane);
     if (lane == 0u)
     {
-        for (uint l = 1u, lStop = EB_END(l, L + 3u, 1u); l < lStop; l++) gNext[flLvHit(l)] = gNext[flLvPrefix(gNext[flLvStart(l)])];
+        for (uint l = 1u, lStop = EB_END(430, l, L + 3u, 1u); l < lStop; l++) gNext[flLvHit(l)] = gNext[flLvPrefix(gNext[flLvStart(l)])];
         uint total = gNext[flLvPrefix(n)];
         gNext[flLvHit(0u)] = total;
         gArgs[FL_ARGS_LV] = flWorkgroups(4u * total);
         gArgs[FL_ARGS_LV + 1u] = 1u;
         gArgs[FL_ARGS_LV + 2u] = 1u;
-        for (uint l = 1u, lStop = EB_END(l, L + 1u, 1u); l < lStop; l++)
+        for (uint l = 1u, lStop = EB_END(431, l, L + 1u, 1u); l < lStop; l++)
         {
             gArgs[FL_ARGS_LV + 4u * l] = flWorkgroups(gNext[flLvHit(l + 1u)] - gNext[flLvHit(l)]);
             gArgs[FL_ARGS_LV + 4u * l + 1u] = 1u;

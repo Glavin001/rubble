@@ -62,25 +62,25 @@ void explicit_surface_prep(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (lane == 0u) gsUniformSurf = pairs ? 1u : 0u;
     sync();
     pairs = gsUniformSurf != 0u;
-    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    for (uint i = lane, iStop = EB_END(547, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
         float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + gi], r0.z, r2.z, r2.w, parity, false);
         gBeams[gP.surfSnap + gi] = float4(sadd3(f, accForce(gi)), 0.0);
         gAcc[gP.surfSplit + gi].store(0);
     }
-    for (uint j = lane, jStop = EB_END(j, bodies, LANES); j < jStop; j += LANES)
+    for (uint j = lane, jStop = EB_END(548, j, bodies, LANES); j < jStop; j += LANES)
     {
         gAcc[surfBodyBase() + v * cplB() + j].store(0);
         gAcc[surfTminAt(v, j, parity + 1u)].store(0);
     }
     if (anyFast)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(549, t, triCount, LANES); t < tStop; t += LANES)
             surfGatherTriangle(v, r1.x + t, origin, r, proxies, parity);
-        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+        for (uint j = lane, jStop = EB_END(550, j, segCount, LANES); j < jStop; j += LANES)
             surfGatherSegment(v, gLists[sr.x + j], origin, r, proxies, r2.z, parity);
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(551, i, nodeCount, LANES); i < iStop; i += LANES)
             surfGatherPoint(v, r0.x + i, origin, r, proxies, parity);
     }
     if (pairs) surfPairBounds(v, lane, proxies);
@@ -128,25 +128,25 @@ void surfPipeKind(uint v, uint lane, bool apply)
 #if EB_SURF_KIND == 1
     if (loops)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+        for (uint t = lane, tStop = EB_END(552, t, triCount, LANES); t < tStop; t += LANES)
             surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, apply);
     }
 #elif EB_SURF_KIND == 2
     if (loops)
     {
-        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+        for (uint j = lane, jStop = EB_END(553, j, segCount, LANES); j < jStop; j += LANES)
             surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, apply);
     }
 #elif EB_SURF_KIND == 3
     if (loops)
     {
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        for (uint i = lane, iStop = EB_END(554, i, nodeCount, LANES); i < iStop; i += LANES)
             surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, apply);
     }
 #else
     if (pairs && !apply)
     {
-        for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+        for (uint p = lane, pStop = EB_END(555, p, listed, LANES); p < pStop; p += LANES)
             surfPairFind(v, p, origin, r, r0, r1, sr);
     }
     if (pairs && apply)
@@ -154,12 +154,12 @@ void surfPipeKind(uint v, uint lane, bool apply)
         uint found = uint(gAcc[surfHitCount(v)].load());
         if (found <= SURF_HIT_CAP)
         {
-            for (uint h = lane, hStop = EB_END(h, found, LANES); h < hStop; h += LANES)
+            for (uint h = lane, hStop = EB_END(556, h, found, LANES); h < hStop; h += LANES)
                 surfHitApply(v, h, r, r0, r1, sr);
         }
         else
         {
-            for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+            for (uint p = lane, pStop = EB_END(557, p, listed, LANES); p < pStop; p += LANES)
                 surfPairApply(v, p, origin, r, r0, r1, sr);
         }
     }

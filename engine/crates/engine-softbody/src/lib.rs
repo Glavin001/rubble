@@ -8,7 +8,9 @@
 //! [`SoftBackend`] ([`SoftHost`]). [`cpu`] is a reference solver of the same
 //! particle and beam model for tests and calibration.
 
-pub mod authoring;
+// Vehicle authoring (the generated cars), their visual meshes (flexmesh, flexskin,
+// glb) and the vehicle comparisons live in engine-softbody-authoring: the runtime
+// model here is what the plans, hosts and World build on.
 pub mod buggy;
 pub mod calibrate;
 pub mod color;
@@ -31,9 +33,6 @@ pub mod explicit_surface;
 pub mod explicit_sleep;
 pub mod explicit_triggers;
 pub mod flexbody;
-pub mod flexmesh;
-pub mod flexskin;
-pub mod glb;
 pub mod flextex;
 pub mod hires;
 pub mod host;
@@ -47,7 +46,6 @@ pub mod procedural;
 pub mod reference_cars;
 pub mod truck;
 pub mod truck_export;
-pub mod vehicle_compare;
 pub mod visual;
 
 pub use damage::{damage_summary, SoftDamage};

@@ -118,6 +118,19 @@
   Timing: the fixtures' times are for ranking a change; a number for the doc comes from
   rung 4 on a GPU nothing else is using (`with-gpu-lock.py` queues GPU jobs, it does not
   keep the user's own page off the GPU).
+- Build time: `engine/docs/build-architecture.md` (the crate layers, the kernel-compile
+  rules, CI's `tools/build-time/check.py`: crate direction, no slangc outside
+  engine-slang-build, source sizes that may only shrink). A change to how anything is
+  built proves itself lossless with `tools/build-time/kernel_digest.py` (every generated
+  kernel byte for byte) and its gain with `tools/build-time/measure.py`
+  (`engine/docs/measurements/build-time.md`); `tools/build-time/check-builds.sh` checks
+  every configuration the kernels build in (run it after touching the kernel plumbing).
+  A kernel's first-load compile in the browser: `tools/build-time/compile_cost.py`
+  predicts it from the WGSL (CI caps it at 10 s, `--burndown` lists what to fix first);
+  a heavy helper is called from one place in a kernel, not once per case.
+  The harness is `-p engine-world-lab --example vehicle_lab`. To iterate on pages:
+  `RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh`
+  (never measure with it).
 - Generated vehicles: read `engine/docs/generated-vehicles-lessons.md` first (lessons,
   measurements, decisions; add to it rather than redoing research).
 - Deformable vehicles: `engine/docs/deformable-vehicles.md` explains the model (keep it

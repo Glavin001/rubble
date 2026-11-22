@@ -1,0 +1,13 @@
+# Seconds from an edit to a ready fast-loop harness (tools/build-time/measure.py --budget),
+# median of 3, on an M-series Mac with 16 cores and nothing else building. Each is the
+# measured median (engine/docs/measurements/build-time.md, 2026-11-22) with headroom
+# (x1.5, at least +1 s). Another machine: measure and keep your own copy.
+kernel-small 2.2
+kernel-explicit 20.3
+kernel-common 13.7
+kernel-aero 12.8
+softbody-runtime 5.9
+softbody-authoring 2.8
+exec-plan 4.4
+webgpu-host 3.9
+world 2.8

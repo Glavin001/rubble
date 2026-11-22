@@ -6,6 +6,7 @@ license.workspace = true
 description = "Fracture lab host logic shared by the WebGPU (wasm) and Metal hosts: SHARDWRIGHT_fracture GLB reader, scene builders and the per-tick dispatch plan (no GPU)"
 
 [dependencies]
+engine-kernel-manifest.workspace = true
 anyhow.workspace = true
 bytemuck.workspace = true
 engine-schema.workspace = true

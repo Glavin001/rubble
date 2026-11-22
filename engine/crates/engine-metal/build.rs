@@ -113,59 +113,38 @@ fn main() -> Result<()> {
         "wheel_soil_press",
     ];
     let convex = slang_root.join("kernels/convex_step.slang");
-    for entry in entries {
-        compile(
-            if vehicle_entries.contains(&entry) {
-                &vehicle
-            } else if entry.starts_with("convex_") {
-                &convex
-            } else if entry.ends_with("_compact")
-                || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
-            {
-                &compact
-            } else {
-                &world
-            },
-            entry,
-            SlangTarget::Metal,
-            &msl_dir.join(format!("{entry}.metal")),
-            &[],
-        )?;
-    }
-
-    // Also emit SPIR-V and CUDA artifacts for the port crates to consume from OUT_DIR copy.
-    let spirv_dir = out_dir.join("spirv");
-    let cuda_dir = out_dir.join("cuda");
-    std::fs::create_dir_all(&spirv_dir)?;
-    std::fs::create_dir_all(&cuda_dir)?;
-    for entry in entries.iter().chain(["abi_roundtrip"].iter()) {
-        let src = if *entry == "abi_roundtrip" {
-            &abi
-        } else if vehicle_entries.contains(entry) {
+    // Each entry cached by what it depends on; the entries of one source in a few
+    // processes (compile_many). (No SPIR-V or CUDA copies: nothing reads them;
+    // engine-webgpu and engine-cuda compile their own.)
+    let source_of = |entry: &str| {
+        if vehicle_entries.contains(&entry) {
             &vehicle
         } else if entry.starts_with("convex_") {
             &convex
         } else if entry.ends_with("_compact")
-            || (*entry == "pack_solver_contacts" || *entry == "clear_solver_contacts")
+            || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
         {
             &compact
         } else {
             &world
-        };
-        let _ = compile(
-            src,
+        }
+    };
+    let dests: Vec<PathBuf> = entries.iter().map(|e| msl_dir.join(format!("{e}.metal"))).collect();
+    let jobs: Vec<engine_slang_build::Compile> = entries
+        .iter()
+        .zip(&dests)
+        .map(|(entry, out)| engine_slang_build::Compile {
+            source: source_of(entry),
             entry,
-            SlangTarget::Spirv,
-            &spirv_dir.join(format!("{entry}.spv")),
-            &[],
-        );
-        let _ = compile(
-            src,
-            entry,
-            SlangTarget::Cuda,
-            &cuda_dir.join(format!("{entry}.cu")),
-            &[],
-        );
+            stage: "compute",
+            target: SlangTarget::Metal,
+            out,
+            include_dirs: &[],
+            defines: &[],
+        })
+        .collect();
+    for r in engine_slang_build::compile_many(&jobs) {
+        r?;
     }
 
     println!("cargo:rustc-env=ENGINE_MSL_DIR={}", msl_dir.display());
@@ -175,13 +154,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The explicit-beams solver's modules (`engine_exec::explicit_plan::MODULES`:
+/// The explicit-beams solver's modules (`engine_kernel_manifest::explicit::MODULES`:
 /// name, entry, defines), Slang → MSL from `explicit_beams.slang` with each
 /// global's Metal buffer mapped to the plan's binding (its `[[vk::binding]]`),
 /// so `MetalExplicitBeams` replays the WebGPU host's commands on the same
 /// buffers. Emits `explicit_kernels.rs`.
 fn explicit_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()> {
-    use engine_exec::explicit_plan::MODULES;
+    use engine_kernel_manifest::explicit::MODULES;
     use engine_slang_build::msl_layout::{compile_kernel_with_defines, msl_buffers, vk_binding_slots};
     use std::fmt::Write;
     let slangc = find_slangc()?;
@@ -246,7 +225,7 @@ fn explicit_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result
     Ok(())
 }
 
-/// The terrain plan's kernels (`engine_terrain::plan::KERNELS`, bindings
+/// The terrain plan's kernels (`engine_kernel_manifest::terrain::KERNELS`, bindings
 /// 37-51) and the look-ahead's (`terrain_watch.slang`, binding 52), in the
 /// same `ENGINE_WGSL` layout as the rigid table, with each kernel's buffers
 /// renumbered from 0 (Slang numbers them across the whole module, past
@@ -272,7 +251,7 @@ fn terrain_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<
     ])?;
     // (table name, Slang entry, source): a fast path may be a plan kernel
     // compiled from terrain_mpm_fast.slang under a name of its own.
-    let entries: Vec<(&str, &str, &std::path::Path)> = engine_terrain::plan::KERNELS
+    let entries: Vec<(&str, &str, &std::path::Path)> = engine_kernel_manifest::terrain::KERNELS
         .iter()
         .map(|&e| (e, e, mpm.as_path()))
         .chain(
@@ -342,7 +321,7 @@ const TERRAIN_WATCH_ENTRIES: &[&str] = &[
 /// with the browser's `ENGINE_WGSL` buffer layout so `MetalSim` replays exactly
 /// the commands the WebGPU host does. Emits `rigid_kernels.rs`.
 fn rigid_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()> {
-    use engine_exec::rigid_plan::{kernel_source, PERSISTENT_ENTRIES};
+    use engine_kernel_manifest::rigid::{kernel_source, PERSISTENT_ENTRIES};
     use engine_slang_build::msl_layout::{bind_slots, compile_kernel, msl_buffers};
     use std::fmt::Write;
     let slangc = find_slangc()?;

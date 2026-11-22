@@ -14,7 +14,7 @@ trajectory (the speeds match to 0.1 km/h at every second) or, where marked, on t
 state.
 
 ```bash
-cargo build --release -j 4 -p engine-world --example vehicle_lab
+cargo build --release -j 4 -p engine-world-lab --example vehicle_lab
 python3 engine/scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 RUBBLE_SURFACE_SPLIT=0 \
   engine/target/release/examples/vehicle_lab --mode gpu --measure mountain-perf --secs 30 \
   --car ~/Development/rubble-artifacts/sedan-live/mods/sedan_new --surface 1 \
@@ -333,7 +333,7 @@ replaces is not established. Threshold 2 lost 0.5–0.6 ms natively late, so 1 i
 
 `--test showcase_car_gpu` 6 passed (1 ignored, as before), `--test explicit_contact_gpu`
 13 passed (with the new `anti_clip_with_own_travel_steps_like_the_cpu`: side memories word
-for word, positions bit for bit), `engine-softbody --test own_travel_reach` passed (a node at
+for word, positions bit for bit), `engine-softbody-authoring --test own_travel_reach` passed (a node at
 300 m/s in no triangle and no contacter: 577 → 3,437 pairs tested with the fastest node's
 padding, 577 → 577 with own travel), `engine-world --features stress --test
 vehicle_lab_reset` 3 passed. Chrome: the mountain, the parked car and the authored sedan's

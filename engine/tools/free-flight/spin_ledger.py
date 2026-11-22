@@ -1,4 +1,4 @@
-"""The main body's spin ledger from `door_orbit`'s spin.csv (engine-world/examples/door_orbit.rs):
+"""The main body's spin ledger from `door_orbit`'s spin.csv (engine-world-lab/examples/door_orbit.rs):
 for every span of at least 1/3 s with the body's centre-of-mass acceleration less gravity
 under THRESHOLD m/s² (no contact beyond what the air gives) and no piece leaving, the change
 of its angular momentum about its centre of mass against the air's torque integrated (the

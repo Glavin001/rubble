@@ -25,7 +25,7 @@ def gate(names, list_kernels=False):
     return [l for l in lines if l.startswith("hash")], sorted({l.split(": ")[1] for l in lines if l.startswith("rigid kernel: ")})
 
 if not os.path.exists(BIN):
-    subprocess.run(["cargo", "build", "--profile", "fast", "-p", "engine-world", "--example", "rigid_gate"], check=True)
+    subprocess.run(["cargo", "build", "--profile", "fast", "-p", "engine-world-lab", "--example", "rigid_gate"], check=True)
 ref, names = gate([], list_kernels=True)
 skip = set(sys.argv[1].split(",")) if len(sys.argv) > 1 else set()
 names = [n for n in names if n not in skip]

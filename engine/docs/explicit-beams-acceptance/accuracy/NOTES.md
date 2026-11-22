@@ -93,7 +93,7 @@ words):
 ```bash
 inspiration/ror-harness/bin/ror_ref <agoras.truck> free pos=189.45,0.5,100 vel=-27.78,0,0 \
   box=174.06,3,101.25,0.5,3,2.25 drag=0 roll=1 secs=2.5 [selfcol=0] out=r.csv
-cargo run --release -p engine-softbody --example ror_compare -- free <agoras.truck> r.csv \
+cargo run --release -p engine-softbody-lab --example ror_compare -- free <agoras.truck> r.csv \
   pos=189.45,0.5,100 vel=-27.78,0,0 box=174.06,3,101.25,0.5,3,2.25 drag=0 roll=1 secs=2.5
 ```
 

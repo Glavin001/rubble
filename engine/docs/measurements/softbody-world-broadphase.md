@@ -6,7 +6,7 @@ Design: `explicit-vehicles-in-world.md` §11, `jbeam-semantics-spec.md` §38.3�
 
 ## 1. The coupling plan against map size
 
-`engine-world/examples/vehicle_broadphase_bench.rs`: repo sedans (surface contact on) in
+`engine-world-lab/examples/vehicle_broadphase_bench.rs`: repo sedans (surface contact on) in
 lanes 12 m apart on a 1 km × 1 km map; `n` rigid bodies, half static posts (a third of
 them hulls), half 40 cm boxes resting on a ground slab (asleep after 240 settling steps),
 spread uniformly, plus the same 40 posts and 20 boxes beside each car at every `n` (11
@@ -54,7 +54,7 @@ resting table in a fracture world (the fracture re-parents colliders on the GPU)
 
 ## 2. Fast rigid bodies into a door (casts, §38.4)
 
-`engine-world/examples/ccd_cannonball.rs`: a steel sphere (6 cm, 15 cm radius) or box
+`engine-world-lab/examples/ccd_cannonball.rs`: a steel sphere (6 cm, 15 cm radius) or box
 (20 cm) at 30–600 m/s horizontally into the side of a parked car at door height, surface
 contact on; CPU reference, wgpu (the proxy written by the host each frame) and the World
 (a dynamic body). *Given*: the momentum the car took, as a share of the projectile's

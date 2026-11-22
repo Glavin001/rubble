@@ -21,8 +21,8 @@ Layer 2 now measures both, and layer 1 and the panel diagnostics explain them.
 | `engine/crates/engine-softbody/tests/crash_invariants.rs` | Layer 2 |
 
 Commands:
-- `cargo test --release -p engine-softbody --test invariants_small -- --nocapture`
-- `cargo test --release -p engine-softbody --test crash_invariants -- --nocapture --include-ignored`
+- `cargo test --release -p engine-softbody-authoring --test host invariants_small:: -- --nocapture`
+- `cargo test --release -p engine-softbody-authoring --test crash_invariants -- --nocapture --include-ignored`
 - Community cars: set `RUBBLE_BEAMNG_MODS`.
 
 Every test prints a report row: `| name | car or sim | measured | bound | pass/FAIL |`.

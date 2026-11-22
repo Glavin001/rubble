@@ -54,6 +54,20 @@ jobs:
           case "$base" in 0000000000000000000000000000000000000000) base= ;; esac
           bash .github/scripts/check-large-files.sh "$base" HEAD
 
+  # The build-architecture rules (engine/docs/build-architecture.md): crate direction,
+  # kernel compiles through engine-slang-build, source sizes that may only shrink.
+  build-architecture:
+    name: Build architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Check the rules
+        working-directory: engine
+        run: python3 tools/build-time/check.py
+
   # One slangc compile of the kernels for the three web builds and the Linux C library. When the kernels
   # changed, each of them (and each C library job) ran its own: the same 5-8 minutes of
   # all four cores, four times over; "build stress" took 10.4 minutes and the C library
@@ -72,7 +86,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/crates/engine-kernel-manifest/src/**', 'engine/scripts/slangc.sh') }}
           lookup-only: true
       - uses: dtolnay/rust-toolchain@stable
         if: steps.have.outputs.cache-hit != 'true'
@@ -98,7 +112,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/crates/engine-kernel-manifest/src/**', 'engine/scripts/slangc.sh') }}
 
   # The demo site is built in three parallel jobs, one per part of build-web.sh
   # (RUBBLE_WEB_PARTS), and assembled by the `web` job below. One job took 21-28 minutes:
@@ -145,11 +159,26 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/crates/engine-kernel-manifest/src/**', 'engine/scripts/slangc.sh') }}
       - name: Build the ${{ matrix.part }} part
         env:
           RUBBLE_WEB_PARTS: ${{ matrix.part }}
         run: bash engine/scripts/build-web.sh
+      # Every explicit module's inlined size within its budget (a module past it would
+      # compile slower in the browser; tools/build-time/inline-budget.txt).
+      - name: Kernel inlined-size budget
+        if: matrix.part == 'kernels'
+        working-directory: engine
+        # (The WGSL of the build wgsl_export just ran: the kernels bin with its features
+        # prints that build's directory.)
+        run: |
+          wgsl="$(cargo run -q --release -p engine-webgpu --no-default-features --bin kernels)"
+          python3 tools/build-time/inline_budget.py "$wgsl"
+          # Each kernel's predicted first-load compile within the 10 s cap, or within its
+          # allowlisted line (tools/build-time/compile-cost-allowlist.txt, lines only come
+          # down); the burn-down list says what to fix first.
+          python3 tools/build-time/compile_cost.py --check "$wgsl"
+          python3 tools/build-time/compile_cost.py --burndown 15 "$wgsl" | sed -n '/burn-down/,$p'
       - name: Upload the part
         uses: actions/upload-artifact@v4
         with:

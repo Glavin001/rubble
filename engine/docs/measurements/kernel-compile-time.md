@@ -232,3 +232,42 @@ No tolerance, iteration count or contact was changed; the remaining difference i
 
 - `query_batch` (63,092 inlined lines) and `projectile_step` (46,267) carry the same casts several times over. No CI job compiles them on the virtual GPU today; a host that prewarms them there would be near the same limit.
 - Chrome was not measured.
+
+## 2026-11-22: measuring without a browser, and the burn-down list
+
+The vehicle lab's derby (`mode=derby&car=gen&cars=5`) and mountain pages create the same
+28 pipelines (the fast setting). Cold in Chrome on an M3 Max (`explicit-wgsl-check.mjs`,
+`EXPLICIT_WGSL_COLD=1`): 335 s in all, four modules past 10 s, every other at most 2.5 s.
+
+| Module | Chrome s | native wgpu s | inlined statements | predicted s |
+|---|---|---|---|---|
+| `explicit_beams_contact_wide_nosurf` | 118.8 | 47.9 | 83,896 | 105.1 |
+| `explicit_beams_selfsplit_member_vv_wide` | 114.0 | 45.8 | 88,441 | 115.4 |
+| `explicit_beams_split_grouplevels_wide` | 49.3 | 32.9 | 51,765 | 45.0 |
+| `explicit_beams_solo_wide_nosurf` | 41.1 | 15.4 | 45,525 | 35.9 |
+| `explicit_beams_wide_hits` | 2.5 | 2.3 | 12,703 | 3.8 |
+
+Three ways to measure, cheapest first:
+
+- **Predicted, from the WGSL** (`tools/build-time/compile_cost.py`, a second, in CI):
+  seconds = K x statements^B over the entry point with every call inlined, one-line
+  helpers not counted. Fitted on the eight modules of 1 s or more: the four past 10 s
+  within 15 %, the 1-3 s ones within 1.5x. Inlined lines fit worse (2x): `nf(x)` is
+  `return x;` in the fast setting and costs the compiler nothing, but is 25-30 % of the
+  lines. Other counts (loops, barriers, array accesses) predicted no better.
+- **Native wgpu on Metal** (`EXPLICIT_WGSL_DIR=DIR cargo run -p engine-webgpu-lab
+  --example explicit_compile_time`, no browser; it takes the GPU lock itself, so do not
+  wrap it in `with-gpu-lock.py`): the driver's real compile, but of naga's MSL, not
+  Tint's. Same ranking, 1.5-2.6x faster than Chrome on the large modules: a lower bound.
+- **Chrome** (`explicit-wgsl-check.mjs`, EXPLICIT_WGSL_COLD=1): the user's first load.
+
+Ruled out: Apple's offline compiler (`xcrun metal -c` on the module's MSL) takes 1 s for
+the 41 s solo module. The time is in the driver's back end, which runs only when a
+pipeline is created on the device.
+
+`compile_cost.py --burndown` over the 142 shipped modules: 70 predicted past 10 s (the
+surface-contact, wing and coupling variants too). The helpers that cost most across them,
+each as if it had one copy: `driveAheadPart` (5 call sites in the frame step, 6 copies of
+3,047 statements), `beamSum` (275 copies of 111, through `vvBeamSumOf`), `drvTyre`,
+`surfaceStep` (twice in the contact module), `ebEnd` (1,358 copies of 12), `toFixed`
+(882 of 11), `surfApplyTo`, `tryContact`.

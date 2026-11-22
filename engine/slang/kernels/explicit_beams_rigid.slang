@@ -98,7 +98,7 @@ uint4 cplVeh(uint v)
     uint ns = cplS();
     if (h.x > nb || h.y > ns)
     {
-        ebLoopCapHit(__LINE__);
+        ebLoopCapHit(447);
         h.x = min(h.x, nb);
         h.y = min(h.y, ns);
     }
@@ -242,7 +242,7 @@ float4 cplFaceLocal(uint v, uint4 h, float4 lp, float4 pr, float4 r, float3 d)
     uint count = h.w >> 16;
     float best = -3.0e38;
     float3 n = float3(0.0, 1.0, 0.0);
-    for (uint i = 0u, iStop = EB_END(i, count, 1u); i < iStop; i++)
+    for (uint i = 0u, iStop = EB_END(448, i, count, 1u); i < iStop; i++)
     {
         float4 pl = asfloat(gMisc[cplPlane(v, off + i)]);
         float s = dot(pl.xyz, l) - pl.w;
@@ -368,7 +368,7 @@ void cplSpheresBy(uint v, uint lane, uint lanes)
 {
     uint shapes = cplCullOn() ? cplVeh(v).y : 0u;
     uint2 gr = cplGsRange(v);
-    for (uint k = lane, kStop = EB_END(k, shapes, lanes); k < kStop; k += lanes)
+    for (uint k = lane, kStop = EB_END(449, k, shapes, lanes); k < kStop; k += lanes)
     {
         // The sphere as cplFace computes it.
         uint at = cplShape(v, k);
@@ -483,7 +483,7 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
         k0 = r & 0xFFFFu;
         k1 = min((r >> 16) + 1u, hdr.y);
     }
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    for (uint k = k0, kStop = EB_END(450, k, k1, 1u); k < kStop; k++)
     {
         if (!cplMay(v, k, x, cull, gr)) continue;
         float4 n4 = cplFace(v, k, x);
@@ -540,13 +540,13 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
 void cplIntegrate(uint v, uint lane)
 {
     uint4 hdr = cplVeh(v);
-    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES) cplIntegrateBody(v, j);
+    for (uint j = lane, jStop = EB_END(451, j, hdr.x, LANES); j < jStop; j += LANES) cplIntegrateBody(v, j);
 }
 // The same bodies (every j < B), body j by lane j of `lanes`, then j + lanes, ...
 void cplIntegrateBy(uint v, uint lane, uint lanes)
 {
     uint4 hdr = cplVeh(v);
-    for (uint j = lane, jStop = EB_END(j, hdr.x, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
+    for (uint j = lane, jStop = EB_END(452, j, hdr.x, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
 }
 // Whether vehicle v's step sums go through workgroup memory (cplReactBy): its every
 // sphere is there (so its shapes fit, CPL_REACT_WORDS words each, in the spheres' and
@@ -572,7 +572,7 @@ void cplReactBy(uint v, uint lane, uint lanes)
     uint acc = cplAcc(v);
     uint nb = cplB();
     uint s0 = cplShape(v, 0u);
-    for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes)
+    for (uint k = lane, kStop = EB_END(453, k, hdr.y, lanes); k < kStop; k += lanes)
     {
         uint at = s0 + k * CPL_SHAPE_RECS;
         uint j = gMisc[at].y;
@@ -625,7 +625,7 @@ void cplIntegrateBody(uint v, uint j)
     uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
     uint k1 = range == 0u ? hdr.y : min(range >> 16, hdr.y);
     uint s0 = cplShape(v, 0u);
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    for (uint k = k0, kStop = EB_END(454, k, k1, 1u); k < kStop; k++)
     {
         uint at = s0 + k * CPL_SHAPE_RECS;
         if (gMisc[at].y != j) continue;
@@ -669,7 +669,7 @@ void cplIntegrateBodySplit(uint v, uint j)
     // The shapes' terms from cplReactBy, summed in shape order; each shape's body slot
     // from workgroup memory (cplReactBy's copy of its record's .y).
     uint gx = cplGsRange(v).x;
-    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    for (uint k = k0, kStop = EB_END(455, k, k1, 1u); k < kStop; k++)
     {
         uint g = CPL_GS_SPH + CPL_REACT_WORDS * (gx + k);
         if (gsCpl[g + 6u] != j) continue;
@@ -699,13 +699,13 @@ void cplRebase(uint v, uint lane, float3 first)
     uint recs = 1u + nb * CPL_BODY_RECS + ns * CPL_SHAPE_RECS + (h.w >> 16);
     uint base = h.y + v * recs;
     uint4 hdr = gMisc[base];
-    for (uint j = lane, jStop = EB_END(j, min(hdr.x, nb), LANES); j < jStop; j += LANES)
+    for (uint j = lane, jStop = EB_END(456, j, min(hdr.x, nb), LANES); j < jStop; j += LANES)
     {
         uint b = base + 1u + j * CPL_BODY_RECS;
         float4 c = asfloat(gMisc[b]);
         gMisc[b] = asuint(float4(c.xyz - first, c.w));
     }
-    for (uint k = lane, kStop = EB_END(k, min(hdr.y, ns), LANES); k < kStop; k += LANES)
+    for (uint k = lane, kStop = EB_END(457, k, min(hdr.y, ns), LANES); k < kStop; k += LANES)
     {
         uint at = base + 1u + nb * CPL_BODY_RECS + k * CPL_SHAPE_RECS + 6u;
         float4 r = asfloat(gMisc[at]);
@@ -729,7 +729,7 @@ void cplCountBy(uint v, uint lane, uint lanes)
     bool cull = cplCullOn();
     uint2 gr = cplGsRange(v);
     uint2 gn = cplGsNodes(v);
-    for (uint i = lane, iStop = EB_END(i, r0.y, lanes); i < iStop; i += lanes)
+    for (uint i = lane, iStop = EB_END(458, i, r0.y, lanes); i < iStop; i += lanes)
     {
         uint gi = r0.x + i;
         uint range = CPL_NONE;
@@ -737,7 +737,7 @@ void cplCountBy(uint v, uint lane, uint lanes)
         {
             // Vehicle-local, as the proxy records (relative to the vehicle's origin).
             float3 x = gNodes[gi * 3u].xyz;
-            for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
+            for (uint k = 0u, kStop = EB_END(459, k, hdr.y, 1u); k < kStop; k++)
             {
                 if (cplMay(v, k, x, cull, gr) && cplFace(v, k, x).w != 0.0)
                 {
@@ -810,7 +810,7 @@ void cplListShapes(uint v, uint lane, uint lanes, uint s)
     uint shapes = cplVeh(v).y;
     uint la = cplListAcc(v);
     bool first = cplListFirst(s);
-    for (uint k = lane, kStop = EB_END(k, shapes, lanes); k < kStop; k += lanes)
+    for (uint k = lane, kStop = EB_END(460, k, shapes, lanes); k < kStop; k += lanes)
     {
         uint sp = cplSphere(v, k);
         float3 p = asfloat(uint3(gNext[sp], gNext[sp + 1u], gNext[sp + 2u]));
@@ -872,7 +872,7 @@ uint cplCountOne(uint v, uint k, float3 x, uint acc, uint range)
 uint cplCountHeld(uint v, float3 x, uint nl, uint shapes, uint acc, uint2 gr)
 {
     uint range = CPL_NONE;
-    for (uint e = 0u, eStop = EB_END(e, CPL_LIST_CAP, 1u); e < eStop; e++)
+    for (uint e = 0u, eStop = EB_END(461, e, CPL_LIST_CAP, 1u); e < eStop; e++)
     {
         uint k = (gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu;
         if (k >= shapes) break;
@@ -889,7 +889,7 @@ uint cplCountBuild(uint v, float3 x, float3 vel, uint nl, uint shapes, uint acc,
     uint range = CPL_NONE;
     uint n = 0u;
     uint word = 0xFFFFFFFFu;
-    for (uint k = 0u, kStop = EB_END(k, shapes, 1u); k < kStop; k++)
+    for (uint k = 0u, kStop = EB_END(462, k, shapes, 1u); k < kStop; k++)
     {
         uint4 w = cplSphereWords(v, k, gr);
         float3 d = x - asfloat(w.xyz);
@@ -938,7 +938,7 @@ void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr)
     float vs = asfloat(gAcc[la + 1u].load());
     bool first = cplListFirst(s);
     uint left = gP.steps > s ? gP.steps - s : 1u;
-    for (uint i = lane, iStop = EB_END(i, r0.y, lanes); i < iStop; i += lanes)
+    for (uint i = lane, iStop = EB_END(463, i, r0.y, lanes); i < iStop; i += lanes)
     {
         uint gi = r0.x + i;
         uint range = CPL_NONE;
@@ -993,7 +993,7 @@ float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, flo
     uint nl = cplListNode(gStatic[v * 4u].x + local);
     bool every = (gNext[nl + 4u] & 0xFFFFu) == CPL_LIST_ALL;
     uint count = every ? k1 : CPL_LIST_CAP;
-    for (uint e = every ? k0 : 0u, eStop = EB_END(e, count, 1u); e < eStop; e++)
+    for (uint e = every ? k0 : 0u, eStop = EB_END(464, e, count, 1u); e < eStop; e++)
     {
         uint k = every ? e : ((gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu);
         if (k >= k1) break;
@@ -1106,7 +1106,7 @@ void cplBodyStepped(uint v, uint j, uint shapes, out float4 c0, out float4 q, ou
         uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
         uint k1 = range == 0u ? shapes : min(range >> 16, shapes);
         uint s0 = cplShape(v, 0u);
-        for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+        for (uint k = k0, kStop = EB_END(465, k, k1, 1u); k < kStop; k++)
         {
             uint at = s0 + k * CPL_SHAPE_RECS;
             if (gMisc[at].y != j) continue;
@@ -1167,7 +1167,7 @@ void cplFoldB(uint v, uint lane, uint lanes, uint s, out bool body, out float4 c
 {
     uint4 hdr = cplVeh(v);
     bool stepped = s > 0u;
-    for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes) cplShapeFolded(v, k, hdr.y, stepped);
+    for (uint k = lane, kStop = EB_END(466, k, hdr.y, lanes); k < kStop; k += lanes) cplShapeFolded(v, k, hdr.y, stepped);
     cplListShapes(v, lane, lanes, s);
     body = stepped && lane < hdr.x;
     c0 = float4(0.0, 0.0, 0.0, 0.0);
@@ -1195,7 +1195,7 @@ void cplFoldC(uint v, uint lane, uint lanes, uint s, bool body, float4 c0, float
     uint2 gr = cplGsRange(v);
     uint acc = cplAcc(v);
     uint nb = cplB();
-    for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes)
+    for (uint k = lane, kStop = EB_END(467, k, hdr.y, lanes); k < kStop; k += lanes)
     {
         if (stepped)
         {
@@ -1299,20 +1299,20 @@ void coupleStepMembers(uint off, uint k, uint lane, uint s, uint on)
 #ifdef EB_ABLATE
     if (s > 0u && (gP.ablate & 8192u) == 0u)
     {
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplReactBy(vvMember(off, m), lane, LANES);
+        for (uint m = 0u, mStop = EB_END(468, m, k, 1u); m < mStop; m++) cplReactBy(vvMember(off, m), lane, LANES);
         sync();
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
+        for (uint m = 0u, mStop = EB_END(469, m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
     }
     sync();
     if ((gP.ablate & 16384u) == 0u)
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+        for (uint m = 0u, mStop = EB_END(470, m, k, 1u); m < mStop; m++)
         {
             cplSpheres(vvMember(off, m), lane);
             cplListShapes(vvMember(off, m), lane, LANES, s);
         }
     sync();
     if ((gP.ablate & 32768u) == 0u)
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplCountStep(vvMember(off, m), lane, LANES, s);
+        for (uint m = 0u, mStop = EB_END(471, m, k, 1u); m < mStop; m++) cplCountStep(vvMember(off, m), lane, LANES, s);
     sync();
     return;
 #endif
@@ -1345,16 +1345,16 @@ void coupleStepMembers(uint off, uint k, uint lane, uint s, uint on)
     }
     if (s > 0u)
     {
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
+        for (uint m = 0u, mStop = EB_END(472, m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
     }
     sync();
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END(473, m, k, 1u); m < mStop; m++)
     {
         cplSpheres(vvMember(off, m), lane);
         cplListShapes(vvMember(off, m), lane, LANES, s);
     }
     sync();
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplCountStep(vvMember(off, m), lane, LANES, s);
+    for (uint m = 0u, mStop = EB_END(474, m, k, 1u); m < mStop; m++) cplCountStep(vvMember(off, m), lane, LANES, s);
     sync();
 }
 
@@ -1372,7 +1372,7 @@ void coupleEndMembers(uint off, uint k, uint lane, uint on)
     }
     else if (gP.steps > 0u)
     {
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
+        for (uint m = 0u, mStop = EB_END(475, m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
     }
     sync();
 }
@@ -1427,7 +1427,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
             cfAdd(gi, c);
             f += c;
         }
-        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
+        for (uint b = 0u, bStop = EB_END(476, b, boxCount, 1u); b < bStop; b++)
         {
             uint4 lo4 = gStatic[gP.boxBase + (boxOff + b) * 2u];
             uint4 hi4 = gStatic[gP.boxBase + (boxOff + b) * 2u + 1u];

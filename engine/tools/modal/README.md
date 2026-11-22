@@ -146,7 +146,7 @@ driver reruns up to twice hoping for a warm host (~5 s each), and only then comp
 its own pipelines. Never let every shard compile: 12 cold matrix rows would each pay
 the ~18-minute warm-up.
 
-The scenario matrix's own pieces: `--matrix` builds `-p engine-world --example
+The scenario matrix's own pieces: `--matrix` builds `-p engine-world-lab --example
 vehicle_lab`, ships `tools/scenario-matrix` (matrix.py, scenes) and the generated
 sedan (`CAR`, default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`),
 forwards `FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT`, and gives
@@ -499,7 +499,7 @@ engine/tools/modal/gpu_run.sh --timeout 1500 -- -p engine-webgpu --test explicit
 # The coupling's candidate list against every node testing every shape, on the
 # mountain crash state at t = 2 s: 20 frames each way from one snapshot, every state
 # word compared ("state bit for bit: true"; the example fails if not).
-engine/tools/modal/gpu_run.sh --timeout 1500 -- -p engine-world --example vehicle_lab -- \
+engine/tools/modal/gpu_run.sh --timeout 1500 -- -p engine-world-lab --example vehicle_lab -- \
   --mode gpu --measure mountain-perf --secs 3 --ab 2 --ab-switch coupling
 # --ab-switch fold | reuse | pieces | (none: surface culls); --ab T1,T2 for several times.
 # --car @sedan: the generated sedan's export instead of the showcase car.
@@ -540,14 +540,14 @@ new test that reads other sources needs its entry in `TARGET_DATA` in
 # Old and new in one container, interleaved three times
 engine/tools/modal/gpu_run.sh --repeat 3 \
   --variant old:RUBBLE_COUPLING_LIST=0 --variant new: \
-  -- -p engine-world --example vehicle_lab -- --mode gpu --measure mountain-perf --secs 4
+  -- -p engine-world-lab --example vehicle_lab -- --mode gpu --measure mountain-perf --secs 4
 
 # fleet.sh's run (explicit_vehicles_bench with the generated sedan), "apart" mode;
 # "town": drop EV_NO_CONTACT / EV_NO_VV. EV_VV_GRID=0 etc. as --variant.
 engine/tools/modal/gpu_run.sh --timing \
   --env EV_ETK=@sedan:sedan/sedan.pc --env EV_SPAN=1 --env EV_SECS=3 \
   --env EV_NO_CONTACT=1 --env EV_NO_VV=1 \
-  -- -p engine-world --example explicit_vehicles_bench -- 1 8 32
+  -- -p engine-world-lab --example explicit_vehicles_bench -- 1 8 32
 ```
 
 Every run with variants (or `--timing`) prints, before and after: **timing is

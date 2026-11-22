@@ -111,8 +111,8 @@ loop {
 }
 ```
 
-Run it: `cd engine && cargo run -p engine-world --release --example quickstart`
-([source](engine/crates/engine-world/examples/quickstart.rs)).
+Run it: `cd engine && cargo run -p engine-world-lab --release --example quickstart`
+([source](engine/crates/engine-world-lab/examples/quickstart.rs)).
 
 Beyond the basics:
 
