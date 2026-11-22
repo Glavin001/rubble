@@ -138,7 +138,7 @@ GOAL = (
     + [(f"clash{n}", n, clash(n), [], 0.7, f"{n // 2} head-on pairs at 50 km/h each, all mid-crush at once (scaling, in contact)")
        for n in (2, 4, 8, 16, 20, 32)]
     + [(f"mountain20_t{t}", 20, mountain(20), [], float(t), f"20 cars down the mountain's ledges, t = {t} s")
-       for t in (2, 4, 7, 12)]
+       for t in (2, 4, 7, 12, 20)]
     + [(f"derby20_t{t}", 20, derby(20), [], float(t), f"20 cars in the derby arena with its 86 props, t = {t} s")
        for t in (2, 5, 10)]
     + [

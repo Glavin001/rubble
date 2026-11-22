@@ -6086,3 +6086,81 @@ Both halves run in the same dispatch, each vehicle's workgroup taking one, so sp
 them costs a second dispatch every substep (34 a frame) for good, to save a compile that
 happens once and that Chrome then caches. Not done; it stays the longest kernel of a
 cold load.
+
+### 8.52 The goal's baseline: 20 cars, surface contact on, by peak and by car count (2026-11-22)
+
+The goal: 20 soft cars on the mountain and in the derby in real time with headroom, at
+full fidelity (surface contact on), judged by the **worst** step of a run, not its median.
+The target is a worst step of 8.3 ms of vehicles' GPU time (half of 1/60 s).
+
+New rows in the scenario matrix (`tools/scenario-matrix/matrix.py`, `GOAL`; `run.sh --make
+goal`, `--baseline goal`), every one with surface contact on: `apartN` (N cars driving
+8 m apart, never touching), `clashN` (N / 2 head-on pairs all mid-crush in the same
+steps), `mountain20_tT`, `derby20_tT` (the AI driving, which the native harness now
+feeds from the cars' poses), `pole`, and `wall_s`, `bricks_s`, `pile8_s` (existing rows
+with surface contact). CUDA now builds the segmented frame and the surface pass's
+pipelines (known bug P1's surface half), so these rows replay on Modal.
+
+Measured at 369b6472 plus this section's commits, bit-exact on, ms a frame of 34 steps
+(mean of each frame's best round; in brackets the worst frame). Mac: M3 Max, native
+Metal, `run.sh --baseline`. T4: Modal, CUDA, `ENGINE_CUDA_FMAD=0 run.sh --cuda --baseline`.
+
+| row | Mac | T4 |
+|---|---|---|
+| drive (1 car, no surface contact) | 3.14 (3.52) | 3.89 (7.14) |
+| apart1 | 69.72 (70.33) | 31.40 (32.06) |
+| apart2 | 8.33 (8.45) | 14.51 (14.76) |
+| apart4 | 12.87 (14.34) | 23.92 (25.87) |
+| apart8 | 13.59 (14.93) | 25.85 (27.95) |
+| apart16 | 14.07 (15.41) | 28.04 (30.52) |
+| apart20 | 14.30 (15.59) | 30.10 (33.74) |
+| apart32 | 15.26 (16.59) | 38.01 (41.90) |
+| clash2 | 15.86 (16.84) | 24.96 (29.40) |
+| clash4 | 16.44 (17.75) | 28.55 (33.69) |
+| clash8 | 23.41 (24.14) | 40.19 (43.53) |
+| clash16 | 24.85 (25.62) | 46.04 (49.74) |
+| clash20 | 25.41 (26.25) | 49.98 (54.16) |
+| clash32 | 30.79 (33.37) | 61.74 (66.49) |
+| mountain20_t2 | 19.32 (22.44) | 36.58 (38.54) |
+| mountain20_t4 | 38.31 (41.89) | 78.10 (95.03) |
+| mountain20_t7 | 37.89 (39.66) | 75.87 (77.69) |
+| mountain20_t12 | 41.40 (46.03) | 86.15 (91.96) |
+| mountain20_t20 | 68.11 (70.38) | not run |
+| derby20_t2 / t5 / t10 (AI driving) | 23.03 / 30.61 / 29.32 (24.53 / 33.62 / 31.20) | not run with the AI |
+| pole | 82.64 (99.09) | 48.36 (78.64) |
+| wall_s | 73.73 (79.23) | 34.37 (35.21) |
+| bricks_s | 78.91 (82.42) | 48.12 (49.84) |
+| pile8 / pile8_s | 13.13 / 25.34 | 20.87 / 48.28 |
+| pile32 (no surface contact) | 36.15 (40.29) | 75.74 (80.58) |
+
+Whole runs on the Mac, 20 s, 20 cars, surface contact on (`vehicle_lab --measure
+mountain-perf --scenario ... --secs 20`, GPU ms a World step):
+
+| scene | vehicles: median / p95 / worst | whole step: median / p95 / worst |
+|---|---|---|
+| mountain, ledges | 40.4 / 66.0 / 71.8 (at t 19.6; it grows with the pile) | 43.2 / 69.6 / 98.9 (t 14.6) |
+| derby | 29.6 / 32.5 / 35.3 | 33.5 / 40.4 / 383.0 (t 1.95) |
+
+What the baseline says:
+
+1. **The explicit frame is the cost.** The rigid step is 0.4 to 1.2 ms and the coupling's
+   passes 0.1 ms of a 30 to 70 ms step.
+2. **One car alone with surface contact on is the slowest row: 70 to 83 ms on the Mac.**
+   A fleet with surface contact and no contact plan runs the frame in segments
+   (`Kernel::FrameSeg`) with the surface pass's nine pipelines between them, 341 launches
+   a frame. On the T4 the segments are 28.0 of 31.7 ms (0.8 ms each); the nine surface
+   pipelines together are 3.6 ms.
+3. **Cars that touch nothing cost 14 ms on the Mac** (apart2 to apart32: 8.3 to 15.3). The
+   count scales almost flat past four cars, so the GPU does take cars side by side; the
+   floor is the cost. On the T4, apart20 is one `Solo` launch of 28.8 ms: every car alone
+   in its workgroup for 34 steps, 0.85 ms a step, with self-collision and the surface
+   pass inside the workgroup. Without surface contact one car is 3.1 ms on the wide
+   passes: `has_surface()` refuses the wide list, self-collision split and self split
+   with vehicle contact (`explicit_plan/schedule.rs`).
+4. **In contact, the members' step is 64 to 74 % of the frame** (T4: clash20 36.3 of 49.8
+   ms, mountain20_t12 55.1 of 85.9), then vehicle contact's tests (5.3; 22.5 on the
+   mountain) and the groups' levels (5.9). Surface contact doubles a pile (pile8 13.1 →
+   25.3 on the Mac) for the same reason as in 3.
+5. **A peak that is not physics:** the derby's whole step is 383 ms once, at t 1.95 s,
+   while its vehicles' time stays under 36 ms. Its cause is not yet identified (the
+   first step that needs a pipeline not used before is the candidate).

@@ -2811,6 +2811,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 other => anyhow::bail!("unknown --alternate {other}"),
             }
         }
+        // The derby: its AI drives from the cars' poses, which the page reads every frame
+        // (`Lab::derby_plan`); here a blocking read before the step, outside its timing.
+        let plan = lab.derby_plan(&world);
+        if let (&[o_at, o_len, d_at, d_len], Some(x)) = (plan.as_slice(), world.explicit_vehicles()) {
+            let read = |at, len| engine_webgpu::explicit_coupling::read_words(world.device(), world.queue(), x.misc_buffer(), at, len);
+            let (origins, drive) = (read(o_at, o_len), read(d_at, d_len));
+            lab.ingest_derby(&world, &origins, &drive);
+        }
         lab.before_step(&mut world)?;
         let t = std::time::Instant::now();
         world.step()?;
