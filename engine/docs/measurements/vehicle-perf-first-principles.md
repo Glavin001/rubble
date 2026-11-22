@@ -6988,3 +6988,55 @@ and 4); engine-metal's parity suite (its host is unchanged); `explicit_beams_bit
 and the World's suites (`explicit_vehicles`, `vehicle_lab_reset`); the T4's rows with
 wgpu through Vulkan. The Mac's timings are from a GPU other sessions were using through
 the lock: deltas within one process are paired, the two baseline runs are not.
+
+### 8.60 The generated sedan from the current code: the matrix and whole runs again (2026-11-22)
+
+From here every benchmark uses the generated sedan made from the current code
+(`cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out
+engine/out/gen/sedan_new`; AGENTS.md). It has 548 nodes, 3,546 beams and 540 collision
+triangles. The car of §8.52–§8.57 was a copy of the same generator from 2026-11-14
+(`~/Development/rubble-artifacts/sedan-live`), with 4,251 beams. Every row's state was
+saved again with it (`out/scenario-matrix`; the old states are kept as
+`out/scenario-matrix-sedan-nov14`). The code is f8cf855d, bit-exact, and each host's
+default schedules apply.
+
+ms a frame of 34 steps, mean (worst frame). Mac: M3 Max, Metal. T4: Modal, CUDA,
+`ENGINE_CUDA_FMAD=0`. "Old car" is §8.54–§8.57's Mac figure at the same code, where one
+exists.
+
+| row | old car, Mac | generated sedan, Mac | generated sedan, T4 |
+|---|---|---|---|
+| drive | 3.14 | 3.14 (3.35) | 3.92 (5.39) |
+| wall | 4.17 | 3.84 (4.26) | 4.32 (5.67) |
+| headon | 12.23 | 11.81 (12.18) | 17.71 (19.56) |
+| pile8 | 13.13 | 12.32 (12.94) | 21.11 (21.70) |
+| pile32 | 36.15 | 41.12 (45.60) | 80.14 (90.77) |
+| apart1 (surface contact) | 5.7 | 5.72 (5.97) | 7.40 (7.46) |
+| apart8 | 11.4 | 10.88 (12.42) | 18.20 (20.22) |
+| apart20 | 14.2 | 14.60 (15.80) | 25.94 (28.39) |
+| clash20 | 25.4 | 21.37 (23.32) | 37.99 (41.96) |
+| mountain20_t12 | 34.3 | 37.67 (38.48) | 73.85 (77.31) |
+| mountain20_t20 | 42.7 | 43.82 (44.91) | 85.52 (87.19) |
+| derby20_t5 | 29.7 | 26.96 (28.97) | 53.47 (58.41) |
+| derby20_t10 | — | 28.77 (31.79) | 48.24 (53.55) |
+| pole | 16.0 | 15.71 (27.80) | 22.50 (51.72) |
+| pile8_s | 25.07 | 21.94 (22.81) | 29.32 (30.56) |
+
+The other rows are in `out/logs/gen-mac-baseline.log` and `gen-t4-baseline.log`. The
+two cars' rows are not the same moments: each state was saved from its own car's run.
+Read the comparison as sizes, not as a change.
+
+Whole 20 s runs on the Mac, 20 cars, surface contact on, GPU ms a World step from
+t 0.5 s:
+
+| scene, setting | vehicles: median / p95 / worst | whole step: median / p95 / worst |
+|---|---|---|
+| derby, bit-exact | 27.0 / 52.3 / 155.4 (t 13.58) | 30.3 / 54.1 / **776.9 (t 1.95)** |
+| derby, fast (the default) | 25.3 / 29.2 / 77.7 (t 18.98) | 28.4 / 34.0 / **379.6 (t 1.95)** |
+| mountain ledges, bit-exact | 38.5 / 43.4 / 53.9 (t 6.27) | 40.9 / 47.2 / 118.5 (t 15.02) |
+
+The derby's worst whole step is at t 1.95 in every run, with either car, and the
+vehicles' own time is normal there. That is the first-contact spike §8.52 names, and it
+is still not explained by a measurement. Two vehicle peaks also stand out: 155 ms in the
+derby at t 13.58 and 118 ms of whole step on the mountain at t 15.02. They are the moments
+to save as fixtures next, so that the matrix times the peaks themselves.
