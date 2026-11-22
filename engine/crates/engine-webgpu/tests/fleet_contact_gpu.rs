@@ -6,7 +6,7 @@
 //! same. In a file of its own: a process of its own (see the note on `group_split_gpu`'s
 //! tests run beside another flag-toggling test, vehicle-perf-first-principles.md §8.25).
 
-use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use engine_webgpu::{default_device, ExplicitBeamsGpu};
 use glam::Vec3;

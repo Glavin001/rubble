@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/engine-kernel-manifest",
+    "crates/engine-softbody-authoring",
     "crates/engine-schema",
     "crates/engine-exec",
     "crates/engine-metal",
@@ -52,6 +54,7 @@ pollster = "1"
 winit = "0.30"
 env_logger = "0.11"
 log = "0.4"
+engine-kernel-manifest = { path = "crates/engine-kernel-manifest" }
 engine-schema = { path = "crates/engine-schema" }
 engine-exec = { path = "crates/engine-exec" }
 engine-slang-build = { path = "crates/engine-slang-build" }
@@ -61,6 +64,7 @@ engine-oracles = { path = "crates/engine-oracles" }
 engine-fracture = { path = "crates/engine-fracture" }
 engine-vehicle = { path = "crates/engine-vehicle" }
 engine-softbody = { path = "crates/engine-softbody" }
+engine-softbody-authoring = { path = "crates/engine-softbody-authoring" }
 engine-terrain = { path = "crates/engine-terrain" }
 engine-vehiclegen = { path = "crates/engine-vehiclegen" }
 engine-webgpu = { path = "crates/engine-webgpu" }

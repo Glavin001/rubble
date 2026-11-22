@@ -2,7 +2,7 @@
 """Structure measurements of BeamNG cars for engine/docs/beamng-structure-study.md.
 
 Input: the JSON files written by the `structure_dump` test of
-`engine/crates/engine-softbody/tests/authoring_census.rs` (one per car, outside the
+`engine/crates/engine-softbody-authoring/tests/authoring_census.rs` (one per car, outside the
 repository). Output: Markdown tables on stdout. Standard library only.
 
     python3 -I engine/tools/beamng-structure-study/analyze.py <dump dir> [car ...] [--only SECTION]

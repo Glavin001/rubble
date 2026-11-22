@@ -1,5 +1,5 @@
-use anyhow::Result;
-use engine_slang_build::{compile, compile_with_defines, find_slangc, par_map, SlangTarget};
+use anyhow::{Context, Result};
+use engine_slang_build::{compile, compile_entries_to, compile_with_defines, find_slangc, par_map, SlangTarget};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -378,7 +378,9 @@ fn main() -> Result<()> {
     let slang_root = manifest.join("../../slang");
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     println!("cargo:rerun-if-changed={}", slang_root.display());
-    println!("cargo:rerun-if-env-changed=RUBBLE_SLANG_CACHE");
+    // (Not `rerun-if-env-changed=RUBBLE_SLANG_CACHE`: the outputs are the same with or
+    // without that cache, so switching between build-web.sh, which sets it, and plain
+    // cargo must not rerun this script and recompile every crate above this one.)
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_SRC");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF_UNCAPPED");
@@ -527,34 +529,32 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // Explicit vehicles in the World (engine-world `explicit_vehicles.rs`): one
     // standalone module.
     let coupling = wgsl_dir.join("vehicle_coupling.wgsl");
-    let mut cmd = std::process::Command::new(find_slangc()?);
-    cmd.args(["-target", "wgsl"]);
-    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_query", "cpl_sleep_mask"] {
-        cmd.args(["-entry", e, "-stage", "compute"]);
-    }
-    let status = cmd
-        .arg("-o")
-        .arg(&coupling)
-        .arg(slang_root.join("kernels/vehicle_coupling.slang"))
-        .status()?;
-    anyhow::ensure!(status.success(), "slangc failed for vehicle_coupling.slang");
+    let coupling_entries: Vec<(&str, &str)> = [
+        "cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_query", "cpl_sleep_mask",
+    ]
+    .iter()
+    .map(|&e| (e, "compute"))
+    .collect();
+    compile_entries_to(
+        &slang_root.join("kernels/vehicle_coupling.slang"),
+        &coupling_entries,
+        SlangTarget::Wgsl,
+        &coupling,
+        &[],
+        &[],
+    )
+    .context("slangc failed for vehicle_coupling.slang")?;
     // Soft-body skinning: one standalone WGSL module, three entries.
     let skin = wgsl_dir.join("soft_skin.wgsl");
-    let status = std::process::Command::new(find_slangc()?)
-        .args(["-target", "wgsl"])
-        .args(["-entry", "soft_skin_vertices", "-stage", "compute"])
-        .args(["-entry", "soft_skin_faces", "-stage", "compute"])
-        .args(["-entry", "soft_skin_normals", "-stage", "compute"])
-        .arg("-o")
-        .arg(&skin)
-        .arg(slang_root.join("kernels/soft_skin.slang"))
-        .status()?;
-    anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
-    // Explicit beams (`ExplicitBeamsGpu`): one standalone module, entry
-    // `explicit_beams_frame`. Its barriers order storage only: Slang lowers
-    // DeviceMemoryBarrierWithGroupSync with a texture barrier naga rejects (and an
-    // empty statement Safari's parser rejects), so keep the storage and workgroup
-    // barriers alone.
+    compile_entries_to(
+        &slang_root.join("kernels/soft_skin.slang"),
+        &[("soft_skin_vertices", "compute"), ("soft_skin_faces", "compute"), ("soft_skin_normals", "compute")],
+        SlangTarget::Wgsl,
+        &skin,
+        &[],
+        &[],
+    )
+    .context("slangc failed for soft_skin.slang")?;
     // Every explicit module is regenerated below: clear the previous build's, so a
     // module that no longer exists does not linger in the output directory (the loop-cap
     // test reads every `explicit_*.wgsl` there).
@@ -563,50 +563,6 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         if name.starts_with("explicit_") && name.ends_with(".wgsl") {
             std::fs::remove_file(entry.path())?;
         }
-    }
-    let beams = wgsl_dir.join("explicit_beams.wgsl");
-    compile_with_defines(
-        &explicit_beams_source(slang_root),
-        "explicit_beams_frame",
-        SlangTarget::Wgsl,
-        &beams,
-        &[],
-        &[("ENGINE_WGSL", "1")],
-    )?;
-    explicit_post(&beams)?;
-    // The wide passes: one module per entry point.
-    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits", "centred_beams", "centred_nodes", "aux"] {
-        let entry = format!("explicit_beams_wide_{pass}");
-        let out = wgsl_dir.join(format!("{entry}.wgsl"));
-        compile_with_defines(
-            &explicit_beams_source(slang_root),
-            &entry,
-            SlangTarget::Wgsl,
-            &out,
-            &[],
-            // (The aux pass: a workgroup a vehicle of 512 lanes.)
-            if pass == "aux" { &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")][..] } else { &[("ENGINE_WGSL", "1")][..] },
-        )?;
-        explicit_post(&out)?;
-    }
-    // The same module with 512 lanes per vehicle, for large vehicles.
-    let wide = wgsl_dir.join("explicit_beams_wide.wgsl");
-    compile_with_defines(
-        &explicit_beams_source(slang_root),
-        "explicit_beams_frame",
-        SlangTarget::Wgsl,
-        &wide,
-        &[],
-        &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")],
-    )?;
-    explicit_post(&wide)?;
-    // With wings, the fuselage drag and command beams (EB_AERO), at both lane
-    // counts: the modules above stay those of vehicles without them.
-    for (name, lanes) in [
-        ("explicit_beams_aero", "256"),
-        ("explicit_beams_aero_wide", "512"),
-    ] {
-        explicit_frame_module(slang_root, &wgsl_dir, name, lanes, true)?;
     }
     // Vehicle–vehicle contact: the plan passes (one module each) and the contact
     // groups' entry at the frame module's four variants.
@@ -620,7 +576,23 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             )
         })
         .collect();
-    // Vehicle sleep's awake list (engine_exec::explicit_plan::SLEEP_LIST).
+    // The frame module (`ExplicitBeamsGpu`, entry `explicit_beams_frame`), the same
+    // with 512 lanes per vehicle for large vehicles, and the wide passes, one module per
+    // entry point (the aux pass: a workgroup a vehicle of 512 lanes). Their barriers
+    // order storage only: Slang lowers DeviceMemoryBarrierWithGroupSync with a texture
+    // barrier naga rejects (and an empty statement Safari's parser rejects), so
+    // `explicit_post` keeps the storage and workgroup barriers alone.
+    vv.push(("explicit_beams".to_string(), "explicit_beams_frame", vec![("ENGINE_WGSL", "1")]));
+    vv.push(("explicit_beams_wide".to_string(), "explicit_beams_frame", vec![("ENGINE_WGSL", "1"), ("EB_LANES", "512")]));
+    // With wings, the fuselage drag and command beams (EB_AERO), at both lane counts:
+    // the modules above stay those of vehicles without them.
+    vv.push(("explicit_beams_aero".to_string(), "explicit_beams_frame", vec![("ENGINE_WGSL", "1"), ("EB_LANES", "256"), ("EB_AERO", "1")]));
+    vv.push(("explicit_beams_aero_wide".to_string(), "explicit_beams_frame", vec![("ENGINE_WGSL", "1"), ("EB_LANES", "512"), ("EB_AERO", "1")]));
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits", "centred_beams", "centred_nodes", "aux"] {
+        let defines = if pass == "aux" { vec![("ENGINE_WGSL", "1"), ("EB_LANES", "512")] } else { vec![("ENGINE_WGSL", "1")] };
+        vv.push((format!("explicit_beams_wide_{pass}"), "", defines));
+    }
+    // Vehicle sleep's awake list (engine_kernel_manifest::explicit::SLEEP_LIST).
     vv.push((
         "explicit_beams_sleep_list".to_string(),
         "",
@@ -664,7 +636,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         r?;
     }
     // The sixteen frame and contact modules again without surface contact
-    // (EB_NO_SURFACE, the `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for):
+    // (EB_NO_SURFACE, the `_nosurf` names; engine_kernel_manifest::explicit::Kernel::module_for):
     // the host runs them when no vehicle of the upload has it, so a browser's first
     // load compiles the frame kernels without the surface pass (feature_query and the
     // pair path).
@@ -725,7 +697,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // A fleet with surface contact on the frame modules (no contact groups): the frame
     // in segments, a step each (EB_FRAME_SEG, `<module>_seg`), with the surface pass
     // as its own small pipelines between them (EB_SURF_PIPE: the prep, then per kind
-    // its find and its apply; engine_exec::explicit_plan::Kernel::FrameSeg, Surf). A
+    // its find and its apply; engine_kernel_manifest::explicit::Kernel::FrameSeg, Surf). A
     // browser compiles these in seconds; the frame with the pass in it took minutes.
     let segs: [(&str, &[(&str, &str)]); 4] = [
         ("explicit_beams_seg", &[W]),
@@ -753,14 +725,14 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     }
     // The split paths' modules (the split group path, self-collision split, the wide
     // passes' reused pair list, self split with vehicle contact): one list for every
-    // host's build (engine_exec::explicit_plan::split_modules).
-    for m in engine_exec::explicit_plan::split_modules() {
+    // host's build (engine_kernel_manifest::explicit::split_modules).
+    for m in engine_kernel_manifest::explicit::split_modules() {
         jobs.push((m.name, m.entry, m.defines));
     }
     // Measurement only: the self split modules' ablation builds (EB_ABLATE), at the
     // non-aero variants.
     if test_kernels {
-        for (tag, aero, lanes) in engine_exec::explicit_plan::split_variants() {
+        for (tag, aero, lanes) in engine_kernel_manifest::explicit::split_variants() {
             if aero {
                 continue;
             }
@@ -769,7 +741,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 ("walk", "explicit_beams_self_walk"),
                 ("pairs", "explicit_beams_self_pairs"),
             ] {
-                let mut d = engine_exec::explicit_plan::self_split_defines(aero, lanes);
+                let mut d = engine_kernel_manifest::explicit::self_split_defines(aero, lanes);
                 d.push(("EB_ABLATE", "1"));
                 if which != "step" {
                     d.push(("EB_SELF_PAIRS_ABLATE", "1"));
@@ -806,14 +778,15 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     )?;
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
-    let status = std::process::Command::new(find_slangc()?)
-        .args(["-target", "wgsl"])
-        .args(["-entry", "state_extent", "-stage", "compute"])
-        .arg("-o")
-        .arg(&extent)
-        .arg(slang_root.join("kernels/state_extent.slang"))
-        .status()?;
-    anyhow::ensure!(status.success(), "slangc failed for state_extent.slang");
+    compile_entries_to(
+        &slang_root.join("kernels/state_extent.slang"),
+        &[("state_extent", "compute")],
+        SlangTarget::Wgsl,
+        &extent,
+        &[],
+        &[],
+    )
+    .context("slangc failed for state_extent.slang")?;
     // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
     // so it stays out of the world's pipeline table.
     compile_with_defines(
@@ -846,8 +819,16 @@ fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
     for f in &files {
         (f.strip_prefix(slang_root)?, std::fs::read(f)?).hash(&mut h);
     }
-    for f in ["build.rs", "src/wgsl_loop_cap.rs", "../engine-slang-build/src/lib.rs"] {
-        std::fs::read(manifest.join(f))?.hash(&mut h);
+    // The kernel lists (engine-kernel-manifest: which modules, entries and defines).
+    let mut lists = Vec::new();
+    list_files(&manifest.join("../engine-kernel-manifest/src"), &mut lists)?;
+    lists.sort();
+    for f in ["build.rs", "src/wgsl_loop_cap.rs", "../engine-slang-build/src/lib.rs"]
+        .iter()
+        .map(|f| manifest.join(f))
+        .chain(lists)
+    {
+        std::fs::read(f)?.hash(&mut h);
     }
     // The test kernels in or out (a test build's entry holds more modules).
     test_kernels().hash(&mut h);
@@ -1024,25 +1005,6 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
 
 /// Lane counts of the current kernel's frame modules (the det variants cover each).
 const EXPLICIT_LANES: &[&str] = &["256", "512"];
-
-/// One frame module (entry `explicit_beams_frame`) at `lanes`, with or without
-/// `EB_AERO`.
-fn explicit_frame_module(slang_root: &Path, dir: &Path, name: &str, lanes: &str, aero: bool) -> Result<()> {
-    let out = dir.join(format!("{name}.wgsl"));
-    let mut d = vec![("ENGINE_WGSL", "1"), ("EB_LANES", lanes)];
-    if aero {
-        d.push(("EB_AERO", "1"));
-    }
-    compile_with_defines(
-        &explicit_beams_source(slang_root),
-        "explicit_beams_frame",
-        SlangTarget::Wgsl,
-        &out,
-        &[],
-        &d,
-    )?;
-    explicit_post(&out)
-}
 
 /// The shipped explicit-beams modules' source: `explicit_beams.slang`; for
 /// measurement builds only (each in its own target directory), `RUBBLE_EB_REF=1`

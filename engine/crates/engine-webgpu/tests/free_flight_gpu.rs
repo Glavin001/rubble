@@ -1,4 +1,4 @@
-//! The free-flight scenes of `engine-softbody/tests/free_flight.rs` (the generated
+//! The free-flight scenes of `engine-softbody-authoring/tests/free_flight.rs` (the generated
 //! sedan, the vehicle lab's `car=gen`, far above any ground, with the page's
 //! settings: per-triangle aero and centred damping) on the GPU against the CPU
 //! reference, bit for bit every step: every node's position and velocity, and the
@@ -6,8 +6,8 @@
 //! momentum, a detached part's ballistic flight, torn parts leaving on their
 //! tangent); this one holds that the kernels step the same, so the invariants hold
 //! on the GPU too. Per-vehicle frame and the wide passes.
-use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
-use engine_softbody::authoring::rig;
+use engine_softbody_authoring::authoring::gen2::{rig as lattice, vg_input};
+use engine_softbody_authoring::authoring::rig;
 use engine_softbody::desc::SoftVehicleDesc;
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, ExplicitKind};
 use engine_webgpu::{default_device, ExplicitBeamsGpu};

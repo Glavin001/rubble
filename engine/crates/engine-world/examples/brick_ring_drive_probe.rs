@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
         "none" => None,
         "showcase" => {
             // The page's ?car=sedan: the authored showcase sedan (showcaseCar, low).
-            use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+            use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
             let def = style("sedan").ok_or_else(|| anyhow::anyhow!("no sedan style"))?;
             let b = build(
                 &def,

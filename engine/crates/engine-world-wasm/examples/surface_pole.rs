@@ -44,7 +44,7 @@ fn flag(k: &str) -> bool {
 fn car(name: &str) -> serde_json::Value {
     match name {
         "sedan1" | "sedan" => {
-            use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+            use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
             let b = build(
                 &style(name).expect("style"),
                 &BuildParams {

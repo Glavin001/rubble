@@ -12,9 +12,9 @@ changed.
 
 ```bash
 cd engine
-cargo run --release -p engine-softbody --example beam_rate_histogram -- \
+cargo run --release -p engine-softbody-authoring --example beam_rate_histogram -- \
     --car ~/Development/rubble-artifacts/sedan-live/mods/sedan_new     # the lab sedan
-cargo run --release -p engine-softbody --example beam_rate_histogram  # the repo sedan
+cargo run --release -p engine-softbody-authoring --example beam_rate_histogram  # the repo sedan
 ```
 
 Options: `--generated low|medium|high`, `--wheels pressure` (JBeam pressure wheels),

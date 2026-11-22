@@ -72,7 +72,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/crates/engine-kernel-manifest/src/**', 'engine/scripts/slangc.sh') }}
           lookup-only: true
       - uses: dtolnay/rust-toolchain@stable
         if: steps.have.outputs.cache-hit != 'true'
@@ -98,7 +98,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/crates/engine-kernel-manifest/src/**', 'engine/scripts/slangc.sh') }}
 
   # The demo site is built in three parallel jobs, one per part of build-web.sh
   # (RUBBLE_WEB_PARTS), and assembled by the `web` job below. One job took 21-28 minutes:
@@ -145,7 +145,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/crates/engine-kernel-manifest/src/**', 'engine/scripts/slangc.sh') }}
       - name: Build the ${{ matrix.part }} part
         env:
           RUBBLE_WEB_PARTS: ${{ matrix.part }}

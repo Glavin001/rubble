@@ -264,7 +264,7 @@ cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
 step "Generated sedan (the generator and rigger, run)"
 # Rubble's generated sedan is built here from its code (engine-vehiclegen's design,
-# engine-softbody's rigger: the vehicle_gen_rig example), never committed: the BeamNG mod
+# engine-softbody-authoring's rigger: the vehicle_gen_rig example), never committed: the BeamNG mod
 # folder the vehicle lab and softbody.html load from __mods/sedan_new (JBeam, .pc, .glb,
 # .rskin and files.json). A local $OUT/__mods that is a link to one's own mods folder
 # (which may hold community cars, local only) is kept as it is and used instead.
@@ -275,14 +275,15 @@ if [[ -L "$OUT/__mods" ]]; then
 else
   SEDAN_DIR="$(mktemp -d)/sedan_new"
   gen_sedan() {
-    cargo run --release -p engine-softbody --example vehicle_gen_rig -- sedan --out "$SEDAN_DIR"
+    cargo run --release -p engine-softbody-authoring --example vehicle_gen_rig -- sedan --out "$SEDAN_DIR"
   }
   # The design is built in memory from the generator's own parameters: its output
   # depends only on these crates' sources, the lock file and the compiler.
   sedan_key="$( ( (git ls-files -z crates/engine-vehiclegen crates/engine-softbody \
-    crates/engine-vehicle crates/engine-schema Cargo.toml Cargo.lock rust-toolchain.toml \
+    crates/engine-softbody-authoring crates/engine-vehicle crates/engine-schema Cargo.toml \
+    Cargo.lock rust-toolchain.toml \
     ':(exclude,glob)crates/*/tests/**' ':(exclude,glob)crates/*/examples/**'
-    printf '%s\0' crates/engine-softbody/examples/vehicle_gen_rig.rs) | sort -z | xargs -0 cat
+    printf '%s\0' crates/engine-softbody-authoring/examples/vehicle_gen_rig.rs) | sort -z | xargs -0 cat
     rustc --version) | key)"
   cached sedan "$sedan_key" "$SEDAN_DIR" gen_sedan
 fi

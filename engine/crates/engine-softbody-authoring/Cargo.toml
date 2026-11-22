@@ -1,0 +1,22 @@
+[package]
+name = "engine-softbody-authoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vehicle authoring for engine-softbody: the generated cars (parts, rigs, skins), imported vehicles' visual meshes (flexmesh, flexskin, glb) and vehicle comparisons"
+
+[dependencies]
+engine-softbody.workspace = true
+engine-schema.workspace = true
+engine-vehicle.workspace = true
+# The vehicle generator's designs: rigged in memory (authoring::gen2::vg_input).
+engine-vehiclegen.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Collada (.dae) flexbody meshes of imported JBeam vehicles (flexmesh.rs).
+quick-xml = "0.41"
+
+[dev-dependencies]
+bcdec_rs = "0.2.1"
+png = "0.18"

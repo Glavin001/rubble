@@ -40,6 +40,11 @@ LINE_SUFFIXES = (".metal", ".cu")
 LINE_RE = re.compile(rb'^(#line \d+ ")([^"]*)(")', re.M)
 
 
+# The generated Rust tables embed their kernels by absolute path
+# (`include_str!("<target>/<profile>/build/<crate>-<hash>/out/...")`): where the
+# checkout is and the build script's hash (which changes with its dependencies) are not
+# part of what is embedded, so they are compared as `OUT[<crate>]/...`.
+OUT_DIR_RE = re.compile(rb'"[^"]*/build/([A-Za-z0-9_-]+?)-[0-9a-f]{16}/out/')
 # The CUDA tables record each `.cu` file's length (`cu_bytes`, read by nothing), which
 # its `#line` names change; the `.cu` files themselves are compared (normalised).
 CU_BYTES_RE = re.compile(rb"cu_bytes: \d+")
@@ -94,6 +99,8 @@ def digest_dir(root):
                 data = fh.read()
             if f.endswith(LINE_SUFFIXES):
                 data = LINE_RE.sub(normalise_line, data)
+            if f.endswith(".rs"):
+                data = OUT_DIR_RE.sub(rb'"OUT[\1]/', data)
             if f.startswith("cuda_") and f.endswith(".rs"):
                 data = CU_BYTES_RE.sub(b"cu_bytes: _", data)
             h.update(data)

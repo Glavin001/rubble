@@ -44,7 +44,7 @@ fn car(name: &str) -> ExplicitBeams {
     };
     let text = match name {
         "sedan1" => {
-            use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+            use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
             build(
                 &style("sedan1").expect("style"),
                 &BuildParams {

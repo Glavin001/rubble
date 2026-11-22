@@ -1,4 +1,4 @@
-//! The shared rigid plan's kernels (`engine_exec::rigid_plan::PERSISTENT_ENTRIES`),
+//! The shared rigid plan's kernels (`engine_kernel_manifest::rigid::PERSISTENT_ENTRIES`),
 //! Slang → CUDA C++ in the browser's `ENGINE_WGSL` layout, then → a fatbin with
 //! nvcc when it is installed. Emits `cuda_kernels.rs`: per entry the fatbin
 //! (empty without nvcc), thread-group size and `SLANG_globalParams` field →
@@ -15,7 +15,7 @@
 //! Modal archives).
 
 use anyhow::{anyhow, Result};
-use engine_exec::rigid_plan::{kernel_source, PERSISTENT_ENTRIES};
+use engine_kernel_manifest::rigid::{kernel_source, PERSISTENT_ENTRIES};
 use engine_slang_build::cuda_layout::{compile_kernel, deferred_load_hazards, fatbin, CudaKernel};
 use engine_slang_build::msl_layout::bind_slots;
 use engine_slang_build::{find_nvcc, find_slangc};
@@ -173,7 +173,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The explicit-beams solver's modules (`engine_exec::explicit_plan::MODULES`:
+/// The explicit-beams solver's modules (`engine_kernel_manifest::explicit::MODULES`:
 /// name, entry, defines), Slang → CUDA from `explicit_beams.slang` with the same
 /// hazard check as the rigid kernels and fatbins when nvcc is present; each
 /// `SLANG_globalParams` field mapped to the plan's binding (its
@@ -187,7 +187,7 @@ fn explicit_kernels(
     root: &std::path::Path,
     out_dir: &std::path::Path,
 ) -> Result<()> {
-    use engine_exec::explicit_plan::{split_modules, MODULES};
+    use engine_kernel_manifest::explicit::{split_modules, MODULES};
     use engine_slang_build::cuda_layout::compile_kernel_with_defines;
     use engine_slang_build::msl_layout::vk_binding_slots;
     // The plan's modules and the split paths' (one list for every host's build).
@@ -352,7 +352,7 @@ const TERRAIN_GS_ENTRIES: &[&str] = &[
     "mpm_p2g_cells_gs",
 ];
 
-/// The terrain plan's kernels (`engine_terrain::plan::KERNELS`, bindings
+/// The terrain plan's kernels (`engine_kernel_manifest::terrain::KERNELS`, bindings
 /// 37-51), the native fast paths (`terrain_mpm_fast.slang`) and the CUDA
 /// grid-stride entries for the plan's indirect dispatches
 /// (`terrain_mpm_cuda.slang`), Slang → CUDA with the same hazard check as the
@@ -379,7 +379,7 @@ fn terrain_kernels(
         mpm.clone(),
         fast.clone(),
     ])?;
-    let entries: Vec<(&str, &std::path::Path)> = engine_terrain::plan::KERNELS
+    let entries: Vec<(&str, &std::path::Path)> = engine_kernel_manifest::terrain::KERNELS
         .iter()
         .map(|&e| (e, mpm.as_path()))
         .chain(TERRAIN_FAST_ENTRIES.iter().map(|&e| (e, fast.as_path())))

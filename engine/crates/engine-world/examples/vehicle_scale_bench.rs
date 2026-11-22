@@ -57,7 +57,7 @@ fn template() -> ExplicitBeams {
                 &desc,
                 Vec3::ZERO,
                 Vec3::ZERO,
-                engine_softbody::vehicle_compare::settings(),
+                engine_softbody_authoring::vehicle_compare::settings(),
             )
             .unwrap()
             .0
@@ -73,7 +73,7 @@ fn template() -> ExplicitBeams {
                 engine_softbody::explicit_beams::JbeamWheels::Pressure,
                 Vec3::ZERO,
                 Vec3::ZERO,
-                engine_softbody::vehicle_compare::settings(),
+                engine_softbody_authoring::vehicle_compare::settings(),
             )
             .unwrap()
             .0

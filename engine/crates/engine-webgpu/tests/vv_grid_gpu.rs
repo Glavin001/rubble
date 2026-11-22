@@ -89,7 +89,7 @@ fn the_candidates_grid_is_the_brute_test_bit_for_bit_with_fewer_visits() {
 /// accumulator words at frame 7; not shipped: fleet-benchmark.md.)
 #[test]
 fn the_grid_with_gridded_cars_is_bit_for_bit() {
-    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
     let text = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::Low, ..Default::default() }).unwrap().truck;
     let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
     let spawn = |at: Vec3, yaw: f32, vel: Vec3| {

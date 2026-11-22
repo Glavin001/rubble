@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One CI job's share of the engine host tests (no GPU). Run from engine/.
 #
-#   host-tests.sh rest             every host-tested crate but engine-softbody
-#   host-tests.sh softbody N M     shard N of M of engine-softbody (host-test-shards.py)
+#   host-tests.sh rest             every host-tested crate but the two soft-body ones
+#   host-tests.sh softbody N M     shard N of M of engine-softbody and
+#                                  engine-softbody-authoring (host-test-shards.py)
 #
 # Together the jobs run what one command ran before:
 #   cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle
@@ -35,30 +36,35 @@ case "$group" in
       -p engine-vehicle -p engine-fracture -p engine-vehiclegen
     ;;
   softbody)
+    # engine-softbody and engine-softbody-authoring (the vehicle authoring split out of
+    # it, with most of the long tests), sharded together.
     shard="${2:?shard}"
     total="${3:?shards}"
-    plan="$(python3 "$scripts/host-test-shards.py" engine-softbody "$shard" "$total")" || exit 1
-    tests=()
-    examples=()
-    doc=0
-    while read -r kind arg; do
-      case "$kind" in
-        test) tests+=("$arg") ;;
-        example) examples+=("--example=$arg") ;;
-        doc) doc=1 ;;
-        "") ;;
-        *) echo "host-test-shards.py: unknown line '$kind $arg'" >&2; exit 1 ;;
-      esac
-    done <<< "$plan"
-    if (( ${#tests[@]} )); then
-      run test "${flags[@]}" --no-fail-fast -p engine-softbody "${tests[@]}"
-    fi
-    if (( doc )); then
-      run test "${flags[@]}" --no-fail-fast -p engine-softbody --doc
-    fi
-    if (( ${#examples[@]} )); then
-      run build "${flags[@]}" -p engine-softbody "${examples[@]}"
-    fi
+    packages=engine-softbody,engine-softbody-authoring
+    plan="$(python3 "$scripts/host-test-shards.py" "$packages" "$shard" "$total")" || exit 1
+    for package in ${packages//,/ }; do
+      tests=()
+      examples=()
+      doc=0
+      while read -r pkg kind arg; do
+        [[ "$pkg" == "$package" ]] || continue
+        case "$kind" in
+          test) tests+=("$arg") ;;
+          example) examples+=("--example=$arg") ;;
+          doc) doc=1 ;;
+          *) echo "host-test-shards.py: unknown line '$pkg $kind $arg'" >&2; exit 1 ;;
+        esac
+      done <<< "$plan"
+      if (( ${#tests[@]} )); then
+        run test "${flags[@]}" --no-fail-fast -p "$package" "${tests[@]}"
+      fi
+      if (( doc )); then
+        run test "${flags[@]}" --no-fail-fast -p "$package" --doc
+      fi
+      if (( ${#examples[@]} )); then
+        run build "${flags[@]}" -p "$package" "${examples[@]}"
+      fi
+    done
     ;;
   *)
     echo "usage: host-tests.sh rest | softbody N M" >&2

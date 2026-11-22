@@ -8,8 +8,9 @@ For each edit below: append a comment line to one file, rebuild the fast loop's
 harness (the build fast-check.sh and the scenario matrix run), record the wall time,
 the crates cargo compiled, the build scripts it ran and the slangc processes those
 started; then put the file back and rebuild untimed, so each edit starts from a
-built tree. A comment changes no output, so what rebuilds is what the build graph
-makes rebuild, not what the edit needed.
+built tree. Each probe is new (a kernel comment, an unused Rust function, never seen by a
+build), so caches miss as they do after a real edit; the probe changes no output,
+so what rebuilds is what the build graph makes rebuild, not what the edit needed.
 
 slangc runs are counted by a wrapper (SLANGC points at it). The per-compile cache's
 key includes slangc's path, so the first build under the wrapper compiles everything
@@ -38,13 +39,35 @@ EDITS = {
     "kernel-explicit": ("slang/kernels/explicit_beams.slang", "the explicit vehicles' kernel"),
     "kernel-common": ("slang/physics/common.slang", "the most-included shared kernel file"),
     "softbody-runtime": ("crates/engine-softbody/src/explicit_beams.rs", "softbody's runtime model"),
-    "softbody-authoring": ("crates/engine-softbody/src/authoring/vehicle.rs", "vehicle authoring"),
+    # (Where it is after the authoring split, else where it was: the tool measures both.)
+    "softbody-authoring": (["crates/engine-softbody-authoring/src/authoring/vehicle.rs",
+                            "crates/engine-softbody/src/authoring/vehicle.rs"], "vehicle authoring"),
     "exec-plan": ("crates/engine-exec/src/explicit_plan.rs", "the explicit plan"),
     "webgpu-host": ("crates/engine-webgpu/src/explicit_beams_gpu.rs", "the explicit GPU host"),
     "world": ("crates/engine-world/src/threshold.rs", "a World module"),
 }
 
 PROBE = "\n// build-time probe (tools/build-time/measure.py); remove if left behind\n"
+
+
+def probe(path):
+    """A new edit each time, as a real one is: a kernel file gets a comment no build
+    has seen (so the per-compile cache misses as it would), a Rust file a function no
+    build has seen."""
+    n = time.time_ns()
+    if path.endswith(".rs"):
+        return (f"\n// build-time probe (tools/build-time/measure.py); remove if left behind\n"
+                f"#[allow(dead_code)]\nfn build_time_probe_{n}() -> u64 {{ {n} }}\n")
+    return f"\n// build-time probe {n} (tools/build-time/measure.py); remove if left behind\n"
+
+
+def edit_file(name):
+    """The edit's file (the first of its candidates that exists)."""
+    rel = EDITS[name][0]
+    for r in [rel] if isinstance(rel, str) else rel:
+        if os.path.isfile(os.path.join(ENGINE, r)):
+            return r
+    sys.exit(f"{name}: none of {rel} exists")
 
 
 def real_slangc():
@@ -86,7 +109,7 @@ def build(cmd, env):
 
 
 def measure(name, cmd, env, log, runs):
-    rel, _ = EDITS[name]
+    rel = edit_file(name)
     path = os.path.join(ENGINE, rel)
     with open(path, "rb") as fh:
         original = fh.read()
@@ -94,7 +117,7 @@ def measure(name, cmd, env, log, runs):
     try:
         for _ in range(runs):
             with open(path, "ab") as fh:
-                fh.write(PROBE.encode())
+                fh.write(probe(path).encode())
             before = count_lines(log)
             secs, compiled, scripts = build(cmd, env)
             slangc = count_lines(log) - before
@@ -135,8 +158,22 @@ def main():
     wrapper, log = make_wrapper(work, real_slangc())
     env = dict(os.environ, SLANGC=wrapper)
 
+    # The warm-up builds the tree and then reruns the kernel build scripts once under
+    # the wrapper (an edit to a kernel file and back), so every kernel is in the cache
+    # under the wrapper's key before anything is timed.
     print(f"warm-up: {' '.join(cmd)}", flush=True)
     secs, _, _ = build(cmd, env)
+    warm = os.path.join(ENGINE, edit_file("kernel-common"))
+    with open(warm, "rb") as fh:
+        original = fh.read()
+    try:
+        with open(warm, "ab") as fh:
+            fh.write(probe(warm).encode())
+        secs += build(cmd, env)[0]
+    finally:
+        with open(warm, "wb") as fh:
+            fh.write(original)
+    secs += build(cmd, env)[0]
     print(f"  {secs:.1f} s", flush=True)
 
     rows = []
