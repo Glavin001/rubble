@@ -1,5 +1,29 @@
 # Build time: edit to ready
 
+## Where it stands (2026-11-22)
+
+Edit to a ready fast-loop harness (`measure.py`, median of 3; ready = the harness built
+and, with kernels compiled at run time, its kernels compiled):
+
+| Edit | main (`d5a1d480`) s | now s | Crates compiled now |
+|---|---|---|---|
+| a small kernel file | 4.1 | 1.1 | 0 |
+| `slang/kernels/explicit_beams.slang` | 28.9 | 13.6 | 0 |
+| `slang/physics/common.slang` | 28.2 | 9.1 | 0 |
+| the explicit kernel's wings | 28.9 | 8.3 | 0 |
+| the soft-body model | 6.1 | 3.9 | 8 |
+| vehicle authoring | 6.1 | 1.8 | 2 |
+| the explicit plan | 4.8 | 2.9 | 6 |
+| the explicit GPU host | 2.6 | 2.5 | 4 |
+| a World module | 1.7 | 1.7 | 2 |
+
+The web (`RUBBLE_WEB_PROFILE=fast`): a kernel edit for the pages 9 s and no wasm rebuild
+(before: the world wasm, 44 s in release); a Rust edit 4-5 s for the world wasm. A new
+worktree compiles no kernel another one already compiled (`~/.cache/rubble/slang-obj`).
+CI: the soft-body shards' targets 107 -> 73, examples checked instead of built.
+
+The sections below are the steps, in order.
+
 What an edit costs before the fast loop's harness is built again
 (`cargo build --profile fast -p engine-world-lab --example vehicle_lab`, the build
 `fast-check.sh` and the scenario matrix run). Measured with

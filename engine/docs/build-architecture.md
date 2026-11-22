@@ -109,6 +109,23 @@ shared instead:
   new worktree's wgpu, naga, winit and the rest come from the cache. It does not help
   the workspace's own crates (incremental builds, which sccache does not cache).
 
+## Tests and tools
+
+- **Host-only integration tests: one binary per crate** (`tests/host/main.rs`, one
+  module per file; run one file's with `cargo test -p CRATE --test host FILE::`). Each
+  test file is otherwise a binary of its own, linked with thin LTO in a release test
+  build (engine-fracture: 16 -> 6 binaries, 15.4 -> 10.6 s after a library edit). A long
+  test (CI's `host-test-shards.py` RUN_SECONDS), one on the expected-failures list, or
+  one that touches process-wide state (an environment variable) keeps a binary of its
+  own; GPU suites stay one binary each (scripts and CI select them by `--test`).
+- **Tools are examples of a lab crate**, not of the crate they exercise:
+  `engine-softbody-lab`, `engine-world-lab` (vehicle_lab, the harness), `engine-webgpu-lab`.
+  Nothing depends on a lab crate, so testing a crate builds none of its tools (after an
+  authoring edit, its 35 examples were 61 s of thin-LTO links in a release test build).
+- **Unit tests in `src/` behind `#[cfg(test)]`** cost nothing outside that crate's test
+  build (an edit to engine-webgpu's 5313-line `gpu_tests.rs` rebuilds no crate of the
+  fast loop); they stay where they reach the crate's private items.
+
 ## Checked in CI
 
 `python3 tools/build-time/check.py` (from `engine/`; the "Build architecture" job):
@@ -117,6 +134,13 @@ shared instead:
   no engine crate but it and `engine-slang-build`; the runtime (plans, executors,
   World, FFI) does not depend on `engine-softbody-authoring`.
 - Nothing but `engine-slang-build` spawns slangc or nvcc.
+- Every loop cap in `slang/kernels` has an id of its own.
+- Functions stay under 200 lines (Rust). The ones over it when the rule came in are in
+  `tools/build-time/fn-size-allowlist.txt` (149), each at most its size: they may shrink,
+  not grow. (An edit inside the 3038-line `rig_with` rebuilt its crate 0.7 s slower than
+  one in a small function: splitting the existing giants by hand would save under a
+  second an edit against the risk to the vehicles they build, so they wait for a change
+  that touches them; no new one is added.)
 - Sources stay under 1500 lines (Rust) and 3000 (Slang). The files over it when the
   rule came in are in `tools/build-time/size-allowlist.txt`, each at most its listed
   size: they may shrink (`check.py --shrink` lowers the numbers), not grow. Split a
@@ -142,6 +166,18 @@ module (one call site per heavy helper, a split by dispatch kind:
   include for modules without the define, so an edit there recompiles only the modules
   that have it. Moving code into such a file is checked with
   `kernel_digest.py` (WGSL identical; MSL and CUDA identical with `STRIP_LINES=1`).
+
+## Before committing a change to the build
+
+- `tools/build-time/check-builds.sh` (from `engine/`, about a minute warm): every build
+  configuration the kernels come in (embedded and at run time, with and without the
+  `gpu` feature, native and wasm, every target) and the rules above. Each compiles
+  different code: a full build of one misses the others (it found a test's path to a
+  moved example and a wasm-only hook missing from a native build, both of this work).
+- `tools/build-time/kernel_digest.py` before and after: every generated kernel byte for
+  byte.
+- `tools/build-time/measure.py --budget`: no edit slower than its line in
+  `tools/build-time/budget.txt` (this machine's medians with headroom).
 
 ## Measuring
 

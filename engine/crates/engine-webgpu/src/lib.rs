@@ -28,12 +28,12 @@ use kernel::kernel;
 
 /// On wasm, how a build with its kernels compiled at run time (a fast web build) reads
 /// them: `load(rel)` returns the store's file `rel` (`wgsl/<name>.wgsl`, `wgsl_ok.txt`,
-/// `spirv_entries.txt`). Nothing to do when the kernels are embedded (every other build).
-#[cfg(target_arch = "wasm32")]
+/// `spirv_entries.txt`). Nothing to do anywhere else (embedded kernels, or native, which
+/// reads its own store).
 pub fn set_kernel_loader(load: fn(&str) -> Result<String, String>) {
-    #[cfg(kernels_at_runtime)]
+    #[cfg(all(kernels_at_runtime, target_arch = "wasm32"))]
     kernel_store::set_loader(load);
-    #[cfg(not(kernels_at_runtime))]
+    #[cfg(not(all(kernels_at_runtime, target_arch = "wasm32")))]
     let _ = load;
 }
 #[cfg(feature = "gpu")]

@@ -18,6 +18,12 @@ once; that warm-up is not timed.
 
 CMD overrides the build (default: the fast loop). RUNS (or --runs) repeats each edit
 and reports the median. Nothing here touches the GPU.
+
+--budget [FILE] (default tools/build-time/budget.txt): exit 1 when an edit's median is
+past its line there (seconds, measured on the machine the file names; set with headroom
+over the medians in engine/docs/measurements/build-time.md). A change that makes an edit
+slower past its budget is a regression of the build: find why, or raise the line in the
+same change where review sees it.
 """
 import argparse
 import os
@@ -155,6 +161,7 @@ def main():
     ap.add_argument("--runs", type=int, default=int(os.environ.get("RUNS", "1")))
     ap.add_argument("--only", default="")
     ap.add_argument("--out", default="")
+    ap.add_argument("--budget", nargs="?", const=os.path.join(ENGINE, "tools", "build-time", "budget.txt"), default="")
     args = ap.parse_args()
     cmd = os.environ.get("CMD", "").split() or DEFAULT_CMD
     names = [n for n in args.only.split(",") if n] or list(EDITS)
@@ -210,6 +217,18 @@ def main():
             fh.write(text)
     print()
     print(text)
+    if args.budget:
+        budget = {}
+        for line in open(args.budget):
+            line = line.split("#", 1)[0].strip()
+            if line:
+                name, secs = line.split()
+                budget[name] = float(secs)
+        over = [r for r in rows if r["name"] in budget and r["secs"] > budget[r["name"]]]
+        for r in over:
+            print(f"over budget: {r['name']} {r['secs']:.1f} s > {budget[r['name']]:.1f} s")
+        print(f"budget: {len(rows)} edits, {len(over)} over")
+        sys.exit(1 if over else 0)
 
 
 if __name__ == "__main__":

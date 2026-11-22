@@ -20,7 +20,7 @@
 //! recorded here from `RUBBLE_CENTRED_OBJECTIVE=1 RAYCAST=1 sedan_stiffness
 //! etkk` (2026-11-13, `kr6.pc`).
 #[allow(dead_code)]
-#[path = "../examples/sedan_stiffness.rs"]
+#[path = "../../engine-softbody-lab/examples/sedan_stiffness.rs"]
 mod harness;
 
 use engine_softbody_authoring::authoring::gen2::{rig as lattice, vg_input};

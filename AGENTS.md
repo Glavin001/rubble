@@ -123,7 +123,9 @@
   engine-slang-build, source sizes that may only shrink). A change to how anything is
   built proves itself lossless with `tools/build-time/kernel_digest.py` (every generated
   kernel byte for byte) and its gain with `tools/build-time/measure.py`
-  (`engine/docs/measurements/build-time.md`). To iterate on pages:
+  (`engine/docs/measurements/build-time.md`); `tools/build-time/check-builds.sh` checks
+  every configuration the kernels build in (run it after touching the kernel plumbing).
+  The harness is `-p engine-world-lab --example vehicle_lab`. To iterate on pages:
   `RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh`
   (never measure with it).
 - Generated vehicles: read `engine/docs/generated-vehicles-lessons.md` first (lessons,

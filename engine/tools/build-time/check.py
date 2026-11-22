@@ -17,6 +17,11 @@ Exits 1 with one line per broken rule:
 - Every loop cap in slang/kernels names its loop by an id of its own
   (`EB_END(ID, ..)`, `EB_PASS(ID, ..)`, `ebLoopCapHit(ID)`; explicit_loop_cap.slang),
   each used once (engine-webgpu's tests/explicit_loop_cap.rs checks the same).
+- Function size: no Rust function over 200 lines, except those in
+  fn-size-allowlist.txt, each at most its listed size (they may shrink, not grow).
+  rustc compiles a function as one unit: an edit inside one of 3000 lines rebuilt the
+  crate 0.7 s slower than one inside a small one (engine/docs/measurements/build-time.md),
+  and the reader carries all of it.
 - Size: no Rust or Slang source over its limit (Rust 1500 lines, Slang 3000), except
   the files in size-allowlist.txt, each at most its listed size (they may shrink, not
   grow). A file that must grow past its line is split, or its line raised in the same
@@ -30,6 +35,8 @@ import sys
 
 ENGINE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ALLOWLIST = os.path.join(ENGINE, "tools", "build-time", "size-allowlist.txt")
+FN_ALLOWLIST = os.path.join(ENGINE, "tools", "build-time", "fn-size-allowlist.txt")
+FN_LIMIT = 200
 LIMITS = {".rs": 1500, ".slang": 3000}
 SCAN = ["crates", "slang", "experiments"]
 
@@ -105,6 +112,92 @@ def check_loop_ids(all_problems):
     all_problems.extend(problems)
 
 
+FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def fn_sizes():
+    """`path::fn` -> lines, for every Rust function (brace matching from the first `{`
+    after its name; strings, chars and comments are skipped)."""
+    found = {}
+    for top in SCAN:
+        for root, dirs, files in os.walk(os.path.join(ENGINE, top)):
+            dirs[:] = [d for d in dirs if d not in ("target", "node_modules", "generated")]
+            for f in files:
+                if not f.endswith(".rs"):
+                    continue
+                path = os.path.join(root, f)
+                rel = os.path.relpath(path, ENGINE)
+                lines = open(path, errors="replace").read().split("\n")
+                for i, line in enumerate(lines):
+                    m = FN_RE.match(line)
+                    if not m:
+                        continue
+                    n = body_lines(lines, i)
+                    if n is not None:
+                        key = f"{rel}::{m.group(1)}"
+                        found[key] = max(found.get(key, 0), n)
+    return found
+
+
+def body_lines(lines, start):
+    depth, opened = 0, False
+    for j in range(start, min(len(lines), start + 20000)):
+        text = re.sub(r'"(?:\\.|[^"\\])*"', '""', lines[j])
+        text = re.sub(r"'(?:\\.|[^'\\])'", "''", text)
+        text = text.split("//", 1)[0]
+        for c in text:
+            if c == "{":
+                depth += 1
+                opened = True
+            elif c == "}":
+                depth -= 1
+                if opened and depth == 0:
+                    return j - start + 1
+            elif c == ";" and not opened:
+                return None  # a declaration without a body (trait item, extern fn)
+    return None
+
+
+def load_fn_allowlist():
+    allowed = {}
+    if os.path.exists(FN_ALLOWLIST):
+        for line in open(FN_ALLOWLIST):
+            line = line.split("#", 1)[0].strip()
+            if line:
+                key, n = line.rsplit(None, 1)
+                allowed[key] = int(n)
+    return allowed
+
+
+def check_fn_sizes(problems, shrink, init):
+    found = fn_sizes()
+    allowed = load_fn_allowlist()
+    if init:
+        allowed = {k: n for k, n in found.items() if n > FN_LIMIT}
+    for key, n in sorted(found.items()):
+        if key in allowed:
+            if n > allowed[key]:
+                problems.append(f"{key}: {n} lines, more than its {allowed[key]} in fn-size-allowlist.txt (split it, or raise the line)")
+        elif n > FN_LIMIT:
+            problems.append(f"{key}: {n} lines, past the {FN_LIMIT}-line function limit (split it)")
+    gone = [k for k in allowed if found.get(k, 0) <= FN_LIMIT]
+    if shrink or init:
+        for k in gone:
+            del allowed[k]
+        for k in allowed:
+            allowed[k] = min(allowed[k], found[k])
+        with open(FN_ALLOWLIST, "w") as fh:
+            fh.write(
+                "# Rust functions over 200 lines (tools/build-time/check.py) when the limit was set,\n"
+                "# each with the most lines it may have. They may shrink (check.py --shrink lowers the\n"
+                "# numbers), not grow: split one instead, or raise its line in the same change.\n"
+            )
+            for k in sorted(allowed):
+                fh.write(f"{k} {allowed[k]}\n")
+    elif gone:
+        problems.append(f"fn-size-allowlist.txt lists functions now under the limit or gone ({', '.join(gone[:5])}): run check.py --shrink")
+
+
 def sizes():
     found = {}
     for top in SCAN:
@@ -168,12 +261,17 @@ def main():
     if "--init" in sys.argv[1:]:
         found = sizes()
         write_allowlist({p: n for p, n in found.items() if n > LIMITS[os.path.splitext(p)[1]]})
+        check_fn_sizes([], False, True)
+        return 0
+    if "--init-fns" in sys.argv[1:]:
+        check_fn_sizes([], False, True)
         return 0
     problems = []
     check_crates(problems)
     check_spawns(problems)
     check_loop_ids(problems)
     check_sizes(problems, shrink)
+    check_fn_sizes(problems, shrink, False)
     for p in problems:
         print(p)
     if not problems:
