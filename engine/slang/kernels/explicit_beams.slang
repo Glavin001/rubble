@@ -7706,7 +7706,8 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 //   explicit_beams_vv_pairs   one thread per vehicle: pairs of overlapping padded
 //                             frame boxes
 //   explicit_beams_vv_group   one workgroup: connected components of the pairs
-//                             (label propagation), the solo list, the groups'
+//                             (label propagation; a vehicle without partners a
+//                             group of one), the groups'
 //                             member lists, the indirect dispatch arguments
 //   (the plan passes run when the last plan's steps are used up: it covers at
 //   least VV_PLAN_STEPS on the host, so at 120 fps every other frame)
@@ -8137,38 +8138,20 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         sync();
     }
     uint pairs = min(uint(gAcc[vvCtl(VV_PAIRS)].load()), gP.vvPairCap);
-    // No overlapping frame boxes (the common case): every vehicle is solo.
-    if (lane == 0u) gsUniformLanes = pairs;
-    sync();
-    uint anyPairs = gsUniformLanes;
-    sync();
-    if (anyPairs == 0u)
-    {
-        for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
-        {
-            EB_PASS(125, bGuard);
-            gAcc[gP.vvGridCount + b].store(0);
-        }
-        if (lane == 0u)
-        {
-            vvArgs(nv, 0u, false, false);
-            gAcc[vvCtl(VV_BIGS)].store(0);
-        }
-        return ebLoopCapFlush();
-    }
+    // Every vehicle is a member of a group, a vehicle without partners a group of its
+    // own: the members' step is the solo frame's bit for bit (contactMemberStep), and
+    // the split group path's vehicles' module then holds that step alone, half its size
+    // and its first-load compile (explicit_beams_split.slang explicit_beams_split_member;
+    // kernel-compile-time.md). Only a group past VV_MAX_GROUP members runs alone below
+    // (reported), as before.
     for (uint v = lane, vStop = EB_END(126, v, nv, 256u); v < vStop; v += 256u)
     {
         gAcc[gP.vvLabel + v].store(int(v));
-        gMisc[vvRec(v, VV_FLAGS)].y = 0u;
+        gMisc[vvRec(v, VV_FLAGS)].y = 1u;
     }
     sync();
     // The pairs by vehicle (the owners' state by vehicle reads its partners from them).
     if (gP.vvFleet != 0u) vvAdjBuild(lane, nv, pairs);
-    for (uint p = lane, pStop = EB_END(127, p, pairs, 256u); p < pStop; p += 256u)
-    {
-        gMisc[vvRec(gNext[gP.vvPairs + 2u * p], VV_FLAGS)].y = 1u;
-        gMisc[vvRec(gNext[gP.vvPairs + 2u * p + 1u], VV_FLAGS)].y = 1u;
-    }
     // Connected components: every vehicle of a group ends with its smallest index.
     uint go = 1u;
     for (uint it = 0u; it < 64u; it++)

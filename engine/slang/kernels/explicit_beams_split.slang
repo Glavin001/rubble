@@ -168,7 +168,11 @@ void splitMember(uint v, uint lane, uint s)
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     uint4 G = fl.y != 0u ? gMisc[gP.vvGroups + fl.z] : uint4(0u, 0u, 0u, 0u);
     // (A sleeping member is not stepped: its group sleeps.)
-    uint k = splitUniform(lane, v < gP.vehicles && sleepAsleep(v) ? 0u : G.y);
+    bool awake = v < gP.vehicles && !sleepAsleep(v);
+    // An awake vehicle in no group (only a group past VV_MAX_GROUP members, reported):
+    // this module has no solo step for it, so the frame fails loudly.
+    if (awake && fl.y == 0u) ebLoopCapHit(599);
+    uint k = splitUniform(lane, awake ? G.y : 0u);
     if (k == 0u) return;
     uint off = G.x;
     uint rank = gMisc[vvRec(v, VV_MEMBER)].x;
@@ -703,10 +707,9 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
     // first workgroup, whatever its vehicle).
     selfSplitArgsClear(gid.x, lid.x);
 #endif
-    // A solo vehicle's step of its frame (it returns at once for a group's member), then
-    // a member's (returns at once for a solo vehicle).
-    explicitBeamsFrameStep(vid, lid);
-    sync();
+    // A member's step: with vehicle contact every vehicle is a member of a group, one
+    // without partners a group of its own (explicit_beams_vv_group), so no solo
+    // vehicle's step here (it was half this module, and its first-load compile).
     splitMember(vid.x, lid.x, gP.pad2);
     ebLoopCapFlush();
 }

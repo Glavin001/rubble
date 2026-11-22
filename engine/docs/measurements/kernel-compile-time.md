@@ -320,3 +320,27 @@ Chrome's cold compile: solo 41.1 -> 39.9 s, contact 118.8 -> 129.9 s, member 114
 only drop by folding a constant does not shorten Chrome's compile; removing copies from
 the source (`fleetLevelsAny`, 49 -> 15 s) does. So `kernel_profile.py`'s burn-down is read
 for duplicated copies, and a fix is judged by Chrome's cold compile, not the profile.
+
+### Every vehicle a group member: the members' module without the solo step
+
+The split group path's vehicles' module (`explicit_beams_split_member`, the vehicle
+lab's `explicit_beams_selfsplit_member_vv_wide`, compiled before the page runs) held two
+steps: a solo vehicle's (`explicitBeamsFrameStep`) and a group member's
+(`contactMemberStep`), each returning at once for the other kind. With vehicle contact,
+the grouping pass (`explicit_beams_vv_group`) now makes every vehicle a member, one
+without partners a group of its own, and the module holds the member step alone. A
+group past `VV_MAX_GROUP` members still runs alone and is reported; such a vehicle
+reaching this module fails the frame loudly (loop-cap id 599) instead of being skipped.
+
+| | before | after |
+|---|---|---|
+| optimized instructions (`kernel_profile.py`) | 172,170 | 88,433 |
+| Chrome cold compile | 114.0-123.0 s | 32.0-34.1 s |
+
+The member step gives a solo vehicle's results bit for bit, and a group of one costs
+the same at run time. Checked against the previous kernels: fast-check (16 of 17
+fixtures bit for bit, the 17th the known quirk), with the split group path off too
+(`--ab-switch groupsplit` in the new build: bit for bit), the scenario matrix (12 rows
+bit for bit, none slower), `sleep-check.sh` (21 checks), the contact, group-split and
+vehicle-grid GPU suites in bit-exact mode (18 tests, including a group over the limit),
+Chrome's validation of all 140 modules in both settings.
