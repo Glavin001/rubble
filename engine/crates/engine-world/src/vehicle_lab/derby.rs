@@ -715,3 +715,17 @@ mod tests {
         assert!(g.over);
     }
 }
+
+impl super::Lab {
+    /// [`Self::derby_plan`] read now, blocking, and ingested (a native host without the
+    /// page's frame readback: the derby's AI then drives from the cars' current poses).
+    pub fn read_derby_blocking(&mut self, world: &crate::World) -> &mut Self {
+        let plan = self.derby_plan(world);
+        if let (&[o_at, o_len, d_at, d_len], Some(x)) = (plan.as_slice(), world.explicit_vehicles()) {
+            let read = |at, len| engine_webgpu::explicit_coupling::read_words(world.device(), world.queue(), x.misc_buffer(), at, len);
+            let (origins, drive) = (read(o_at, o_len), read(d_at, d_len));
+            self.ingest_derby(world, &origins, &drive);
+        }
+        self
+    }
+}
