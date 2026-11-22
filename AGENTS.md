@@ -125,6 +125,9 @@
   kernel byte for byte) and its gain with `tools/build-time/measure.py`
   (`engine/docs/measurements/build-time.md`); `tools/build-time/check-builds.sh` checks
   every configuration the kernels build in (run it after touching the kernel plumbing).
+  A kernel's first-load compile in the browser: `tools/build-time/compile_cost.py`
+  predicts it from the WGSL (CI caps it at 10 s, `--burndown` lists what to fix first);
+  a heavy helper is called from one place in a kernel, not once per case.
   The harness is `-p engine-world-lab --example vehicle_lab`. To iterate on pages:
   `RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh`
   (never measure with it).

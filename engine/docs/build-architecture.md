@@ -155,6 +155,22 @@ call inlined, which a GPU driver's compile time follows) within its line in
 module (one call site per heavy helper, a split by dispatch kind:
 `docs/measurements/kernel-compile-time.md`), or raise its line in the same change.
 
+And `tools/build-time/compile_cost.py --check`: each kernel's first-load compile time,
+predicted from its WGSL in a second (no browser, no GPU), within 10 s. A GPU compiler
+inlines every call into the entry point and its time grows about as the 1.76th power of
+that one function's statements, so the model counts the inlined statements (one-line
+helpers, folded away, not counted) and maps them to seconds with a fit to measured cold
+compiles in Chrome (`compile-cost-model.txt`; `--calibrate` refits it). Kernels already
+past the cap are in `compile-cost-allowlist.txt` at their predicted time plus 10 %:
+lines only come down, and a kernel leaves the list when it is under the cap.
+`--burndown N` ranks what to fix: per helper, the seconds the kernels past the cap would
+lose if it had one copy, and the callers that multiply it.
+
+The rule for kernel code this enforces: a helper of more than a few statements is called
+from one place in a kernel (loop over its cases, or select its arguments, and call it
+once), not once per case. A small function costs nothing at run time; a heavy one called
+from 200 places costs the compiler 200 copies.
+
 ## Kernel source
 
 - A loop cap names its loop by a permanent id (`EB_END(ID, ..)`, `EB_PASS(ID, ..)`),

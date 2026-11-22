@@ -171,7 +171,14 @@ jobs:
         working-directory: engine
         # (The WGSL of the build wgsl_export just ran: the kernels bin with its features
         # prints that build's directory.)
-        run: python3 tools/build-time/inline_budget.py "$(cargo run -q --release -p engine-webgpu --no-default-features --bin kernels)"
+        run: |
+          wgsl="$(cargo run -q --release -p engine-webgpu --no-default-features --bin kernels)"
+          python3 tools/build-time/inline_budget.py "$wgsl"
+          # Each kernel's predicted first-load compile within the 10 s cap, or within its
+          # allowlisted line (tools/build-time/compile-cost-allowlist.txt, lines only come
+          # down); the burn-down list says what to fix first.
+          python3 tools/build-time/compile_cost.py --check "$wgsl"
+          python3 tools/build-time/compile_cost.py --burndown 15 "$wgsl" | sed -n '/burn-down/,$p'
       - name: Upload the part
         uses: actions/upload-artifact@v4
         with:
