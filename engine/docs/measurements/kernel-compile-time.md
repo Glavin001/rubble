@@ -378,3 +378,9 @@ cold 15.4 -> 12.9 s. Checked: fast-check (16 of 17 bit for bit, the known quirk)
 scenario matrix (12 rows bit for bit, none slower; the contact rows 1-9 % faster), the
 group-split, fleet-contact and contact GPU suites in bit-exact mode (17 tests), Chrome's
 validation of all 140 modules.
+
+Tried and dropped: one function for the members' two drive schedules (the normal step
+and PERF_SPLIT_WHEELS_AHEAD's tyres alone, one copy of `drvTyre`). Bit for bit, 76,220 ->
+70,924 optimized instructions, but Chrome cold the same (before 25.4 / 25.8 s, after
+25.4 / 25.7 s, alternating): the copy it removed is not where the compile spends its
+time. The profile ranks candidates; only a cold compile decides.
