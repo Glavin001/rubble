@@ -235,6 +235,8 @@ unsafe fn lab_def(d: &RbLabDef) -> anyhow::Result<LabDef> {
                 RbLabCrush::RB_LAB_CRUSH_SCENE => LabCrush::Scene,
                 RbLabCrush::RB_LAB_CRUSH_PRESETS => LabCrush::Presets,
             },
+            // Not in the C ABI yet (`RbLabDef` has no field for it): off, as before.
+            blast_loading: false,
             gpu_timing: GpuTiming::Step,
         },
     })

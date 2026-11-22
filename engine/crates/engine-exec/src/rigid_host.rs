@@ -83,8 +83,29 @@ pub fn choose_grid(
     convex: bool,
     movable_radius: f32,
 ) -> (f32, u32, bool) {
+    choose_grid_with(colliders, bodies, forced, convex, movable_radius, &mut || {
+        rigid_plan::grid_cell_with(colliders, bodies, true, movable_radius)
+    })
+}
+
+/// [`choose_grid`] with the hierarchical grid's `(cell, levels)` from `hier_grid` when it is
+/// the one chosen: a host that keeps the grid's geometry between steps
+/// (`engine_schema::convex::HierGridGeometry`, the same values) passes it here instead of
+/// sizing every collider again.
+pub fn choose_grid_with(
+    colliders: &[Collider],
+    bodies: &[BodyState],
+    forced: Option<bool>,
+    convex: bool,
+    movable_radius: f32,
+    hier_grid: &mut dyn FnMut() -> (f32, u32),
+) -> (f32, u32, bool) {
     let mut hier = forced.unwrap_or(convex);
-    let mut r = rigid_plan::grid_cell_with(colliders, bodies, hier, movable_radius);
+    let mut r = if hier {
+        hier_grid()
+    } else {
+        rigid_plan::grid_cell_with(colliders, bodies, false, movable_radius)
+    };
     // Automatic grid: more dynamics wider than a uniform cell than its large list holds
     // take the hierarchical grid, which finds every pair at any size, instead of failing
     // the step.
@@ -93,7 +114,7 @@ pub fn choose_grid(
         && rigid_plan::uniform_large_dynamics_overflow(colliders, bodies, r.0)
     {
         hier = true;
-        r = rigid_plan::grid_cell_with(colliders, bodies, true, movable_radius);
+        r = hier_grid();
     }
     (r.0, r.1, hier)
 }

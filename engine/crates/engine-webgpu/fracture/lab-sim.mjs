@@ -60,7 +60,8 @@ export function labSimulation(world,lab,scene){
   // The balls fired from now on: multiples of the scene's mass and speed, continuous collision.
   setBall(massScale,speedScale,ccd){lab.setBall(massScale,speedScale,!!ccd)},
   // Queue an action (engine-world-wasm lab.rs `action_of`) `delay` steps from now: a shot
-  // ray, 'row', 'volley', 'topple', 'meteor', or {pack: index}. Its balls launch at their steps.
+  // ray, 'row', 'volley', 'topple', 'meteor', {pack: index}, {rocket: {origin, direction, tntKg}}
+  // or {blast: {position, tntKg}}. Its balls launch, and its charges go off, at their steps.
   queue(action,delay=0){world.labQueue(lab,action,delay);capture?.push({queued:action})},
   // A ball along a ray at the next step. Returns the scene body it will be: the next ball
   // slot in order, after those already queued (Rust fires them in that order).

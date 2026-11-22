@@ -510,6 +510,8 @@ pub struct WgpuSim {
     /// them, or the last step did not keep the table. The next awake-indexed step
     /// rebuilds it and bounds every collider.
     pub(crate) rest_stale: bool,
+    /// A GPU fracture re-frames this world's bodies between steps (`StepModes::gpu_reframes`).
+    pub(crate) gpu_reframes: bool,
     /// Test control: dispatch all FAST_CAP `broadphase_fast` workgroups (the old way).
     fast_direct: bool,
     /// Local incremental color repair (8en, HOST_S(27)).
@@ -603,6 +605,11 @@ pub struct WgpuSim {
     /// until a write or a mirror update could change it: computing it is a pass over every
     /// collider on the CPU each step.
     uniform_cell: Option<(f32, u32)>,
+    /// The hierarchical grid's sizing from the colliders' shapes and sizes alone (their
+    /// median diameter and counts per level), kept until a collider is added or its shape
+    /// or size changes: a split's mirror update changes neither, and without this every
+    /// step that adopts one sorted every collider again. `Some(None)`: no collider but planes.
+    hier_geometry: Option<Option<engine_schema::convex::HierGridGeometry>>,
     /// Colliders were added after step 0; see `build_all_bounds`.
     bounds_dirty: bool,
     /// Bumped on every collider write (add, replace, adopt): renderers rebuild their
@@ -1251,6 +1258,7 @@ impl WgpuSim {
             archive_touch_query: features.archive_touch_query,
             carry_with_archive: features.carry_with_archive,
             rest_stale: true,
+            gpu_reframes: false,
             fast_direct: false,
             persist_list: persistent_contacts && features.reuse_copy && features.persist_list,
             // Split broadphase grids: awake dynamics in one table, sleepers and small
@@ -1303,6 +1311,7 @@ impl WgpuSim {
             grid_levels: 0,
             grid_cache: None,
             uniform_cell: None,
+            hier_geometry: None,
             bounds_dirty: false,
             collider_epoch: 0,
             marks: None,
@@ -1583,6 +1592,7 @@ impl WgpuSim {
                 bytemuck::cast_slice(colliders),
             );
             self.host_cols.extend_from_slice(colliders);
+            self.hier_geometry = None;
             self.collider_count += count;
             engine_exec::rigid_host::note_collider_reach(&mut self.body_reach, colliders);
         }
@@ -1707,6 +1717,7 @@ impl WgpuSim {
             self.has_filters |= f.filters;
             self.manifolds_valid = false;
             self.host_cols.extend_from_slice(colliders);
+            self.hier_geometry = None;
             self.collider_count += count;
             // The resting table's per-collider words are laid out by the collider count.
             self.mark_rest_stale();
@@ -1764,6 +1775,9 @@ impl WgpuSim {
         let cleared = self.host_cols[first as usize..end]
             .iter()
             .any(CollisionFilter::is_set);
+        if !same_sizes(&self.host_cols[first as usize..end], cols) {
+            self.hier_geometry = None;
+        }
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.colliderless.set(None);
         self.uniform_cell = None;
@@ -1909,6 +1923,7 @@ impl WgpuSim {
         self.has_height_field = f.height_field;
         self.has_filters = f.filters;
         self.host_cols = cols;
+        self.hier_geometry = None;
         self.grid_cache = None;
         self.uniform_cell = None;
         self.manifolds_valid = false;
@@ -1940,6 +1955,9 @@ impl WgpuSim {
         let cleared = self.host_cols[first as usize..end]
             .iter()
             .any(CollisionFilter::is_set);
+        if !same_sizes(&self.host_cols[first as usize..end], cols) {
+            self.hier_geometry = None;
+        }
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.colliderless.set(None);
         self.uniform_cell = None;
@@ -2574,6 +2592,14 @@ impl WgpuSim {
     /// both give the same candidate pairs (tests/awake_broadphase.rs). A step taken
     /// with it off leaves the resting table stale, so the next one with it on
     /// rebuilds the table.
+    /// A GPU fracture re-frames this world's bodies and re-points its colliders between
+    /// steps with no host write (stress-gpu's threshold fracture): the awake-indexed
+    /// broadphase then bounds every collider and rebuilds its resting table on the steps
+    /// that see a re-framed body at rest (`StepModes::gpu_reframes`).
+    pub fn set_gpu_reframes(&mut self, on: bool) {
+        self.gpu_reframes = on;
+    }
+
     pub fn set_awake_broadphase(&mut self, on: bool) {
         self.awake_broadphase = on;
     }
@@ -3591,6 +3617,7 @@ impl WgpuSim {
             // (apply_commands, this step): every bound, and the table rebuilt.
             rest_rebuild: self.rest_stale || self.commands_move_poses,
             full_bounds: self.rest_stale || self.commands_move_poses,
+            gpu_reframes: self.gpu_reframes,
             fast_indirect: !self.fast_direct,
             archive_cold: self.archive_cold,
             archive_spread_rounds: self.archive_spread_rounds,
@@ -3844,12 +3871,22 @@ impl WgpuSim {
             _ => {
                 // The automatic grid takes the hierarchical one for a box scene the
                 // uniform grid's large list cannot hold (the fracture lab's cuboid suburb).
-                let (cell, levels, h) = engine_exec::rigid_host::choose_grid(
-                    &self.host_cols,
-                    &self.host_bodies,
+                // The hierarchical grid's values come from its kept geometry, not from
+                // sizing every collider again each step.
+                let (cols, bodies, radius) = (&self.host_cols, &self.host_bodies, self.movable_radius);
+                let geometry = &mut self.hier_geometry;
+                let (cell, levels, h) = engine_exec::rigid_host::choose_grid_with(
+                    cols,
+                    bodies,
                     self.grid_levels_mode,
                     self.has_convex,
-                    self.movable_radius,
+                    radius,
+                    &mut || {
+                        match geometry.get_or_insert_with(|| engine_schema::convex::HierGridGeometry::new(cols)) {
+                            Some(g) => g.grid(cols, bodies, radius),
+                            None => (1.0, 2),
+                        }
+                    },
                 );
                 hier = h;
                 let r = (cell, levels);
@@ -4817,6 +4854,9 @@ impl VehicleBackend for WgpuSim {
             u64::from(index) * std::mem::size_of::<Collider>() as u64,
             bytes_of(collider),
         );
+        if !same_sizes(&self.host_cols[index as usize..=index as usize], std::slice::from_ref(collider)) {
+            self.hier_geometry = None;
+        }
         self.host_cols[index as usize] = *collider;
     }
 
@@ -4876,6 +4916,12 @@ pub struct SoftEvents {
     /// Records overwritten in the event ring before this poll (bodies were
     /// resynchronised from a readback).
     pub lost: u32,
+}
+
+/// Whether two runs of colliders have the same shapes and sizes, one for one (what the
+/// hierarchical grid's kept geometry depends on).
+fn same_sizes(a: &[Collider], b: &[Collider]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.shape == y.shape && x.params == y.params)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -119,6 +119,17 @@ export async function createCity(opts, page = {}) {
 }
 
 /**
+ * The most houses a city of `opts` holds in one world (`CityDef::max_houses`: the world's
+ * fracture chunk limit, `rubble::THRESHOLD_CHUNKS_MAX`). A page offers no more.
+ */
+export async function cityMaxHouses(opts = {}) {
+  ready ??= init();
+  await ready;
+  const city = new WebCity(opts);
+  try { return city.maxHouses(); } finally { city.free(); }
+}
+
+/**
  * The explicit vehicles' crash town (`rubble::explicit_scene::crash_town`, as the native
  * benchmark builds it): `spec` `{ truck, count, houses, speed, runUp, drag }` (`truck`
  * .truck text; absent, the procedural sedan with tyres). Returns the world and

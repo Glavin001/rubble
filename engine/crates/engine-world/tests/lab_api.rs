@@ -90,6 +90,79 @@ fn every_bond_model_runs_the_cuboid_house_and_the_breakable_ones_break_it() {
     }
 }
 
+/// The district buildings (engine-fracture `district.rs`) under the threshold model: each
+/// stands under its own weight with no bond broken, and a cannonball breaks it.
+#[test]
+fn the_district_buildings_stand_and_a_shot_breaks_them() {
+    use engine_fracture::district::DistrictScene;
+    for scene in [DistrictScene::Block, DistrictScene::Frame] {
+        let def = LabDef {
+            source: LabSource::district(scene).unwrap(),
+            arrangement: LabArrangement::One,
+            settings: LabSettings {
+                bonds: LabBonds::Model(StrengthModel::Threshold),
+                ..LabSettings::default()
+            },
+        };
+        let (mut world, mut lab) = place(&def).unwrap_or_else(|e| panic!("{}: {e:#}", scene.key()));
+        let at_rest = run(&mut world, &mut lab, 120).unwrap();
+        assert!(at_rest.bonds > 1000, "{}: {} bonds", scene.key(), at_rest.bonds);
+        assert_eq!(at_rest.bonds_intact, at_rest.bonds, "{}: it stands whole", scene.key());
+        lab.queue(&world, &centre_shot(&lab), 0).unwrap();
+        let st = run(&mut world, &mut lab, 150).unwrap();
+        eprintln!(
+            "{}: {} chunks · {} of {} bonds broken · {} bodies · {} awake",
+            scene.key(),
+            st.chunks,
+            st.bonds - st.bonds_intact,
+            st.bonds,
+            st.bodies,
+            st.awake
+        );
+        assert_eq!(st.shots, 1, "{}", scene.key());
+        assert!(st.bonds_intact < st.bonds, "{}: the shot breaks bonds", scene.key());
+    }
+}
+
+/// A rocket's charge goes off where its ray meets the building, with blast loading and
+/// support loss on: it breaks bonds, and more TNT breaks more. Without blast loading a blast
+/// is refused, with its reason.
+#[test]
+fn a_rocket_breaks_a_blast_loaded_building() {
+    use engine_fracture::district::DistrictScene;
+    let def = |blast_loading| LabDef {
+        source: LabSource::district(DistrictScene::Block).unwrap(),
+        arrangement: LabArrangement::One,
+        settings: LabSettings {
+            bonds: LabBonds::Model(StrengthModel::Threshold),
+            support_loss: true,
+            blast_loading,
+            ..LabSettings::default()
+        },
+    };
+    let rocket = |lab: &Lab, tnt_kg| {
+        let LabAction::Shot { origin, direction } = centre_shot(lab) else { unreachable!() };
+        LabAction::BlastRay { origin, direction, tnt_kg }
+    };
+    let mut broken = Vec::new();
+    for tnt_kg in [5.0, 50.0] {
+        let (mut world, mut lab) = place(&def(true)).unwrap();
+        let at_rest = run(&mut world, &mut lab, 60).unwrap();
+        assert_eq!(at_rest.bonds_intact, at_rest.bonds, "it stands whole with support loss on");
+        lab.queue(&world, &rocket(&lab, tnt_kg), 0).unwrap();
+        assert_eq!(lab.queued(), 1);
+        let st = run(&mut world, &mut lab, 120).unwrap();
+        assert_eq!(lab.queued(), 0, "the charge went off");
+        eprintln!("{tnt_kg} kg TNT: {} of {} bonds broken · {} bodies", st.bonds - st.bonds_intact, st.bonds, st.bodies);
+        broken.push(st.bonds - st.bonds_intact);
+    }
+    assert!(broken[0] > 0, "5 kg breaks bonds");
+    assert!(broken[1] > broken[0], "50 kg breaks more than 5 kg: {broken:?}");
+    let (world, mut lab) = place(&def(false)).unwrap();
+    let e = lab.queue(&world, &rocket(&lab, 5.0), 0).unwrap_err();
+    assert!(format!("{e:#}").contains("blast loading"), "{e:#}");
+}
+
 /// The tower block of house-1story (four copies, the city's cars and pedestrians) under
 /// `blast_gpu`: the volley fires every shot at its step and breaks the towers.
 #[test]
