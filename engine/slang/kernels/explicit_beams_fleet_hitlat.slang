@@ -87,7 +87,8 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
         resMerge(h, tn.x, tn.y, tn.z);
         return;
     }
-    float rr = vvResOf(va, vh, h, tn, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, parity, a);
+    VvSums S = vvSumsOf(va, vh, h, tn, parity);
+    float rr = vvResOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, a);
     if (phase == 0u)
     {
         if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, sscale(kept.nn, rr));
@@ -96,7 +97,7 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
     float3 total = kept.f1;
     if (rr > 0.0) total = sadd3(total, sscale(kept.nn, rr));
     float3 g;
-    if (vvGuardOf(va, vh, h, tn, kept.alpha, kept.beta, kept.gamma, kept.v, total, parity, g)) total = sadd3(total, g);
+    if (vvGuardOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.v, total, g)) total = sadd3(total, g);
     resFinal(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, kept.f1, total);
 }
 

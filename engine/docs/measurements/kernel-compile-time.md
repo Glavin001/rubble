@@ -365,3 +365,16 @@ fast-check (16 of 17 bit for bit, the known quirk), `groupsplit` in the new buil
 scenario matrix (12 rows bit for bit, none slower), `sleep-check.sh` (21), the
 group-split, self-split and contact GPU suites in bit-exact mode (24 tests), Chrome's
 validation of all 140 modules in both settings.
+
+### The residual and the guard share their beam sums
+
+A staged hit's residual (`vvResOf`) and its guard (`vvGuardOf`) each summed the beam
+forces of the hit's four nodes (`vvResAcc`, through `vvBeamSumOf`): eight copies a call
+site, and eight sums at run time where four give the same values (nothing writes the
+beams' forces between the two). The four sums are now taken once, in one loop
+(`vvSumsOf`, `slang/kernels/explicit_beams_vv_sums.slang`), and both read them.
+`explicit_beams_split_grouplevels_wide`: 73,206 -> 65,284 optimized instructions, Chrome
+cold 15.4 -> 12.9 s. Checked: fast-check (16 of 17 bit for bit, the known quirk), the
+scenario matrix (12 rows bit for bit, none slower; the contact rows 1-9 % faster), the
+group-split, fleet-contact and contact GPU suites in bit-exact mode (17 tests), Chrome's
+validation of all 140 modules.

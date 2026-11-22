@@ -532,7 +532,8 @@ void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, ui
         resMerge(h, tn.x, tn.y, tn.z);
         return;
     }
-    float rr = vvResOf(va, vh, h, tn, alpha, beta, gamma, nn, v, parity, 0u);
+    VvSums S = vvSumsOf(va, vh, h, tn, parity);
+    float rr = vvResOf(h, tn, S, alpha, beta, gamma, nn, v, 0u);
     if (phase == 0u)
     {
         if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
@@ -541,7 +542,7 @@ void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, ui
     float3 total = f1;
     if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
     float3 gg;
-    if (vvGuardOf(va, vh, h, tn, alpha, beta, gamma, v, total, parity, gg)) total = sadd3(total, gg);
+    if (vvGuardOf(h, tn, S, alpha, beta, gamma, v, total, gg)) total = sadd3(total, gg);
     resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f1, total);
 }
 

@@ -9604,13 +9604,14 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
 // residual, D the totals' deltas at resAt). A turn whose list overflowed applied
 // its hits at once (out of the specification's order, as before) and stages none.
 
-// Node x of vehicle vx: its acceleration from its force now (vvPointForce: beams,
-// A, with B when `withB`; 0 immovable).
-float3 vvResAcc(uint x, uint vx, uint parity, bool withB)
+#include "explicit_beams_vv_sums.slang"
+
+// Node x's acceleration from its force now, its beam sum f given (vvSumsOf): vvPointForce's
+// beams, A, with B when `withB`; 0 immovable.
+float3 vvResAcc(uint x, float3 f, bool withB)
 {
     if (vvImmovable(x)) return float3(0.0, 0.0, 0.0);
     uint4 info = gStatic[gP.nodeInfoBase + x];
-    float3 f = vvBeamSumOf(x, vx, parity);
     int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
     if (withB)
     {
@@ -9691,13 +9692,12 @@ bool vvStagedHit(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint pari
 
 // The staged hit's residual r (0: none): approaching and still approaching at A,
 // with the first pass's counts.
-float vvResOf(uint va, uint vh, uint h, uint4 tn, float alpha, float beta, float gamma, float3 nn, float3 v,
-              uint parity, uint slot)
+float vvResOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, float3 nn, float3 v, uint slot)
 {
-    float3 at = sadd3(sadd3(sscale(vvResAcc(tn.y, va, parity, false), alpha),
-                            sscale(vvResAcc(tn.z, va, parity, false), beta)),
-                      sscale(vvResAcc(tn.x, va, parity, false), gamma));
-    float an = sdot(ssub3(vvResAcc(h, vh, parity, false), at), nn);
+    float3 at = sadd3(sadd3(sscale(vvResAcc(tn.y, S.y, false), alpha),
+                            sscale(vvResAcc(tn.z, S.z, false), beta)),
+                      sscale(vvResAcc(tn.x, S.x, false), gamma));
+    float an = sdot(ssub3(vvResAcc(h, S.h, false), at), nn);
     float vn = sdot(v, nn);
     if (!(vn < 0.0 && nf(smul(an, STEP) + vn) < 0.0)) return 0.0;
     float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), gNodes[h * 3u].w);
@@ -9713,15 +9713,14 @@ float vvResOf(uint va, uint vh, uint h, uint4 tn, float alpha, float beta, float
 
 // The guard of the staged hit's force t at A + B (explicit_contact.rs
 // guard_vehicle_pass).
-bool vvGuardOf(uint va, uint vh, uint h, uint4 tn, float alpha, float beta, float gamma, float3 v, float3 t,
-               uint parity, out float3 g)
+bool vvGuardOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, float3 v, float3 t, out float3 g)
 {
     g = float3(0.0, 0.0, 0.0);
     if (all(t == float3(0.0, 0.0, 0.0))) return false;
-    float3 a = ssub3(vvResAcc(h, vh, parity, true),
-                     sadd3(sadd3(sscale(vvResAcc(tn.y, va, parity, true), alpha),
-                                 sscale(vvResAcc(tn.z, va, parity, true), beta)),
-                           sscale(vvResAcc(tn.x, va, parity, true), gamma)));
+    float3 a = ssub3(vvResAcc(h, S.h, true),
+                     sadd3(sadd3(sscale(vvResAcc(tn.y, S.y, true), alpha),
+                                 sscale(vvResAcc(tn.z, S.z, true), beta)),
+                           sscale(vvResAcc(tn.x, S.x, true), gamma)));
     float inv = nf(ownInvMass(h)
                    + nf(nf(selfTerm(alpha, ownInvMass(tn.y)) + selfTerm(beta, ownInvMass(tn.z))) + selfTerm(gamma, ownInvMass(tn.x))));
     float3 rest = ssub3(a, sscale(t, inv));
@@ -9760,7 +9759,8 @@ void vvResidualPhase(uint va, uint base, uint n, float r, uint parity, uint lane
             resMerge(h, t.tn.x, t.tn.y, t.tn.z);
             continue;
         }
-        float rr = vvResOf(va, vh, h, t.tn, alpha, beta, gamma, nn, v, parity, slot);
+        VvSums S = vvSumsOf(va, vh, h, t.tn, parity);
+        float rr = vvResOf(h, t.tn, S, alpha, beta, gamma, nn, v, slot);
         if (phase == 0u)
         {
             if (rr > 0.0) resStage(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, sscale(nn, rr));
@@ -9769,7 +9769,7 @@ void vvResidualPhase(uint va, uint base, uint n, float r, uint parity, uint lane
         float3 total = f1;
         if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
         float3 g;
-        if (vvGuardOf(va, vh, h, t.tn, alpha, beta, gamma, v, total, parity, g)) total = sadd3(total, g);
+        if (vvGuardOf(h, t.tn, S, alpha, beta, gamma, v, total, g)) total = sadd3(total, g);
         resFinal(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, f1, total);
     }
 }
