@@ -431,3 +431,11 @@ fast-check (16 of 17 bit for bit, the known quirk), `groupsplit`, the scenario m
 rows bit for bit, none slower), the self-split, group-split, contact and pair-reuse GPU
 suites in bit-exact mode (26 tests), `sleep-check.sh` (21), Chrome's validation of all
 140 modules.
+
+What is left of the members' module's 16.5 s, by the same ablation: the pieces' tests
+4.5 s, the grid walk 1.8 s, the brute pairs 1.8 s, the single triangle test 0.2 s; the
+hits' tail (selfApply: its rounds and serial residual, one copy each) about 7 s. The tests'
+cost is `tryContact` (about a thousand instructions with its force) inside each
+strategy's own nested candidate loops: one call site for it across the strategies means
+the strategies producing pairs for one consuming loop, a change to the narrow phase's
+shape (and its run time) of its own.
