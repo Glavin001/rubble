@@ -5034,14 +5034,14 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
         out.push((n.to_string(), entry, u(w)));
     }
+    // (Each module's entry as the builds name it: plan::split_modules.)
+    let split = plan::split_modules();
     for (n, w) in crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter() {
-        let entry = if n.contains("member") {
-            SPLIT_MEMBER_ENTRY
-        } else if n.contains("tests") {
-            SPLIT_TESTS_ENTRY
-        } else {
-            SPLIT_GROUP_ENTRY
-        };
+        let entry = split
+            .iter()
+            .find(|m| m.name == *n)
+            .map(|m| m.entry)
+            .unwrap_or_else(|| panic!("explicit beams: no split module {n}"));
         out.push((n.to_string(), entry, u(w)));
     }
     for (n, w) in crate::EXPLICIT_BEAMS_SELF_SPLIT.iter() {
