@@ -2647,41 +2647,6 @@ impl ExplicitBeamsGpu {
         &self.acc
     }
 
-    /// Measurement (reverted): per vehicle (nodes, nodes with a list entry, entries in
-    /// all, nodes whose list is "every shape") from the coupling's candidate lists as the
-    /// last frame left them.
-    #[doc(hidden)]
-    pub fn coupling_list_entries(&self) -> Vec<[u32; 4]> {
-        let Some(c) = self.layout.coupling else { return Vec::new() };
-        let raw = self.read(&self.next);
-        let next: &[u32] = bytemuck::cast_slice(&raw);
-        let nodes0 = (c.list_base + CouplingLayout::LIST_SHAPE_WORDS * c.cap.shapes * c.vehicles) as usize;
-        self.layout
-            .spans
-            .iter()
-            .map(|sp| {
-                let mut out = [sp.nodes, 0, 0, 0];
-                for i in 0..sp.nodes as usize {
-                    let nl = nodes0 + (sp.node_off as usize + i) * CouplingLayout::LIST_NODE_WORDS as usize;
-                    let mut n = 0;
-                    for e in 0..16 {
-                        let k = (next[nl + 4 + (e >> 1)] >> (16 * (e & 1))) & 0xFFFF;
-                        if k == 0xFFFE {
-                            out[3] += 1;
-                        }
-                        if k >= 0xFFFE {
-                            break;
-                        }
-                        n += 1;
-                    }
-                    out[1] += u32::from(n > 0);
-                    out[2] += n;
-                }
-                out
-            })
-            .collect()
-    }
-
     /// Turn the rigid coupling on or off from the next frame (its header's `on` word).
     /// Panics without [`Self::with_coupling`]. On, the frames run on the per-vehicle
     /// workgroups (the wide passes do not run the coupling; the same steps, as

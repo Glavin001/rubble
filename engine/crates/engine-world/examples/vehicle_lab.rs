@@ -2396,17 +2396,6 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out.push((ms, y.state_words(), y.coupling_words()));
                 engine_webgpu::set_explicit_module_override(None);
             }
-            // (Measurement, reverted: AB_LIST_STATS=1, the coupling's candidate lists after
-            // one frame from the state.)
-            if std::env::var("AB_LIST_STATS").is_ok() {
-                x.frame(34);
-                x.wait();
-                for (v, s) in x.coupling_list_entries().iter().enumerate() {
-                    println!("   candidate lists after a frame, car {v}: {} nodes, {} list a shape, {} entries, {} list every shape", s[0], s[1], s[2], s[3]);
-                }
-                x.restore(&snap);
-                x.wait();
-            }
             // (AB_WARM_MS=n: frames from the snapshot for n ms before the timed halves, so a
             // GPU still at its idle clock after the process's start does not slow the
             // first half alone: a small scene's 20 ms of frames is over before it ramps.)
