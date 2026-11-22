@@ -164,6 +164,12 @@ jobs:
         env:
           RUBBLE_WEB_PARTS: ${{ matrix.part }}
         run: bash engine/scripts/build-web.sh
+      # Every explicit module's inlined size within its budget (a module past it would
+      # compile slower in the browser; tools/build-time/inline-budget.txt).
+      - name: Kernel inlined-size budget
+        if: matrix.part == 'kernels'
+        working-directory: engine
+        run: python3 tools/build-time/inline_budget.py
       - name: Upload the part
         uses: actions/upload-artifact@v4
         with:

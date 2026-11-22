@@ -95,6 +95,25 @@ shared instead:
   Large files cost twice: every edit recompiles all of it, and the editor and the
   reader carry all of it.
 
+Also in CI (the web build's kernels job): `tools/build-time/inline_budget.py`, every
+explicit module's inlined size (`scripts/wgsl-inline-size.py`: the entry point with every
+call inlined, which a GPU driver's compile time follows) within its line in
+`tools/build-time/inline-budget.txt` (its size when set, plus 10 %). Past it: shrink the
+module (one call site per heavy helper, a split by dispatch kind:
+`docs/measurements/kernel-compile-time.md`), or raise its line in the same change.
+
+## Kernel source
+
+- A loop cap names its loop by a permanent id (`EB_END(ID, ..)`, `EB_PASS(ID, ..)`),
+  never `__LINE__`: a line added anywhere would change every module below it, and with
+  them Chrome's and nvcc's caches. New loops take the next free id (the census test and
+  `check.py` name it).
+- A part that only some modules compile lives in a file of its own, included under its
+  define (`#ifdef EB_AERO` / `#include "explicit_beams_aero.slang"`): the cache skips the
+  include for modules without the define, so an edit there recompiles only the modules
+  that have it. Moving code into such a file is checked with
+  `kernel_digest.py` (WGSL identical; MSL and CUDA identical with `STRIP_LINES=1`).
+
 ## Measuring
 
 - `python3 tools/build-time/measure.py [--only NAME,...] [--runs N]` (from `engine/`):
