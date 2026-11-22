@@ -8551,9 +8551,9 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
         sync();
     }
     // The grid's walk below: the step's own, or the self split's when its listed pairs
-    // are past the list's room (selfSplitTestsHow): one call site of triangleGrid. And one
-    // loop of triangleCandidates for the pieces', the brute pairs' or every candidate's
-    // tests (a step runs one of them): one call site of tryContact for the three.
+    // are past the list's room (selfSplitTestsHow); the pieces', the brute pairs' or every
+    // candidate's tests: a step runs one of the four, from one loop of triangleCandidates
+    // (one call site of tryContact for them).
     bool walk = candCount > 0u && cell > 0.0 && gridOn != 0u;
     bool listedTests = false;
     bool pieces = false;
@@ -8576,21 +8576,17 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
 #endif
     }
 #endif
-    if (walk)
-    {
-        uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(152, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
-        {
-            uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
-            triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                         groupCount, parity, 0u);
-        }
-    }
-    uint cmode = 3u; // 2 the pieces', 1 the brute pairs', 0 every candidate's (triangleCandidates)
+    uint cmode = 4u; // 3 the walk, 2 the pieces', 1 the brute pairs', 0 every candidate's (triangleCandidates)
     uint cN = 0u;
     uint ck = 1u;
     uint cstride = LANES;
-    if (pieces)
+    if (walk)
+    {
+        cN = (triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount) * GRID_SUBS;
+        ck = GRID_SUBS;
+        cmode = 3u;
+    }
+    else if (pieces)
     {
         cN = piecesBegin(v, lane, ck);
         cN *= ck;
@@ -8608,7 +8604,7 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
     for (uint p = lane, pStop = EB_END(153, p, cN, cstride); p < pStop && lane < cstride; p += cstride)
     {
         uint q = p / ck;
-        uint gt = cmode == 2u ? gNext[pieceVolAt(triOff + q)] : triOff + (cmode == 1u && triCount <= TRI_LIST ? gsTested[q] : q);
+        uint gt = cmode == 2u ? gNext[pieceVolAt(triOff + q)] : triOff + (cmode % 2u == 1u && triCount <= TRI_LIST ? gsTested[q] : q);
         triangleCandidates(gt, p % ck, ck, origin, range, cell, candOff, candCount, beamOff, groupOff, groupCount, parity,
                            cmode);
     }

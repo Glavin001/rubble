@@ -470,3 +470,10 @@ step, calls it from one loop (the self split's listed path reports "pieces",
 for bit, the known quirk), `groupsplit`, the scenario matrix (12 rows bit for bit, none
 slower), the pair-reuse, contact, self-split, bitwise and group-split GPU suites in
 bit-exact mode (38 tests), `sleep-check.sh` (21), Chrome's validation of all 140 modules.
+
+The grid's testing walk joined it (`triangleCandidates` mode 3: the covered cells'
+buckets' entries, every candidate past GRID_MAX_CELLS cells, the entry loop budgeted as
+`triangleGridWalk`'s), so the member step's four strategies have one call site of
+`tryContact`: `explicit_beams_selfsplit_member_vv_wide` Chrome cold 13.6 -> 11.0 s.
+Checked as above (fast-check, `groupsplit`, the matrix, the five GPU suites in bit-exact
+mode, `sleep-check.sh`, Chrome's validation).
