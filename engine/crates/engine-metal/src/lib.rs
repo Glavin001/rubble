@@ -3,6 +3,7 @@
 mod device;
 mod explicit;
 mod pipelines;
+pub mod profile;
 mod sim;
 pub mod terrain;
 mod world;

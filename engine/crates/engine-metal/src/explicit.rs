@@ -42,6 +42,10 @@ pub use table::{ExplicitKernel, EXPLICIT_KERNELS, LOOP_CAP_TEST};
 const PARAM_RING: usize = 3;
 
 struct Pipe {
+    /// The plan module (debug labels, replay).
+    name: &'static str,
+    entry: &'static str,
+    msl: &'static str,
     pso: ComputePipelineState,
     threads: u64,
     binds: &'static [(u32, u32)],
@@ -69,6 +73,10 @@ pub struct MetalExplicitBeams {
     /// Timed frames still to record.
     timed_left: u32,
     timed: VecDeque<bool>,
+    /// Frames submitted (labels, `RUBBLE_CAPTURE_STEP` counts frames here).
+    frames: u32,
+    capture: Option<crate::profile::CaptureRequest>,
+    gpu_log: Option<Vec<crate::profile::GpuSpan>>,
 }
 
 impl MetalExplicitBeams {
@@ -80,6 +88,7 @@ impl MetalExplicitBeams {
     /// [`Self::new`] with room for rigid-body proxies per vehicle (the coupling,
     /// `explicit_beams_rigid.slang`); off until [`Self::set_coupling_on`].
     pub fn with_coupling(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> anyhow::Result<Self> {
+        crate::profile::prepare_env();
         let device = Device::system_default().ok_or_else(|| anyhow::anyhow!("no Metal device"))?;
         let queue = device.new_command_queue();
         let upload = ExplicitUpload::new(vehicles, cap);
@@ -101,8 +110,6 @@ impl MetalExplicitBeams {
             })
             .collect();
         let fast = std::env::var("ENGINE_FAST_MATH").as_deref() != Ok("off");
-        let options = CompileOptions::new();
-        options.set_fast_math_enabled(fast);
         let mut kernels = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
         kernels.extend((0..plan::VV_PASSES.len()).map(Kernel::Vv));
         if layout.wide_ok {
@@ -115,9 +122,7 @@ impl MetalExplicitBeams {
                 .iter()
                 .find(|t| t.name == name)
                 .ok_or_else(|| anyhow::anyhow!("explicit kernel {name} not built"))?;
-            let lib = device
-                .new_library_with_source(t.msl, &options)
-                .map_err(|e| anyhow::anyhow!("compile {name}: {e}"))?;
+            let lib = crate::profile::new_library(&device, t.msl, name, fast)?;
             let func = lib
                 .get_function(t.entry, None)
                 .map_err(|e| anyhow::anyhow!("function {name}: {e}"))?;
@@ -130,7 +135,7 @@ impl MetalExplicitBeams {
                 "{name}: {threads} lanes per workgroup, the device allows {}",
                 pso.max_total_threads_per_threadgroup()
             );
-            pipes.insert(k, Pipe { pso, threads, binds: t.binds });
+            pipes.insert(k, Pipe { name: t.name, entry: t.entry, msl: t.msl, pso, threads, binds: t.binds });
         }
         let planner = FramePlanner::new(&layout);
         Ok(Self {
@@ -146,6 +151,9 @@ impl MetalExplicitBeams {
             timing: None,
             timed_left: 0,
             timed: VecDeque::new(),
+            frames: 0,
+            capture: crate::profile::CaptureRequest::from_env(),
+            gpu_log: None,
         })
     }
 
@@ -208,24 +216,47 @@ impl MetalExplicitBeams {
         while self.in_flight.len() >= PARAM_RING {
             self.retire_oldest();
         }
+        let capture = self.capture.clone().filter(|c| c.step == self.frames);
+        if let Some(c) = &capture {
+            self.wait();
+            if let Err(e) = crate::profile::begin_capture(&self.queue, &c.out) {
+                eprintln!("rubble: no GPU capture: {e}");
+            }
+        }
+        let labels = crate::profile::labels_enabled();
         let slot = self.ring;
         self.ring = (self.ring + 1) % PARAM_RING;
         let bytes = self.planner.write_params(steps);
         write(&self.params[slot], 0, &bytes);
         let cmds = self.planner.commands(steps, true);
         let cb = self.queue.new_command_buffer().to_owned();
+        if labels {
+            cb.set_label(&format!("rubble explicit frame {} ({steps} steps)", self.frames));
+        }
         let mut enc = Some(cb.new_compute_command_encoder().to_owned());
         for cmd in &cmds {
             match *cmd {
                 Cmd::Dispatch { kernel, groups, param_copy } => {
                     let e = enc.get_or_insert_with(|| cb.new_compute_command_encoder().to_owned());
                     let p = self.bind(e, kernel, slot, param_copy);
+                    if labels {
+                        e.push_debug_group(&format!("{} step {param_copy} x{groups} groups", self.pipes[&kernel].name));
+                    }
                     e.dispatch_thread_groups(MTLSize::new(u64::from(groups), 1, 1), MTLSize::new(p, 1, 1));
+                    if labels {
+                        e.pop_debug_group();
+                    }
                 }
                 Cmd::Indirect { kernel, offset } => {
                     let e = enc.get_or_insert_with(|| cb.new_compute_command_encoder().to_owned());
                     let p = self.bind(e, kernel, slot, 0);
+                    if labels {
+                        e.push_debug_group(&format!("{} indirect", self.pipes[&kernel].name));
+                    }
                     e.dispatch_thread_groups_indirect(&self.bufs[BIND_ARGS as usize], offset, MTLSize::new(p, 1, 1));
+                    if labels {
+                        e.pop_debug_group();
+                    }
                 }
                 Cmd::Copy { src, src_offset, dst, dst_offset, size } => {
                     if let Some(e) = enc.take() {
@@ -248,12 +279,98 @@ impl MetalExplicitBeams {
         }
         let status = self.planner.status_due();
         cb.commit();
+        self.frames += 1;
+        if let Some(c) = &capture {
+            cb.wait_until_completed();
+            crate::profile::end_capture(&c.out);
+        }
         let timed = self.timed_left > 0;
         if timed {
             self.timed_left -= 1;
         }
         self.timed.push_back(timed);
         self.in_flight.push_back(InFlight { cb, status });
+    }
+
+    /// The next frame of `steps` steps as replay operations over
+    /// [`Self::replay_buffers`] (measurement only: nothing is submitted, the planner's
+    /// state is restored and the fleet does not advance; the frame's parameters go to a
+    /// free ring slot).
+    pub fn replay_ops(&mut self, steps: u32) -> Vec<crate::profile::ReplayOp> {
+        use crate::profile::{writable_buffers, Grid, ReplayDispatch, ReplayOp};
+        self.wait();
+        let state = self.planner.state();
+        let slot = self.ring;
+        let bytes = self.planner.write_params(steps);
+        write(&self.params[slot], 0, &bytes);
+        let cmds = self.planner.commands(steps, true);
+        self.planner.restore(state);
+        let params = self.bufs.len() + slot;
+        cmds.iter()
+            .map(|cmd| match *cmd {
+                Cmd::Copy { src, src_offset, dst, dst_offset, size } => ReplayOp::Copy {
+                    src: src as usize,
+                    src_offset,
+                    dst: dst as usize,
+                    dst_offset,
+                    size,
+                    phase: "frame".into(),
+                },
+                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => {
+                    // Per-step passes carry their step; the frame kernels run every step.
+                    let per_step = matches!(kernel, Kernel::Wide(_) | Kernel::FrameSeg | Kernel::Surf(_));
+                    let (grid, param_copy, step) = match *cmd {
+                        Cmd::Dispatch { groups, param_copy, .. } => (
+                            Grid::Groups(u64::from(groups), 1, 1),
+                            param_copy,
+                            if per_step { format!("step {param_copy}") } else { "frame".into() },
+                        ),
+                        Cmd::Indirect { offset, .. } => (Grid::Indirect { buf: BIND_ARGS as usize, offset }, 0, "frame".into()),
+                        Cmd::Copy { .. } => unreachable!(),
+                    };
+                    let p = &self.pipes[&kernel];
+                    let binds = p
+                        .binds
+                        .iter()
+                        .map(|&(index, b)| {
+                            let at = if b == BIND_PARAMS { (params, u64::from(param_copy) * PARAM_STRIDE) } else { (b as usize, 0) };
+                            (u64::from(index), Some(at))
+                        })
+                        .collect();
+                    ReplayOp::Dispatch(Box::new(ReplayDispatch {
+                        kernel: p.name.to_string(),
+                        entry: p.entry.to_string(),
+                        phase: step,
+                        pso: p.pso.clone(),
+                        group: MTLSize::new(p.threads, 1, 1),
+                        grid,
+                        binds,
+                        writable: writable_buffers(p.msl, p.entry),
+                    }))
+                }
+            })
+            .collect()
+    }
+
+    /// The buffers [`Self::replay_ops`] indexes: the plan's bindings, then the
+    /// parameter ring.
+    pub fn replay_buffers(&self) -> Vec<&Buffer> {
+        self.bufs.iter().chain(self.params.iter()).collect()
+    }
+
+    /// The Metal device and queue (the profiler's replay runs on them).
+    pub fn device_queue(&self) -> (&Device, &CommandQueue) {
+        (&self.device, &self.queue)
+    }
+
+    /// Keep each completed frame's GPU interval ([`Self::take_gpu_log`]) from now on, or stop.
+    pub fn set_gpu_log(&mut self, on: bool) {
+        self.gpu_log = on.then(Vec::new);
+    }
+
+    /// The GPU intervals of the frames completed since the log was turned on or last taken.
+    pub fn take_gpu_log(&mut self) -> Vec<crate::profile::GpuSpan> {
+        self.gpu_log.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Set the pipeline and buffers of `kernel`; its lanes per workgroup.
@@ -292,6 +409,10 @@ impl MetalExplicitBeams {
         let timed = self.timed.pop_front().unwrap_or(false);
         if f.cb.status() == MTLCommandBufferStatus::Error {
             panic!("explicit beams (Metal): a frame's command buffer failed");
+        }
+        if let Some(log) = &mut self.gpu_log {
+            let (start_s, end_s) = crate::profile::gpu_interval(&f.cb);
+            log.push(crate::profile::GpuSpan { label: "frame".into(), start_s, end_s });
         }
         if timed {
             if let Some((_, t)) = &mut self.timing {
