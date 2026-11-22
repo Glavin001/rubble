@@ -440,7 +440,6 @@ float4 cplFastSide(uint v, uint k, float3 vel, float4 n4)
 // `local`: the node's index in its vehicle (its count pass range, cplGsNodes).
 bool surfProxyFast(uint v, uint k, out float3 vb);
 
-float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction);
 bool cplListOn();
 
 // Vehicle v's static shape rule against an infinite-mass proxy takes its own surface
@@ -458,12 +457,14 @@ float3 cplStaticContactV(float3 f, float3 u, float mass, float3 n, uint v, float
 }
 float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
-    // The candidate list (cplList*, lossless): its own function (Metal's codegen of the
-    // path below stays as it was).
-    if (cplListOn()) return cplContactsListed(v, local, x, f, vel, mass, friction);
+    // With the candidate list (cplList*, lossless) the node's listed shapes (the count pass
+    // this step left it valid; every shape when it keeps none), else every shape of its
+    // range (culled by the spheres when on): one loop, one copy of the contact for both
+    // (the compilers inline every call).
+    bool listed = cplListOn();
     // §38.4 (explicit_beams_surface.slang FLAG_SURFACE): a fast proxy pushes the nodes
     // inside it out along its motion relative to them (CPU ProxySet::node_contact_with).
-    #ifdef EB_NO_SURFACE
+#ifdef EB_NO_SURFACE
     bool fastSide = false; // gP.surfSplit is 0 in this module's uploads
 #else
     bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
@@ -471,7 +472,6 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
     uint4 hdr = cplVeh(v);
     uint acc = cplAcc(v);
     uint nb = cplB();
-    bool cull = cplCullOn();
     uint2 gr = cplGsRange(v);
     uint k0 = 0u;
     uint k1 = hdr.y;
@@ -483,8 +483,15 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
         k0 = r & 0xFFFFu;
         k1 = min((r >> 16) + 1u, hdr.y);
     }
-    for (uint k = k0, kStop = EB_END(450, k, k1, 1u); k < kStop; k++)
+    bool cull = listed || cplCullOn();
+    uint nl = cplListNode(gStatic[v * 4u].x + local);
+    bool every = !listed || (gNext[nl + 4u] & 0xFFFFu) == CPL_LIST_ALL;
+    uint count = every ? k1 : CPL_LIST_CAP;
+    for (uint e = every ? k0 : 0u, eStop = EB_END(464, e, count, 1u); e < eStop; e++)
     {
+        uint k = every ? e : ((gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu);
+        if (k >= k1) break;
+        if (k < k0) continue;
         if (!cplMay(v, k, x, cull, gr)) continue;
         float4 n4 = cplFace(v, k, x);
         if (n4.w == 0.0) continue;
@@ -737,14 +744,7 @@ void cplCountBy(uint v, uint lane, uint lanes)
         {
             // Vehicle-local, as the proxy records (relative to the vehicle's origin).
             float3 x = gNodes[gi * 3u].xyz;
-            for (uint k = 0u, kStop = EB_END(459, k, hdr.y, 1u); k < kStop; k++)
-            {
-                if (cplMay(v, k, x, cull, gr) && cplFace(v, k, x).w != 0.0)
-                {
-                    gAcc[acc + gMisc[cplShape(v, k)].y].add(1);
-                    range = range == CPL_NONE ? (k | (k << 16)) : ((range & 0xFFFFu) | (k << 16));
-                }
-            }
+            range = cplCountShapes(v, x, gi, 0u, hdr.y, acc, gr, 0u, cull, 0.0, 0.0, 1u);
         }
         if (i < gn.y) gsCpl[CPL_GS_NODE + gn.x + i] = range;
     }
@@ -868,33 +868,33 @@ uint cplCountOne(uint v, uint k, float3 x, uint acc, uint range)
     return range == CPL_NONE ? (k | (k << 16)) : ((range & 0xFFFFu) | (k << 16));
 }
 
-// A node whose list holds: its listed shapes, in order.
-uint cplCountHeld(uint v, float3 x, uint nl, uint shapes, uint acc, uint2 gr)
+// Node x's (node gi's) shapes counted, the range of those it is inside: mode 0 every
+// shape (cplCountBy; the sphere first when culled), 1 the node's list holds (its listed
+// shapes, in order, the sphere first), 2 the node (re)building its list (every shape, the
+// ones within its skin listed). One function, so a count step that takes one of the
+// three per node has one copy of cplCountOne (cplFace) for them (the compilers inline
+// every call): the same tests and writes in the same order as the three had.
+uint cplCountShapes(uint v, float3 x, uint gi, uint nl, uint shapes, uint acc, uint2 gr, uint mode, bool cull, float E,
+                    float vs, uint left)
 {
-    uint range = CPL_NONE;
-    for (uint e = 0u, eStop = EB_END(461, e, CPL_LIST_CAP, 1u); e < eStop; e++)
-    {
-        uint k = (gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu;
-        if (k >= shapes) break;
-        if (cplMay(v, k, x, true, gr)) range = cplCountOne(v, k, x, acc, range);
-    }
-    return range;
-}
-
-// A node (re)building its list: every shape tested as cplCountBy does, the ones within
-// its skin listed.
-uint cplCountBuild(uint v, float3 x, float3 vel, uint nl, uint shapes, uint acc, uint2 gr, float E, float vs, uint left)
-{
-    float m = cplListMargin(length(vel), vs, left);
+    float m = mode == 2u ? cplListMargin(length(gNodes[gi * 3u + 1u].xyz), vs, left) : 0.0;
     uint range = CPL_NONE;
     uint n = 0u;
     uint word = 0xFFFFFFFFu;
-    for (uint k = 0u, kStop = EB_END(462, k, shapes, 1u); k < kStop; k++)
+    for (uint e = 0u, eStop = EB_END(461, e, mode == 1u ? CPL_LIST_CAP : shapes, 1u); e < eStop; e++)
     {
+        uint k = e;
+        if (mode == 1u)
+        {
+            k = (gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu;
+            if (k >= shapes) break;
+        }
+        // (cplMay's test: the sphere's words, inside when dd < its radius squared.)
         uint4 w = cplSphereWords(v, k, gr);
         float3 d = x - asfloat(w.xyz);
         float dd = dot(d, d);
-        if (dd < asfloat(w.w)) range = cplCountOne(v, k, x, acc, range);
+        if ((mode == 0u && !cull) || dd < asfloat(w.w)) range = cplCountOne(v, k, x, acc, range);
+        if (mode != 2u) continue;
         float l = sqrt(asfloat(w.w)) + m;
         // NaN lists the shape.
         if (!(dd >= l * l))
@@ -907,15 +907,25 @@ uint cplCountBuild(uint v, float3 x, float3 vel, uint nl, uint shapes, uint acc,
             n++;
         }
     }
-    if (n > CPL_LIST_CAP)
-        gNext[nl + 4u] = 0xFFFF0000u | CPL_LIST_ALL;
-    else if ((n & 1u) == 0u && n < CPL_LIST_CAP)
-        gNext[nl + 4u + (n >> 1)] = 0xFFFFFFFFu;
-    gNext[nl] = asuint(x.x);
-    gNext[nl + 1u] = asuint(x.y);
-    gNext[nl + 2u] = asuint(x.z);
-    gNext[nl + 3u] = asuint(n > CPL_LIST_CAP ? -1.0 : m - E);
+    if (mode == 2u)
+    {
+        if (n > CPL_LIST_CAP)
+            gNext[nl + 4u] = 0xFFFF0000u | CPL_LIST_ALL;
+        else if ((n & 1u) == 0u && n < CPL_LIST_CAP)
+            gNext[nl + 4u + (n >> 1)] = 0xFFFFFFFFu;
+        gNext[nl] = asuint(x.x);
+        gNext[nl + 1u] = asuint(x.y);
+        gNext[nl + 2u] = asuint(x.z);
+        gNext[nl + 3u] = asuint(n > CPL_LIST_CAP ? -1.0 : m - E);
+    }
     return range;
+}
+// The node's mode for the listed count (cplCountShapes): 1 its list holds, 2 it builds.
+uint cplListMode(uint gi, float3 x, float E, bool first)
+{
+    uint nl = cplListNode(gi);
+    float4 h = asfloat(uint4(gNext[nl], gNext[nl + 1u], gNext[nl + 2u], gNext[nl + 3u]));
+    return !first && length(x - h.xyz) + E < h.w ? 1u : 2u;
 }
 
 // cplCountBy with the list (step s; the cull on).
@@ -945,12 +955,8 @@ void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr)
         if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) == 0u)
         {
             float3 x = gNodes[gi * 3u].xyz;
-            uint nl = cplListNode(gi);
-            float4 h = asfloat(uint4(gNext[nl], gNext[nl + 1u], gNext[nl + 2u], gNext[nl + 3u]));
-            if (!first && length(x - h.xyz) + E < h.w)
-                range = cplCountHeld(v, x, nl, hdr.y, acc, gr);
-            else
-                range = cplCountBuild(v, x, gNodes[gi * 3u + 1u].xyz, nl, hdr.y, acc, gr, E, vs, left);
+            range = cplCountShapes(v, x, gi, cplListNode(gi), hdr.y, acc, gr, cplListMode(gi, x, E, first), true, E, vs,
+                                   left);
         }
         if (i < gn.y) gsCpl[CPL_GS_NODE + gn.x + i] = range;
     }
@@ -959,91 +965,38 @@ void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr)
 // The count pass (step s): with the list, or every shape.
 void cplCountStep(uint v, uint lane, uint lanes, uint s)
 {
-    if (cplListOn())
-    {
-        cplCountListed(v, lane, lanes, s);
-        return;
-    }
-    cplCountBy(v, lane, lanes);
-}
-
-// cplContacts with the list: the node's listed shapes (the count pass this step left
-// it valid), or every shape when it keeps none; within its node range as before.
-float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
-{
-#ifdef EB_NO_SURFACE
-    bool fastSide = false; // gP.surfSplit is 0 in this module's uploads
-#else
-    bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
-#endif
+    // (With the list or every shape, one node loop of cplCountShapes: cplCountListed's and
+    // cplCountBy's in one, the mode chosen per node.)
+    bool listOn = cplListOn();
     uint4 hdr = cplVeh(v);
+    if (hdr.y == 0u) return;
+    uint4 r0 = gStatic[v * 4u];
     uint acc = cplAcc(v);
-    uint nb = cplB();
     uint2 gr = cplGsRange(v);
-    uint k0 = 0u;
-    uint k1 = hdr.y;
     uint2 gn = cplGsNodes(v);
-    if (local < gn.y)
+    bool cull = cplCullOn();
+    float E = 0.0;
+    float vs = 0.0;
+    if (listOn)
     {
-        uint r = gsCpl[CPL_GS_NODE + gn.x + local];
-        if (r == CPL_NONE) return f;
-        k0 = r & 0xFFFFu;
-        k1 = min((r >> 16) + 1u, hdr.y);
+        uint la = cplListAcc(v);
+        E = asfloat(gAcc[la].load());
+        vs = asfloat(gAcc[la + 1u].load());
     }
-    uint nl = cplListNode(gStatic[v * 4u].x + local);
-    bool every = (gNext[nl + 4u] & 0xFFFFu) == CPL_LIST_ALL;
-    uint count = every ? k1 : CPL_LIST_CAP;
-    for (uint e = every ? k0 : 0u, eStop = EB_END(464, e, count, 1u); e < eStop; e++)
+    bool first = cplListFirst(s);
+    uint left = gP.steps > s ? gP.steps - s : 1u;
+    for (uint i = lane, iStop = EB_END(604, i, r0.y, lanes); i < iStop; i += lanes)
     {
-        uint k = every ? e : ((gNext[nl + 4u + (e >> 1)] >> (16u * (e & 1u))) & 0xFFFFu);
-        if (k >= k1) break;
-        if (k < k0) continue;
-        if (!cplMay(v, k, x, true, gr)) continue;
-        float4 n4 = cplFace(v, k, x);
-        if (n4.w == 0.0) continue;
-        if (fastSide) n4 = cplFastSide(v, k, vel, n4);
-        uint at = cplShape(v, k);
-        uint j = gMisc[at].y;
-        uint b = cplBody(v, j);
-        float4 c0 = asfloat(gMisc[b]);
-        float4 q = asfloat(gMisc[b + 1u]);
-        float4 c2 = asfloat(gMisc[b + 2u]);
-        float4 c3 = asfloat(gMisc[b + 3u]);
-        float3 r = x - c0.xyz;
-        float3 vb = c2.xyz + cross(c3.xyz, r);
-        float3 fc;
-        if (c0.w == 0.0)
+        uint gi = r0.x + i;
+        uint range = CPL_NONE;
+        if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) == 0u)
         {
-            // Infinite mass: the static shape rule (relative to a kinematic body's motion).
-            float3 u = all(vb == float3(0.0, 0.0, 0.0)) ? vel : vel - vb;
-            if (cplStaticOwnSurface(v)) fc = cplStaticContactV(f, u, mass, n4.xyz, v, friction);
-            else fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
+            float3 x = gNodes[gi * 3u].xyz;
+            range = cplCountShapes(v, x, gi, cplListNode(gi), hdr.y, acc, gr, listOn ? cplListMode(gi, x, E, first) : 0u,
+                                   listOn || cull, E, vs, left);
         }
-        else
-        {
-            float3 ii = asfloat(gMisc[b + 4u].xyz);
-            float3 rn = cross(r, n4.xyz);
-            float3 lr = cplRot(float4(-q.xyz, q.w), rn);
-            float3 irn = cplRot(q, ii * lr);
-            float split = float(max(uint(gAcc[acc + j].load()), 1u)) * max(c2.w, 1.0);
-            float wb = split * (c0.w + dot(rn, irn));
-            float wn = 1.0 / mass;
-            float mred = 1.0 / (wn + wb);
-            float share = wn / (wn + wb);
-            fc = contactForce(f * share, vel - vb, mred, n4.xyz, boxSurface(), 0.0, friction);
-        }
-        f += fc;
-        float3 react = -fc;
-        float3 m = cross(x - asfloat(gMisc[at + 6u].xyz), react);
-        uint s = acc + nb + 6u * k;
-        gAcc[s].add(toFixed(react.x));
-        gAcc[s + 1u].add(toFixed(react.y));
-        gAcc[s + 2u].add(toFixed(react.z));
-        gAcc[s + 3u].add(toFixed(m.x));
-        gAcc[s + 4u].add(toFixed(m.y));
-        gAcc[s + 5u].add(toFixed(m.z));
+        if (i < gn.y) gsCpl[CPL_GS_NODE + gn.x + i] = range;
     }
-    return f;
 }
 
 // --- The folded step (lossless; 2 barriers a step, not 4) ---

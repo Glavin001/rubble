@@ -477,3 +477,35 @@ buckets' entries, every candidate past GRID_MAX_CELLS cells, the entry loop budg
 `tryContact`: `explicit_beams_selfsplit_member_vv_wide` Chrome cold 13.6 -> 11.0 s.
 Checked as above (fast-check, `groupsplit`, the matrix, the five GPU suites in bit-exact
 mode, `sleep-check.sh`, Chrome's validation).
+
+### Both of the lab's blocking kernels under 10 s
+
+Three more single call sites in the members' module, each found by ablation:
+- The coupling's count: `cplCountBy`, `cplCountHeld` and `cplCountBuild` (every shape,
+  the node's list, the list rebuilt) are one per-node function (`cplCountShapes`) that
+  `cplCountStep` calls from one node loop; and the contact pass's two (`cplContacts`
+  without the list, `cplContactsListed` with it: identical bodies) are one. 11.0 -> 10.7 s.
+- The wheels: the normal step and PERF_SPLIT_WHEELS_AHEAD's tyres alone are one function
+  (`splitDrive`): one `drvTyre`. 10.7 -> 9.95 s. (The same change measured no gain at 25 s
+  and was dropped then: at 10 s the copy counts.)
+- The loop caps of the joined candidate loop kept every loop budgeted exactly as before
+  (the outer loop budgeted, the walk's entries a pass each, the entry loop capped):
+  writing them as an unconditional `EB_PASS` instead cost 5.5 s of compile.
+
+Chrome cold, the vehicle lab's derby and mountain pages:
+
+| Module | at the start | now |
+|---|---|---|
+| `explicit_beams_selfsplit_member_vv_wide` (blocking) | 114-123 s | 9.6 s |
+| `explicit_beams_split_grouplevels_wide` (blocking) | 49 s | 9.1-9.7 s |
+| every other blocking module | at most 2.5 s | the same |
+| `explicit_beams_solo_wide_nosurf` (deferred) | 41 s | 19.6 s |
+| `explicit_beams_contact_wide_nosurf` (deferred) | 119 s | 65 s |
+
+Checked: fast-check (16 of 17 bit for bit, the known quirk), `perf=67108864` and
+`groupsplit` in the new build, the scenario matrix (12 rows bit for bit, none slower),
+`run.sh --world` (8 rows, the World's cost within 2.5 ms), twelve GPU suites in bit-exact
+mode (pair reuse, self split, contact, bitwise, group split, drive, coupling shapes, rigid,
+surface proxies, loop caps, fleet contact, vehicle grid: 61 tests), `sleep-check.sh` (21),
+Chrome's validation of all 140 modules. The loop-cap suite also caught an uncapped loop an
+earlier commit here added (the `vvSnapNode` loops): capped now.

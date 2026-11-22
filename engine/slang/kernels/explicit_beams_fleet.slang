@@ -686,7 +686,7 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
                         uint h = gNext[base + 2u * i + 1u];
                         // (The four nodes at one call site, in the same order: tn.x, tn.y, tn.z, h. The
                         // compilers inline every call; opaqueCount keeps the loop from being unrolled back.)
-                        for (uint q = 0u, qStop = opaqueCount(4u); q < qStop; q++)
+                        for (uint q = 0u, qStop = EB_END(606, q, opaqueCount(4u), 1u); q < qStop; q++)
                             vvSnapNode(q == 0u ? tn.x : (q == 1u ? tn.y : (q == 2u ? tn.z : h)),
                                        q < 3u ? tn.w : gStatic[gP.nodeInfoBase + h].w, parity, tag);
                     }

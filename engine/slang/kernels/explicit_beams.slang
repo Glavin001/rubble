@@ -1668,7 +1668,7 @@ static const uint PERF_HIT_SLOT_MAP = 134217728u;
 // perfFlags bit 67108864 (explicit_plan::PERF_SPLIT_WHEELS_AHEAD, with PERF_MEMBER_LIST and
 // self-collision split): a contact group member's raycast wheels' rays and bars of step
 // s + 1 on a workgroup of their own in step s's rest dispatch (explicit_beams_split.slang
-// splitWheelsAhead), its tyres at step s + 1's start as before (splitTyres).
+// splitWheelsAhead), its tyres at step s + 1's start as before (splitDrive with `ahead`).
 static const uint PERF_SPLIT_WHEELS_AHEAD = 67108864u;
 // perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): the
 // wheels' second part loaded before the hits (explicit_beams_drive.slang drvTyreLoad).
@@ -11280,7 +11280,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                     uint h = gNext[base + 2u * i + 1u];
                     // (The four nodes at one call site, in the same order: tn.x, tn.y, tn.z, h. The
                     // compilers inline every call; opaqueCount keeps the loop from being unrolled back.)
-                    for (uint q = 0u, qStop = opaqueCount(4u); q < qStop; q++)
+                    for (uint q = 0u, qStop = EB_END(605, q, opaqueCount(4u), 1u); q < qStop; q++)
                         vvSnapNode(q == 0u ? tn.x : (q == 1u ? tn.y : (q == 2u ? tn.z : h)),
                                    q < 3u ? tn.w : gStatic[gP.nodeInfoBase + h].w, parity, tag);
                 }

@@ -92,16 +92,8 @@ void splitCoupleStep(uint v, uint rank, uint k, uint lane, uint s, uint on)
     sync();
 }
 
-// driveStepMembers for one member: its wheels on lanes 0 .. DRV_MAX_WHEELS - 1.
-void splitDriveStep(uint v, uint lane, uint s, uint on)
-{
-    if (on == 0u) return;
-    driveWheelsSplit(v, lane % DRV_MAX_WHEELS, lane < DRV_MAX_WHEELS, gMisc[v].w + s);
-    sync();
-}
-
 // --- PERF_SPLIT_WHEELS_AHEAD: a member's wheels' rays and bars off its step's workgroup ---
-// A member's step starts with its coupling's step and its wheels (splitDriveStep: the rays,
+// A member's step starts with its coupling's step and its wheels (splitDrive: the rays,
 // the bars, the tyres, a barrier after each), a chain of a few lanes ahead of its node
 // phase. The rays and the bars read the nodes' positions and velocities (final from a
 // step's node phase to the next: the walk, the pairs, the members' rest and the groups'
@@ -122,16 +114,32 @@ bool splitWheelsAheadOn()
     return false;
 #endif
 }
-// Step s's tyres and end alone (its rays and bars ran ahead): driveWheelsSplit's last part.
-void splitTyres(uint v, uint lane, uint s, uint on)
+// Member v's wheels of step s (driveStepMembers for one member: its wheels on lanes
+// 0 .. DRV_MAX_WHEELS - 1): driveWheelsSplit's work, or with `ahead` its tyres and end
+// alone, the rays and bars having run ahead (driveAheadCtx and driveAheadPart's part 2,
+// as before with the same context: a lane past the wheels has none, and the ahead
+// schedules' context keeps step 0). One function for both, so one copy of drvTyre (the
+// compilers inline every call: each path's own was a copy).
+void splitDrive(uint v, uint lane, uint s, uint on, bool ahead)
 {
     if (on == 0u) return;
+    uint step = gMisc[v].w + s;
     uint w = lane < DRV_MAX_WHEELS ? lane : DRV_MAX_WHEELS;
     DrvCtx c;
-    bool has;
-    bool apart;
-    driveAheadCtx(v, w, c, has, apart);
-    driveAheadPart(c, has, apart, w, 2u, gMisc[v].w + s);
+    bool has = w < DRV_MAX_WHEELS && drvCtx(v, c);
+    if (!ahead) c.step = step;
+    bool apart = has && drvWheelsApart(c);
+    uint k0 = apart ? w : 0u;
+    uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
+    if (!ahead)
+    {
+        for (uint k = k0, kStop = EB_END(600, k, k1, 1u); k < kStop; k++) drvRays(c, k);
+        sync();
+        if (has && w == 0u) drvBars(c);
+        sync();
+    }
+    for (uint k = k0, kStop = EB_END(601, k, k1, 1u); k < kStop; k++) drvTyre(c, k, step);
+    if (has && w == 0u) drvEnd(c);
     sync();
 }
 // The rest dispatch's second row: member v's rays and bars of step s + 1 (every lane;
@@ -196,10 +204,7 @@ uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
     splitCoupleStep(v, rank, k, lane, s, coupleOn);
     // (PERF_SPLIT_WHEELS_AHEAD: this step's rays and bars ran in the last step's rest
     // dispatch; uniform.)
-    if (s > 0u && splitWheelsAheadOn())
-        splitTyres(v, lane, s, driveOn);
-    else
-        splitDriveStep(v, lane, s, driveOn);
+    splitDrive(v, lane, s, driveOn, s > 0u && splitWheelsAheadOn());
     // Every member on the whole of its workgroup with the one member step
     // (contactMemberStep), whatever the group's size: the same results as a small
     // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which

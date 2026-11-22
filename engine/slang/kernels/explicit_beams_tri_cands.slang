@@ -9,7 +9,7 @@
 // candidate past GRID_MAX_CELLS cells). Candidates k = sub, sub + subs, ... (cells for
 // the walk). One function, so that a step that runs one of the four has one copy of
 // tryContact for them (the compilers inline every call): the same tests in the same order
-// as each had, the walk's entry loop budgeted as before.
+// as each had.
 void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
                         uint beamOff, uint groupOff, uint groupCount, uint parity, uint mode)
 {
@@ -57,6 +57,8 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
         }
     }
     bool walk = mode == 3u && !every;
+    // The loop budget as each of the four drew it: the outer loop budgeted, and the walk's
+    // every bucket entry a pass more (ebSpend below; the entry loop capped, unbudgeted).
     for (uint i = sub, iStop = EB_END(17, i, walk ? cells : candCount, subs); i < iStop; i += subs)
     {
         uint e0 = 0u;
@@ -97,10 +99,13 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
             e0 = gsOff[b];
             e1 = gsOff[b + 1u];
         }
-        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        for (uint e = e0, eStop = EB_END_UNIFORM(603, e, e1, 1u, EB_LOOP_CAP); e < eStop; e++)
         {
-            if (mode == 3u)
-                EB_PASS(603, eGuard);
+            if (mode == 3u && !ebSpend())
+            {
+                ebLoopCapHit(607);
+                break;
+            }
             uint h;
             if (walk)
             {
