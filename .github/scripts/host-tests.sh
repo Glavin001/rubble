@@ -61,8 +61,10 @@ case "$group" in
       if (( doc )); then
         run test "${flags[@]}" --no-fail-fast -p "$package" --doc
       fi
+      # The examples are tools nothing runs here: checked (every compile error, no
+      # code generation or thin-LTO link: about 9 s a target saved), not built.
       if (( ${#examples[@]} )); then
-        run build "${flags[@]}" -p "$package" "${examples[@]}"
+        run check "${flags[@]}" -p "$package" "${examples[@]}"
       fi
     done
     ;;

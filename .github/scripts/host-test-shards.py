@@ -5,8 +5,9 @@ Usage (from engine/): host-test-shards.py PACKAGE[,PACKAGE...] SHARD TOTAL
 
 Prints what shard SHARD (1-based) of TOTAL runs, one line per target:
   <package> test <cargo arg>   an argument of `cargo test` (--lib, --bin=NAME, --test=NAME)
-  <package> example <NAME>     an example `cargo build` compiles (what a plain `cargo
-                               test` does with examples: it builds them and runs nothing)
+  <package> example <NAME>     an example to `cargo check` (a plain `cargo test` builds
+                               examples and runs nothing; checking them finds the same
+                               compile errors without generating and linking code)
   <package> doc                this shard also runs the package's doc tests
 
 The targets come from `cargo metadata`, so a new test file or example is in a shard
@@ -41,6 +42,8 @@ DEFAULT_RUN_SECONDS = 2
 # Compiling and linking one target (release, thin LTO), on four cores: an estimate
 # from the whole build (about 130 targets in 19.6 min).
 BUILD_SECONDS = 9
+# Checking one example (no code generation, no link).
+CHECK_SECONDS = 2
 
 meta = json.loads(
     subprocess.run(
@@ -74,7 +77,7 @@ for package in packages:
         elif kind == "example":
             # A plain `cargo test` runs an example's tests only with `test = true`.
             assert not t["test"], f"example {name} has test = true: it needs its own rule here"
-            units.append((BUILD_SECONDS, f"{package} example {name}"))
+            units.append((CHECK_SECONDS, f"{package} example {name}"))
         elif kind in ("bench", "custom-build"):
             pass  # `cargo test` builds no benches; the build script is not a target to pick
         else:
