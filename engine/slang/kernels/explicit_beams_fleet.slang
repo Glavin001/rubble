@@ -353,7 +353,10 @@ uint flCands(uint va)
 // largest pad any candidate of the owner can have (the walk's own `pad`, from the owner's
 // fastest candidate: vvInBox's pad of a candidate is the same expression of its own speed,
 // which is at most that one, and each operation is monotone), so a candidate outside it
-// fails vvInBox: the same candidates pass, without the two loads for the others.
+// fails vvInBox: the same candidates pass, without the two loads for the others. The
+// first test's box is 0.1 mm and a millionth of the coordinates larger still: with fast
+// arithmetic the two pads may round apart in their last place (a fused multiply-add in
+// one), which that room is a thousand times; vvInBox alone decides inside it.
 // `helper`: a thread of a marked triangle's own (part `sub` of FL_BIG_PARTS of the owner's
 // candidates); the walk's threads leave a marked triangle to them.
 void flWalkBoxed(uint va, uint gt, uint sub, uint subs, uint cands, float r, bool helper)
@@ -366,6 +369,9 @@ void flWalkBoxed(uint va, uint gt, uint sub, uint subs, uint cands, float r, boo
     float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
     float3 lo = ssub3(t.lo, float3(pad, pad, pad));
     float3 hi = sadd3(t.hi, float3(pad, pad, pad));
+    float3 room = float3(1.0e-4, 1.0e-4, 1.0e-4) + 1.0e-6 * max(abs(lo), abs(hi));
+    float3 blo = lo - room;
+    float3 bhi = hi + room;
     float3 f0 = floor(lo / cell);
     float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
     bool every = helper || !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
@@ -379,7 +385,7 @@ void flWalkBoxed(uint va, uint gt, uint sub, uint subs, uint cands, float r, boo
         for (uint e = sub, eStop = EB_END(640, e, cands, subs); e < eStop; e += subs)
         {
             float4 E = gBeams[run + e];
-            if (any(E.xyz < lo) || any(E.xyz > hi)) continue;
+            if (any(E.xyz < blo) || any(E.xyz > bhi)) continue;
             uint h = asuint(E.w);
             if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
             cand = true;
@@ -431,7 +437,7 @@ void flWalkBoxed(uint va, uint gt, uint sub, uint subs, uint cands, float r, boo
         {
             EB_PASS(643, eGuard);
             float4 E = gBeams[sorted + e];
-            if (any(E.xyz < lo) || any(E.xyz > hi)) continue;
+            if (any(E.xyz < blo) || any(E.xyz > bhi)) continue;
             uint h = asuint(E.w);
             if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
             cand = true;

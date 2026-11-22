@@ -6586,7 +6586,11 @@ are untouched). Each lossless: the same (triangle, candidate) pairs listed, each
    expression of that candidate's own speed, which is at most the fastest's, and every
    operation in it is monotone, so a candidate outside the larger box fails `vvInBox`:
    it is skipped before the two dependent loads. A NaN compares false and goes on to
-   `vvInBox` as before. Alone: mountain20_t12 39.7 → 36.6 ms, mountain20_t20 66.8 → 64.7.
+   `vvInBox` as before. The first test's box is 0.1 mm and a millionth of the
+   coordinates larger still: with fast arithmetic (the default outside the tests) a
+   compiler may fuse the multiply-add of one pad and not of the other, a last place
+   apart; inside that room `vvInBox` alone decides, so the pairs are the same in either
+   setting. Alone: mountain20_t12 39.7 → 36.6 ms, mountain20_t20 66.8 → 64.7.
 2. **A big triangle's test on threads of its own.** The throttles' dispatch marks a listed
    triangle whose box covers more than the walk's 64 cells (`flBigHint`, in a pass that
    walks: bit 1 of the triangle's listed word, `fkListed`) and puts it in the fleet's list
@@ -6611,27 +6615,38 @@ callers: `perf=536870912`, `RUBBLE_PERF_FLAGS`, the lab page's `--ab`).
 frames, every state word the same on every row of both machines
 (`tools/scenario-matrix/run.sh perf=536870912`, and `--cuda`). ms a frame of 34 steps.
 
-| row | Mac on / off | Mac, default before → after: mean (worst frame) | T4 on / off |
+| row | Mac on / off (worst frame on / off) | Mac, default before → after: mean (worst frame) | T4 on / off (worst frame on / off) |
 |---|---|---|---|
-| mountain20_t2 | 18.60 / 18.68, −0.4 % | 18.84 (19.87) → 19.19 (19.87) | 34.59 / 34.83, −0.7 % |
-| mountain20_t4 | 36.80 / 36.97, −0.4 % | 36.94 (40.48) → 36.60 (40.39) | 64.86 / 65.61, −1.1 % |
-| mountain20_t7 | 36.35 / 37.91, −4.1 % | 36.83 (37.71) → 35.18 (36.35) | 63.28 / 65.74, −3.7 % |
-| **mountain20_t12** | **35.15 / 41.92, −16.2 %** | **40.57 (44.85) → 34.21 (37.99)** | **64.71 / 77.46, −16.5 %** |
-| **mountain20_t20** | **44.69 / 66.63, −32.9 %** | **66.52 (69.13) → 43.16 (44.41)** | **80.94 / 125.56, −35.5 %** |
-| derby20_t2 | 22.49 / 23.51, −4.3 % | 22.02 (23.97) → 22.40 (23.42) | 37.85 / 37.87, −0.0 % |
-| derby20_t5 | 30.30 / 30.00, +1.0 % | 29.43 (31.12) → 29.76 (31.61) | 56.15 / 56.15, +0.0 % |
-| derby20_t10 | 28.77 / 28.64, +0.4 % | 28.20 (29.67) → 28.69 (30.21) | 51.83 / 51.86, −0.1 % |
-| clash2 / 4 / 8 | −1.2 / +0.3 / −0.4 % | 15.41 (16.30) → 15.60 (16.76); 16.11 (17.76) → 16.35 (17.62); 23.55 (24.17) → 23.52 (24.19) | +0.0 / +0.1 / +0.0 % |
-| clash16 / 20 / 32 | −0.4 / −0.0 / +1.0 % | 24.64 (27.64) → 24.71 (25.56); 25.17 (26.15) → 25.45 (26.25); 30.93 (33.20) → 30.83 (33.32) | −0.0 / −0.0 / +0.0 % |
-| apart1 to apart32 | −0.4 to +0.4 % | 6.17 (6.61) → 6.41 (6.61); 8.33 (8.41) → 8.33 (8.46); 12.86 (14.24) → 12.87 (14.28); 13.54 (14.81) → 13.56 (14.92); 14.06 (15.36) → 14.05 (15.39); 14.26 (15.64) → 14.25 (15.66); 15.27 (16.62) → 15.27 (16.60) | −0.2 to +0.0 % |
-| pole / wall_s / bricks_s / pile8_s | −0.1 / −0.0 / −0.8 / +0.1 % | 16.13 (30.40) → 16.68 (31.45); 7.51 (8.85) → 8.12 (9.34); 10.24 (10.80) → 11.15 (11.98); 24.98 (26.62) → 25.17 (26.76) | +0.5 / +0.0 / −0.0 / −0.0 % |
-| drive / tumble / wall | +2.5 / +0.0 / −0.9 % | 3.52 (3.62) → 3.42 (3.67); 3.38 (3.54) → 3.43 (3.52); 4.05 (4.41) → 4.24 (4.45) | +0.1 / +0.1 / −0.1 % |
-| pile2 / pile8 / pile32 | −4.6 / +0.9 / −0.3 % | 8.24 (8.44) → 8.22 (8.41); 12.80 (13.25) → 12.99 (13.36); 36.13 (40.07) → 35.51 (39.39) | +0.1 / +0.0 / −3.0 % |
-| headon / side / bricks | +0.4 / −0.2 / −0.6 % | 11.81 (12.53) → 11.89 (12.52); 8.41 (11.16) → 8.83 (11.67); 3.34 (3.50) → 3.72 (3.83) | +0.0 / −0.1 / +0.0 % |
-| rocks / barrier / truss | +0.9 / +0.5 / −1.4 % | 4.01 (4.27) → 3.96 (4.18); 7.35 (8.27) → 7.29 (8.25); 1.71 (1.84) → 1.70 (1.91) | −0.0 / −0.0 / +0.2 % |
+| mountain20_t2 | 19.13 / 19.31, −0.9 % (19.82 / 19.95) | 18.84 (19.87) → 19.19 (19.87) | 34.61 / 34.89, −0.8 % (35.73 / 36.13) |
+| mountain20_t4 | 37.04 / 37.12, −0.2 % (40.37 / 40.43) | 36.94 (40.48) → 36.60 (40.39) | 64.40 / 64.98, −0.9 % (75.92 / 75.86) |
+| mountain20_t7 | 35.66 / 36.80, −3.1 % (36.40 / 37.67) | 36.83 (37.71) → 35.18 (36.35) | 62.91 / 65.34, −3.7 % (64.33 / 66.93) |
+| **mountain20_t12** | **34.24 / 40.84, −16.1 % (37.91 / 44.84)** | **40.57 (44.85) → 34.21 (37.99)** | **64.72 / 77.44, −16.4 % (70.10 / 83.35)** |
+| **mountain20_t20** | **43.09 / 66.60, −35.3 % (45.98 / 74.89)** | **66.52 (69.13) → 43.16 (44.41)** | **81.00 / 125.46, −35.4 % (83.37 / 129.71)** |
+| derby20_t2 | 22.23 / 22.03, +0.9 % (31.88 / 30.37) | 22.02 (23.97) → 22.40 (23.42) | 37.78 / 37.78, +0.0 % (39.46 / 39.47) |
+| derby20_t5 | 30.00 / 30.31, −1.0 % (38.09 / 38.19) | 29.43 (31.12) → 29.76 (31.61) | 55.80 / 55.80, −0.0 % (58.55 / 58.51) |
+| derby20_t10 | 30.26 / 29.80, +1.5 % (37.23 / 35.72) | 28.20 (29.67) → 28.69 (30.21) | 51.77 / 51.81, −0.1 % (55.09 / 55.30) |
+| clash2 / 4 / 8 | +0.1 / +0.1 / +0.3 % | 15.41 (16.30) → 15.60 (16.76); 16.11 (17.76) → 16.35 (17.62); 23.55 (24.17) → 23.52 (24.19) | +0.0 / +0.1 / +0.0 % |
+| clash16 / 20 / 32 | +0.1 / +0.2 / −0.2 % (clash20 25.39 / 25.34, worst 26.16 / 26.18) | 24.64 (27.64) → 24.71 (25.56); 25.17 (26.15) → 25.45 (26.25); 30.93 (33.20) → 30.83 (33.32) | −0.0 / +0.1 / +0.0 % (clash20 43.81 / 43.79, worst 47.18 / 47.09) |
+| apart1 to apart32 | −0.1 to +0.8 % | 6.17 (6.61) → 6.41 (6.61); 8.33 (8.41) → 8.33 (8.46); 12.86 (14.24) → 12.87 (14.28); 13.54 (14.81) → 13.56 (14.92); 14.06 (15.36) → 14.05 (15.39); 14.26 (15.64) → 14.25 (15.66); 15.27 (16.62) → 15.27 (16.60) | −0.2 to +0.1 % |
+| pole / wall_s / bricks_s / pile8_s | −0.2 / +0.1 / −0.0 / −0.0 % | 16.13 (30.40) → 16.68 (31.45); 7.51 (8.85) → 8.12 (9.34); 10.24 (10.80) → 11.15 (11.98); 24.98 (26.62) → 25.17 (26.76) | within 0.6 % |
+| drive / tumble / wall | +1.1 / +0.4 / +1.6 % | 3.52 (3.62) → 3.42 (3.67); 3.38 (3.54) → 3.43 (3.52); 4.05 (4.41) → 4.24 (4.45) | +0.0 / +0.4 / +0.1 % |
+| pile2 / pile8 / pile32 | +0.2 / +0.0 / −0.2 % | 8.24 (8.44) → 8.22 (8.41); 12.80 (13.25) → 12.99 (13.36); 36.13 (40.07) → 35.51 (39.39) | +0.0 / +0.1 / −3.0 % (pile32 73.42 / 75.71, worst 78.98 / 81.04) |
+| headon / side / bricks | −0.1 / −0.1 / +3.1 % (bricks 3.78 / 3.67) | 11.81 (12.53) → 11.89 (12.52); 8.41 (11.16) → 8.83 (11.67); 3.34 (3.50) → 3.72 (3.83) | within 0.1 % |
+| rocks / barrier / truss | +0.4 / +1.1 / +0.5 % | 4.01 (4.27) → 3.96 (4.18); 7.35 (8.27) → 7.29 (8.25); 1.71 (1.84) → 1.70 (1.91) | within 0.2 % |
 
 "On / off" is the paired A/B (the verdict: PASS on both machines, 37 rows, none slower
-past 5 % and 0.05 ms). "Default before → after" is two `run.sh --baseline` runs of this
+past 5 % and 0.05 ms; `WORST=1` prints the slowest frame of any round of each half). Both
+columns are the last run, on the kernel as committed; two earlier runs of each machine on
+the kernel before the first test's rounding room gave the same verdicts and the same
+deltas to 0.5 % (mountain20_t12 −16.2 and −16.5 %, mountain20_t20 −32.9 and −35.5 %). On
+the T4 the other rows' worst frames are within 0.3 ms between the halves but for one
+frame of the on half on three rows: drive 7.61, wall 9.78 and pile2 24.10 ms against 3.94,
+6.69 and 12.34 in one run, 9.28, 8.68 and 28.57 in the next. It is not the switch: the
+same rows with `perf=0`, same against same, give pile2 22.46 / 12.26 (the lone cars 4.59 /
+4.60 and 3.93 / 3.92 that time). The on half is the first of each round; why its pile2
+has one slow frame was not looked into (a hypothesis: a module's first load in a timed
+frame). Each frame's best round, the number compared, does not see it. "Default before →
+after" is two `run.sh --baseline` runs of this
 build one after the other on the shared GPU, the first with `RUBBLE_PERF_FLAGS=165150661`
 (the defaults without the switch), each row a process of its own: not a paired A/B, and
 the one-car rows change level between processes by more than this change could (bricks
@@ -6640,6 +6655,16 @@ lone car launches no fleet dispatch).
 
 The worst frame of the mountain's last fixture goes from 69.1 to 44.4 ms on the Mac. From
 t 12 to t 20 the frame now grows from 34.2 to 43.2 ms where it grew from 40.6 to 66.5.
+
+By dispatch kind on the Mac (`--ab-profile`, each dispatch a timed pass, ms a frame;
+Metal's timestamps overstate a kind, the comparison is like for like):
+
+| kind | t 12 before → after | t 20 before → after |
+|---|---|---|
+| fleet walk | 10.17 → 2.25 (299 → 66 µs a dispatch) | 30.97 → 3.31 (911 → 98 µs) |
+| fleet triangles, points (the marks are made here) | 1.87 → 1.90 | 2.80 → 2.82 |
+| members' step | 23.89 → 23.83 | 25.98 → 25.98 |
+| levels | 3.31 → 3.31 | 6.42 → 6.41 |
 
 **Default: on natively and on CUDA** (`perf_flags_default`), off in a browser until
 Chrome's bit-for-bit A/B on the lab page (AGENTS.md rung 3) is run.
