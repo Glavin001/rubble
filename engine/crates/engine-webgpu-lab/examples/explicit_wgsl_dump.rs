@@ -32,10 +32,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let fast = args.iter().any(|a| a == "--fast");
+    // (engine-webgpu's generated/, where explicit-wgsl-check.mjs reads them.)
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(if fast {
-        "generated/explicit-wgsl-fast"
+        "../engine-webgpu/generated/explicit-wgsl-fast"
     } else {
-        "generated/explicit-wgsl"
+        "../engine-webgpu/generated/explicit-wgsl"
     });
     std::fs::create_dir_all(&dir)?;
     let mut manifest = Vec::new();

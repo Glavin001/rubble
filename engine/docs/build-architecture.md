@@ -190,3 +190,25 @@ module (one call site per heavy helper, a split by dispatch kind:
   generated kernel's hash, the shipped set and the test set. Run it before and after a
   change to how kernels are built: anything but "0 changed, 0 removed, 0 added" needs
   an explanation in the commit.
+
+## Decisions (2026-11-22)
+
+Where this differs from the plan it came from, and why:
+
+- **Production web pages embed their kernels.** Only the fast web build's world wasm
+  reads them at run time (`generated/kernels/`, 18 MB instead of 78 MB). Loading them by
+  URL in production would change every page's load (tens of MB of separate requests,
+  synchronous on first use): a product decision, not a build one. The iteration loop
+  it was for is solved: a kernel edit for the pages is 9 s and no wasm rebuild.
+- **Writing a build script's outputs only when their bytes change** was not done: cargo
+  recompiles a crate whenever its build script reruns, whatever the outputs, so it
+  would save nothing. The run-time kernels (no rerun at all) are what removed that cost.
+- **CUDA's kernel store is the shared per-compile cache** (slangc's output, and nvcc's
+  fatbins in `ENGINE_CUDA_FATBIN_CACHE`, the volumes `gpu_run.sh` mounts): engine-cuda
+  embeds what they hold. Its slangc runs gained the relative paths (one cache for every
+  checkout) and stable loop ids (a line shift no longer changes unrelated modules).
+- **The four giant functions are not split by hand** (measured: under a second an edit;
+  the ratchet stops new ones), and **engine-webgpu's `gpu_tests.rs` stays in `src/`**
+  (`#[cfg(test)]`: no crate of the fast loop rebuilds after an edit to it; moving it out
+  would make the crate's internals public).
+
