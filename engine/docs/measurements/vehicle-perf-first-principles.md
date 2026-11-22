@@ -6505,3 +6505,44 @@ candidates' tracking of every node (`fkTrackVehicle`), and wheels on each other
 (`wheelsPartners`) between a step's coupling and its nodes. Each is per element or per
 vehicle and none reads workgroup state of another, so none is a reason it cannot be
 hosted; each is kernel work in the wide node pass and its proof.
+
+### 8.57 Every car's own step on the wide passes under vehicle contact: the map, and the frames without a group (2026-11-22)
+
+§8.54's first reading: a car's whole step in one workgroup costs 0.4 to 0.8 ms a step on
+the Mac, the same cars' steps across the GPU (the wide passes) about 0.1 ms a step
+together. A fleet with vehicle contact on never takes the wide passes today
+(`FramePlanner::is_wide` needs contact off). This section is the map of what a car's own
+step is on each path, then the first part built: the frames in which the contact plan
+holds no group.
+
+**The paths today** (contact on, `schedule::frame`):
+
+| the fleet | the plan holds no group | the plan holds a group |
+|---|---|---|
+| surface contact, its pass in the kernels (wgpu's default: `surface_fast_contact_default(false)`) | one `Solo` dispatch, a workgroup a vehicle for the whole frame (`explicit_beams_frame` under `EB_VV_SOLO`), sized by the plan (`vvArgs` words 0..2: the vehicles, or 0 with a group) | every vehicle a step a dispatch on `explicit_beams_split_member` (`Member(s)`, sized by words 20..22: 0 without a group): a solo vehicle `explicitBeamsFrameStep`, a member `splitMember` |
+| no surface contact, or its pass as pipelines with vehicle contact (CUDA's default): self split with vehicle contact | every vehicle a step a dispatch whatever the plan (`SelfMember(s)`, words 28..30: the vehicles always), the walk, the pairs, the members' rest (none without a group), the solo vehicles' rest and the surface pipelines (surface fleets) | the same dispatches, then the fleet's front, tests and levels |
+
+**The map.** What a vehicle's own step runs on the members' path and on the solo
+vehicles' (`contactMemberStep`, `splitMember`, `memberRestStep`, `contactMemberBegin`,
+`contactMemberEnd`, `splitGroupBegin`, `splitGroupEnd`; `explicitBeamsFrameStep` under
+`EB_VV_SOLO`), against the wide passes (`explicit_beams_wide_*`, `explicit_beams_wide_list`).
+"Reading" marks what is read from the code and not yet held by a test.
+
+| item | today: where, what it reads and writes | on the wide step | status |
+|---|---|---|---|
+| the frame's start: the origin's rebase | solo: the step dispatch of step 0 (every lane reads node 0, the nodes shifted, `gMisc[v].xyz`, `cplRebase`); member: `contactMemberBegin` in the groups' begin dispatch | `wide_begin` (the shift into `gMisc[wideMisc + 1 + v]`, `cplRebase`), `wide_rebase` (a thread a node), then the host's copy of the origins and step counts into the vehicle table | built for a frame without a group (the same arithmetic: `P − first` when `length(first) > REBASE_RADIUS`). With a group: the groups' begin must then skip `contactMemberBegin` (reading) |
+| the coupling's step, the wheels | solo: `coupleStep`, `driveStep` (or `PERF_DRIVE_AHEAD`'s parts); member: `splitCoupleStep` (the members' partition of lanes; a group past `CPL_GS_VEHICLES` members or header bit 4 runs `cplIntegrate` with no `cplReactBy` before it, where `coupleStep` runs both) and `splitDriveStep` / `splitTyres` | `wide_aux` (a workgroup a vehicle: `coupleStep`, `driveStep`); with `PERF_WIDE_FUSED` on the list and hits kernels | built without a group. With a group (reading): the fused form cannot be taken, since step s + 1's tyres would read their hubs' accumulators before step s's contact levels add to them; and `splitCoupleStep`'s large-group branch must be shown the same as `coupleStep` or kept |
+| the solo vehicles' frame-bounds check | `nodeUpdateSolo` / `nodeUpdateShapes` / `nodeUpdateCoupled` with `solo`: each node's position before its update against the allowed box (`gsVvBounds`: centre and half extents from `vvRec(v, VV_ALLOWED_LO/HI)` minus the origin, in workgroup memory), not for a retired node; every node again at the frame's end. Writes `gAcc[vvCtl(VV_OUTSIDE)]` by an atomic maximum | the node pass's thread, before its `nodeUpdate`: the box from the two records and the table's origin, a thread a node; the frame's last positions in the close pass | **built** (`explicit_beams_wide_nodes_vv`, `explicit_beams_wide_close_vv`): the same expression per node; the half sum times 0.5 is exact, so no rounding differs from the workgroup's stored copy |
+| each member's contact box by step parity | `memberBox` after the member's node phase (and again after centred damping): atomic minima and maxima of `nf3(origin + P)` into `vvBoxKey(v, parity)`, the other parity's keys cleared for the next step, the allowed box checked (`vvReportOutside`); `contactMemberEnd` clears all twelve | the node pass's thread after `nodeUpdate` (and the centred nodes' pass): order-free atomics a node; the other parity's clear in the pass's per-vehicle part | not built. Reading: exact (minima, maxima); the fleet's front reads the keys after the members' steps, which the wide step keeps |
+| the pending-beam reset of a member's triangle throttles | `VV_FLAGS.w`, set by the contact pass on a fast approach (`explicit_beams.slang` 10085, 11085; `explicit_beams_fleet.slang` 121): at the next step's throttle update every triangle's wait is zeroed and the triangle listed; cleared after the update (`contactMemberStep`, lane 0, s > 0), and in `contactMemberEnd` | the list kernel's throttle loop (it reads the flag per vehicle) and `wide_end`; `PERF_WIDE_GEO`'s `triangleFinishPeek` in the beams pass must then fill every triangle of a pending member | not built. Reading: exact, per vehicle |
+| the members' pair-list state between steps | `memberListLoad` / `memberListKeep` / `memberListSave`: the list's state (`gsCount` past the buckets, `REUSE_WORDS` words) in `soloStepAt(v)` | the list kernel keeps the same words there (`soloStepSave`, `soloStepLoad`) | the same words already: nothing to host. `pairReuseBegin` at step 0 on both |
+| the kept candidates' tracking of every node | `fkTrackVehicle` at the end of `memberRest` when the host sets `PERF_KEEP_TRACK_REST`; otherwise the scans' dispatch tracks (`fkTrack`, a thread a node) | not hosted: without the members' rest the host does not set the flag and the scans' dispatch tracks, one launch a step in a frame with a group | a schedule choice, no kernel work (the fleet's kept candidates are being changed in parallel: left to that work) |
+| wheels on each other | `wheelsPartners` in a dispatch of its own a workgroup a group before each step's vehicles (`GroupOp::Wheels`): the staged reactions into the partners' accumulators, the rays | the same dispatch before the step's aux pass | not built: a fleet whose wheels see bodies stays on today's path |
+| the node, beam, centred and list phases, the walk, the pairs, the hits | the member's or the solo vehicle's workgroup; a member's node phase always takes the accumulators (`hits` true) | `wide_nodes` (always `hits` true), `wide_centred_*`, `wide_beams`, the list kernel, the walk and pairs dispatches, `wide_hits` | the wide frame against the frame kernel is held bit for bit already with contact off (`explicit_beams_bitwise`, the matrix's one-car rows) |
+| the surface pass | in the member's or solo vehicle's kernel, or as pipelines after the rests (§8.53) | the pipelines after `wide_hits` (§8.53) | built without a group |
+| the frame's end | solo: `coupleEnd`, `pairReuseEnd`, the triangles' last throttle update, the last group breaks, the step count, the last bounds check; member: `splitGroupEnd` (`coupleEndMembers`, `contactMemberEnd`) | the list kernel's end, `wide_aux` at `steps`, `wide_end`, `wide_close` | built without a group. With a group: `splitGroupEnd` must skip what the wide end ran (reading) |
+| the step parity | a member's own step uses its own count (`gMisc[v].w + s`); the groups' pass its first member's | the wide passes clear every vehicle's group slots by vehicle 0's parity: every vehicle must have run the same steps | holds while no vehicle sleeps (every vehicle steps every frame): vehicle sleep stays on today's path |
+
+Nothing in the list reads another vehicle's workgroup memory; the two rows marked as
+needing a proof before they move are the coupling's large-group branch and the order of
+the tyres against the contact levels.
