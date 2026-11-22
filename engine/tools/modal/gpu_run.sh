@@ -38,7 +38,7 @@
 #                        is neither read nor written)
 #   --data PATH          an extra repo-relative file or directory to ship (small)
 #   --sedan DIR          the generated sedan's JBeam export (default
-#                        ~/Development/rubble-artifacts/sedan-live/mods/sedan_new);
+#                        engine/out/gen/sedan_new (the generated sedan from the current code, AGENTS.md));
 #                        shipped when an argument says @sedan, which becomes its
 #                        path in the container (/scenarios/sedan_new)
 #   --fanout             one container per executable of the selection (each test
@@ -63,7 +63,7 @@ repo="$(cd "$here/../../.." && pwd)"
 
 gpu=T4 cpus="" mem="" pack="" allow_cold=0 warm=1 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
 fanout=""
-sedan="$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new"
+sedan="$repo/engine/out/gen/sedan_new"
 envs=() variants=() data=() pack_opts=()
 while [ $# -gt 0 ]; do
   case "$1" in

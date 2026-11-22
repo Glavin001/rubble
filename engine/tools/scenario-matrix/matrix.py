@@ -73,7 +73,9 @@ REPLAY = os.environ.get("REPLAY_BIN")
 # Two builds (`--two-builds`): the base's explicit_replay, compared with REPLAY_BIN (the
 # head) process by process (gpu_run.sh --base REF builds and ships both).
 BASE = os.environ.get("BASE_BIN")
-CAR = os.environ.get("CAR", os.path.expanduser("~/Development/rubble-artifacts/sedan-live/mods/sedan_new"))
+# The generated sedan from the current code (AGENTS.md: the car every benchmark uses):
+# cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out out/gen/sedan_new
+CAR = os.environ.get("CAR", os.path.join(ENGINE, "out", "gen", "sedan_new"))
 FRAMES = int(os.environ.get("FRAMES", "10"))
 ROUNDS = int(os.environ.get("ROUNDS", "3"))
 # A row past the threshold runs RETRIES more times; the median run decides.

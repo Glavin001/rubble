@@ -11,7 +11,7 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 mode="${1:-apart}"
 counts="${2:-1 8 32}"
 bin="${3:-$here/target/release/examples/explicit_vehicles_bench}"
-car="${FLEET_CAR:-$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new:sedan/sedan.pc}"
+car="${FLEET_CAR:-$here/out/gen/sedan_new:sedan/sedan.pc}"
 extra=""
 [ "$mode" = apart ] && extra="EV_NO_CONTACT=1 EV_NO_VV=1"
 # shellcheck disable=SC2086

@@ -88,7 +88,7 @@ engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_v
 | `--monitor SECS` | While a process runs, a line of GPU use and the process's CPU use every SECS (default 30; 0 off). GPU 0 % with one core busy is the driver compiling |
 | `--no-shader-cache` | Neither read nor write the shared shader cache |
 | `--data PATH` | An extra repo-relative file or directory to ship (32 MB cap, not counting the generated WGSL) |
-| `--sedan DIR` | The generated sedan's JBeam export (default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`). Shipped only when an argument, `--env` or `--variant` says `@sedan`, which becomes `/scenarios/sedan_new`; only `files.json`, `*.jbeam` and `*.pc` (under 1 MB), never the `.glb`/`.rskin` |
+| `--sedan DIR` | The generated sedan's JBeam export (default `engine/out/gen/sedan_new (the generated sedan from the current code, AGENTS.md)`). Shipped only when an argument, `--env` or `--variant` says `@sedan`, which becomes `/scenarios/sedan_new`; only `files.json`, `*.jbeam` and `*.pc` (under 1 MB), never the `.glb`/`.rskin` |
 | `--fanout` | One container per executable of the selection (each test binary), all at once (see Fan-out) |
 | `--fanout-tests` | One container per test, all at once |
 | `--matrix` | The scenario matrix, one container per row (`tools/scenario-matrix/run.sh` calls it) |
@@ -148,7 +148,7 @@ the ~18-minute warm-up.
 
 The scenario matrix's own pieces: `--matrix` builds `-p engine-world-lab --example
 vehicle_lab`, ships `tools/scenario-matrix` (matrix.py, scenes) and the generated
-sedan (`CAR`, default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`),
+sedan (`CAR`, default `engine/out/gen/sedan_new (the generated sedan from the current code, AGENTS.md)`),
 forwards `FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT`, and gives
 each row `engine/out/scenario-matrix/ROW.fx`, uploaded once by hash to the Volume
 `rubble-scenario-states`. Each container runs matrix.py for its row (both halves, the

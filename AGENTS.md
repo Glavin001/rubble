@@ -131,6 +131,17 @@
   The harness is `-p engine-world-lab --example vehicle_lab`. To iterate on pages:
   `RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh`
   (never measure with it).
+- The car for every vehicle benchmark, scenario-matrix row, fixture and demo is the
+  **generated sedan** (Rubble's own, built from code by `engine-vehiclegen`): the best
+  quality vehicle. Do not use the authored sedan (`car=sedan`, "Soft-body sedan
+  (authored)"): it is older, heavier (987 nodes against 548) and messier, and numbers
+  measured on it do not describe what we ship. Make the generated sedan from the current
+  code (the full web build does this for the site):
+  `cd engine && cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out "$PWD/out/gen/sedan_new"`.
+  That folder is the scenario matrix's default `CAR`; on the lab page it is `car=gen`
+  (served from `__mods/sedan_new`, which a local server needs linked to that folder when
+  only the kernels and world parts were built). Regenerate it, and the matrix's states,
+  after a change to the generator, and say which car a number was measured on.
 - Generated vehicles: read `engine/docs/generated-vehicles-lessons.md` first (lessons,
   measurements, decisions; add to it rather than redoing research).
 - Deformable vehicles: `engine/docs/deformable-vehicles.md` explains the model (keep it
