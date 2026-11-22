@@ -3693,3 +3693,199 @@ python3 scripts/with-gpu-lock.py --limit 300 -- env RUBBLE_GPU_LOCK=0 AB_WARM_MS
 
 The lab prints each vehicle's proxy bodies and shapes at the state; a run whose state has
 a touched or moving proxy reports the words that differ and fails.
+
+### 8.52 The untouched ground of the tumble row: each node's range kept for the wide node pass (2026-11-22)
+
+§8.47's second open item: a car in the air over the mountain has seven static ground
+shapes in its proxy set and pays 0.36 ms a frame (11 %) for them without touching one,
+most of it in the node pass. The owner asked for it. (Numbering: this branch's §8.47 is
+§8.50 on #144's branch, where 8.48 to 8.51 are taken; 8.52 is free on every branch.)
+
+**Base.** `main` at 3c6ae6c0, merged into this branch. Since 96904a44 `main` changed the
+hosts (one explicit schedule for every host, #142) and no kernel: the node pass, the
+coupling and its candidate lists are as §8.47 read them, and the saved states replay
+unchanged. Of the open PRs, #133 (in #145's and #144's branches) lets a raycast wheel add
+to a proxy shape's sums before the node pass; nothing here reads or clears those sums, so
+the two compose. #134, #141 and #144 change the hits, the fleet's candidates and the
+runtime checks, not the node function or `explicit_beams_rigid.slang`.
+
+**Two things §8.47's hypothesis had wrong** (it proposed: a vehicle none of whose nodes
+lists a shape takes the uncoupled node function):
+
+1. *The lists are not empty on the tumble row.* After a frame from the saved state all
+   548 nodes list a shape, 3,488 entries in all (6.4 a node): a ground chunk's cull
+   sphere is large and the car is inside several. Bricks: 295 nodes list, 1,123 entries;
+   rocks 32 and 32; wall 548 and 548. A node lists what is within its skin of a shape's
+   bounding sphere, which says nothing about being inside the shape. The cost is that
+   walk: every node, every step, the sphere test and the face test (a hull's planes) on
+   each listed shape, to find it is inside none.
+2. *The coupled and the uncoupled node functions are not the same function without
+   proxies.* `nodeUpdateShapes` applies a pressure-wheel node's friction limit to its
+   ground contact (`explicit_beams.slang:1479`, `NODE_FRICTION_LIMIT`, the reference's
+   `friction_limit`, `explicit_beams.rs:3712`); `nodeUpdateCoupled` does not
+   (`explicit_beams_rigid.slang`, its ground branch). The CPU reference has one node
+   function and applies it with or without proxies, so the coupled GPU function differs
+   from the reference for a pressure-wheel vehicle on the solver's own ground while a
+   proxy is in its set. The lab's sedan has raycast wheels and no such node. Not changed
+   here (it changes results); it is listed below. It rules out swapping the function.
+
+**The guard production already has.** The coupling's count pass runs before every step's
+node phase, for every vehicle with a shape (`coupleStep` and its folded, grouped and
+split forms all end in `cplCountStep`). For each node it runs the face test on the node's
+listed shapes (every shape, when the node rebuilds its list), counts the node on each
+body it is inside (the mass split) and forms the node's **range**: the first and last
+shape it is inside, none when none. The node phase of that step then tests only the
+shapes in the range, and a node with none returns at once
+(`cplContactsListed`: `if (r == CPL_NONE) return f`). But the range lives in the
+workgroup's memory (`gsCpl`, the vehicle's first 1,024 nodes), so only a node phase in
+the count pass's own workgroup has it. The wide node pass is another dispatch: it clears
+the table and every node walks its whole list. So does any node past 1,024, and every
+node where the ranges' copies are off (the header's bit 64, a browser's setting).
+
+**The change** (`PERF_CPL_RANGES`, perf bit 2^27 = 134217728, off by default; both parts
+their own functions behind an early return): the count pass also writes each node's
+range into the node's list record (`cplCountListedKept`; one more word a node,
+`CouplingLayout::LIST_NODE_WORDS` 12 → 13), and the node phase reads it there when the
+range is not in its workgroup's memory (`cplContactsKept`), before it reads anything
+else of the coupling.
+
+**Why the same words.** The claim is the workgroup ranges' own, stated for a word that
+outlives the dispatch:
+
+* *The same test on the same inputs.* The count pass and the node phase of a step both
+  call `cplFace(v, k, x)` with x the node's position record and the shape's frame as the
+  coupling's step stored it. The node phase tests a subset of the pairs the count pass
+  tested: a held list's shapes that pass the sphere test are the same set in both; a
+  node rebuilding its list tests every shape that passes it; a node with more than 16 in
+  reach rebuilds every step and tests every shape. Nodes the count pass skips (no ground
+  contact) the node phase skips too.
+* *Nothing writes those inputs between the two.* A node's position is written by the node
+  update, by centred damping's node pass right after it, and by the rebase at a frame's
+  start (every writer of `gNodes[3 gi]` was listed). The shapes' frames and the bodies'
+  records are written by the coupling's step itself, before its count. On the wide
+  passes step s + 1's coupling runs in step s's list dispatch, after step s's nodes and
+  centred damping; what follows before step s + 1's nodes (the walk, the pairs, the
+  hits, the tyres) writes accumulators, not positions or frames. The bodies' counts,
+  which divide a contact's mass, already rest on exactly this: were it false the split
+  would differ from the reference today.
+* *So a shape outside the range adds nothing.* It was rejected by the same face test, or
+  not tested for failing the same sphere test: in the node phase it would `continue`
+  before any write. With the range none the walk writes nothing and returns the force it
+  was given; the caller's `cfAdd(gi, fr - f)` then adds a zero, as it does today.
+* *What the switch writes that the path without it does not:* one word a node in the
+  list record, rewritten by every count pass, read only by `cplContactsKept` of the same
+  step. It is scratch: not among the compared state words, and never read with the
+  switch off. A step's count pass and its node phase are in one frame, and the lab or a
+  host changes the flags between frames, so a range is never read from before the switch
+  was on. Nothing else is new: the anti-clip memory, the contact-force words, the
+  position steps, the bodies' counts, the shapes' sums and window sums are written by
+  the same code from the same values.
+
+**Measured before building** (commit a505fee3, reverted by the next): with the proxy
+test left out of the coupled node function altogether the tumble row stays bit for bit
+(nothing is touched in those frames) and is 6.2 % cheaper, 2.985 against 3.183 ms: the
+most any switch on the node pass's proxy test can give there.
+
+**Checks** (the switch on against off from the same state, native Metal):
+
+| check | result |
+|---|---|
+| `fast-check.sh perf=134217728`, 20 fixtures (1, 2, 4, 8, 32 cars) | every state word the same, 20 of 20 |
+| scenario matrix, 12 rows (3 rounds, and three times with 11) | bit for bit every row every time; **PASS** four times, no row slower |
+| bricks, rocks, wall as saved (proxies touched or in flight) | bit for bit: the range hands a node from none to a shape and back with no differing word (8 runs a row besides) |
+| `run.sh --world` | PASS with the switch off (the World adds 0.48 to 1.44 ms a step) and on (0.50 to 1.74); it changes none of the World's passes |
+| Chrome, `EXPLICIT_WGSL_MODULES_ONLY=1 explicit-wgsl-check.mjs` | all 124 modules compile |
+| `engine-webgpu` `explicit_loop_cap` (every loop capped) | 5 tests pass |
+| GPU against the CPU reference with the switch on (`perf-verify.sh 165117893`) | `engine-world` `explicit_vehicles` 11 pass (one of them holds a town's coupled frames with the workgroup ranges off, which now read the kept word, to the same frames with them on, every state word), `engine-webgpu` `explicit_rigid_gpu` 6 pass, `explicit_surface_proxy_gpu` 4 pass |
+| `engine-metal` `vehicle_parity` (the kernels straight to Metal, default flags) | 4 pass |
+
+No barrier is gated, so nothing new has to be uniform for Chrome. The list record's
+thirteenth word changes the buffers' layout: the saved states and fixtures were made
+again (`run.sh --make`, `fast-check.sh --make 1 2 4 8 32`), as anyone's must be once.
+
+**Results.** One-car rows, eight runs a line, 11 rounds of 10 frames a process, the
+comparisons in turn with `perf=0` controls in the same chain (ms a frame; medians):
+
+| row | off | on | change (median of the runs' own) | range | control |
+|---|---|---|---|---|---|
+| tumble (7 ground shapes, none touched) | 3.271 | 3.107 | **−0.161 ms, −5.0 %** | −6.3 to −2.7 % (−0.13 to −0.24 ms) | +0.4 % |
+| bricks | 3.736 | 3.721 | −0.018 ms, −0.4 % | −1.6 to +1.0 % | −0.2 % |
+| rocks | 4.302 | 4.305 | +0.011 ms, +0.3 % | −2.6 to +3.2 % | 0.0 % |
+| wall | 4.422 | 4.473 | +0.007 ms, +0.2 % | −1.3 to +6.7 % | −0.2 % |
+| drive (no proxy) | 3.538 | 3.455 | −0.006 ms, −0.2 % | −4.5 to +5.4 % | −0.3 % |
+
+The whole matrix, three times with the switch and three times same against same (11
+rounds; each row's three deltas and their median):
+
+| row | off | on | switch | control |
+|---|---|---|---|---|
+| drive | 3.227 | 3.220 | +0.4, −0.2, −0.1: **−0.1 %** | −0.5 % |
+| tumble | 3.343 | 3.106 | −5.7, −7.1, −4.9: **−5.7 %** | +0.9 % |
+| wall | 4.135 | 4.092 | −1.6, −1.0, −1.1: **−1.1 %** | +0.3 % |
+| pile2 | 8.455 | 8.452 | 0.0, 0.0, −0.2: **0.0 %** | +0.3 % |
+| pile8 | 14.768 | 14.355 | −3.0, −2.8, −2.9: **−2.9 %** | 0.0 % |
+| pile32 | 38.716 | 38.544 | −0.7, −1.6, −0.4: **−0.7 %** | −0.2 % |
+| headon | 13.486 | 13.506 | −0.3, +1.1, +0.1: **+0.1 %** | −0.3 % |
+| side | 9.604 | 9.365 | 0.0, +0.6, −2.5: **0.0 %** | −0.1 % |
+| bricks | 3.820 | 3.673 | −3.8, −1.0, −1.7: **−1.7 %** | −0.2 % |
+| rocks | 3.875 | 3.860 | +0.3, −3.7, −0.5: **−0.5 %** | −0.3 % |
+| barrier | 7.669 | 7.628 | −0.5, +0.6, −0.3: **−0.3 %** | 0.0 % |
+| truss | 1.674 | 1.675 | −1.5, −0.6, +2.0: **−0.6 %** | −0.3 % |
+
+**Reading.**
+
+* **The tumble row gains 0.16 to 0.24 ms a frame, 5.0 to 5.7 %** (5.0 % over eight
+  processes, 5.2 and 5.7 % by the matrix), of a ceiling of 6.2 %. It is at the 5 % stop
+  rule, not clearly past it.
+* **The piles gain as well: pile8 −2.9 %** in all three matrices (control 0.0 %). A
+  contact group's members share one table of 1,024 node ranges, less than two sedans, and
+  a group of more than four has none (`splitCplTable`), so most of a pile's nodes walked
+  their lists too.
+* **No row is slower.** The rows whose nodes are in contact (bricks, rocks, wall) pay one
+  word a node and are level or a little faster. The row without proxies is untouched: the
+  count pass and the proxy test do not run there.
+* **What the tumble row stands for is wider than a tumble.** The sedan stands on raycast
+  wheels, so on a World's rigid ground (the mountain's chunks, a town's street) its nodes
+  are inside no shape while it simply drives; every such frame is this case.
+* **Of the coupling's 0.36 ms on that row 0.16 to 0.24 is gone.** What is left is the
+  count pass itself (it is the guard; the list kernel's 2.3 % in §8.47) and the node
+  pass's carried code and barrier (§8.47's 1.3 to 2 %).
+
+**Kept, off by default.** `PERF_CPL_RANGES` is not in `perf_flags_default`; `main`'s
+default path runs the functions it ran, at a list record one word longer. Turning it on
+by default is the owner's decision and needs, by the ladder, Chrome's bit-for-bit A/B on
+the lab page (rung 3) and the whole runs (rung 4), neither done here. Chrome may gain
+more than Metal: a browser's host turns the workgroup ranges off (the header's bit 64,
+because their lookup compiled slowly under Tint), so there every coupled node walks its
+list on every path, and with the switch each reads one word. Not measured.
+
+**Found on the way, not changed** (each changes results or is another task):
+
+1. *The coupled node function lacks the friction limit* (above): a pressure-wheel
+   vehicle with a proxy in its set, on the solver's own ground, differs from the CPU
+   reference. I found no test that combines the two; the fix is one line in `nodeUpdateCoupled` and a
+   test from the reference.
+2. *The count pass and the walk test a hull's planes for every listed shape.* The lists
+   hold what is near a shape's bounding sphere; a ground chunk's is large. A tighter
+   listing rule (a hull's own box, say) would shorten both, and is the next thing to
+   measure on this row.
+3. §8.47's first item (an empty set on a workgroup a vehicle, 0.16 ms) is still open.
+
+**To run it again** (from `engine/`; after a build with this change the states are made
+once more):
+
+```sh
+tools/scenario-matrix/run.sh --make && tools/explicit-2khz/fast-check.sh --make 1 2 4 8 32
+tools/explicit-2khz/fast-check.sh perf=134217728          # 20 fixtures, bit for bit
+ROUNDS=11 tools/scenario-matrix/run.sh perf=134217728     # the table and the verdict
+ROUNDS=11 tools/scenario-matrix/run.sh perf=0             # same against same: the noise
+tools/scenario-matrix/run.sh --world
+RUBBLE_PERF_FLAGS=165117893 tools/scenario-matrix/run.sh --world   # the default flags and the switch
+tools/explicit-2khz/perf-verify.sh 165117893 world:explicit_vehicles webgpu:explicit_rigid_gpu webgpu:explicit_surface_proxy_gpu
+(cd crates/engine-webgpu && cargo run -p engine-webgpu --release --example explicit_wgsl_dump \
+  && EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket explicit-wgsl-check.mjs)
+```
+
+The lists' entries a car (the 3,488 above) and the ceiling come from the measurement
+build: `git checkout a505fee3`, then the lab on a row's state with `AB_LIST_STATS=1` and
+`--ab-switch perf=134217728` (in that build the bit leaves the proxy test out).
