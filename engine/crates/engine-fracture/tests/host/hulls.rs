@@ -1,7 +1,7 @@
 //! Hull cooking as the scenes use it (formerly fracture/convex.test.mjs; the
 //! cooker, packer and arena themselves are covered by engine-schema).
 
-mod common;
+use crate::common;
 use common::*;
 use engine_fracture::math::*;
 use engine_fracture::scene::*;

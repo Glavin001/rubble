@@ -1774,7 +1774,7 @@ python3 -I engine/tools/beamng-structure-study/analyze.py <dump dir> etkk_kc6 --
 # The dump alone (opt-in test; skipped unless both variables are set)
 cd engine && RUBBLE_STRUCTURE_OUT=<dir> \
   RUBBLE_CENSUS_CARS="etkk_kc6=$HOME/Downloads/jbeams/etkk_lucasbe/vehicles,etkk,kc6.pc" \
-  cargo test --release -p engine-softbody-authoring --test authoring_census -- --ignored --nocapture structure_dump
+  cargo test --release -p engine-softbody-authoring --test host authoring_census:: -- --ignored --nocapture structure_dump
 
 # §7.2: modes, whole-car ω·h, spawn, half-sine loads and the bump (CPU, about 4 minutes for four cars).
 # RUBBLE_COMPARE_MODS is a folder of links: <label> -> the mod's vehicles/ folder.

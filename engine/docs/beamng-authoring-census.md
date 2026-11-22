@@ -28,7 +28,7 @@ were read. No BeamNG or RoR code, no Lua.
 
 ```bash
 RUBBLE_CENSUS_CARS="bx=<dir>/vehicles,bx,;etkk=<dir>/vehicles,etkk,kr6.pc;..." \
-  cargo test --release -p engine-softbody-authoring --test authoring_census -- --ignored --nocapture authoring_census
+  cargo test --release -p engine-softbody-authoring --test host authoring_census:: -- --ignored --nocapture authoring_census
 ```
 
 - Each entry is `label=<vehicles dir>,<vehicle>,<.pc or empty>`. A car whose

@@ -3,7 +3,7 @@
 //! cuboid, scene pack) and the copies of a layout keep the pairing; each line vertex carries
 //! the bond-line normal (`bond_line_normal`) the draw keys on.
 
-mod common;
+use crate::common;
 
 use engine_fracture::pack::build_pack_scene;
 use engine_fracture::samples::{layout_scene, sample};

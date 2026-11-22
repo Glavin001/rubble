@@ -7,7 +7,7 @@
 //!
 //! ```bash
 //! RUBBLE_CENSUS_CARS="etkk=$HOME/Downloads/jbeams/etkk_lucasbe/vehicles,etkk,kr6.pc" \
-//!   cargo test --release -p engine-softbody-authoring --test authoring_census -- --ignored --nocapture
+//!   cargo test --release -p engine-softbody-authoring --test host authoring_census:: -- --ignored --nocapture
 //! ```
 //!
 //! Without it only sedan1 is measured. The content is read as data (its

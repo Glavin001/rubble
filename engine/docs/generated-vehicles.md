@@ -33,7 +33,7 @@ cargo run --release -p engine-softbody-authoring --example vehicle_gen_rig -- se
 # Checks
 cargo run --release -p engine-softbody-authoring --example vehicle_lint -- sedan
 GEN3_RIG_DESIGN=sedan cargo test --release -p engine-softbody-authoring --test gen3_rig -- rest_
-cargo test --release -p engine-softbody-authoring --test vehicle_lint
+cargo test --release -p engine-softbody-authoring --test host vehicle_lint::
 # Drive and crash on the CPU reference
 cargo run --release -p engine-softbody-authoring --example vehicle_drive -- sedan 40
 cargo run --release -p engine-softbody-authoring --example vehicle_c2c -- sedan 50 0.6

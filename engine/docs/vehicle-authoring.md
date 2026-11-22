@@ -3419,7 +3419,7 @@ transverse–longitudinal). Medium, front left door unless noted:
   (frontal NCAP), `o` (side pole), `p` (FMVSS 214 door), `q` (FMVSS 216a
   roof). `--ignored` adds the pole sweep (`SWEEP=front|side`,
   `SWEEP_KMH=60` for a subset).
-* `cargo test --release -p engine-softbody-authoring --test showcase_rest_wobble -- --ignored --nocapture`:
+* `cargo test --release -p engine-softbody-authoring --test host showcase_rest_wobble:: -- --ignored --nocapture`:
   the materials and rest wobble beside real Rigs of Rods cars.
 * `cargo test --release -p engine-webgpu --test showcase_car_gpu`: GPU against CPU.
 * `cargo run --release -p engine-softbody-authoring --example showcase_probe -- sedan low wall 56`

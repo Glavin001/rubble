@@ -2,7 +2,7 @@
 //! springs follow Shardwright's reference formulas, scaling keeps row ratios,
 //! and capping bounds the solver.
 
-mod common;
+use crate::common;
 use common::*;
 use engine_fracture::bonds::*;
 use engine_fracture::build_scene;

@@ -18,7 +18,7 @@
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox, STEP};
 use glam::Vec3;
 
-const PLATE: &str = include_str!("data/thin_box_plate.truck");
+const PLATE: &str = include_str!("../data/thin_box_plate.truck");
 
 /// The harness's `free` scene: spawn at `pos` with `vel`, an optional box
 /// (centre, half extents), `secs` of steps with the origin rebased every 33, no air

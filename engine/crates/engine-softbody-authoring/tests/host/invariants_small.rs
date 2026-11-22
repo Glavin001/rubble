@@ -2,10 +2,10 @@
 //! small cases, one feature each, compared with a closed form on the CPU
 //! reference (the GPU runs the same bodies: `engine-webgpu/tests/invariants_small_gpu.rs`).
 //! Every tolerance is derived in its comment; anything else is labelled a Choice.
-//! Run: `cargo test --release -p engine-softbody-authoring --test invariants_small -- --nocapture`
+//! Run: `cargo test --release -p engine-softbody-authoring --test host invariants_small:: -- --nocapture`
 //! (each test prints its report-table row).
 
-mod invariants_common;
+use crate::invariants_common;
 use invariants_common::*;
 
 use engine_softbody::explicit_beams::{

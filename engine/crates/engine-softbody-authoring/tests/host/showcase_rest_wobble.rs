@@ -2,7 +2,7 @@
 //! settling, 1 s of samples: the RMS and max deviation of each node from its own
 //! mean position, and the max node speed. Prints the showcase sedan beside a
 //! real Rigs of Rods car when one is in engine/local-vehicles (gitignored).
-//! `cargo test --release -p engine-softbody-authoring --test showcase_rest_wobble -- --ignored --nocapture`
+//! `cargo test --release -p engine-softbody-authoring --test host showcase_rest_wobble:: -- --ignored --nocapture`
 
 use engine_softbody_authoring::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};

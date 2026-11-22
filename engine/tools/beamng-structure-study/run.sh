@@ -15,7 +15,7 @@ mkdir -p "$OUT/dump"
 if [ "${SKIP_DUMP:-0}" != "1" ]; then
   RUBBLE_STRUCTURE_OUT="$OUT/dump" \
   RUBBLE_CENSUS_CARS="etkk_kc6=$JBEAMS/etkk_lucasbe/vehicles,etkk,kc6.pc;etkk_kr6=$JBEAMS/etkk_lucasbe/vehicles,etkk,kr6.pc;ccf=$JBEAMS/thw_ccf2/vehicles,ccf,f4_sport_M.pc;vertex=$JBEAMS/innocent_gavril_vertex/vehicles,gavril_vertex,gavril_vertex.pc;fullsuv=$JBEAMS/fsw_fullsizesuv/vehicles,fullsuv,mid-sport.pc;boathauler=$JBEAMS/boathauler/vehicles,boathauler,gooseneck.pc" \
-    cargo test --release --manifest-path "$HERE/../../Cargo.toml" -p engine-softbody-authoring --test authoring_census -- --ignored --nocapture structure_dump
+    cargo test --release --manifest-path "$HERE/../../Cargo.toml" -p engine-softbody-authoring --test host authoring_census:: -- --ignored --nocapture structure_dump
 fi
 for f in "$OUT"/dump/*.json; do
   car="$(basename "$f" .json)"

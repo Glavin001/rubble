@@ -1,7 +1,7 @@
 //! Real Shardwright bakes: the reader, level selection, frame conversion and
 //! the row / grid / suburb layouts (formerly fracture/asset.test.mjs).
 
-mod common;
+use crate::common;
 use common::*;
 use engine_fracture::math::*;
 use engine_fracture::scene::*;
