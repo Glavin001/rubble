@@ -8399,8 +8399,13 @@ void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, u
 }
 #endif
 
-void contactMemberStep(uint v, uint lane, uint s, bool first)
+#include "explicit_beams_member_tail.slang"
+
+// Member v's step s up to its tail (memberTail, which t and the MT_* bits returned
+// describe; 0: no tail here).
+uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail t)
 {
+    t = memberTailNone(v, s);
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -8676,21 +8681,23 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         // dispatches: memberRest.
         sync();
         memberListKeep(v, lane);
-        return;
+        return 0u;
     }
 #endif
-    if ((flagsU & 2u) != 0u)
-    {
-        sync();
-        selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);
-    }
-#ifdef EB_AERO
-    if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, groupOff, parity);
-#endif
-    sync();
-#ifdef EB_SOLO_STEP
-    if (keep) memberListSave(v, lane, s);
-#endif
+    t.origin = origin;
+    t.range = range;
+    t.beamOff = beamOff;
+    t.groupOff = groupOff;
+    t.groupCount = groupCount;
+    t.parity = parity;
+    t.flagsV = flagsV;
+    return MT_TAIL | ((flagsU & 2u) != 0u ? MT_SYNC | MT_APPLY : 0u) | (keep ? MT_SAVE : 0u);
+}
+void contactMemberStep(uint v, uint lane, uint s, bool first)
+{
+    MemberTail t;
+    uint how = contactMemberStepHead(v, lane, s, first, t);
+    if ((how & MT_TAIL) != 0u) memberTail(t, how, lane);
 }
 
 // --- A small group's members stepped side by side (k <= VV_PART members) ---

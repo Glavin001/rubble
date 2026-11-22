@@ -160,11 +160,12 @@ void splitWheelsAhead(uint v, uint lane, uint s)
 
 // Vehicle v's step s (parameter copy s) when it is a member of a contact group this
 // frame; any other vehicle returns at once.
-void splitMember(uint v, uint lane, uint s)
+uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
 {
+    t = memberTailNone(v, s);
     // (With self-collision split the vehicles' dispatch runs once more after the last
     // step, s = steps: the solo vehicles' last rest and frame end; a member has none.)
-    if (s >= gP.steps) return;
+    if (s >= gP.steps) return 0u;
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     uint4 G = fl.y != 0u ? gMisc[gP.vvGroups + fl.z] : uint4(0u, 0u, 0u, 0u);
     // (A sleeping member is not stepped: its group sleeps.)
@@ -174,7 +175,7 @@ void splitMember(uint v, uint lane, uint s)
     // its vehicles are not stepped that frame); any other such vehicle fails the frame.
     if (awake && fl.y == 0u && gAcc[vvCtl(VV_TOO_BIG)].load() == 0) ebLoopCapHit(599);
     uint k = splitUniform(lane, awake ? G.y : 0u);
-    if (k == 0u) return;
+    if (k == 0u) return 0u;
     uint off = G.x;
     uint rank = gMisc[vvRec(v, VV_MEMBER)].x;
     if (lane == 0u)
@@ -202,10 +203,22 @@ void splitMember(uint v, uint lane, uint s)
     // (contactMemberStep), whatever the group's size: the same results as a small
     // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which
     // this module no longer holds), bit for bit (group_split_gpu, self_split_gpu).
-    contactMemberStep(v, lane, s, rank == 0u);
+    // (contactMemberStep up to its tail: the entry runs memberTail, then splitMemberEnd.)
+    uint how = contactMemberStepHead(v, lane, s, rank == 0u, t);
+    t.stepBase = stepBase;
+    return how | MT_STEPPED;
+}
+// Member t.v's step's end after its tail (splitMemberHead's caller): the surface pass and
+// vehicle sleep's motion.
+void splitMemberEnd(MemberTail t, uint lane)
+{
+    uint v = t.v;
+    // (surfaceOn again, not through t: a barrier follows, whose uniformity Chrome does
+    // not see through a struct handed back by pointer.)
+    uint surfOn = surfaceOn();
     if (surfOn != 0u)
     {
-        surfaceStep(v, lane, surfOn, (stepBase + s) & 1u);
+        surfaceStep(v, lane, surfOn, (t.stepBase + t.s) & 1u);
         sync();
     }
     // Vehicle sleep: this step's motion (the velocities its node phase left; nothing
@@ -620,13 +633,14 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 // slide nodes, as contactMemberStep runs them after its tests; then the list's state for
 // the next step, or its statistics at the frame's end. Before the groups' pass of the
 // step, which reads what the hits leave. A solo vehicle returns at once.
-void memberRestStep(uint v, uint lane, uint s)
+uint memberRestStepHead(uint v, uint lane, uint s, out MemberTail t)
 {
+    t = memberTailNone(v, s);
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
     // (A sleeping member has no step to finish.)
     uint member = splitUniform(lane, keep && !(v < gP.vehicles && sleepAsleep(v)) ? fl.y : 0u);
-    if (member == 0u) return;
+    if (member == 0u) return 0u;
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -648,23 +662,21 @@ void memberRestStep(uint v, uint lane, uint s)
     sync();
     uint selfOn = gsUniformLanes;
     uint hitsOn = gsUniformHits;
-    if (selfOn != 0u && hitsOn == 2u)
-        selfApplyLocalKeep(v, lane, r0.z, r2.z, r2.w, parity);
-    else if (selfOn != 0u)
-        selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
-#ifdef EB_AERO
-    uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
-    if (lane == LANES - 1u && (r3.x & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, r2.z, parity);
-#endif
-    sync();
-    memberListSave(v, lane, s);
+    // (The tail, memberTail, in the entry: its hits applied, the slide nodes, the list.)
+    t.origin = origin;
+    t.range = asfloat(r3.z);
+    t.beamOff = r0.z;
+    t.groupOff = r2.z;
+    t.groupCount = r2.w;
+    t.parity = parity;
+    t.flagsV = r3.x;
+    return MT_TAIL | MT_SAVE | (selfOn == 0u ? 0u : (hitsOn == 2u ? MT_LOCAL : MT_APPLY));
 }
 // … then, with the kept candidates' tracking here (PERF_KEEP_TRACK_REST: the scans fused
 // in the plan's workgroup), every node of the vehicle after its rest: the last writes of
 // its nodes before the contact pass's scans (explicit_beams_fleet_track.slang).
-void memberRest(uint v, uint lane, uint s)
+void memberRestEnd(uint v, uint lane)
 {
-    memberRestStep(v, lane, s);
     if (!fkTrackInRest()) return;
     sync();
     fkTrackVehicle(v, lane);
@@ -696,22 +708,32 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
     }
     // The members' rest of step s (the step word's SPLIT_LEVELS: after the step's walk
     // and pairs dispatches, before the groups' pass).
-    if ((gP.pad2 & SPLIT_LEVELS) != 0u)
-    {
-        memberRest(vid.x, lid.x, gP.pad2 & SPLIT_STEP);
-        ebLoopCapFlush();
-        return;
-    }
+    bool rest = (gP.pad2 & SPLIT_LEVELS) != 0u;
     // Self-collision split (explicit_beams_selfsplit.slang): the solo vehicles' steps cut
     // at their tests, the walk and pairs dispatches after this one; the next pairs
     // dispatch's slot cleared as the self split's step dispatch does (the dispatch's
     // first workgroup, whatever its vehicle).
-    selfSplitArgsClear(gid.x, lid.x);
+    if (!rest) selfSplitArgsClear(gid.x, lid.x);
+#else
+    bool rest = false;
 #endif
     // A member's step: with vehicle contact every vehicle is a member of a group, one
     // without partners a group of its own (explicit_beams_vv_group), so no solo
-    // vehicle's step here (it was half this module, and its first-load compile).
-    splitMember(vid.x, lid.x, gP.pad2);
+    // vehicle's step here (it was half this module, and its first-load compile). The
+    // step and the rest dispatch share their tail (memberTail): one copy of selfApply.
+    MemberTail t;
+    uint how;
+#ifdef EB_SELF_SPLIT
+    if (rest)
+        how = memberRestStepHead(vid.x, lid.x, gP.pad2 & SPLIT_STEP, t);
+    else
+#endif
+        how = splitMemberHead(vid.x, lid.x, gP.pad2, t);
+    if ((how & MT_TAIL) != 0u) memberTail(t, how, lid.x);
+#ifdef EB_SELF_SPLIT
+    if (rest) memberRestEnd(vid.x, lid.x);
+#endif
+    if ((how & MT_STEPPED) != 0u) splitMemberEnd(t, lid.x);
     ebLoopCapFlush();
 }
 #endif

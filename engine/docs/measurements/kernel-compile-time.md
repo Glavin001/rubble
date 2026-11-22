@@ -347,3 +347,21 @@ fixtures bit for bit, the 17th the known quirk), with the split group path off t
 bit for bit, none slower), `sleep-check.sh` (21 checks), the contact, group-split and
 vehicle-grid GPU suites in bit-exact mode (18 tests, including a group over the limit),
 Chrome's validation of all 140 modules in both settings.
+
+### The members' module: one selfApply
+
+The members' module's entry runs either a member's step (`splitMemberHead`, through
+`contactMemberStepHead`) or, in the self split's rest dispatch, the member's rest
+(`memberRestStepHead`); each ended in the same tail with its own `selfApply`. The tail is
+now one function the entry calls once (`memberTail`,
+`slang/kernels/explicit_beams_member_tail.slang`), the heads returning what it is to do
+(the `MT_*` bits: Chrome sees a barrier's uniformity through a return value, not through
+the struct handed back by pointer, which it rejected). `contactMemberStep` keeps its
+form for the contact module (its head, then the tail).
+
+`explicit_beams_selfsplit_member_vv_wide`: 88,433 -> 76,220 optimized instructions, Chrome
+cold 32.0 -> 26.3 s. Checked against the kernels before the members' changes:
+fast-check (16 of 17 bit for bit, the known quirk), `groupsplit` in the new build, the
+scenario matrix (12 rows bit for bit, none slower), `sleep-check.sh` (21), the
+group-split, self-split and contact GPU suites in bit-exact mode (24 tests), Chrome's
+validation of all 140 modules in both settings.
