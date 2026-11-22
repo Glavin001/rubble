@@ -156,6 +156,8 @@ enum Launch {
 pub struct CudaExplicitBeams {
     ctx: sys::CUcontext,
     stream: sys::CUstream,
+    /// The stream is this host's own (not another host's: [`Self::use_stream`]).
+    owns_stream: bool,
     device_name: String,
     layout: ExplicitLayout,
     planner: FramePlanner,
@@ -280,7 +282,18 @@ impl CudaExplicitBeams {
     /// [`Self::new`] with room for rigid-body proxies per vehicle (the coupling,
     /// `explicit_beams_rigid.slang`); off until [`Self::set_coupling_on`].
     pub fn with_coupling(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> anyhow::Result<Self> {
-        let upload = ExplicitUpload::new(vehicles, cap);
+        Self::with_settings(vehicles, cap, None)
+    }
+
+    /// [`Self::with_coupling`] with room for vehicle sleep when `sleep` is set (on from
+    /// the first frame; `engine_softbody::explicit_sleep`), as the WebGPU host's
+    /// `with_sleep`.
+    pub fn with_settings(
+        vehicles: &[ExplicitBeams],
+        cap: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> anyhow::Result<Self> {
+        let upload = ExplicitUpload::with_sleep(vehicles, cap, sleep);
         let bindings = (0..BIND_COUNT as u32).map(|b| upload.bytes(b)).collect();
         Self::from_parts(upload.layout, bindings)
     }
@@ -382,6 +395,7 @@ impl CudaExplicitBeams {
         Ok(Self {
             ctx,
             stream,
+            owns_stream: true,
             device_name,
             layout,
             planner,
@@ -422,6 +436,47 @@ impl CudaExplicitBeams {
 
     fn bind_ctx(&self) -> Result<(), ExecError> {
         unsafe { result::ctx::set_current(self.ctx) }.map_err(backend)
+    }
+
+    pub(crate) fn context(&self) -> sys::CUcontext {
+        self.ctx
+    }
+
+    /// Queue everything on `stream` from now on (another host's in this context: the
+    /// World's rigid step and its coupling share one, so their launches and this
+    /// host's run in the order they were queued with no wait between). The stream
+    /// must outlive this host.
+    pub(crate) fn use_stream(&mut self, stream: sys::CUstream) -> Result<(), ExecError> {
+        self.bind_ctx()?;
+        unsafe { result::stream::synchronize(self.stream) }.map_err(backend)?;
+        if self.owns_stream {
+            unsafe { result::stream::destroy(self.stream) }.map_err(backend)?;
+        }
+        self.stream = stream;
+        self.owns_stream = false;
+        Ok(())
+    }
+
+    /// Binding `b`'s device buffer and its bytes (the coupling's passes bind the nodes
+    /// and gMisc beside the rigid buffers).
+    pub(crate) fn buffer(&self, b: u32) -> (sys::CUdeviceptr, u64) {
+        (self.bufs[b as usize], self.sizes[b as usize])
+    }
+
+    /// Binding `b` as words (waits; tests and tools).
+    pub fn download_words(&mut self, b: u32) -> Result<Vec<u32>, ExecError> {
+        self.wait()?;
+        self.download::<u32>(b)
+    }
+
+    /// Vehicle sleep is on (only with room: [`Self::with_settings`]).
+    pub fn sleep_on(&self) -> bool {
+        self.planner.sleep_on()
+    }
+
+    /// gMisc record of the retired nodes' bits (0: none retired).
+    pub fn retire_base(&self) -> u32 {
+        self.planner.words[plan::W_RETIRE_BASE]
     }
 
     pub fn set_vehicle_contact(&mut self, on: bool) {
@@ -847,6 +902,15 @@ impl CudaExplicitBeams {
         Ok(())
     }
 
+    /// [`Self::set_drive_input`] from the input's words (`explicit_plan::drive::input_words`:
+    /// a portable World's recorded inputs).
+    pub fn set_drive_input_words(&mut self, v: usize, words: [u32; 4]) -> Result<(), ExecError> {
+        let Some(d) = self.layout.drive else { return Ok(()) };
+        self.upload(plan::BIND_MISC, d.input_offset(v), bytemuck::cast_slice(&words))?;
+        self.planner.request_replan();
+        Ok(())
+    }
+
     /// Read vehicle `v`'s raycast wheels' state back into `drive` (waits).
     pub fn read_drive(&mut self, v: usize, drive: &mut engine_softbody::explicit_drive::Drive) -> Result<(), ExecError> {
         let Some(l) = self.layout.drive else { return Ok(()) };
@@ -936,7 +1000,9 @@ impl Drop for CudaExplicitBeams {
             for &(b, _) in self.arg_bufs.values() {
                 let _ = result::free_sync(b);
             }
-            let _ = result::stream::destroy(self.stream);
+            if self.owns_stream {
+                let _ = result::stream::destroy(self.stream);
+            }
         }
     }
 }
