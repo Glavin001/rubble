@@ -42,6 +42,7 @@ mod guidance;
 mod lab;
 mod motion;
 mod presets;
+mod profile;
 mod read;
 mod scene;
 mod showcase;

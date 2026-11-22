@@ -240,6 +240,8 @@ fn main() -> anyhow::Result<()> {
     let mut awake = 0u32;
     let mut wall = std::time::Instant::now();
     for k in 1..=steps {
+        // `RUBBLE_KERNEL_REPLAY_AT=N`: the rigid step's kernels timed alone, once (docs/profiling-webgpu.md).
+        engine_webgpu::replay::env_hook(w.sim_mut());
         let ts = std::time::Instant::now();
         w.step()?;
         for f in w.poll_blocking()? {

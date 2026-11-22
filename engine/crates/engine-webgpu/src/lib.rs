@@ -18,6 +18,9 @@ mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
 #[cfg(feature = "gpu")]
+pub mod gpu_labels;
+pub mod host_profile;
+#[cfg(feature = "gpu")]
 pub mod gpu_marks;
 #[cfg(feature = "gpu")]
 mod poses;
@@ -46,7 +49,7 @@ pub use gpu::creation_errors;
 pub use engine_exec::explicit_plan::{explicit_loop_cap_hit, loop_budget_override};
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, default_device_with, hold_gpu_lock, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING, RestView,
+    default_device, default_device_with, hold_gpu_lock, instance_flags, replay, CharacterHandle, KernelReplayOptions, KernelReplayReport, ReplayedDispatch, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING, RestView,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]

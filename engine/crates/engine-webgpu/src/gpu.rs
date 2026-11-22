@@ -415,7 +415,8 @@ struct StepQueries {
 
 /// A compute pass of the step, timestamped as segment `segment` when the
 /// queries have room for it.
-fn begin_timed<'e>(enc: &'e mut wgpu::CommandEncoder, queries: Option<&StepQueries>, segment: usize) -> wgpu::ComputePass<'e> {
+/// The pass is labelled `label` (`step`, or `step:<phase>` with debug labels, `gpu_labels`).
+fn begin_timed_named<'e>(enc: &'e mut wgpu::CommandEncoder, queries: Option<&StepQueries>, segment: usize, label: &str) -> wgpu::ComputePass<'e> {
     let timestamp_writes = queries
         .filter(|q| segment < q.segments as usize)
         .map(|q| wgpu::ComputePassTimestampWrites {
@@ -424,7 +425,7 @@ fn begin_timed<'e>(enc: &'e mut wgpu::CommandEncoder, queries: Option<&StepQueri
             end_of_pass_write_index: Some(2 * segment as u32 + 1),
         });
     enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("step"),
+        label: Some(label),
         timestamp_writes,
     })
 }
@@ -617,6 +618,10 @@ pub struct WgpuSim {
     collider_epoch: u64,
     /// Diagnostic GPU timing marks at the plan's phases (`set_marks`, `RUBBLE_GPU_TIMING`).
     marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
+    /// Debug groups named `phase/kernel` around every dispatch of the step, so Dawn/Chrome
+    /// traces and Xcode captures read like the plan ([`WgpuSim::set_debug_labels`],
+    /// `RUBBLE_GPU_LABELS=1`). Off by default: it changes no work, only names it.
+    debug_labels: bool,
     /// The sleep archive's blocks (`enable_sleep_archive`; 0: off).
     sleep_archive_blocks: u32,
     /// The sleep archive keeps no rows and is laid out without them (archiveCompact).
@@ -1315,6 +1320,7 @@ impl WgpuSim {
             bounds_dirty: false,
             collider_epoch: 0,
             marks: None,
+            debug_labels: crate::gpu_labels::env_enabled(),
             sleep_archive_blocks: 0,
             sleep_archive_compact: false,
             has_filters: false,
@@ -3237,6 +3243,16 @@ impl WgpuSim {
     }
 
     /// The marks [`Self::set_marks`] set (hosts' own passes mark into the same timeline).
+    /// Name the step's GPU work after the plan (`gpu_labels`): passes `step:<phase>` and a
+    /// debug group `phase/kernel` around every dispatch. The same work either way.
+    pub fn set_debug_labels(&mut self, on: bool) {
+        self.debug_labels = on;
+    }
+
+    pub fn debug_labels(&self) -> bool {
+        self.debug_labels
+    }
+
     pub fn marks(&self) -> Option<&std::sync::Arc<crate::gpu_marks::GpuMarks>> {
         self.marks.as_ref()
     }
@@ -3276,7 +3292,17 @@ impl WgpuSim {
         // empty pass need not write its timestamps (Dawn and Metal leave them
         // zero), and a phase with no work has no time to report.
         let mut dispatched = false;
-        let mut pass = Some(begin_timed(enc, queries, segments.len()));
+        // Pass labels and debug groups after the plan (`gpu_labels`): the same work, named.
+        let labels = self.debug_labels;
+        let phase_of = crate::gpu_labels::phase_of(cmds);
+        let label_at = |k: usize| -> String {
+            if labels {
+                crate::gpu_labels::pass_label(phase_of.get(k).copied())
+            } else {
+                "step".to_string()
+            }
+        };
+        let mut pass = Some(begin_timed_named(enc, queries, segments.len(), &label_at(0)));
         for (k, c) in cmds.iter().enumerate() {
             match *c {
                 rigid_plan::Cmd::Dispatch { kernel, .. }
@@ -3301,7 +3327,7 @@ impl WgpuSim {
                     dispatched = false;
                     f(enc);
                     hook = None;
-                    pass = Some(begin_timed(enc, queries, segments.len()));
+                    pass = Some(begin_timed_named(enc, queries, segments.len(), &label_at(k + 1)));
                     continue;
                 }
             }
@@ -3316,7 +3342,7 @@ impl WgpuSim {
                     self.marks.as_ref().expect("marks").mark(enc, name);
                     segments.push(name);
                     dispatched = false;
-                    pass = Some(begin_timed(enc, queries, segments.len()));
+                    pass = Some(begin_timed_named(enc, queries, segments.len(), &label_at(k + 1)));
                 }
                 rigid_plan::Cmd::Phase { .. } if per_phase && !dispatched => {}
                 rigid_plan::Cmd::Phase { name } if split || per_phase => {
@@ -3324,7 +3350,7 @@ impl WgpuSim {
                     segments.push(name);
                     dispatched = false;
                     if !(per_phase && k + 1 == cmds.len()) {
-                        pass = Some(begin_timed(enc, queries, segments.len()));
+                        pass = Some(begin_timed_named(enc, queries, segments.len(), &label_at(k + 1)));
                     }
                 }
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
@@ -3334,7 +3360,14 @@ impl WgpuSim {
                     pass: p,
                 } => {
                     dispatched = true;
-                    self.disp(pass.as_mut().expect("a pass"), kernel, threads, Some(p));
+                    let pass = pass.as_mut().expect("a pass");
+                    if labels {
+                        pass.push_debug_group(&format!("{}/{kernel}", phase_of[k]));
+                    }
+                    self.disp(pass, kernel, threads, Some(p));
+                    if labels {
+                        pass.pop_debug_group();
+                    }
                 }
                 rigid_plan::Cmd::Indirect {
                     kernel,
@@ -3343,10 +3376,16 @@ impl WgpuSim {
                 } => {
                     dispatched = true;
                     let pass = pass.as_mut().expect("a pass");
+                    if labels {
+                        pass.push_debug_group(&format!("{}/{kernel}", phase_of[k]));
+                    }
                     if kernel.starts_with("solve_primal_color") {
                         self.disp_indirect(pass, slot);
                     } else {
                         self.disp_work(pass, kernel, slot, Some(p));
+                    }
+                    if labels {
+                        pass.pop_debug_group();
                     }
                 }
             }
@@ -3363,7 +3402,7 @@ impl WgpuSim {
                     pass = None;
                 }
                 m.mark(enc, kernel);
-                pass = Some(begin_timed(enc, queries, segments.len()));
+                pass = Some(begin_timed_named(enc, queries, segments.len(), &label_at(k + 1)));
             }
         }
         let pass_open = pass.is_some();
@@ -3431,15 +3470,22 @@ impl WgpuSim {
                 );
             }
         };
-        self.refresh_cell();
-        self.ensure_rest_tables().map_err(|e| ExecError::Capacity(e.to_string()))?;
+        let _span = crate::host_profile::span("sim.step_encode");
+        {
+            let _s = crate::host_profile::span("sim.refresh_cell");
+            self.refresh_cell();
+            self.ensure_rest_tables().map_err(|e| ExecError::Capacity(e.to_string()))?;
+        }
         lap(&host_t, "refresh_cell");
         self.last_step_ran = true;
+        let s_up = crate::host_profile::span("sim.uploads");
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(true);
         lap(&host_t, "uniforms");
         self.write_guide_params();
+        drop(s_up);
+        let s_plan = crate::host_profile::span("sim.plan");
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
@@ -3475,9 +3521,12 @@ impl WgpuSim {
             }
         }
         lap(&host_t, "plan + copies");
+        drop(s_plan);
+        let s_enc = crate::host_profile::span("sim.encode_dispatches");
         let phases: Vec<&str> = cmds.iter().filter_map(|c| if let rigid_plan::Cmd::Phase { name, .. } = c { Some(*name) } else { None }).collect();
         let hooked = hook.as_ref().is_some_and(|(at, _)| phases.contains(at));
         self.encode_dispatches_hooked(enc, &cmds, hook);
+        drop(s_enc);
         lap(&host_t, "dispatches");
         self.finish_step(false, wall).map(|_| hooked)
     }
@@ -4891,6 +4940,9 @@ pub(crate) use terrain::terrain_buffer;
 pub use terrain_watch::{TerrainStrike, TerrainWatch};
 #[path = "gpu_characters.rs"]
 mod characters;
+#[path = "gpu_replay.rs"]
+pub mod replay;
+pub use replay::{KernelReplayOptions, KernelReplayReport, ReplayedDispatch};
 pub use characters::{CharacterHandle, MotionEvent};
 pub use host_state::{SimSnapshot, StateMeasure};
 

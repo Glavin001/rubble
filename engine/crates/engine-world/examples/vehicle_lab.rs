@@ -1539,6 +1539,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         }
     }
     for k in 0..windows {
+        // `RUBBLE_KERNEL_REPLAY_AT=N`: the rigid step's kernels timed alone, once (docs/profiling-webgpu.md).
+        engine_webgpu::replay::env_hook(world.sim_mut());
         if ab.first().is_some_and(|&t| lab.bench.t >= t) {
             ab.remove(0);
             if let Some(dir) = &save_dir {
