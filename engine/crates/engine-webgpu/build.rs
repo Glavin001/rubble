@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use engine_slang_build::{compile, compile_entries_to, compile_with_defines, find_slangc, par_map, SlangTarget};
+use engine_slang_build::{compile, compile_entries_to, compile_many, compile_with_defines, find_slangc, par_map, Compile, SlangTarget};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -459,16 +459,50 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
 
     let mut ok = vec!["abi_roundtrip".to_string()];
     let mut failed = Vec::new();
-    let spirv = par_map(WORLD_ENTRIES, |entry| {
-        let dest = out.join(format!("{entry}.spv"));
-        compile(
-            &source_for(slang_root, entry),
+    // Direct Slang → WGSL. `ENGINE_WGSL` switches atomic slots to Atomic<uint>
+    // (physics/atomics.slang); the WGSL is embedded so wasm32 needs no filesystem.
+    let wgsl_dir = out_dir.join("wgsl");
+    std::fs::create_dir_all(&wgsl_dir)?;
+    let mut wgsl_ok = Vec::new();
+    let mut wgsl_failed = Vec::new();
+    let wgsl_entries: Vec<&str> = WORLD_ENTRIES
+        .iter()
+        .copied()
+        .chain(std::iter::once("broadphase_grid"))
+        .collect();
+    // The SPIR-V and the WGSL of every world entry in one compile_many: the entries of
+    // one source and target in a few processes, each parsing the source once (the same
+    // outputs as a compile each), both targets at once.
+    let spv_sources: Vec<PathBuf> = WORLD_ENTRIES.iter().map(|e| source_for(slang_root, e)).collect();
+    let spv_dests: Vec<PathBuf> = WORLD_ENTRIES.iter().map(|e| out.join(format!("{e}.spv"))).collect();
+    let wgsl_sources: Vec<PathBuf> = wgsl_entries.iter().map(|e| source_for(slang_root, e)).collect();
+    let wgsl_dests: Vec<PathBuf> = wgsl_entries.iter().map(|e| wgsl_dir.join(format!("{e}.wgsl"))).collect();
+    let mut jobs: Vec<Compile> = Vec::new();
+    for (k, entry) in WORLD_ENTRIES.iter().enumerate() {
+        jobs.push(Compile {
+            source: &spv_sources[k],
             entry,
-            SlangTarget::Spirv,
-            &dest,
-            &[],
-        )
-    });
+            stage: "compute",
+            target: SlangTarget::Spirv,
+            out: &spv_dests[k],
+            include_dirs: &[],
+            defines: &[],
+        });
+    }
+    for (k, entry) in wgsl_entries.iter().enumerate() {
+        jobs.push(Compile {
+            source: &wgsl_sources[k],
+            entry,
+            stage: "compute",
+            target: SlangTarget::Wgsl,
+            out: &wgsl_dests[k],
+            include_dirs: &[],
+            defines: &[("ENGINE_WGSL", "1")],
+        });
+    }
+    let mut results = compile_many(&jobs).into_iter();
+    let spirv: Vec<Result<()>> = results.by_ref().take(WORLD_ENTRIES.len()).collect();
+    let wgsl: Vec<Result<()>> = results.collect();
     for (entry, result) in WORLD_ENTRIES.iter().zip(spirv) {
         match result {
             Ok(()) => ok.push((*entry).to_string()),
@@ -495,28 +529,6 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             failed.join(", ")
         ));
     }
-
-    // Direct Slang → WGSL. `ENGINE_WGSL` switches atomic slots to Atomic<uint>
-    // (physics/atomics.slang); the WGSL is embedded so wasm32 needs no filesystem.
-    let wgsl_dir = out_dir.join("wgsl");
-    std::fs::create_dir_all(&wgsl_dir)?;
-    let mut wgsl_ok = Vec::new();
-    let mut wgsl_failed = Vec::new();
-    let wgsl_entries: Vec<&str> = WORLD_ENTRIES
-        .iter()
-        .copied()
-        .chain(std::iter::once("broadphase_grid"))
-        .collect();
-    let wgsl = par_map(&wgsl_entries, |entry| {
-        compile_with_defines(
-            &source_for(slang_root, entry),
-            entry,
-            SlangTarget::Wgsl,
-            &wgsl_dir.join(format!("{entry}.wgsl")),
-            &[],
-            &[("ENGINE_WGSL", "1")],
-        )
-    });
     for (entry, result) in wgsl_entries.iter().zip(wgsl) {
         match result {
             Ok(()) => wgsl_ok.push((*entry).to_string()),

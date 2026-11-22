@@ -42,11 +42,29 @@ Every generated kernel is the same byte for byte (`tools/build-time/kernel_diges
 the only difference is engine-metal's 145 SPIR-V and CUDA copies that nothing read and
 that are no longer compiled.
 
+## 2026-11-22: many entries of one source in one process (`compile_many`)
+
+The rigid kernels' WGSL and SPIR-V (engine-webgpu, every world entry of each source in
+one call) through `slang_batch`, one parse per batch instead of one per entry.
+
+| Edit | Main s | Before this s | After s | slangc processes |
+|---|---|---|---|---|
+| `slang/physics/common.slang` | 28.2 | 27.0 | 14.7 | 555 → 12 (and 44 batches) |
+| `slang/kernels/explicit_beams.slang` | 28.9 | 18.5 | 18.8 | 172 → 173 |
+| `slang/kernels/soft_skin.slang` | 4.1 | 3.6 | 3.7 | 1 → 2 |
+
+The explicit modules each have defines of their own, so they share no parse: one slangc
+each, as before. Every kernel of the four crates compiled from an empty cache: 86 s with
+slangc alone, 69 s with batches (MSL and CUDA are still a slangc a compile).
+
+Every generated kernel is the same byte for byte with and without batches
+(`kernel_digest.py`, from an empty cache); in the Linux build image (Slang 2026.19),
+the 499 rigid WGSL and SPIR-V outputs a batch writes are all slangc's.
+
 ## Where the time still goes
 
-- A kernel edit is slangc: one process per module, each parsing the module's whole
-  include closure (14–25k lines). `common.slang` reaches 555 modules of the fast loop;
-  `explicit_beams.slang` 172, 30 of them the test-only modules (`test-kernels`, on in
+- An explicit kernel edit is slangc: 172 modules of distinct defines, about 1.3 s
+  each (a third of it parsing); 30 of them the test-only modules (`test-kernels`, on in
   the harness through engine-world's dev-dependency).
 - Every kernel edit recompiles engine-webgpu and everything above it: the build
   script embeds the kernels with `include_str!`.

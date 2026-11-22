@@ -49,6 +49,19 @@ Direction is downward only. In particular:
   compiles no kernel another one already compiled.
 - **Compile in parallel** (`engine_slang_build::par_map`), never in a loop of single
   compiles.
+- **Many entries of one source: `compile_many`.** slangc spends about half a second
+  parsing and checking a source's include closure before it emits anything, once per
+  process. `compile_many` compiles the entries of one source, target and define set in
+  a few `slang_batch` processes (`engine-slang-build/batch/slang_batch.cpp`, the Slang
+  library, one parse each) instead of a slangc each. It is used where the output is
+  slangc's byte for byte: WGSL and SPIR-V (checked on macOS and Linux with every rigid
+  entry; the MSL a batch writes has some `#line` numbers of its own, so MSL and CUDA
+  stay one slangc a compile). Each process also checks one batched entry per target
+  against slangc and drops the batch if they differ; an entry calling another entry
+  point (which the library's link step does not finish) and anything a batch does not
+  write in its time limit compile with slangc. Without the Slang SDK beside slangc
+  (headers and library) or with `RUBBLE_SLANG_BATCH=0`, every compile is a slangc.
+  `RUBBLE_SLANG_TIMING=1` prints the phases on the build script's stderr.
 - **Do not compile what nothing reads.** Every output a build script writes has a
   reader.
 - **An environment variable is a rerun trigger only if the output depends on it.**

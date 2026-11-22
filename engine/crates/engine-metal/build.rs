@@ -113,28 +113,37 @@ fn main() -> Result<()> {
         "wheel_soil_press",
     ];
     let convex = slang_root.join("kernels/convex_step.slang");
-    // Each entry cached by what it depends on; in parallel, as the other tables are.
-    // (No SPIR-V or CUDA copies: nothing reads them; engine-webgpu and engine-cuda
-    // compile their own.)
-    for r in engine_slang_build::par_map(&entries, |&entry| {
-        compile(
-            if vehicle_entries.contains(&entry) {
-                &vehicle
-            } else if entry.starts_with("convex_") {
-                &convex
-            } else if entry.ends_with("_compact")
-                || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
-            {
-                &compact
-            } else {
-                &world
-            },
+    // Each entry cached by what it depends on; the entries of one source in a few
+    // processes (compile_many). (No SPIR-V or CUDA copies: nothing reads them;
+    // engine-webgpu and engine-cuda compile their own.)
+    let source_of = |entry: &str| {
+        if vehicle_entries.contains(&entry) {
+            &vehicle
+        } else if entry.starts_with("convex_") {
+            &convex
+        } else if entry.ends_with("_compact")
+            || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
+        {
+            &compact
+        } else {
+            &world
+        }
+    };
+    let dests: Vec<PathBuf> = entries.iter().map(|e| msl_dir.join(format!("{e}.metal"))).collect();
+    let jobs: Vec<engine_slang_build::Compile> = entries
+        .iter()
+        .zip(&dests)
+        .map(|(entry, out)| engine_slang_build::Compile {
+            source: source_of(entry),
             entry,
-            SlangTarget::Metal,
-            &msl_dir.join(format!("{entry}.metal")),
-            &[],
-        )
-    }) {
+            stage: "compute",
+            target: SlangTarget::Metal,
+            out,
+            include_dirs: &[],
+            defines: &[],
+        })
+        .collect();
+    for r in engine_slang_build::compile_many(&jobs) {
         r?;
     }
 
