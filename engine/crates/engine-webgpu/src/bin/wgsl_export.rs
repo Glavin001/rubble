@@ -99,8 +99,17 @@ fn main() -> anyhow::Result<()> {
     println!("Wrote {} vehicle presets", all.len());
     // engine-vehicle's packer and VehicleHost for vehicle.mjs.
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-vehicle-wasm");
+    // build-web.sh's RUBBLE_WEB_PROFILE: `fast` for a local build to iterate on (the
+    // fast profile, no wasm-opt), else release.
+    let profile: &[&str] = if std::env::var("RUBBLE_WEB_PROFILE").is_ok_and(|p| p == "fast") {
+        &["--profile", "fast", "--no-opt"]
+    } else {
+        &["--release"]
+    };
     let status = std::process::Command::new("wasm-pack")
-        .args(["build", "--target", "web", "--release", "--out-dir"])
+        .args(["build", "--target", "web"])
+        .args(profile)
+        .arg("--out-dir")
         .arg(root.join("vehicle_wasm"))
         .arg(&crate_dir)
         .status()

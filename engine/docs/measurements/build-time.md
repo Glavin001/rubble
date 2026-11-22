@@ -61,6 +61,22 @@ Every generated kernel is the same byte for byte with and without batches
 (`kernel_digest.py`, from an empty cache); in the Linux build image (Slang 2026.19),
 the 499 rigid WGSL and SPIR-V outputs a batch writes are all slangc's.
 
+## 2026-11-22: the web build's fast profile (`RUBBLE_WEB_PROFILE=fast`)
+
+The world wasm (`wasm-pack build crates/engine-world-wasm`), rebuilt after an edit:
+
+| Edit | `--release` s | `--profile fast` s | `--profile fast --no-opt` s |
+|---|---|---|---|
+| a kernel file (`soft_skin.slang`) | 44 | 34 | 5 |
+| the soft-body model | – | – | 4 |
+
+Release is thin LTO and one codegen unit. With `--profile fast` cargo finishes in 4 s;
+the rest was wasm-opt, which the crates turn off for release only
+(`[package.metadata.wasm-pack.profile.release]`), so the fast build passes `--no-opt`.
+`build-web.sh` with `RUBBLE_WEB_PROFILE=fast` builds the engine's wasm and host tools
+this way and skips the world wasm's Asyncify build (Safari). For iterating only: host
+code runs slower than in release (no LTO), so pages are measured with release builds.
+
 ## Where the time still goes
 
 - An explicit kernel edit is slangc: 172 modules of distinct defines, about 1.3 s

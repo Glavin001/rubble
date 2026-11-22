@@ -107,6 +107,16 @@ bash engine/scripts/build-web.sh
 python3 -m http.server 8080 -d engine/web-dist
 ```
 
+To iterate on a page, a kernel or the engine, build with the fast profile: the world
+wasm then rebuilds in about 5 s after an edit instead of 44 (no link-time optimisation,
+no wasm-opt, no Safari Asyncify build). The physics is the same; the host code runs
+slower, so measure performance with a release build only
+([engine/docs/build-architecture.md](engine/docs/build-architecture.md)):
+
+```bash
+RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh
+```
+
 Then open `http://localhost:8080/` in a WebGPU browser (Chrome or Edge on desktop). The
 build runs `wgsl_export` (Slang kernels to WGSL, the vehicle wasm), the fracture-lab
 wasm and `scene_export` (the Rust-built scenes as GPU snapshots), then copies the pages
@@ -408,7 +418,8 @@ don't predict real ones. The legacy workspace's jobs are in
 
 Vercel builds the same site from [vercel.json](vercel.json): production from `main`
 ([rubble-tau.vercel.app](https://rubble-tau.vercel.app)) and a preview for every pull
-request. A Linux build takes about 10 minutes. Pushes that change nothing the site uses
+request. A build takes 31–33 minutes after a change to the engine's crates (the cache keeps
+third-party crates; [engine/docs/measurements/build-time.md](engine/docs/measurements/build-time.md)). Pushes that change nothing the site uses
 (docs, the stress solver, the legacy crates) skip the build (`ignoreCommand`). The project
 needs **Git LFS enabled** (Project Settings → Git) so the fracture assets are real files;
 that setting can't live in `vercel.json`.
