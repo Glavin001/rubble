@@ -40,7 +40,7 @@ Options (environment): EXTRA (more vehicle_lab options for the replays, e.g. "--
 `--ab-profile`: the frame by dispatch kind; slower), THRESHOLD (% slower that fails,
 default below), WARM_MS (default 150: the GPU warmed from the state before the timed halves), LAB_BIN,
 CAR, STATES (the states' directory), RETRIES (default 2: a row past the threshold runs again,
-the median run decides), BIT_EXACT (default 1: the rows run with bit-exact results, the
+the median run decides), WORST=1 (each row's worst frame of either side beside its line), BIT_EXACT (default 1: the rows run with bit-exact results, the
 engine-wide setting that is off by default since 2026-11-19, so that the verdict is bit for
 bit; 0 runs them in the fast setting). --world: WORLD_STEPS (default 20) steps each way, WORLD_MS (default
 2.5) the most the World may add a step, WORLD_ARGS extra lab arguments.
@@ -723,6 +723,8 @@ def main():
             delta = 100.0 * (on - off) / off
             note = f" ({len(runs)} runs: " + ", ".join(f"{100.0 * (a - b) / b:+.1f}%" for a, b, _ in runs) + ")"
             r["secs"] = sum(x[2] for x in runs)
+        if os.environ.get("WORST") == "1":
+            note += f" [worst frame on {r['on'][2]:.3f} / off {r['off'][2]:.3f} ms]"
         slower = past(on, off)
         flag = "SLOWER" if slower else ("faster" if delta < -THRESHOLD and off - on > NOISE_MS else "")
         if not r["bfb"] or slower:

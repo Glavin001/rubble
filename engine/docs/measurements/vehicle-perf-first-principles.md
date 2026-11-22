@@ -6506,6 +6506,226 @@ candidates' tracking of every node (`fkTrackVehicle`), and wheels on each other
 vehicle and none reads workgroup state of another, so none is a reason it cannot be
 hosted; each is kernel work in the wide node pass and its proof.
 
+### 8.56 The fleet walk on a pile: why the kept candidates are off, and the walk made cheap without them (2026-11-22)
+
+§8.55 left two questions: which rule keeps the kept candidates off on the mountain, and
+what the walk costs when it has to run. Branch `claude/fleet-walk-kept`, from 25ea30b4.
+Mac: M3 Max, native Metal, the GPU shared with other sessions through the lock. T4:
+Modal, CUDA, `ENGINE_CUDA_FMAD=0`. Bit-exact on everywhere.
+
+**The cause (measured).** `FK_DEBUG=1 vehicle_lab <row> --from-fixture ROW.fx --ab-switch
+perf=0 --ab-frames 3` prints the kept candidates' control words and the plan's adjacency
+(`ExplicitBeamsGpu::fleet_keep_debug`, new):
+
+| row | a vehicle's partners in the plan (20 vehicles) | partners a build covers | the control words |
+|---|---|---|---|
+| mountain20_t12 | 19, 19, 8, 17, 19, 12, 14, 18, 18, 18, 15, 13, 15, 17, 17, 18, 15, 15, 19, 14 | 8 (`FK_COVER`) | no list; 1,897 passes of the wait left (of 2,176), 4 failed builds in a row; the last build covered 0 partners for 19 vehicles |
+| mountain20_t20 | 18, 19, 8, 17, 19, 14, 14, 18, 18, 18, 17, 13, 18, 17, 18, 18, 18, 15, 19, 18 | 8 | no list; 1,136 left, 4 in a row |
+| clash20 | 1 or 0 | 8 | list valid, 15 builds and 334 reused passes in 10 frames |
+| derby20_t5 | 0 to 4 | 8 | list valid, 1 build and 33 reused passes a frame |
+| derby20_t10 | 0 to 6 | 8 | list valid, 1 build and 33 reused passes a frame; most pairs an owner kept 43,495 |
+
+So it is neither the fleet's pair room nor an owner's share nor a short life: it is the
+third rule of `fkDecide`, **a vehicle with more partners in the plan than a build covers**
+(`tooMany`: `FK_COVER` = 8, the words a vehicle has for its build's partners). In a pile of
+20 on the ledges every car but one has 12 to 19 partners (their boxes with the 5 cm margin
+overlap), so every build attempt ends before its gather, takes the back-off (136 passes
+doubling to 2,176) and the fleet stays on the front's own path: one attempt in 2,176
+passes, 64 frames. §8.39 met the same rule at 32 cars ("a car with more partners than a
+build covers, 8"). The derby keeps its list: at t 5 and t 10 it is rebuilt about once a
+frame and reused on 33 passes of 34.
+
+**What a build would need** (not built): the cover's words a vehicle are part of the
+buffers' layout (`fleet_keep_words`), so 19 partners is a layout change; the build's run
+is sized `VV_PART` (8) times the fleet's contact points (87,680 here) where the front's own
+run has the fleet's room (19 times: 208,240); and a build pads every triangle's box by
+0.25 to 0.9 m, in a pile where a triangle's cells hold candidates of every neighbour. §8.39
+tried 16 partners at 32 cars: 505,000 pairs a build, 8 % slower, reverted. With the walk
+at its cost below, what a kept list could still give back on these rows is the front's
+other dispatches, 6 to 7 of 34 ms (below).
+
+**What the walk does on a pile (measured, counters in a time-only build; a frame is 34
+passes).**
+
+| a frame of 34 passes | mountain20_t12 | mountain20_t20 |
+|---|---|---|
+| listed triangles walked | 336,396 (9,894 a pass: every owner lists its 528; a partner approaches fast on every pass and resets the throttles) | 334,662 |
+| cells their boxes cover | 3.43 million (10 a triangle) | 3.34 million |
+| candidates visited in those cells' buckets | 9.20 million | 12.48 million |
+| of them inside the triangle's box at its largest pad | **698** | **55,397** |
+| triangles over the grid's 64 cells, which test every candidate of their owner | 544 (16 a pass, every one over 4,096 cells: a torn panel's triangle, metres long) | 1,444 (42 a pass: the same 16, and 26 of 64 to 4,096 cells) |
+| candidates those test | 1.64 million (3,000 a triangle) | 7.84 million (5,400 a triangle) |
+| iterations of the walk's search for a bucket met twice | 19.5 million | 19.0 million |
+
+Two things, both of the repo's known kinds. (1) A visited candidate cost three loads, two
+of them dependent (`vvInBox` loads the candidate's vehicle for the anti-clip flag and its
+velocity for its pad) before the comparison that rejects 9,199,000 of 9,200,000. (2) A
+triangle over the cells tests every candidate of its owner on its three threads, chains
+of 1,000 to 3,000 loads each, and the dispatch waits for its longest thread: a loop that
+one lane runs for the whole GPU.
+
+**The bound, time only** (20 frames from the fixture, wall): the walk's work done twice
+(a second, dry copy of `vvTriangleCandsList` that lists nothing and keeps a checksum
+alive) adds 7.3 ms a frame at t 12 (43.3 → 50.5) and 19.4 ms at t 20 (67.1 → 86.5). So
+the walk costs that much, and a walk at clash20's 0.2 ms a frame would give 36.2 ms at
+t 12 and 47.9 ms at t 20. (§8.54's timed passes said 10.2 and 30.7 ms: Metal's
+timestamps overstate it, as that section warned.) With the candidates' position test in
+(below), each part left out in turn (time only, results differ): no test of every
+candidate −3.9 ms at t 12 and −23.0 at t 20 (the hits those triangles find go with it);
+no bucket scans −3.0 and −2.5; no search for a bucket met twice −0.1 and −0.1; the
+thread's own start (the triangle's frame, three nodes) 1.7 ms.
+
+**What changed** (`explicit_beams_fleet.slang`: `flWalkBoxed`, `flWalkBig`, `flBigHint`;
+perf flag 536870912, `PERF_FLEET_WALK_BOX`; the walk of the front's own path only: the
+kept candidates' build and tests, the groups' own dispatches and the larger groups' pass
+are untouched). Each lossless: the same (triangle, candidate) pairs listed, each once.
+
+1. **A candidate's position first.** The walk already has the triangle's box grown by
+   the largest pad any candidate of the owner can have (it sizes the cells from it: the
+   owner's fastest candidate, `FL_FAST`). `vvInBox`'s pad for a candidate is the same
+   expression of that candidate's own speed, which is at most the fastest's, and every
+   operation in it is monotone, so a candidate outside the larger box fails `vvInBox`:
+   it is skipped before the two dependent loads. A NaN compares false and goes on to
+   `vvInBox` as before. The first test's box is 0.1 mm and a millionth of the
+   coordinates larger still: with fast arithmetic (the default outside the tests) a
+   compiler may fuse the multiply-add of one pad and not of the other, a last place
+   apart; inside that room `vvInBox` alone decides, so the pairs are the same in either
+   setting. Alone: mountain20_t12 39.7 → 36.6 ms, mountain20_t20 66.8 → 64.7.
+2. **A big triangle's test on threads of its own.** The throttles' dispatch marks a listed
+   triangle whose box covers more than the walk's 64 cells (`flBigHint`, in a pass that
+   walks: bit 1 of the triangle's listed word, `fkListed`) and puts it in the fleet's list
+   of big triangles (`flListAt`: a region of a word a triangle that the layout has held
+   since stage 2 and nothing used; an atomic count in a free control word, cleared by the
+   first plan). The walk's plan adds 128 threads for each (`FL_BIG_PARTS`) after the
+   listed triangles' own, and thread p of a big triangle tests candidates p, p + 128, ...
+   of its owner, 20 to 70 each. The stored mark alone decides who tests a triangle: the
+   walk's threads leave a marked one to its own threads, which test every candidate
+   whatever the walk's own count of cells would be (the cells only leave out candidates
+   that fail the box test, so testing every candidate lists the same pairs). No value is
+   worked out in two places and compared, so fast arithmetic cannot make two threads
+   disagree about a triangle. Which triangles are marked is a choice of schedule. No
+   change of the buffers' layout.
+
+The fleet's parameter copies have no free bit in their perf word (bits 27 to 31 are the
+level slots there), so the planner keeps the switch in bit 30 of the word after the beam
+order (`FramePlanner::set_perf_flags` and `perf_flags` carry it as bit 29 for their
+callers: `perf=536870912`, `RUBBLE_PERF_FLAGS`, the lab page's `--ab`).
+
+**Results.** On against off in one build from each row's saved state, 3 rounds of 10
+frames, every state word the same on every row of both machines
+(`tools/scenario-matrix/run.sh perf=536870912`, and `--cuda`). ms a frame of 34 steps.
+
+| row | Mac on / off (worst frame on / off) | Mac, default before → after: mean (worst frame) | T4 on / off (worst frame on / off) |
+|---|---|---|---|
+| mountain20_t2 | 19.13 / 19.31, −0.9 % (19.82 / 19.95) | 18.84 (19.87) → 19.19 (19.87) | 34.61 / 34.89, −0.8 % (35.73 / 36.13) |
+| mountain20_t4 | 37.04 / 37.12, −0.2 % (40.37 / 40.43) | 36.94 (40.48) → 36.60 (40.39) | 64.40 / 64.98, −0.9 % (75.92 / 75.86) |
+| mountain20_t7 | 35.66 / 36.80, −3.1 % (36.40 / 37.67) | 36.83 (37.71) → 35.18 (36.35) | 62.91 / 65.34, −3.7 % (64.33 / 66.93) |
+| **mountain20_t12** | **34.24 / 40.84, −16.1 % (37.91 / 44.84)** | **40.57 (44.85) → 34.21 (37.99)** | **64.72 / 77.44, −16.4 % (70.10 / 83.35)** |
+| **mountain20_t20** | **43.09 / 66.60, −35.3 % (45.98 / 74.89)** | **66.52 (69.13) → 43.16 (44.41)** | **81.00 / 125.46, −35.4 % (83.37 / 129.71)** |
+| derby20_t2 | 22.23 / 22.03, +0.9 % (31.88 / 30.37) | 22.02 (23.97) → 22.40 (23.42) | 37.78 / 37.78, +0.0 % (39.46 / 39.47) |
+| derby20_t5 | 30.00 / 30.31, −1.0 % (38.09 / 38.19) | 29.43 (31.12) → 29.76 (31.61) | 55.80 / 55.80, −0.0 % (58.55 / 58.51) |
+| derby20_t10 | 30.26 / 29.80, +1.5 % (37.23 / 35.72) | 28.20 (29.67) → 28.69 (30.21) | 51.77 / 51.81, −0.1 % (55.09 / 55.30) |
+| clash2 / 4 / 8 | +0.1 / +0.1 / +0.3 % | 15.41 (16.30) → 15.60 (16.76); 16.11 (17.76) → 16.35 (17.62); 23.55 (24.17) → 23.52 (24.19) | +0.0 / +0.1 / +0.0 % |
+| clash16 / 20 / 32 | +0.1 / +0.2 / −0.2 % (clash20 25.39 / 25.34, worst 26.16 / 26.18) | 24.64 (27.64) → 24.71 (25.56); 25.17 (26.15) → 25.45 (26.25); 30.93 (33.20) → 30.83 (33.32) | −0.0 / +0.1 / +0.0 % (clash20 43.81 / 43.79, worst 47.18 / 47.09) |
+| apart1 to apart32 | −0.1 to +0.8 % | 6.17 (6.61) → 6.41 (6.61); 8.33 (8.41) → 8.33 (8.46); 12.86 (14.24) → 12.87 (14.28); 13.54 (14.81) → 13.56 (14.92); 14.06 (15.36) → 14.05 (15.39); 14.26 (15.64) → 14.25 (15.66); 15.27 (16.62) → 15.27 (16.60) | −0.2 to +0.1 % |
+| pole / wall_s / bricks_s / pile8_s | −0.2 / +0.1 / −0.0 / −0.0 % | 16.13 (30.40) → 16.68 (31.45); 7.51 (8.85) → 8.12 (9.34); 10.24 (10.80) → 11.15 (11.98); 24.98 (26.62) → 25.17 (26.76) | within 0.6 % |
+| drive / tumble / wall | +1.1 / +0.4 / +1.6 % | 3.52 (3.62) → 3.42 (3.67); 3.38 (3.54) → 3.43 (3.52); 4.05 (4.41) → 4.24 (4.45) | +0.0 / +0.4 / +0.1 % |
+| pile2 / pile8 / pile32 | +0.2 / +0.0 / −0.2 % | 8.24 (8.44) → 8.22 (8.41); 12.80 (13.25) → 12.99 (13.36); 36.13 (40.07) → 35.51 (39.39) | +0.0 / +0.1 / −3.0 % (pile32 73.42 / 75.71, worst 78.98 / 81.04) |
+| headon / side / bricks | −0.1 / −0.1 / +3.1 % (bricks 3.78 / 3.67) | 11.81 (12.53) → 11.89 (12.52); 8.41 (11.16) → 8.83 (11.67); 3.34 (3.50) → 3.72 (3.83) | within 0.1 % |
+| rocks / barrier / truss | +0.4 / +1.1 / +0.5 % | 4.01 (4.27) → 3.96 (4.18); 7.35 (8.27) → 7.29 (8.25); 1.71 (1.84) → 1.70 (1.91) | within 0.2 % |
+
+"On / off" is the paired A/B (the verdict: PASS on both machines, 37 rows, none slower
+past 5 % and 0.05 ms; `WORST=1` prints the slowest frame of any round of each half). Both
+columns are the last run, on the kernel as committed; two earlier runs of each machine on
+the kernel before the first test's rounding room gave the same verdicts and the same
+deltas to 0.5 % (mountain20_t12 −16.2 and −16.5 %, mountain20_t20 −32.9 and −35.5 %). On
+the T4 the other rows' worst frames are within 0.3 ms between the halves but for one
+frame of the on half on three rows: drive 7.61, wall 9.78 and pile2 24.10 ms against 3.94,
+6.69 and 12.34 in one run, 9.28, 8.68 and 28.57 in the next. It is not the switch: the
+same rows with `perf=0`, same against same, give pile2 22.46 / 12.26 (the lone cars 4.59 /
+4.60 and 3.93 / 3.92 that time). The on half is the first of each round; why its pile2
+has one slow frame was not looked into (a hypothesis: a module's first load in a timed
+frame). Each frame's best round, the number compared, does not see it. "Default before →
+after" is two `run.sh --baseline` runs of this
+build one after the other on the shared GPU, the first with `RUBBLE_PERF_FLAGS=165150661`
+(the defaults without the switch), each row a process of its own: not a paired A/B, and
+the one-car rows change level between processes by more than this change could (bricks
+3.34 → 3.72 and bricks_s 10.24 → 11.15 there are −0.6 % and −0.8 % in the paired run; a
+lone car launches no fleet dispatch).
+
+The worst frame of the mountain's last fixture goes from 69.1 to 44.4 ms on the Mac. From
+t 12 to t 20 the frame now grows from 34.2 to 43.2 ms where it grew from 40.6 to 66.5.
+
+By dispatch kind on the Mac (`--ab-profile`, each dispatch a timed pass, ms a frame;
+Metal's timestamps overstate a kind, the comparison is like for like):
+
+| kind | t 12 before → after | t 20 before → after |
+|---|---|---|
+| fleet walk | 10.17 → 2.25 (299 → 66 µs a dispatch) | 30.97 → 3.31 (911 → 98 µs) |
+| fleet triangles, points (the marks are made here) | 1.87 → 1.90 | 2.80 → 2.82 |
+| members' step | 23.89 → 23.83 | 25.98 → 25.98 |
+| levels | 3.31 → 3.31 | 6.42 → 6.41 |
+
+**Default: on natively and on CUDA** (`perf_flags_default`), off in a browser until
+Chrome's bit-for-bit A/B on the lab page (AGENTS.md rung 3) is run.
+
+**What is left of 20 cars on the mountain, and next.** After this the walk is within 1
+to 2 ms a frame of no walk at all (the time-only "no walk" frames above also lose the
+hits' work, so that is an upper bound of what is left). The frame at t 12 is the members'
+step (23.8 ms in §8.54's split), the levels (3.3) and the front's seven other dispatches
+a pass (the triangles and points, the owners' parts, the grids, three prefixes, the
+pairs: 6 to 7 ms a frame, mostly launches). A kept list that holds on a pile would
+replace those with one dispatch; it needs the cover for 19 partners (a layout change)
+and a build whose pairs fit the fleet's room, which §8.39's attempt at 16 partners did
+not reach. Not built here.
+
+**A bug found on the way, fixed because the proof needed it.** `explicit_replay` (the
+CUDA matrix's row runner) set a `perf=MASK` switch, ran one untimed frame, put the state
+back and timed: `CudaExplicitBeams::restore` puts the planner's words back with the
+bindings, the perf flags among them, so **both halves of every `perf=MASK` A/B on CUDA ran
+the snapshot's flags**, same against same (this switch's first T4 run: mountain20_t20
+124.86 / 124.79 ms, every row within 0.3 %). The switch is now applied again after the
+state is put back (80.94 / 125.56). Earlier T4 verdicts of `perf=` switches were
+same-against-same and say nothing; the host switches (`surffast`, `groupsplit`,
+`selfsplit`, `widelist`, `fused`, `wide`, `devindirect`) are fields of the host and were
+not affected.
+
+**Proofs** (2026-11-22; commands from `engine/`):
+
+- `WORST=1 tools/scenario-matrix/run.sh perf=536870912 ROW...` (all 37 rows named), Mac:
+  every row bit for bit, `verdict: PASS; 37 rows in 95.2 s` (before the rounding room:
+  `run.sh perf=536870912`, `verdict: PASS; 12 rows in 20.3 s`, and `... goal`, `verdict:
+  PASS; 25 rows in 97.8 s`).
+- `ENGINE_CUDA_FMAD=0 MODAL_OPTS="--pack 4 --env WORST=1" tools/scenario-matrix/run.sh
+  --cuda perf=536870912 ROW...` (all 37 rows named): every row bit for bit, `verdict:
+  PASS; 37 rows on Modal T4, in 4 container(s)`, three times (twice before the room).
+- `tools/explicit-2khz/perf-verify.sh default webgpu:fleet_walk_gpu webgpu:fleet_contact_gpu
+  webgpu:group_split_gpu webgpu:explicit_contact_gpu` (release, bit-exact on, the switch
+  on by default): PASS, 1, 1, 3 and 13 tests. `perf-verify.sh 701988805` (the defaults
+  with the kept candidates off, so that every contact pass walks) on `fleet_contact_gpu`,
+  `group_split_gpu` and `explicit_contact_gpu`: PASS, 1, 3 and 13. (`fleet_walk_gpu` and
+  the second run's `group_split_gpu` and `explicit_contact_gpu` on the kernel as
+  committed, the others before the rounding room.) On the kernel as committed again:
+  `perf-verify.sh default webgpu:fleet_contact_gpu metal:vehicle_parity`: PASS, 1 and 4.
+- `cargo test --profile fast -p engine-webgpu --test fleet_walk_gpu` (new, bit-exact on):
+  a column of ten and a column of six with torn panels (a triangle's node of two cars
+  moved 4 m, so that triangles are over the cells), the kept candidates off so that every
+  pass walks, with and without self split: 40 frames each, every state word the same with
+  the switch on as off; up to 9 and 18 big triangles a pass on threads of their own.
+- `cargo test --profile fast -p engine-webgpu --test explicit_loop_cap`: 6 passed (the
+  new loops are capped, ids 640 to 643). `cargo test --profile fast -p engine-exec`: 25.
+- Chrome: `EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
+  explicit-wgsl-check.mjs`: all 155 modules compile. `tools/build-time/compile_cost.py
+  --check`: 0 failing. `tools/build-time/check.py`: the two `vehicle_lab.rs` lines of the
+  base (3,383 lines against 3,375; `mountain_perf`), nothing new.
+
+**Not verified.** Chrome's bit-for-bit A/B on the lab page (rung 3: the web build needs
+the fracture lab's Git LFS assets, which this worktree does not hold; the switch stays
+off in a browser, where Chrome accepts every module); whole 20 and 40 s runs (rung 4)
+and the lab's own runs with the AI driving; the fast setting's tolerance suite
+(`fast_arithmetic_gpu`, `run.sh bitexact`). The time-only
+figures (the bound, the parts left out) are from builds that were not committed.
+
 ### 8.57 Every car's own step on the wide passes under vehicle contact: the map, and the frames without a group (2026-11-22)
 
 §8.54's first reading: a car's whole step in one workgroup costs 0.4 to 0.8 ms a step on
