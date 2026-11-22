@@ -611,7 +611,7 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 // slide nodes, as contactMemberStep runs them after its tests; then the list's state for
 // the next step, or its statistics at the frame's end. Before the groups' pass of the
 // step, which reads what the hits leave. A solo vehicle returns at once.
-void memberRest(uint v, uint lane, uint s)
+void memberRestStep(uint v, uint lane, uint s)
 {
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
@@ -649,6 +649,16 @@ void memberRest(uint v, uint lane, uint s)
 #endif
     sync();
     memberListSave(v, lane, s);
+}
+// … then, with the kept candidates' tracking here (PERF_KEEP_TRACK_REST: the scans fused
+// in the plan's workgroup), every node of the vehicle after its rest: the last writes of
+// its nodes before the contact pass's scans (explicit_beams_fleet_track.slang).
+void memberRest(uint v, uint lane, uint s)
+{
+    memberRestStep(v, lane, s);
+    if (!fkTrackInRest()) return;
+    sync();
+    fkTrackVehicle(v, lane);
 }
 #endif
 
@@ -698,6 +708,28 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
 }
 #endif
 
+// Raycast wheels on each other (drive header bit 2; explicit_beams_drive.slang
+// wheelsPartners): a workgroup a group before each substep's members' dispatch (parameter
+// copy s: step s's rays after step s - 1's reactions) and after the frame's last pass (the
+// copy SPLIT_BEGIN: the last step's reactions only). contactGroup's calls at its step's
+// start and frame's end: the same function on the same state, so the same bits.
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_wheels(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint lane = lid.x;
+    uint4 G = gMisc[gP.vvGroups + gid.x];
+    uint k = splitUniform(lane, splitAwake(G));
+    if (k == 0u) return ebLoopCapFlush();
+    if (lane == 0u) driveBegin();
+    sync();
+    uint driveOn = gsUniformDrive;
+    sync();
+    bool end = gP.pad2 == SPLIT_BEGIN;
+    if ((driveOn & 2u) != 0u) wheelsPartners(G.x, k, lane, end ? gP.steps : gP.pad2, !end);
+    ebLoopCapFlush();
+}
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_group(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -717,3 +749,74 @@ void explicit_beams_split_group(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
         splitGroupStep(gid.x, lid.x, gP.pad2);
     ebLoopCapFlush();
 }
+
+#ifdef EB_VV_FLEET
+// explicit_beams_split_group's dispatches one kind at a time, each in a module of its
+// own (explicit_plan::GroupEntry: the host picks one only for a dispatch it would run the
+// same way). One kernel holding every pass of splitGroupStep took Metal 267 s to compile
+// cold in Chrome, and those passes alone 0.2 to 35 s each (vehicle-perf-first-principles
+// §8.51). The same functions on the same words: the same results.
+
+// The groups' frame start (the word SPLIT_BEGIN).
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_group_begin(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    splitGroupBegin(gid.x, lid.x);
+    ebLoopCapFlush();
+}
+
+// The levels across the GPU's end (a word with SPLIT_LV).
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_group_lv(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    fleetLevelsEnd(gid.x, lid.x, gP.pad2);
+    ebLoopCapFlush();
+}
+
+// A step's levels (a word with SPLIT_LEVELS) where the copy's flags hold the owners'
+// state, the front fleet-wide, groups of any size, the hits by latency and the levels
+// once, but not the levels across the GPU, and the ablation word lacks 512
+// (explicit_plan::levels_once_entry): splitGroupStep's fleet branch under those flags,
+// the same calls in the same order.
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_group_levels(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    splitGroupLevelsOnce(gid.x, lid.x, gP.pad2);
+    ebLoopCapFlush();
+}
+
+void splitGroupLevelsOnce(uint g, uint lane, uint word)
+{
+    uint s = word & SPLIT_STEP;
+    bool levels = (word & SPLIT_LEVELS) != 0u;
+    uint4 G = gMisc[gP.vvGroups + g];
+    uint off = G.x;
+    uint runOff = G.z;
+    uint points = G.w;
+    uint k = splitUniform(lane, splitAwake(G));
+    if (k == 0u) return;
+    uint stepBase = gMisc[vvMember(off, 0u)].w;
+    uint parity = (stepBase + s) & 1u;
+    bool small = k <= VV_PART;
+    // (Without SPLIT_LEVELS: the front's word, which is fleet-wide here: nothing.)
+    if (!levels) return;
+    uint tag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u;
+    uint longest = 0u;
+    if (small && (gP.beamOrderPad0 & 0x80000000u) == 0u)
+    {
+        if (lane == 0u)
+        {
+            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
+        }
+        longest = splitUniform(lane, longest);
+    }
+    if (small && longest > FL_SCAN_MOST)
+        fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
+    else
+        fleetLevelsOnce(k, off, parity, lane, tag);
+    splitGroupEnd(off, k, lane, s);
+}
+#endif

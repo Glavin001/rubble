@@ -737,7 +737,8 @@ make that pass about a pass of today's front. The flag is now bit for bit in Chr
 the ledges and on the rolling gully, faster at the median everywhere and at the worst on
 the ledges, but not at the worst on the rolling gully, where the cars pile and the list is
 past its room or outlived in a few passes; so it stays off (§8.28). The limit that
-remains: one owner past its room sends every owner to the front's own path. A list per
+remained, one owner past its room sending every owner to the front's own path, is gone
+since §8.12 (the fleet's room, shared by the owners' counts). A list per
 car (an excluded car's pairs on today's front, the others reused) was built and measured
 slower on both terrains, and reverted (§8.28).
 
@@ -761,19 +762,79 @@ updates across the fleet (`PERF_FLEET_POST`, `flPostOn`, above) and the fused sc
 
 With the fused front (§8.9, `PERF_FLEET_FUSE`) the two share the grids' dispatch: a
 build's owner sorts its own run there after its offsets (`fuseSortCands`, the build's
-`fkSortCandOf`), a pass that reuses the list tests it there as before, and the pairs'
-scans keep their own dispatch while the kept candidates are on (it is also a thread a
-node, `fkTrack`: `fuseScansOn`). Both can be on; `fleet_contact_gpu` checks the kept
-candidates against off with the fused front on (the default).
+`fkSortCandOf`), a pass that reuses the list tests it there as before. The pairs' scans
+stay fused in the plan's workgroup too since §8.12 (the node tracking moved to the
+members' rest). With the throttles across the fleet (`PERF_FLEET_POST`) they combine since
+§8.12 as well (the dispatch takes the elements' size with the kept candidates). Before
+§8.12 the host dropped both with the kept candidates on: the record of why is §8.12's
+first part.
 
-With the throttles across the fleet (`PERF_FLEET_POST`, §8 stage 3) the kept candidates
-do not combine: that dispatch is sized and indexed by the walk's prefix of the listed
-triangles, which a pass that reuses the kept pairs never computes, so the throttle
-updates of such a pass were skipped (found by `fleet_contact_gpu` on the integration
-branch: two sedans head-on, frame 4, four words). With the kept candidates on, the host
-drops `PERF_FLEET_POST` and the levels across the GPU (`PERF_FLEET_LEVELS`, which leave
-the throttles to that dispatch), and the groups' levels update the listed triangles' throttles
-by each owner's listed count, as before the switch (`flPostOn`).
+### 8.12 The kept candidates with today's defaults: the throttles, the fused scans, the fleet's room (2026-11-18)
+
+Perf flag 32768 as §8.10; measurements and the default in `vehicle-perf-first-principles.md`
+§8.39. On main before this, turning the flag on cost two of the defaults:
+
+- **The throttles across the fleet (`PERF_FLEET_POST`) were dropped.** Its dispatch is a
+  thread a listed triangle, sized by the walk's arguments and indexed by the walk's
+  prefix of the listed triangles (`flPrefixAt(1)`). A pass that reuses the kept pairs
+  runs no walk and no later plan, so neither exists, and the throttle updates moved back
+  into the groups' levels (`flPostOn`): 528 triangles a car on one workgroup, +0.7 to
+  0.9 ms a frame of levels.
+- **The fused scans (`PERF_FLEET_FUSE`'s scans in the plan's workgroup) were dropped.**
+  The kept candidates' bound tracks every node's motion since the build (`fkTrack`, a
+  thread a node), which lived in the scans' dispatch, so that dispatch came back
+  (+0.37 to 0.53 ms a frame).
+
+What changed (each lossless: the same tests on the same pairs, only where work runs):
+
+1. **The throttles, a thread a triangle.** With the kept candidates on, the throttles'
+   dispatch takes the elements' arguments (at least a thread a triangle of the fleet; the
+   first plan writes them every pass, whatever the mode) and thread t updates triangle t
+   when this pass's throttle step listed it (`fkPost`: `fkListed(t)`, which `flTriangle`
+   writes for every triangle of an owner on the fleet-wide passes before any test reads
+   it) and its owner is on the passes (`flVehicleOn`, as the elements' thread). The same
+   triangles as the walk's listed ones, each once; `vvThrottleEnd` touches only the
+   triangle's own record and marks, so the order is free. `flPostOn` no longer excludes
+   the kept candidates.
+2. **The tracking in the members' rest.** The members' rest dispatch (`memberRest`, a
+   workgroup a vehicle, `PERF_MEMBER_LIST` with self-collision split) is the last to
+   write a member's nodes before the contact pass's scans. After it, a barrier, then the
+   workgroup tracks its vehicle's nodes (`fkTrackVehicle`): each lane its nodes' motion,
+   travel and class, its maxima and its fixed-point sum kept in registers and put with one
+   atomic each (maxima and an integer sum: the same in any order). The host sets
+   `PERF_KEEP_TRACK_REST` (bit 8, the host's own: a caller's is cleared) on every copy of
+   a frame with the kept candidates, the fused scans and the members' rest dispatches
+   (and not `PERF_SPLIT_WHEELS_AHEAD`, whose workgroups share the rest's dispatch); then
+   the scans' own tracking returns at once (`fkTrack`) and the scans stay fused
+   (`fuseScansOn`). Without the rest dispatches (self split off) the scans' dispatch
+   tracks as before.
+3. **The fleet's room for the kept pairs.** On the rolling gully the cars pile and one
+   owner's padded list is past its region's 32,767 pairs (33,103 to 66,207 measured), so
+   every build was past the room: the list void, the backoff doubling to 2,176 passes, and
+   no pass ever reused a list (0 builds kept in 680 passes at t 20 to 30). The kept pairs
+   now use the fleet's pair regions as one room of vehicles · 32,767 slots (the regions'
+   signature words never), each owner a share at the build: its last build's count, an
+   eighth more and 512, the room left spread evenly, scaled down when past the room
+   (`fkAlloc`, `fkShareAt`, `fkBase`; three rows of the kept candidates' region, so a
+   change of the buffers' layout). An owner past its share voids the list but the
+   listing keeps counting, so the next build's shares hold it; a build past an owner's
+   share alone retries two passes later (three in a row: the backoff), one past the
+   fleet's room takes the backoff and skips its listing as before. Where a pair is kept
+   decides nothing: the tests (`fkTest`) are the same on the same pairs.
+4. **A list kept down to 3 passes** (`FK_SHORT` 8 → 3). On the rolling gully the lists
+   now built last 6 to 8 passes (wild nodes: tumbling cars), and 8 sent every list to the
+   68-pass wait on today's front. A build and a few reused passes cost less there than
+   today's front each pass (§8.39). A choice of path only.
+
+What was looked at for the rebuilds and not built: a build that touches only the cars
+whose nodes passed their allowance, the list fleet-wide. The pairs of a rebuilt owner
+hold the points of its partners, whose records (the build's positions) the bound measures
+from; a partial build would need either every partner's records again (in a pile, every
+car: a whole build) or boxes padded by twice the allowance for the partners not rebuilt
+(larger lists, the tests' cost up). Neither pays on the measured split (§8.39: on the
+gully the builds' walk is 2.2 to 2.8 ms a frame and the kept pairs' tests 1.4 to 1.8 ms,
+against 6.1 to 6.9 ms of today's walk; a partial build would save part of the first and add
+to the second).
 
 ### 8.11 A group's levels with each hit worked out once (2026-11-18)
 

@@ -82,10 +82,11 @@ struct LazyKernel {
 impl LazyKernel {
     fn build(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
         self.pipeline.get_or_init(|| scoped(device, || format!("pipeline {name}"), || {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let off = rigid_shader_checks_off(device, name);
+            let module = crate::explicit_beams_gpu::shader_module_without(device, wgpu::ShaderModuleDescriptor {
                 label: Some(name),
                 source: wgpu::ShaderSource::Wgsl(self.wgsl.as_str().into()),
-            });
+            }, off);
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(name),
                 layout: Some(
@@ -97,11 +98,59 @@ impl LazyKernel {
                 ),
                 module: &module,
                 entry_point: None,
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: off & 8 == 0,
+                    ..Default::default()
+                },
                 cache: None,
             })
         }))
     }
+}
+
+/// What the World's own kernel `name` (every module but the explicit vehicles') is
+/// compiled without: 1 wgpu's bounds checks, 2 its forced loop bound, 4 its
+/// integer-division guards, 8 the zeroing of workgroup memory at each workgroup's start.
+/// `RUBBLE_RIGID_SHADER_CHECKS_OFF=MASK` sets it for every kernel (0: every check and the
+/// zeroing; a measurement, or the debugging mode). The default keeps what a result
+/// depends on or what is not proven (vehicle-perf-first-principles.md §8.49):
+/// - the loop bound out on native Metal: it changes nothing of a loop that ends, the
+///   rigid scenes' end states are the same bit for bit, and Metal is where it is measured;
+/// - the zeroing out, natively, for the `solve_primal*` kernels alone: their workgroup
+///   memory is 864 floats a workgroup, zeroed by one lane at every dispatch, and every
+///   value they read from it was written in the same dispatch before a barrier (a body's
+///   lanes are live together, so a lane's partner in `primalReduceStep` has written the
+///   slot it reads; `gsUniformLanes` is written by lane 0 before each read);
+/// - the bounds checks stay: without them the end states differ from step 20 on, through
+///   `narrowphase_fresh_copy_persistent` and `ccd_emit_copy_persistent` (the manifold
+///   code), and the other kernels gain nothing without them. The division guards stay:
+///   unproven.
+fn rigid_shader_checks_off(device: &wgpu::Device, name: &str) -> u32 {
+    static ENV: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    if let Some(mask) = *ENV.get_or_init(|| std::env::var("RUBBLE_RIGID_SHADER_CHECKS_OFF").ok().and_then(|v| v.parse().ok())) {
+        return mask;
+    }
+    // The search for the kernel whose result depends on the bounds checks:
+    // `RUBBLE_RIGID_BOUNDS_OFF_NAMES=a,b` compiles those kernels alone without them
+    // (`RUBBLE_RIGID_KERNEL_NAMES=1` prints each kernel as it is built).
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        std::env::var("RUBBLE_RIGID_BOUNDS_OFF_NAMES").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_default()
+    });
+    if std::env::var_os("RUBBLE_RIGID_KERNEL_NAMES").is_some() {
+        eprintln!("rigid kernel: {name}");
+    }
+    if cfg!(target_arch = "wasm32") {
+        return 0;
+    }
+    let mut off = u32::from(names.iter().any(|n| n == name));
+    if device.adapter_info().backend == wgpu::Backend::Metal {
+        off |= 2;
+    }
+    if name.starts_with("solve_primal") {
+        off |= 8;
+    }
+    off
 }
 
 /// A prewarm running on background threads ([`WgpuSim::prewarm_async`]): poll

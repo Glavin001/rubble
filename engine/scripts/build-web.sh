@@ -72,14 +72,25 @@ if [[ -n "$CACHE" ]]; then
   mkdir -p "$CACHE"
   CACHE="$(cd "$CACHE" && pwd)"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE/cargo-target}"
-  # Cargo never deletes stale artifacts (old dependency versions, a new toolchain), and
-  # Vercel's build cache holds 1 GB. Past the cap, start the target dir over: one cold
-  # build, then it fits again.
+  # Cargo never deletes stale artifacts (a crate's old variants, old dependency versions,
+  # a new toolchain), and Vercel's build cache holds 1 GB. Past the cap, start the
+  # workspace's own crates over and keep the third-party crates (trim-cargo-target.mjs:
+  # most of the stale bytes are engine-webgpu's old variants). Never the whole dir, nor
+  # the whole wasm half of it: a build from nothing takes about 55 minutes on Vercel's
+  # 2 cores and one with the wasm crates from nothing about 48, past its 45-minute limit,
+  # and a build that fails keeps no cache, so the branch starts over and fails on every
+  # push (PR #144, 2026-11-21, both tried). With the workspace's crates alone to compile
+  # a build is the 31 to 33 minutes of any build after a change to engine-webgpu.
   CAP_MB="${RUBBLE_TARGET_CAP_MB:-1600}"
   if [[ -d "$CARGO_TARGET_DIR" ]] \
     && (( $(du -sm "$CARGO_TARGET_DIR" | cut -f1) > CAP_MB )); then
-    echo "==> $CARGO_TARGET_DIR is over ${CAP_MB} MB: starting it over"
-    rm -rf "$CARGO_TARGET_DIR"
+    echo "==> $CARGO_TARGET_DIR is over ${CAP_MB} MB: starting the workspace's crates over"
+    if command -v node >/dev/null 2>&1; then
+      node "$ENGINE/scripts/trim-cargo-target.mjs" "$CARGO_TARGET_DIR" "$ENGINE"
+      echo "    now $(du -sm "$CARGO_TARGET_DIR" | cut -f1) MB"
+    else
+      echo "    (no node to run trim-cargo-target.mjs: left as it is)"
+    fi
   fi
   export RUBBLE_SLANG_CACHE="$CACHE/slang"
   echo "==> Build cache: $CACHE"

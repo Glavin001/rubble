@@ -86,7 +86,7 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
         // The vehicles' kernels compiled without blocking first (as `createVehicleTown`).
         let car = lab_car(&template, &opts, None);
         let fleet = vec![car; opts.cars as usize + usize::from(opts.parked)];
-        let mut specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(opts.capacity));
+        let mut specs = engine_webgpu::ExplicitBeamsGpu::compute_specs_for(&fleet, Some(opts.capacity), opts.bit_exact);
         if opts.self_split {
             engine_webgpu::ExplicitBeamsGpu::prefer_self_split(&mut specs);
         }

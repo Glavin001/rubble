@@ -13,8 +13,9 @@
 use super::{
     self_split_module_names, split_module_name, wide_list_module_name, Cmd, FramePlanner, Kernel, PARAM_COPIES,
     PARAM_LEVEL_COPIES, PARAM_STRIDE, PERF_AHEAD_APART, PERF_FLEET_ANY, PERF_FLEET_FRONT, PERF_FLEET_FUSE,
-    PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_MEMBER_LIST,
-    PERF_WHEELS_APART, PERF_WIDE_FUSED, PERF_WIDE_LIST, W_PERF_FLAGS, W_SLEEP, W_VV_FLEET, W_VV_FLEET_NEXT,
+    PERF_FLEET_HITLAT, PERF_FLEET_KEEP, PERF_FLEET_LEVELS, PERF_FLEET_POST, PERF_FLEET_STATE, PERF_HIT_SLOT_MAP, PERF_KEEP_TRACK_REST, PERF_MEMBER_LIST,
+    PERF_WHEELS_APART, PERF_WIDE_FUSED, PERF_WIDE_LIST, PERF_DRIVE_AHEAD, PERF_SPLIT_WHEELS_AHEAD, PERF_TYRE_AHEAD,
+    PERF_TYRE_EARLY, W_ABLATE, W_PERF_FLAGS, W_SLEEP, W_VV_FLEET, W_VV_FLEET_NEXT, PERF_LEVELS_ONCE,
     W_VV_TRI_PAIRS, WIDE_AUX, WIDE_BEAMS_PASS, WIDE_END, WIDE_TRIS, FLEET_LEVEL_MAX, FLEET_LEVEL_SLOTS_SHIFT,
 };
 
@@ -73,7 +74,8 @@ pub enum GroupOp {
     /// grids, lists), 2 the tests' walk, 3 the listed pairs' tests, 4 the levels (the
     /// hits applied; the last with the frame's end), 5 a whole pass in the group's workgroup,
     /// 6 the levels across the GPU's end.
-    Group { copy: u32, tests: bool, args: u64, part: u8 },
+    /// `entry`: which kernel runs it ([`GroupEntry`]; the tests' dispatches ignore it).
+    Group { copy: u32, tests: bool, args: u64, part: u8, entry: GroupEntry },
     /// A dispatch of the contact pass's front over the fleet ([`PERF_FLEET_FRONT`]):
     /// `kernel` 0 the thread kernels' module, 1 the plan module, 2 the tests' module, 3 the
     /// throttles', 4 the levels across the GPU's;
@@ -96,6 +98,51 @@ pub enum GroupOp {
     /// pairs, before the groups' pass; parameter copy `copy` (the step with the kernel's
     /// SPLIT_LEVELS). No workgroups without a group.
     SelfRest { copy: u32 },
+    /// The members' raycast wheels on each other before step `copy` (copy steps + 1: the
+    /// frame's end, the last step's reactions only), a workgroup a group
+    /// ([`Switches::wheels_bodies`]).
+    Wheels { copy: u32 },
+}
+
+/// Which kernel runs a groups' dispatch ([`GroupOp::Group`]): the one with every pass
+/// (`explicit_beams_split_group`), or one with only what that dispatch runs, in a module
+/// of its own. The kernel with every pass took Metal 267 s to compile cold in Chrome; the
+/// frame's start, the levels' end and a step's levels under the default flags alone take
+/// 0.2 s, 1.3 s and about 40 s. Each runs the same functions on the same words as the
+/// kernel with every pass: the same results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupEntry {
+    /// `explicit_beams_split_group` (any word).
+    Any,
+    /// The frame's start (SPLIT_BEGIN).
+    Begin,
+    /// A step's levels where [`levels_once_entry`] holds.
+    LevelsOnce,
+    /// The levels across the GPU's end (SPLIT_LV).
+    LvEnd,
+}
+
+impl GroupEntry {
+    /// The module's `which` ([`split_module_name`]) and its entry point.
+    pub fn which_entry(self) -> (&'static str, &'static str) {
+        match self {
+            GroupEntry::Any => ("group", super::SPLIT_GROUP_ENTRY),
+            GroupEntry::Begin => ("groupbegin", super::SPLIT_GROUP_BEGIN_ENTRY),
+            GroupEntry::LevelsOnce => ("grouplevels", super::SPLIT_GROUP_LEVELS_ENTRY),
+            GroupEntry::LvEnd => ("grouplv", super::SPLIT_GROUP_LV_ENTRY),
+        }
+    }
+}
+
+/// Whether a step's levels dispatch with the copy's `flags` and ablation word `ablate`
+/// runs as `explicit_beams_split_group_levels` does: splitGroupStep's fleet branch with
+/// the owners' state, the front fleet-wide, groups of any size, the hits by latency and
+/// the levels once, not the levels across the GPU (the kernel's flLevelsOn), and not the
+/// measurement that skips the groups' passes (ablation 512).
+pub fn levels_once_entry(flags: u32, ablate: u32) -> bool {
+    let need = PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_HITLAT | PERF_LEVELS_ONCE;
+    let across = PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST | PERF_FLEET_LEVELS;
+    flags & need == need && flags & across != across && ablate & 512 == 0
 }
 
 impl GroupOp {
@@ -127,6 +174,7 @@ impl GroupOp {
             GroupOp::SelfWalk { .. } => "explicit self walk",
             GroupOp::SelfPairs { .. } => "explicit self pairs",
             GroupOp::SelfRest { .. } => "explicit self members' hits",
+            GroupOp::Wheels { .. } => "explicit split wheels on cars",
         }
     }
 }
@@ -195,8 +243,17 @@ pub struct Switches<'a> {
     /// onto the list and hits kernels.
     pub wide_list: bool,
     pub wide_fused: bool,
+    /// Raycast wheels see the rigid proxies and other cars (the drive header's bit 2,
+    /// `engine_softbody::explicit_drive::DriveConfig::see_bodies`): the split group path
+    /// runs the members' wheels on each other ([`GroupOp::Wheels`]) and the wide passes'
+    /// fused aux work is left out ([`Switches::wide_fused_on`]).
+    pub wheels_bodies: bool,
     /// Vehicle contact's candidates in a grid (the owners' state by vehicle needs it).
     pub vv_grid: bool,
+    /// The groups' dispatches on the kernels of one kind each where they serve
+    /// ([`group_entries_apart`]; [`group_apart_default`]); off: every groups' dispatch on
+    /// the kernel with every pass. The same results either way.
+    pub group_apart: bool,
     /// The kernels are the current ones (not a test variant).
     pub current: bool,
     /// Measurement: the current kernel's ablation build (self split runs on it).
@@ -220,6 +277,22 @@ pub struct Switches<'a> {
     /// then frames keep the paths that do not need it, the same results).
     pub ready: &'a dyn Fn(&str) -> bool,
 }
+
+impl Switches<'_> {
+    /// The wide passes' fused aux work as frames take it: not while wheels see bodies
+    /// (it runs step s + 1's wheels beside step s's proxies).
+    pub fn wide_fused_on(&self) -> bool {
+        self.wide_fused && !self.wheels_bodies
+    }
+}
+
+/// The schedules left out while raycast wheels see bodies: they run the wheels' rays or
+/// tyres before or beside the step's proxy integration (or, the wide passes', on another
+/// workgroup at once), where a ray would meet a body's last pose. A host clears them from
+/// its perf flags while [`Switches::wheels_bodies`] (the kernel fails a frame that takes
+/// them with the bit set).
+pub const WHEELS_AHEAD_FLAGS: u32 =
+    PERF_DRIVE_AHEAD | PERF_SPLIT_WHEELS_AHEAD | PERF_AHEAD_APART | PERF_TYRE_AHEAD | PERF_TYRE_EARLY | PERF_WHEELS_APART;
 
 /// The paths a frame runs ([`frame`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -339,7 +412,10 @@ pub struct SplitLaunch {
 /// What a split path [`Op`] launches (`None` for a plan command: [`Kernel::module_for`]).
 /// `aero` and `lanes`: the fleet's frame variant; `kind`: the frame's paths.
 pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option<SplitLaunch> {
-    use super::{split_module_name as split, SPLIT_GROUP_ENTRY, SPLIT_MEMBER_ENTRY, SPLIT_TESTS_ENTRY, WIDE_LIST_ENTRY};
+    use super::{
+        split_module_name as split, SPLIT_GROUP_ENTRY, SPLIT_MEMBER_ENTRY, SPLIT_TESTS_ENTRY, SPLIT_WHEELS_ENTRY,
+        WIDE_LIST_ENTRY,
+    };
     let selfs = |vv: bool, i: usize| {
         let (name, entry, _) = self_split_module_names(aero, lanes, vv).swap_remove(i);
         (name, entry)
@@ -371,8 +447,8 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
         Op::Group(GroupOp::Group { copy, tests: true, args, .. }) => {
             l((split("tests", aero, lanes), SPLIT_TESTS_ENTRY), copy, Grid::Indirect(ArgBuf::Plan, args), None, None)
         }
-        Op::Group(GroupOp::Group { copy, tests: false, args, .. }) => l(
-            (split("group", aero, lanes), SPLIT_GROUP_ENTRY),
+        Op::Group(GroupOp::Group { copy, tests: false, args, entry, .. }) => l(
+            (split(entry.which_entry().0, aero, lanes), entry.which_entry().1),
             copy,
             Grid::Indirect(ArgBuf::Plan, args),
             Some(ArgBuf::Fleet1),
@@ -400,6 +476,14 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
             };
             l((split(which, aero, lanes), entry), copy, Grid::Indirect(src, args), b10, b11)
         }
+        // (The groups' module's defines and the tests' bindings, a workgroup a group.)
+        Op::Group(GroupOp::Wheels { copy }) => l(
+            (split("wheels", aero, lanes), SPLIT_WHEELS_ENTRY),
+            copy,
+            Grid::Indirect(ArgBuf::Plan, SPLIT_GROUP_ARGS),
+            None,
+            None,
+        ),
         Op::Group(GroupOp::Member(s)) => l(
             (split("member", aero, lanes), SPLIT_MEMBER_ENTRY),
             s,
@@ -421,8 +505,10 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
 /// The perf flags of a frame on the split group path: vehicle contact's state by owner
 /// vehicle ([`PERF_FLEET_STATE`], contact-groups-design.md §8) only with the tests in
 /// their own dispatches, the candidates' grid, the pair list and the state's regions (a
-/// fleet of two or more); otherwise the groups' slots, the same results.
-pub fn fleet_flags(planner: &FramePlanner, sw: &Switches) -> u32 {
+/// fleet of two or more); otherwise the groups' slots, the same results. `vv`: the frame
+/// runs self-collision split with vehicle contact ([`FrameKind::self_split_vv`]; it
+/// decides [`PERF_KEEP_TRACK_REST`]).
+pub fn fleet_flags(planner: &FramePlanner, sw: &Switches, vv: bool) -> u32 {
     let w = &planner.words;
     let ok = sw.group_split_tests && sw.vv_grid && w[W_VV_TRI_PAIRS] != 0 && w[W_VV_FLEET] != 0 && w[W_VV_FLEET_NEXT] != 0;
     // (The front as fleet-wide dispatches: with the state by vehicle, once its modules
@@ -440,14 +526,31 @@ pub fn fleet_flags(planner: &FramePlanner, sw: &Switches) -> u32 {
         // (Groups of any size on the fleet-wide passes: only with the front there.)
         flags &= !(PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST | PERF_FLEET_FUSE | PERF_FLEET_HITLAT | PERF_FLEET_KEEP);
     }
-    // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates stay
-    // in the groups' levels, which find them by each owner's listed count. The
-    // throttles' own dispatch is sized and indexed by the walk's prefix of the listed
-    // triangles, which a pass that reuses the kept pairs does not compute; and the
-    // levels across the GPU leave the throttles to that dispatch. The kernel's
-    // flPostOn says the same.)
+    // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates
+    // across the fleet, PERF_FLEET_POST, take the elements' dispatch, a thread a
+    // triangle (a pass that reuses the kept pairs computes no walk, so no prefix of the
+    // listed triangles: the kernel's fkPost). The levels across the GPU are not taken
+    // with them.)
     if flags & PERF_FLEET_KEEP != 0 {
-        flags &= !(PERF_FLEET_POST | PERF_FLEET_LEVELS);
+        flags &= !PERF_FLEET_LEVELS;
+    }
+    // (The kept candidates' tracking in the members' rest, PERF_KEEP_TRACK_REST: the
+    // host's alone, when the frame has the rest dispatches and the fused scans, and no
+    // wheels in the rest's dispatch beside the members; else the scans' dispatch.)
+    flags &= !PERF_KEEP_TRACK_REST;
+    // (PERF_HIT_SLOT_MAP is bit 27, which the split group path's copies give to the
+    // level slots ([`FLEET_LEVEL_SLOTS_SHIFT`], the kernel's lvSlots): no bit of the
+    // word is free. The map is the wide hits kernel's alone, which no split module is,
+    // so these copies leave it out (the same results either way).)
+    flags &= !PERF_HIT_SLOT_MAP;
+    let rest = PERF_FLEET_FRONT | PERF_FLEET_KEEP | PERF_FLEET_FUSE | PERF_MEMBER_LIST;
+    if front
+        && sw.group_split_tests
+        && flags & rest == rest
+        && flags & PERF_SPLIT_WHEELS_AHEAD == 0
+        && member_rest_on(planner, vv)
+    {
+        flags |= PERF_KEEP_TRACK_REST;
     }
     // (The levels across the GPU: with groups of any size and the throttles across the
     // fleet, once their module is compiled.)
@@ -466,7 +569,7 @@ pub fn fleet_flags(planner: &FramePlanner, sw: &Switches) -> u32 {
 /// Levels past them run in their group's workgroup in the end dispatch (the same
 /// results).
 pub fn fleet_level_slots(planner: &FramePlanner, sw: &Switches, steps: u32) -> u32 {
-    if fleet_flags(planner, sw) & PERF_FLEET_LEVELS == 0 {
+    if fleet_flags(planner, sw, false) & PERF_FLEET_LEVELS == 0 {
         return 0;
     }
     let room = (PARAM_COPIES + PARAM_LEVEL_COPIES).saturating_sub(3 * steps + 2 + 3) / 4;
@@ -479,17 +582,45 @@ pub fn fleet_level_slots(planner: &FramePlanner, sw: &Switches, steps: u32) -> u
 
 /// [`fleet_flags`] for a frame of `slots` level slots past the switches
 /// ([`FLEET_LEVEL_SLOTS_SHIFT`]; with the levels across the GPU).
-pub fn fleet_flags_for(planner: &FramePlanner, sw: &Switches, slots: u32) -> u32 {
-    let flags = fleet_flags(planner, sw);
+pub fn fleet_flags_for(planner: &FramePlanner, sw: &Switches, vv: bool, slots: u32) -> u32 {
+    let flags = fleet_flags(planner, sw, vv);
     if flags & PERF_FLEET_LEVELS == 0 {
         return flags;
     }
     flags | slots << FLEET_LEVEL_SLOTS_SHIFT
 }
 
-/// Whether the self split's modules (with vehicle contact or not) are compiled.
-fn self_split_ready(sw: &Switches, vv: bool) -> bool {
-    self_split_module_names(sw.aero, sw.lanes, vv).iter().all(|(m, _, _)| (sw.ready)(m))
+/// Whether the self split's modules (with vehicle contact or not) are compiled; with
+/// contact the groups' kernels as [`group_ready`] says.
+fn self_split_ready(planner: &FramePlanner, sw: &Switches, vv: bool) -> bool {
+    let group = split_module_name("group", sw.aero, sw.lanes);
+    self_split_module_names(sw.aero, sw.lanes, vv).iter().filter(|(m, _, _)| *m != group).all(|(m, _, _)| (sw.ready)(m))
+        && (!vv || group_ready(planner, sw, vv))
+}
+
+/// Whether this frame's groups' dispatches run the kernels of one dispatch kind each
+/// ([`GroupEntry`] other than `Any`): the tests split with the front fleet-wide and the
+/// flags of [`levels_once_entry`], and those modules compiled. Otherwise every groups'
+/// dispatch runs `explicit_beams_split_group`.
+pub fn group_entries_apart(planner: &FramePlanner, sw: &Switches, vv: bool) -> bool {
+    let f = fleet_flags(planner, sw, vv);
+    sw.group_apart
+        && sw.group_split_tests
+        && levels_once_entry(f, planner.words[W_ABLATE])
+        && ["groupbegin", "grouplevels", "grouplv"].iter().all(|w| (sw.ready)(&split_module_name(w, sw.aero, sw.lanes)))
+}
+
+/// [`Switches::group_apart`]'s default: on; `RUBBLE_GROUP_APART=0` off (a measurement,
+/// and the A/B that holds the kernels of one kind each to the one with every pass).
+pub fn group_apart_default() -> bool {
+    std::env::var("RUBBLE_GROUP_APART").as_deref() != Ok("0")
+}
+
+/// Whether the groups' kernels a frame would run are compiled: those of one dispatch
+/// kind each ([`group_entries_apart`]) or the one with every pass. (A browser host
+/// compiles the one with every pass in the background when the others serve.)
+fn group_ready(planner: &FramePlanner, sw: &Switches, vv: bool) -> bool {
+    group_entries_apart(planner, sw, vv) || (sw.ready)(&split_module_name("group", sw.aero, sw.lanes))
 }
 
 /// Whether this frame runs the split group path.
@@ -506,7 +637,8 @@ pub fn group_split_on(planner: &FramePlanner, sw: &Switches, steps: u32) -> bool
         && sw.vehicles * 64 <= 65_535
         // (A browser host's async compiles: the groups' workgroup until its modules
         // are compiled, the same results.)
-        && ["member", "group", "tests"].iter().all(|w| (sw.ready)(&split_module_name(w, sw.aero, sw.lanes)))
+        && ["member", "tests"].iter().all(|w| (sw.ready)(&split_module_name(w, sw.aero, sw.lanes)))
+        && group_ready(planner, sw, false)
 }
 
 /// Whether a frame with self-collision split and vehicle contact runs the members' rest
@@ -527,7 +659,7 @@ fn self_split_vv_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[C
         && steps > 0
         && 3 * steps + 2 <= PARAM_COPIES
         && sw.vehicles * 64 <= 65_535
-        && self_split_ready(sw, true)
+        && self_split_ready(planner, sw, true)
         && cmds.iter().all(|c| match c {
             Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => {
                 matches!(kernel, Kernel::Vv(_) | Kernel::Sleep | Kernel::Solo | Kernel::Contact | Kernel::ContactBig)
@@ -546,7 +678,7 @@ fn self_split_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[Cmd]
         && !sw.debug
         && steps > 0
         && steps < PARAM_COPIES
-        && self_split_ready(sw, false)
+        && self_split_ready(planner, sw, false)
         && cmds.iter().any(|c| matches!(c, Cmd::Dispatch { kernel: Kernel::Frame, .. } | Cmd::Indirect { kernel: Kernel::Frame, .. }))
         && cmds.iter().all(|c| match c {
             // (Vehicle sleep's awake list before the frame, when it is listed.)
@@ -560,9 +692,9 @@ fn self_split_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[Cmd]
 /// coupling and wheels (the kernel's `wideAheadApart`).
 pub fn list_groups(planner: &FramePlanner, sw: &Switches, nv: u32) -> u32 {
     let f = planner.perf_flags();
-    if sw.wide_fused && f & PERF_AHEAD_APART != 0 && f & PERF_WHEELS_APART != 0 {
+    if sw.wide_fused_on() && f & PERF_AHEAD_APART != 0 && f & PERF_WHEELS_APART != 0 {
         3 * nv
-    } else if sw.wide_fused && f & PERF_AHEAD_APART != 0 {
+    } else if sw.wide_fused_on() && f & PERF_AHEAD_APART != 0 {
         2 * nv
     } else {
         nv
@@ -573,14 +705,24 @@ pub fn list_groups(planner: &FramePlanner, sw: &Switches, nv: u32) -> u32 {
 /// self-collision split and contact, every vehicle's step, the walk and the pairs in
 /// each substep).
 pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps: u32) -> Vec<GroupOp> {
-    let mut out = vec![GroupOp::Group { copy: steps + 1, tests: false, args: SPLIT_GROUP_ARGS, part: 0 }];
+    let vv = kind.self_split_vv;
+    // (The groups' dispatches on kernels of one kind each where those serve.)
+    let apart = group_entries_apart(planner, sw, vv);
+    let pick = |e: GroupEntry| if apart { e } else { GroupEntry::Any };
+    let any = GroupEntry::Any;
+    let mut out = vec![GroupOp::Group { copy: steps + 1, tests: false, args: SPLIT_GROUP_ARGS, part: 0, entry: pick(GroupEntry::Begin) }];
     // With self-collision split: every vehicle's step (copy s, s = 0 ..= steps: the
     // last the solo vehicles' last rest and frame end), each step's walk and pairs
     // over the solo vehicles (explicit_beams_selfsplit.slang), then the groups.
-    let vv = kind.self_split_vv;
     let slots = kind.level_slots;
-    let fleet = fleet_flags(planner, sw);
+    let fleet = fleet_flags(planner, sw, vv);
+    // Raycast wheels on each other (Switches::wheels_bodies): before each step's members,
+    // the last step's reactions and this step's rays; after the last step the reactions.
+    let wheels = sw.wheels_bodies;
     for s in 0..steps + u32::from(vv) {
+        if wheels && s < steps {
+            out.push(GroupOp::Wheels { copy: s });
+        }
         if vv {
             out.push(GroupOp::SelfMember(s));
             if s == steps {
@@ -603,14 +745,16 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             // no workgroups without one; with PERF_FLEET_ANY it is on the fleet-wide
             // passes as every other.)
             if fleet & PERF_FLEET_ANY == 0 {
-                out.push(GroupOp::Group { copy: ct, tests: false, args: FLEET_LARGER_ARGS, part: 5 });
+                out.push(GroupOp::Group { copy: ct, tests: false, args: FLEET_LARGER_ARGS, part: 5, entry: any });
             }
             // (PERF_FLEET_FUSE: the scans in the plan's workgroup, the sorted copy in the
             // grids' workgroups.)
             // (With the kept candidates the scans' dispatch stays: it also tracks every
             // node, fkTrack; the kernel's fuseScansOn.)
+            // (PERF_KEEP_TRACK_REST: the tracking in the members' rest, the scans fused.)
             let fuse = fleet & PERF_FLEET_FUSE != 0;
-            if !fuse || fleet & PERF_FLEET_KEEP != 0 {
+            let keep = fleet & (PERF_FLEET_KEEP | PERF_KEEP_TRACK_REST) == PERF_FLEET_KEEP;
+            if !fuse || keep {
                 out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
             }
             out.push(GroupOp::Fleet { copy: c0, kernel: 1, args: FLEET_FIRST_ARGS, from: 0, part: 1 });
@@ -624,10 +768,15 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             out.push(GroupOp::Fleet { copy: cl, kernel: 1, args: FLEET_ONE_ARGS, from: 1, part: 7 });
             out.push(GroupOp::Fleet { copy: cl, kernel: 2, args: FLEET_PAIRS_ARGS, from: 2, part: 8 });
             // (The listed triangles' throttle updates, a thread each: the walk's size.)
+            // (With the kept candidates: a thread a triangle, the elements' size.)
             if fleet & PERF_FLEET_POST != 0 {
-                out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                if fleet & PERF_FLEET_KEEP != 0 {
+                    out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_ELEMENT_ARGS, from: 1, part: 9 });
+                } else {
+                    out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                }
             }
-            out.push(GroupOp::Group { copy: cl, tests: false, args: SPLIT_GROUP_ARGS, part: 4 });
+            out.push(GroupOp::Group { copy: cl, tests: false, args: SPLIT_GROUP_ARGS, part: 4, entry: pick(GroupEntry::LevelsOnce) });
             // The levels across the GPU (explicit_beams_fleet_levels.slang): the plan (one
             // workgroup when a group exists), the snapshot, each slot's application and
             // residual phases (a thread a hit of that level), then the end (a workgroup a
@@ -642,18 +791,21 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
                         out.push(GroupOp::Fleet { copy: base + 4 * (l - 1) + phase, kernel: 4, args, from: 1, part: if phase == 0 { 12 } else { 13 } });
                     }
                 }
-                out.push(GroupOp::Group { copy: base + 4 * slots + 2, tests: false, args: SPLIT_GROUP_ARGS, part: 6 });
+                out.push(GroupOp::Group { copy: base + 4 * slots + 2, tests: false, args: SPLIT_GROUP_ARGS, part: 6, entry: pick(GroupEntry::LvEnd) });
             }
         } else if sw.group_split_tests {
             // The front, the tests across workgroups (the walk, then the listed
             // pairs), then the levels.
-            out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS, part: 1 });
-            out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS, part: 2 });
-            out.push(GroupOp::Group { copy: steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS, part: 3 });
-            out.push(GroupOp::Group { copy: steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS, part: 4 });
+            out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS, part: 1, entry: any });
+            out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS, part: 2, entry: any });
+            out.push(GroupOp::Group { copy: steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS, part: 3, entry: any });
+            out.push(GroupOp::Group { copy: steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS, part: 4, entry: any });
         } else {
-            out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS, part: 5 });
+            out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS, part: 5, entry: any });
         }
+    }
+    if wheels {
+        out.push(GroupOp::Wheels { copy: steps + 1 });
     }
     out
 }
@@ -690,7 +842,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         && steps > 0
         && !planner.has_surface()
         && sw.current
-        && self_split_ready(sw, false)
+        && self_split_ready(planner, sw, false)
         && (sw.ready)(wide_list_module_name(sw.lanes));
     kind.wide_list = if wl { steps } else { 0 };
     let params = if wl {
@@ -698,7 +850,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         let at = 4 * W_PERF_FLAGS;
         let flags = planner.words[W_PERF_FLAGS];
         for k in 0..=steps as usize {
-            let fused = if sw.wide_fused { PERF_WIDE_FUSED } else { 0 };
+            let fused = if sw.wide_fused_on() { PERF_WIDE_FUSED } else { 0 };
             bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(flags | PERF_WIDE_LIST | fused).to_le_bytes());
         }
         bytes
@@ -707,6 +859,17 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         bytes
     } else if group {
         kind.group_split = true;
+        // (The steps' copies without PERF_HIT_SLOT_MAP too: on this path bit 27 is the
+        // level slots' (lvSlots, read by the groups' pass at copy s without the tests
+        // split); the map is the wide hits kernel's alone, the same results either way.)
+        {
+            let stride = PARAM_STRIDE as usize;
+            let at = 4 * W_PERF_FLAGS;
+            for k in 0..=steps as usize {
+                let w = u32::from_le_bytes(bytes[stride * k + at..stride * k + at + 4].try_into().unwrap());
+                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(w & !PERF_HIT_SLOT_MAP).to_le_bytes());
+            }
+        }
         // Copy steps + 1: the groups' frame start (the kernel's SPLIT_BEGIN); with the
         // tests split, copy steps + 2 + s step s's second phase (SPLIT_LEVELS) and copy
         // 2 steps + 2 + s its first group dispatch and walk (SPLIT_TESTS). The
@@ -722,7 +885,17 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         bytes.resize((PARAM_STRIDE * u64::from(steps + 1 + extra + lv)) as usize, 0);
         // The owners' state by vehicle only where its dispatches and regions are (the
         // groups' dispatches' copies carry the flags that hold this frame).
-        let flags = fleet_flags_for(planner, sw, slots);
+        let flags = fleet_flags_for(planner, sw, vv, slots);
+        // (The kept candidates' tracking in the members' rest: the steps' copies, which
+        // the scans and the first plan read, say so too.)
+        if flags & PERF_KEEP_TRACK_REST != 0 {
+            let stride = PARAM_STRIDE as usize;
+            let at = 4 * W_PERF_FLAGS;
+            for k in 0..=steps as usize {
+                let w = u32::from_le_bytes(bytes[stride * k + at..stride * k + at + 4].try_into().unwrap());
+                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(w | PERF_KEEP_TRACK_REST).to_le_bytes());
+            }
+        }
         let mut put = |k: u32, word: u32| {
             let mut w = planner.words;
             w[W_PERF_FLAGS] = flags;
@@ -805,7 +978,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
             }
             // (PERF_WIDE_FUSED: steps 1..'s coupling and wheels ran on the step
             // before's list and hits kernels.)
-            if k == WIDE_AUX && sw.wide_fused && param_copy >= 1 && param_copy < steps {
+            if k == WIDE_AUX && sw.wide_fused_on() && param_copy >= 1 && param_copy < steps {
                 continue;
             }
             if k == WIDE_END {

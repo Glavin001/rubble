@@ -177,6 +177,9 @@ pub struct CudaExplicitBeams {
     wide_list: bool,
     wide_fused: bool,
     vv_grid: bool,
+    /// Raycast wheels see bodies (the drive header's bit 2 in the uploaded state:
+    /// `schedule::Switches::wheels_bodies`).
+    wheels_bodies: bool,
     /// Indirect launches read their counts on the GPU (default); off, the host reads
     /// them back (a wait).
     device_indirect: bool,
@@ -249,7 +252,7 @@ impl CudaExplicitBeams {
         if layout.sleep.is_some() {
             out.push(Kernel::Sleep.module_for(aero, lanes, layout.surface).to_string());
         }
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
             out.push(plan::split_module_name(which, aero, lanes));
         }
         for vv in [false, true] {
@@ -296,6 +299,7 @@ impl CudaExplicitBeams {
         g.wide_fused = s.wide_fused;
         // (The grid's switch is a word in the bindings, already as that host had it.)
         g.vv_grid = s.vv_grid;
+        g.wheels_bodies |= s.wheels_bodies;
         Ok(g)
     }
 
@@ -318,6 +322,13 @@ impl CudaExplicitBeams {
         let sms = unsafe { result::device::get_attribute(dev, sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) }
             .map_err(map)? as u32;
 
+        // Raycast wheels that see bodies: the drive header's .x bit 2 (explicit_plan::drive).
+        let wheels_bodies = layout.drive.is_some_and(|d| {
+            let at = d.header as usize * 16;
+            bindings[engine_exec::explicit_plan::BIND_MISC as usize]
+                .get(at..at + 4)
+                .is_some_and(|w| u32::from_le_bytes(w.try_into().unwrap()) & 2 != 0)
+        });
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         let mut sizes = Vec::with_capacity(BIND_COUNT);
         for bytes in bindings {
@@ -386,6 +397,7 @@ impl CudaExplicitBeams {
             wide_list: false,
             wide_fused: false,
             vv_grid: true,
+            wheels_bodies,
             device_indirect: std::env::var("RUBBLE_CUDA_HOST_INDIRECT").as_deref() != Ok("1"),
             sms,
             args_syncs: 0,
@@ -452,13 +464,20 @@ impl CudaExplicitBeams {
         }
         self.bind_ctx()?;
         let ready = |_: &str| true;
+        // Wheels that see bodies leave out the schedules that run rays ahead.
+        if self.wheels_bodies {
+            let f = self.planner.perf_flags();
+            self.planner.set_perf_flags(f & !schedule::WHEELS_AHEAD_FLAGS);
+        }
         let sw = schedule::Switches {
             group_split: self.group_split,
             group_split_tests: self.group_split_tests,
             self_split: self.self_split,
             wide_list: self.wide_list,
             wide_fused: self.wide_fused,
+            wheels_bodies: self.wheels_bodies,
             vv_grid: self.vv_grid,
+            group_apart: schedule::group_apart_default(),
             current: true,
             ablate: false,
             debug: false,

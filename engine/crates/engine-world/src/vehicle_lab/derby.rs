@@ -327,6 +327,9 @@ pub struct DerbyCar {
     pub wheels_off: u32,
     /// Per wheel whether it is on the main body (the pose uses only those).
     pub attached: Vec<bool>,
+    /// Its main body's wheels touching something at the last reading (a car with none
+    /// that should move is beached).
+    pub grounded: u32,
 }
 
 /// A derby round: the cars, the AI, who is out, the winner.
@@ -391,6 +394,12 @@ impl DerbyGame {
             engine_exec::explicit_plan::drive::decode(w, &mut d);
             let mask = (car.attached.len() == d.wheels.len() && car.attached.iter().any(|a| *a))
                 .then_some(car.attached.as_slice());
+            car.grounded = d
+                .wheels
+                .iter()
+                .enumerate()
+                .filter(|(k, s)| s.contact && mask.is_none_or(|m| m[*k]))
+                .count() as u32;
             let (c, fwd, up) = wheel_frame(&d, mask);
             let p = Vec3::new(f(o[0]), f(o[1]), f(o[2])) + c;
             if p.is_finite() && fwd.is_finite() && up.is_finite() && d.speed.is_finite() {
@@ -588,7 +597,7 @@ impl DerbyGame {
     }
 
     /// The round for the page: `{ t, limit, over, winner, left, player, cars: [{ out,
-    /// outAt, damage, wheelsOff, kmh, flipped, target, plan, pos }], events: [{ t, text }] }`.
+    /// outAt, damage, wheelsOff, kmh, flipped, grounded, target, plan, pos }], events: [{ t, text }] }`.
     pub fn json(&self) -> Value {
         let left = self.cars.iter().filter(|c| c.out.is_none()).count();
         json!({
@@ -596,7 +605,7 @@ impl DerbyGame {
             "player": self.player(), "spec": self.spec.json(), "readings": self.readings,
             "cars": self.cars.iter().enumerate().map(|(v, c)| json!({
                 "out": c.out.map(|o| o.0), "outAt": c.out.map(|o| o.1), "damage": c.damage, "wheelsOff": c.wheels_off,
-                "kmh": c.pose.map_or(0.0, |p| p.speed * 3.6), "flipped": c.flipped_for,
+                "kmh": c.pose.map_or(0.0, |p| p.speed * 3.6), "flipped": c.flipped_for, "grounded": c.grounded,
                 "pos": c.pose.map(|p| p.p.to_array()), "up": c.pose.map(|p| p.up.y),
                 "target": self.drivers.get(v).and_then(|d| d.target()),
                 "plan": if Some(v) == self.player() { "player" } else { self.drivers.get(v).map_or("", |d| d.plan_name()) },

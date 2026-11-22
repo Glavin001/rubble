@@ -5,7 +5,9 @@
 # FLAGS: the perf flags the suites run with (0: every switch off; `default`: the host's own). Each suite holds the GPU
 # kernel to the CPU reference or the frozen reference bit for bit, so a pass with a flag
 # on is that flag's proof against them. One PASS/FAIL line per suite; logs in
-# $VERIFY_LOGS (default out/perf/verify).
+# $VERIFY_LOGS (default out/perf/verify). Every suite runs with bit-exact results
+# (RUBBLE_BIT_EXACT=1, the engine-wide setting that is off by default since 2026-11-19):
+# a perf change is proven bit for bit with it on.
 here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 flags="${1:-0}"
@@ -21,7 +23,7 @@ for s in $suites; do
   log="$logs/$test.flags$flags.log"
   bin=$(cargo test --release --no-run -p "$crate" --test "$test" 2>&1 | sed -n 's/.*Executable .*(\(.*\)).*/\1/p' | tail -1)
   if [ -z "$bin" ]; then echo "FAIL(build) $crate $test"; continue; fi
-  (cd "crates/$crate" && python3 "$engine/scripts/with-gpu-lock.py" --limit "${LIMIT:-1200}" -- env RUBBLE_GPU_LOCK=0 $( [ "$flags" = default ] || echo "RUBBLE_PERF_FLAGS=$flags" ) "../../$bin" --test-threads=1) > "$log" 2>&1
+  (cd "crates/$crate" && python3 "$engine/scripts/with-gpu-lock.py" --limit "${LIMIT:-1200}" -- env RUBBLE_GPU_LOCK=0 RUBBLE_BIT_EXACT=1 $( [ "$flags" = default ] || echo "RUBBLE_PERF_FLAGS=$flags" ) "../../$bin" --test-threads=1) > "$log" 2>&1
   code=$?
   res=$(grep -E '^test result' "$log" | tail -1)
   if [ "$code" -eq 0 ]; then echo "PASS flags=$flags $crate $test: $res"; else echo "FAIL($code) flags=$flags $crate $test: $res (log $log)"; fi

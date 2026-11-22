@@ -114,6 +114,9 @@ const evaluate = async (expression) => {
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
+// (--preload FILE: a script run in the page before its own, e.g. timing every synchronous
+// pipeline creation: tools/vehicle-lab/sync-pipelines.js.)
+if (opt('--preload', null)) await send('Page.addScriptToEvaluateOnNewDocument', { source: readFileSync(opt('--preload'), 'utf8') });
 
 const open = async (query) => {
   await send('Page.navigate', { url: `${base}/vehicle-lab.html?${query}${EXTRA ? '&' + EXTRA : ''}` });
@@ -168,7 +171,11 @@ if (PROBE && AB != null) {
   const [frames, steps, every, until] = [opt('--abFrames', '20'), opt('--abSteps', '34'), opt('--abEvery', '1'), opt('--abUntil', '40')].map(Number);
   let bad = 0;
   for (const run of runs) {
-    const { name, query } = parse(run);
+    const parsed = parse(run);
+    const name = parsed.name;
+    // (Bit-exact results, the engine-wide setting off by default since 2026-11-19: the A/B
+    // is bit for bit with it on, unless the query asks otherwise.)
+    const query = /(^|&)bitExact=/.test(parsed.query) ? parsed.query : `${parsed.query}&bitExact=1`;
     // (--locked: the page frame-locked, `record=1`: each step's readback awaited before the
     // next, so the World's run is the same whatever the GPU's speed; otherwise the page's
     // own real-time loop, whose readbacks land a speed-dependent number of steps later.)
