@@ -385,14 +385,18 @@ void splitGroupStep(uint g, uint lane, uint word)
         // explicit_beams_fleet.slang fleetLevelsDefer; the pass's end then in the levels'
         // end dispatch.)
         if (flLevelsOn() && fleetLevelsDefer(k, off, lane, s, !(small && (!anySize || longest > FL_SCAN_MOST)))) return;
+        // (fleetLevelsAny at one call site: the others' fallbacks come back here.)
+        bool any = true;
         if (small && (!anySize || longest > FL_SCAN_MOST))
+        {
             fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
+            any = false;
+        }
         else if (flHitLatOn() && lvOnceOn())
-            fleetLevelsOnce(k, off, parity, lane, tag);
+            any = fleetLevelsOnceTry(k, off, parity, lane, tag);
         else if (flHitLatOn())
-            fleetLevelsLat(k, off, parity, lane, tag);
-        else
-            fleetLevelsAny(k, off, parity, lane, tag);
+            any = fleetLevelsLatTry(k, off, parity, lane, tag);
+        if (any) fleetLevelsAny(k, off, parity, lane, tag);
         splitGroupEnd(off, k, lane, s);
         return;
     }

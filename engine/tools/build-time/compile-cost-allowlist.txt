@@ -9,10 +9,6 @@ explicit_beams_split_member_aero 354.2
 explicit_beams_split_member_aero_wide 354.2
 explicit_beams_split_member 337.0
 explicit_beams_split_member_wide 337.0
-explicit_beams_split_group_aero 235.9
-explicit_beams_split_group_aero_wide 235.9
-explicit_beams_split_group 230.5
-explicit_beams_split_group_wide 230.5
 explicit_beams_contact_aero_nocpl 162.0
 explicit_beams_contact_aero_wide_nocpl 162.0
 explicit_beams_contact_nocpl 149.4
@@ -33,6 +29,10 @@ explicit_beams 118.2
 explicit_beams_wide 118.2
 explicit_beams_contact_nosurf 115.6
 explicit_beams_contact_wide_nosurf 115.6
+explicit_beams_split_group_aero 110.0
+explicit_beams_split_group_aero_wide 110.0
+explicit_beams_split_group 107.7
+explicit_beams_split_group_wide 107.7
 explicit_beams_contact_big_aero 105.6
 explicit_beams_contact_big_aero_wide 105.6
 explicit_beams_contact_big 100.2
@@ -41,14 +41,10 @@ explicit_beams_solo_aero_nocpl 53.9
 explicit_beams_solo_aero_wide_nocpl 53.9
 explicit_beams_aero_nocpl 53.9
 explicit_beams_aero_wide_nocpl 53.9
-explicit_beams_split_grouplevels_aero 50.7
-explicit_beams_split_grouplevels_aero_wide 50.7
 explicit_beams_solo_nocpl 50.0
 explicit_beams_solo_wide_nocpl 50.0
 explicit_beams_nocpl 50.0
 explicit_beams_wide_nocpl 50.0
-explicit_beams_split_grouplevels 49.5
-explicit_beams_split_grouplevels_wide 49.5
 explicit_beams_selfsplit_step_aero 44.1
 explicit_beams_selfsplit_step_aero_wide 44.1
 explicit_beams_aero_seg 43.1
@@ -71,3 +67,7 @@ explicit_beams_contact_big_aero_nosurf 31.7
 explicit_beams_contact_big_aero_wide_nosurf 31.7
 explicit_beams_contact_big_nosurf 28.6
 explicit_beams_contact_big_wide_nosurf 28.6
+explicit_beams_split_grouplevels_aero 19.4
+explicit_beams_split_grouplevels_aero_wide 19.4
+explicit_beams_split_grouplevels 18.9
+explicit_beams_split_grouplevels_wide 18.9

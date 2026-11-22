@@ -101,8 +101,9 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
 }
 
 // fleetLevelsAny with the group's hits flattened over the lanes (see above). Every lane of
-// the group's workgroup; a hit list past its room: fleetLevelsAny itself.
-void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
+// the group's workgroup. True (and nothing done) when a hit list is past its room: the
+// caller then runs fleetLevelsAny itself, at one call site (fleetLevelsOnceTry). Uniform.
+bool fleetLevelsLatTry(uint k, uint off, uint parity, uint lane, uint tag)
 {
     uint open = 0u;
     if (lane == 0u)
@@ -116,8 +117,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     open = splitUniform(lane, open);
     if (open == 0u)
     {
-        fleetLevelsAny(k, off, parity, lane, tag);
-        return;
+        return true;  // (the caller runs fleetLevelsAny)
     }
     // The owners with hits (gsOff), their hits' prefix (gsOff past LAT_PRE), any list past
     // its room (then fleetLevelsAny, whose levels re-walk such an owner).
@@ -146,8 +146,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     over = splitUniform(lane, over);
     if (over != 0u || (gP.ablate & (65536u | 32768u | 16384u | 262144u)) != 0u)
     {
-        fleetLevelsAny(k, off, parity, lane, tag);
-        return;
+        return true;  // (the caller runs fleetLevelsAny)
     }
     uint H = splitUniform(lane, lane == 0u ? gsCount[0].load() : 0u);
     uint T = splitUniform(lane, gsOff[LAT_PRE + H]);
@@ -321,6 +320,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     sync();
     for (uint m = lane, mStop = EB_END(402, m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
     flArgsZero(lane);
+    return false;
 }
 
 // --- The fleet front's fused dispatches (PERF_FLEET_FUSE) ---

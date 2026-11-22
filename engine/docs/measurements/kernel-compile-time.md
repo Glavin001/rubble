@@ -271,3 +271,38 @@ each as if it had one copy: `driveAheadPart` (5 call sites in the frame step, 6 
 3,047 statements), `beamSum` (275 copies of 111, through `vvBeamSumOf`), `drvTyre`,
 `surfaceStep` (twice in the contact module), `ebEnd` (1,358 copies of 12), `toFixed`
 (882 of 11), `surfApplyTo`, `tryContact`.
+
+### The burn-down from the compiler's own output (`tools/build-time/kernel_profile.py`)
+
+The static count overstates a call that passes a constant: splitting `driveAheadPart`
+(5 call sites, each with a constant `part`) by its part cut the counted statements of
+`explicit_beams_solo_wide_nosurf` by 24 % and changed nothing the compiler sees (its
+optimized entry point 83,059 instructions both ways; Chrome 41.1 -> 37.9 s, noise). The
+driver folds each site down to its branch before the costly passes.
+
+`kernel_profile.py` measures what is left: the module through naga's MSL, Apple's
+offline compiler and `air-opt` (every call inlined, `-O2`), the entry point's
+instructions, and from its line tables each source function's instructions, the copies
+that survived and the call paths that made them (`--attr N --who FN`). 15 s a module,
+no GPU, no browser (macOS with Xcode). Chrome's cold compile follows it as
+`1.07e-8 x instructions^1.914` s (the 28 lab modules: within 1.3x on average): 10 s at
+about 49,000 instructions.
+
+| Module (fast setting) | optimized instructions | Chrome cold |
+|---|---|---|
+| `explicit_beams_contact_wide_nosurf` | 173,434 | 118.8 s |
+| `explicit_beams_selfsplit_member_vv_wide` | 172,170 | 114.0 s |
+| `explicit_beams_split_grouplevels_wide` | 123,679 | 49.3 s |
+| `explicit_beams_solo_wide_nosurf` | 83,059 | 41.1 s |
+
+First fix, from its list: `fleetLevelsAny` was four copies of 15,625 instructions in the
+levels kernel, half of it: `fleetLevelsOnce` and `fleetLevelsLat` each called it at two
+fallbacks (a hit list past its room) and returned. They now return "fall back" and their
+callers call it once (`fleetLevelsOnceTry`, `fleetLevelsLatTry`); nothing ran after a
+fallback, so the same work in the same order. `explicit_beams_split_grouplevels_wide`
+73,206 instructions, Chrome cold 49.3 -> 15.4 s; `explicit_beams_split_group_wide`
+predicted 230 -> 108 s. Checked: fast-check against the previous kernels (16 of 17
+fixtures bit for bit, `cars1_t20.0` differing as with the same kernels on both sides),
+the scenario matrix (12 rows bit for bit, none slower; `--ab-switch kernel` now times its
+halves in rounds as the other switches do), Chrome's validation of all 140 modules in
+both settings.
