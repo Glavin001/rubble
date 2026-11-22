@@ -6705,7 +6705,8 @@ not affected.
   with the kept candidates off, so that every contact pass walks) on `fleet_contact_gpu`,
   `group_split_gpu` and `explicit_contact_gpu`: PASS, 1, 3 and 13. (`fleet_walk_gpu` and
   the second run's `group_split_gpu` and `explicit_contact_gpu` on the kernel as
-  committed, the others before the rounding room.)
+  committed, the others before the rounding room.) On the kernel as committed again:
+  `perf-verify.sh default webgpu:fleet_contact_gpu metal:vehicle_parity`: PASS, 1 and 4.
 - `cargo test --profile fast -p engine-webgpu --test fleet_walk_gpu` (new, bit-exact on):
   a column of ten and a column of six with torn panels (a triangle's node of two cars
   moved 4 m, so that triangles are over the cells), the kept candidates off so that every
@@ -6722,5 +6723,5 @@ not affected.
 the fracture lab's Git LFS assets, which this worktree does not hold; the switch stays
 off in a browser, where Chrome accepts every module); whole 20 and 40 s runs (rung 4)
 and the lab's own runs with the AI driving; the fast setting's tolerance suite
-(`fast_arithmetic_gpu`, `run.sh bitexact`); engine-metal's parity suite. The time-only
+(`fast_arithmetic_gpu`, `run.sh bitexact`). The time-only
 figures (the bound, the parts left out) are from builds that were not committed.
