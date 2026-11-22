@@ -89,7 +89,7 @@ for f in $list; do
     echo "FAIL $name: ${line:-no verdict}"
     echo "$out" | grep -E "differ|records|^Error|panicked" | head -6 | sed 's/^/       /'
   fi
-  echo "$out" | grep -E "kept candidates \(on\)" | sed 's/^ */     /'
+  echo "$out" | grep -E "kept candidates \(on\)|kernels made" | sed 's/^ */     /'
   [ -n "$EXTRA" ] && echo "$out" | grep -E "profile at|explicit |split ablation|untimed|group of|sleep \\(" | sed 's/^/     /'
 done
 echo "fast check: $(( $(date +%s) - start )) s"

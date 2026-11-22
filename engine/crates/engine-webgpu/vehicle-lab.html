@@ -72,7 +72,8 @@
     #togHud { left: 14px; } #togRight { right: 14px; }
     #hud, #right { top: 50px; max-height: calc(100vh - 96px); max-height: calc(100dvh - 96px); }
     body.hideHud #hud, body.hideRight #right, body.clean .tog { display: none; }
-    #fatal { display: none; left: 50%; top: 40%; transform: translate(-50%, -50%); width: min(34rem, calc(100vw - 48px)); color: #ffb4a0; font-size: 14px; font-weight: 600; white-space: pre-wrap; z-index: 4; }
+    /* Anchored near the top and scrolled, not centred: a long error (a wasm stack) must not push its first line, the message, off the screen. */
+    #fatal { display: none; left: 50%; top: 64px; transform: translateX(-50%); width: min(40rem, calc(100vw - 48px)); max-height: calc(100vh - 128px); overflow-y: auto; box-sizing: border-box; color: #ffb4a0; font-size: 14px; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: auto; z-index: 4; }
     @media (max-width: 760px) {
       .tog { top: 8px; padding: 8px 14px; } #togHud { left: 8px; } #togRight { right: 8px; }
       #hud, #right { left: 8px; right: 8px; top: 50px; width: auto; max-width: none; max-height: calc(100dvh - 130px); }

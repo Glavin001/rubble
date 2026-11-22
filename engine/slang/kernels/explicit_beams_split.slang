@@ -749,3 +749,74 @@ void explicit_beams_split_group(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
         splitGroupStep(gid.x, lid.x, gP.pad2);
     ebLoopCapFlush();
 }
+
+#ifdef EB_VV_FLEET
+// explicit_beams_split_group's dispatches one kind at a time, each in a module of its
+// own (explicit_plan::GroupEntry: the host picks one only for a dispatch it would run the
+// same way). One kernel holding every pass of splitGroupStep took Metal 267 s to compile
+// cold in Chrome, and those passes alone 0.2 to 35 s each (vehicle-perf-first-principles
+// §8.51). The same functions on the same words: the same results.
+
+// The groups' frame start (the word SPLIT_BEGIN).
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_group_begin(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    splitGroupBegin(gid.x, lid.x);
+    ebLoopCapFlush();
+}
+
+// The levels across the GPU's end (a word with SPLIT_LV).
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_group_lv(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    fleetLevelsEnd(gid.x, lid.x, gP.pad2);
+    ebLoopCapFlush();
+}
+
+// A step's levels (a word with SPLIT_LEVELS) where the copy's flags hold the owners'
+// state, the front fleet-wide, groups of any size, the hits by latency and the levels
+// once, but not the levels across the GPU, and the ablation word lacks 512
+// (explicit_plan::levels_once_entry): splitGroupStep's fleet branch under those flags,
+// the same calls in the same order.
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_split_group_levels(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    splitGroupLevelsOnce(gid.x, lid.x, gP.pad2);
+    ebLoopCapFlush();
+}
+
+void splitGroupLevelsOnce(uint g, uint lane, uint word)
+{
+    uint s = word & SPLIT_STEP;
+    bool levels = (word & SPLIT_LEVELS) != 0u;
+    uint4 G = gMisc[gP.vvGroups + g];
+    uint off = G.x;
+    uint runOff = G.z;
+    uint points = G.w;
+    uint k = splitUniform(lane, splitAwake(G));
+    if (k == 0u) return;
+    uint stepBase = gMisc[vvMember(off, 0u)].w;
+    uint parity = (stepBase + s) & 1u;
+    bool small = k <= VV_PART;
+    // (Without SPLIT_LEVELS: the front's word, which is fleet-wide here: nothing.)
+    if (!levels) return;
+    uint tag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u;
+    uint longest = 0u;
+    if (small && (gP.beamOrderPad0 & 0x80000000u) == 0u)
+    {
+        if (lane == 0u)
+        {
+            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
+        }
+        longest = splitUniform(lane, longest);
+    }
+    if (small && longest > FL_SCAN_MOST)
+        fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
+    else
+        fleetLevelsOnce(k, off, parity, lane, tag);
+    splitGroupEnd(off, k, lane, s);
+}
+#endif

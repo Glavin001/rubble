@@ -1095,12 +1095,24 @@ pub fn wide_list_module_name(lanes: u32) -> &'static str {
 
 pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
 pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+/// [`SPLIT_GROUP_ENTRY`]'s dispatches one kind at a time, each in a module of its own
+/// ([`schedule::GroupEntry`]): the frame's start, a step's levels under the default
+/// fleet flags ([`schedule::levels_once_entry`]) and the levels across the GPU's end.
+/// One kernel with every pass took Metal 267 s to compile cold in Chrome.
+pub const SPLIT_GROUP_BEGIN_ENTRY: &str = "explicit_beams_split_group_begin";
+pub const SPLIT_GROUP_LEVELS_ENTRY: &str = "explicit_beams_split_group_levels";
+pub const SPLIT_GROUP_LV_ENTRY: &str = "explicit_beams_split_group_lv";
 pub const SPLIT_WHEELS_ENTRY: &str = "explicit_beams_split_wheels";
 pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
 pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
 pub const SELF_PAIRS_ENTRY: &str = "explicit_beams_self_pairs";
 pub const WIDE_LIST_ENTRY: &str = "explicit_beams_wide_list";
+
+/// The split group path's modules by `which` ([`split_module_name`]), each at the frame
+/// module's four variants ([`split_modules`]).
+pub const SPLIT_WHICH: [&str; 11] =
+    ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels", "groupbegin", "grouplevels", "grouplv"];
 
 /// Every module of the split paths, which every host's build compiles from the one
 /// Slang source as it does [`MODULES`]: the split group path (EB_VV_SPLIT;
@@ -1114,7 +1126,7 @@ pub fn split_modules() -> Vec<SplitModule> {
         out.push(SplitModule { name, entry, defines });
     };
     for (tag, aero, lanes) in VARIANTS {
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
+        for which in SPLIT_WHICH {
             // (The members' module without EB_VV_GROUPS: its frame step never reaches
             // contactGroup, so it binds the workgroup variables of the steps alone:
             // Metal allows 31 a kernel.)
@@ -1126,7 +1138,7 @@ pub fn split_modules() -> Vec<SplitModule> {
                 "member" => ("EB_SOLO_STEP", "1"),
                 // Raycast wheels on each other (explicit_beams_split_wheels: the groups'
                 // module's defines, a small kernel).
-                "group" | "wheels" => GROUPS,
+                "group" | "wheels" | "groupbegin" | "grouplevels" | "grouplv" => GROUPS,
                 // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => ("EB_FLEET_FRONT", "1"),
@@ -1145,6 +1157,9 @@ pub fn split_modules() -> Vec<SplitModule> {
             let entry = match which {
                 "member" => SPLIT_MEMBER_ENTRY,
                 "group" => SPLIT_GROUP_ENTRY,
+                "groupbegin" => SPLIT_GROUP_BEGIN_ENTRY,
+                "grouplevels" => SPLIT_GROUP_LEVELS_ENTRY,
+                "grouplv" => SPLIT_GROUP_LV_ENTRY,
                 "wheels" => SPLIT_WHEELS_ENTRY,
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
@@ -4011,7 +4026,7 @@ mod tests {
         assert_eq!(names.len(), list.len(), "a split module twice");
         assert!(MODULES.iter().all(|m| !names.contains(m.name)));
         for (aero, lanes) in [(false, 256), (false, 512), (true, 256), (true, 512)] {
-            for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels"] {
+            for which in SPLIT_WHICH {
                 assert!(names.contains(split_module_name(which, aero, lanes).as_str()));
             }
             for vv in [false, true] {

@@ -88,13 +88,7 @@ impl SceneSink for HostWorld {
         self.bodies.len() as u32 - 1
     }
     fn add_collider(&mut self, col: Collider) -> u32 {
-        if let Some(r) = collider_reach(&col) {
-            let b = col.body as usize;
-            if self.body_radius.len() <= b {
-                self.body_radius.resize(b + 1, 0.0);
-            }
-            self.body_radius[b] = self.body_radius[b].max(r);
-        }
+        crate::joint::note_collider_reach(&mut self.body_radius, std::slice::from_ref(&col));
         self.colliders.push(col);
         self.colliders.len() as u32 - 1
     }
@@ -108,17 +102,7 @@ impl SceneSink for HostWorld {
         self.bodies[id as usize] = state;
     }
     fn add_joint_desc(&mut self, desc: &JointDesc) -> u32 {
-        let mut j = desc.to_gpu();
-        if desc.torque_arm <= 0.0 {
-            let r = |id: u32| {
-                if self.bodies[id as usize].inv_mass == 0.0 {
-                    0.0
-                } else {
-                    self.body_radius.get(id as usize).copied().unwrap_or(0.0)
-                }
-            };
-            j.torque_arm = default_torque_arm(r(desc.body_a), r(desc.body_b));
-        }
+        let j = crate::joint::joint_from_desc(desc, &self.bodies, &self.body_radius);
         self.joints.push(j);
         self.joints.len() as u32 - 1
     }

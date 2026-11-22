@@ -110,6 +110,8 @@ pub struct ExplicitBeamsGpu {
     /// Vehicle contact's candidates in a grid ([`Self::set_vv_grid`]; the owners' state by
     /// vehicle needs it).
     vv_grid: bool,
+    /// The groups' dispatches on the kernels of one kind each ([`Self::set_group_apart`]).
+    group_apart: bool,
     group_split_pipes: std::sync::OnceLock<GroupSplit>,
     group_split_zero: bool,
     /// Self-collision's listed pairs across workgroups ([`Self::set_self_split`]): on,
@@ -415,13 +417,48 @@ struct ContactPipes {
     plan: [wgpu::ComputePipeline; 3],
     /// Vehicle sleep's awake list ([`plan::SLEEP_LIST`]).
     sleep: wgpu::ComputePipeline,
-    groups: wgpu::ComputePipeline,
-    /// The solo vehicles' frame (`EB_VV_SOLO`).
-    solo: wgpu::ComputePipeline,
-    /// The groups of more than four members ([`Kernel::ContactBig`]); `None` for a
-    /// fleet of at most [`plan::VV_PART`] vehicles, which cannot form one (the
-    /// plan then never gives that dispatch a workgroup): its module is not compiled.
-    big: Option<wgpu::ComputePipeline>,
+    /// The contact groups' frame, the solo vehicles' frame (`EB_VV_SOLO`) and the groups
+    /// of more than four members ([`Kernel::ContactBig`]): created at their first
+    /// dispatch, not with the others. Their modules are the largest (about 1 MB of WGSL
+    /// each), and with the fleet-wide passes and self-collision split (the default) they
+    /// are only the fallback path. A browser compiles them in the background
+    /// (`compute_specs`, deferred): created at start-up, a cold one compiled on Chrome's
+    /// GPU process's main thread for longer than its watchdog allows, and every WebGPU
+    /// device was lost (`compute_spec.rs`). The same pipelines whenever they are made.
+    groups: LazyPipe,
+    solo: LazyPipe,
+    /// `None` for a fleet of at most [`plan::VV_PART`] vehicles, which cannot form a
+    /// group of more than four (the plan then never gives that dispatch a workgroup).
+    big: Option<LazyPipe>,
+}
+
+/// A compute pipeline created at its first use from its WGSL ([`ContactPipes`]).
+struct LazyPipe {
+    entry: &'static str,
+    wgsl: String,
+    layout: wgpu::PipelineLayout,
+    pipe: std::sync::OnceLock<wgpu::ComputePipeline>,
+}
+
+impl LazyPipe {
+    fn get(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
+        self.pipe.get_or_init(|| {
+            // (As the other explicit pipelines: wgpu's checks as explicit_shader_module
+            // says, the compile options of explicit_compilation_options.)
+            let module = explicit_shader_module(device, wgpu::ShaderModuleDescriptor {
+                label: Some(self.entry),
+                source: wgpu::ShaderSource::Wgsl(self.wgsl.as_str().into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(self.entry),
+                layout: Some(&self.layout),
+                module: &module,
+                entry_point: Some(self.entry),
+                compilation_options: explicit_compilation_options(device),
+                cache: None,
+            })
+        })
+    }
 }
 
 /// The vehicle-contact passes' bind group layout entries: the frame's bindings,
@@ -647,7 +684,11 @@ struct GroupSplit {
     kind: (bool, u32, bool),
     /// The modules' WGSL as built (true) or without strict arithmetic ([`host_wgsl`]).
     bit_exact: bool,
-    group: wgpu::ComputePipeline,
+    /// The groups' kernels by [`plan::schedule::GroupEntry`] (Any, Begin, LevelsOnce,
+    /// LvEnd), each created at its first use: the one with every pass is the largest
+    /// compile of the split path (267 s cold in Chrome) and with the default flags no
+    /// dispatch runs it ([`plan::schedule::group_entries_apart`]).
+    groups: [std::sync::OnceLock<wgpu::ComputePipeline>; 4],
     tests: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
     /// The contact pass's front as fleet-wide dispatches (explicit_beams_fleet.slang,
@@ -717,7 +758,6 @@ impl GroupSplit {
         };
         let fleet_args = [args_buffer(), args_buffer()];
         let spare = [args_buffer(), args_buffer()];
-        let group = split_pipe(device, &args_layout, kind, bit_exact, "group", SPLIT_GROUP_ENTRY);
         let tests = split_pipe(device, &pipeline_layout, kind, bit_exact, "tests", SPLIT_TESTS_ENTRY);
         fn entries<'a>(bufs: &'a [wgpu::Buffer; 9], args: Option<[&'a wgpu::Buffer; 2]>) -> Vec<wgpu::BindGroupEntry<'a>> {
             let mut e: Vec<wgpu::BindGroupEntry> = (0..9)
@@ -753,7 +793,7 @@ impl GroupSplit {
             pipeline_layout,
             kind,
             bit_exact,
-            group,
+            groups: Default::default(),
             tests,
             bind,
             fleet: std::sync::OnceLock::new(),
@@ -775,6 +815,22 @@ impl GroupSplit {
                 split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "fleetpost", FLEET_POST_ENTRY),
                 split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "fleetlevels", FLEET_LEVELS_ENTRY),
             ]
+        })
+    }
+
+    /// The groups' kernel `entry` (with the fleet's arguments bound, as every groups'
+    /// dispatch).
+    fn group(&self, entry: plan::schedule::GroupEntry) -> &wgpu::ComputePipeline {
+        use plan::schedule::GroupEntry as E;
+        let i = match entry {
+            E::Any => 0,
+            E::Begin => 1,
+            E::LevelsOnce => 2,
+            E::LvEnd => 3,
+        };
+        self.groups[i].get_or_init(|| {
+            let (which, name) = entry.which_entry();
+            split_pipe(&self.device, &self.args_layout, self.kind, self.bit_exact, which, name)
         })
     }
 
@@ -1375,12 +1431,18 @@ impl Contact {
                 cache: None,
             })
         };
+        let lazy = |entry: &'static str, wgsl: &str| LazyPipe {
+            entry,
+            wgsl: host_wgsl(wgsl, bit_exact),
+            layout: contact_layout.clone(),
+            pipe: std::sync::OnceLock::new(),
+        };
         ContactPipes {
             plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), plan_layout)),
             sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), plan_layout),
-            groups: make(plan::FRAME_ENTRY, contact_wgsl, contact_layout),
-            solo: make(plan::FRAME_ENTRY, solo_wgsl, contact_layout),
-            big: big_groups.then(|| make(plan::CONTACT_ENTRY, big_wgsl, contact_layout)),
+            groups: lazy(plan::FRAME_ENTRY, contact_wgsl),
+            solo: lazy(plan::FRAME_ENTRY, solo_wgsl),
+            big: big_groups.then(|| lazy(plan::CONTACT_ENTRY, big_wgsl)),
         }
     }
 
@@ -1632,6 +1694,9 @@ impl ExplicitBeamsGpu {
             for (which, entry) in [
                 ("member", SPLIT_MEMBER_ENTRY),
                 ("group", SPLIT_GROUP_ENTRY),
+                ("groupbegin", plan::SPLIT_GROUP_BEGIN_ENTRY),
+                ("grouplevels", plan::SPLIT_GROUP_LEVELS_ENTRY),
+                ("grouplv", plan::SPLIT_GROUP_LV_ENTRY),
                 ("tests", SPLIT_TESTS_ENTRY),
                 ("fleetfront", FLEET_FRONT_ENTRY),
                 ("fleetplan", FLEET_PLAN_ENTRY),
@@ -1640,7 +1705,7 @@ impl ExplicitBeamsGpu {
             ] {
                 let module = split_module(which, aero, lanes);
                 // (The groups' and the fleet plan's modules bind the fleet's arguments.)
-                let args = matches!(which, "group" | "fleetplan");
+                let args = matches!(which, "group" | "groupbegin" | "grouplevels" | "grouplv" | "fleetplan");
                 specs.push(crate::ComputeSpec {
                     label: entry,
                     module,
@@ -1730,7 +1795,13 @@ impl ExplicitBeamsGpu {
         }
         let fallback = [Kernel::Contact.entry(), Kernel::Solo.entry(), Kernel::ContactBig.entry()];
         for s in specs.iter_mut() {
-            if ahead.iter().any(|m| s.module.starts_with(m)) {
+            // (The groups' kernel with every pass stays in the background: with the
+            // default flags the groups' dispatches run the kernels of one kind each,
+            // `explicit_beams_split_group*`, plan::schedule::group_entries_apart. It was
+            // 267 s of a cold load in Chrome.)
+            if s.entry == SPLIT_GROUP_ENTRY {
+                s.deferred = true;
+            } else if ahead.iter().any(|m| s.module.starts_with(m)) {
                 s.deferred = false;
             } else if fallback.contains(&s.label) && !s.deferred {
                 s.deferred = true;
@@ -1901,6 +1972,7 @@ impl ExplicitBeamsGpu {
             group_split: group_split_default(),
             group_split_tests: group_split_tests_default(),
             vv_grid: true,
+            group_apart: plan::schedule::group_apart_default(),
             group_split_pipes: std::sync::OnceLock::new(),
             group_split_zero: std::env::var("RUBBLE_GROUP_SPLIT_ZERO").as_deref() == Ok("1"),
             self_split: self_split_default(),
@@ -3645,7 +3717,9 @@ impl ExplicitBeamsGpu {
                 let (solo, groups, g) = alt.map_or_else(
                     || {
                         let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
-                        (&p.solo, &p.groups, &c.contact_group)
+                        let lazy = if kernel == Kernel::Solo { &p.solo } else { &p.groups };
+                        let pipe = lazy.get(&self.device);
+                        (pipe, pipe, &c.contact_group)
                     },
                     |a| (&a.solo, &a.groups, &a.group),
                 );
@@ -3672,7 +3746,7 @@ impl ExplicitBeamsGpu {
                     // At most VV_PART vehicles: no group this dispatch steps can
                     // exist (its indirect count is always 0), and it has no pipeline.
                     let Some(big) = &p.big else { return };
-                    pass.set_pipeline(big);
+                    pass.set_pipeline(big.get(&self.device));
                     pass.set_bind_group(0, &c.contact_group, &[]);
                 }
             }
@@ -4526,6 +4600,7 @@ impl ExplicitBeamsGpu {
             wide_fused: self.wide_fused,
             wheels_bodies: self.wheels_bodies,
             vv_grid: self.vv_grid,
+            group_apart: self.group_apart,
             current: self.variant == KernelVariant::Current,
             ablate: self.variant == KernelVariant::Ablate,
             debug: self.debug_big.is_some() || self.debug_solo.is_some() || self.debug_groups.is_some(),
@@ -4542,6 +4617,21 @@ impl ExplicitBeamsGpu {
     /// The split path's small groups' triangle tests in dispatches of their own, across
     /// workgroups (on, the default; `RUBBLE_GROUP_SPLIT_TESTS=0` off: each group's pass
     /// whole in its workgroup). The same results bit for bit.
+    /// The split group path's groups' dispatches on the kernels of one dispatch kind each
+    /// where they serve (on, the default; `RUBBLE_GROUP_APART=0` off: every one on
+    /// `explicit_beams_split_group`, whose compile is the longest of a cold load in
+    /// Chrome). The same results bit for bit (`--ab-switch groupapart`).
+    pub fn set_group_apart(&mut self, on: bool) {
+        self.group_apart = on;
+    }
+
+    /// Measurement: which of the groups' kernels have been created (Any, Begin,
+    /// LevelsOnce, LvEnd: [`plan::schedule::GroupEntry`]).
+    #[doc(hidden)]
+    pub fn group_kernels_made(&self) -> [bool; 4] {
+        self.group_split_pipes.get().map_or([false; 4], |g| g.groups.each_ref().map(|p| p.get().is_some()))
+    }
+
     pub fn set_group_split_tests(&mut self, on: bool) {
         self.group_split_tests = on;
     }
@@ -4576,8 +4666,8 @@ impl ExplicitBeamsGpu {
         let args = &self.contact.args;
         let at = |k: u32| [k * PARAM_STRIDE as u32];
         match op {
-            GroupOp::Group { copy, tests, args: off, .. } => {
-                pass.set_pipeline(if tests { &g.tests } else { &g.group });
+            GroupOp::Group { copy, tests, args: off, entry, .. } => {
+                pass.set_pipeline(if tests { &g.tests } else { g.group(entry) });
                 pass.set_bind_group(0, if tests { &g.bind } else { &g.bind_args }, &at(copy));
                 pass.dispatch_workgroups_indirect(args, off);
             }
@@ -5025,14 +5115,14 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
         out.push((n.to_string(), entry, u(w)));
     }
+    // (Each module's entry as the builds name it: plan::split_modules.)
+    let split = plan::split_modules();
     for (n, w) in crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter() {
-        let entry = if n.contains("member") {
-            SPLIT_MEMBER_ENTRY
-        } else if n.contains("tests") {
-            SPLIT_TESTS_ENTRY
-        } else {
-            SPLIT_GROUP_ENTRY
-        };
+        let entry = split
+            .iter()
+            .find(|m| m.name == *n)
+            .map(|m| m.entry)
+            .unwrap_or_else(|| panic!("explicit beams: no split module {n}"));
         out.push((n.to_string(), entry, u(w)));
     }
     for (n, w) in crate::EXPLICIT_BEAMS_SELF_SPLIT.iter() {

@@ -1050,6 +1050,36 @@ pub fn encode_step(
 /// sleep pass): only when something reads them, a warm start (not
 /// [`StepModes::archive_cold`]) or the earlier `archive_emit` path (which emits nothing
 /// while the carry runs).
+/// The parallel solve's precondition, checked on the host from a step's read-back
+/// state (every host's `validate_contact_coloring`): each awake dynamic body has a
+/// finished colour below `max_colors`, and no manifold joins two awake bodies of the
+/// same colour (they would race in the primal solve).
+pub fn validate_contact_coloring(
+    bodies: &[engine_schema::BodyState],
+    colors: &[u32],
+    manifolds: &[engine_schema::Manifold],
+    colliders: &[engine_schema::Collider],
+    max_colors: u32,
+) -> Result<(), String> {
+    let active = |id: usize| bodies[id].is_dynamic() && !bodies[id].is_sleeping();
+    for id in 0..bodies.len() {
+        if active(id) && colors[id] >= max_colors {
+            return Err(format!("body {id} has unfinished/out-of-range colour {}; assigning unfinished bodies to colour zero introduces concurrent constraint writes", colors[id]));
+        }
+    }
+    for (id, m) in manifolds.iter().enumerate() {
+        if m.contact_count == 0 {
+            continue;
+        }
+        let a = colliders[m.collider_a as usize].body as usize;
+        let b = colliders[m.collider_b as usize].body as usize;
+        if active(a) && active(b) && colors[a] == colors[b] {
+            return Err(format!("manifold {id}: active bodies {a} and {b} share colour {} and would race in the primal solver", colors[a]));
+        }
+    }
+    Ok(())
+}
+
 pub fn archive_rows(m: &StepModes) -> bool {
     m.sleep_archive_blocks > 0
         && !m.archive_compact

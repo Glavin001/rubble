@@ -114,6 +114,9 @@ const evaluate = async (expression) => {
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
+// (--preload FILE: a script run in the page before its own, e.g. timing every synchronous
+// pipeline creation: tools/vehicle-lab/sync-pipelines.js.)
+if (opt('--preload', null)) await send('Page.addScriptToEvaluateOnNewDocument', { source: readFileSync(opt('--preload'), 'utf8') });
 
 const open = async (query) => {
   await send('Page.navigate', { url: `${base}/vehicle-lab.html?${query}${EXTRA ? '&' + EXTRA : ''}` });

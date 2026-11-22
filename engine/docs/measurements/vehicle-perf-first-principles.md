@@ -5995,3 +5995,94 @@ python3 scripts/with-gpu-lock.py --limit 300 -- env RUBBLE_GPU_LOCK=0 AB_WARM_MS
 
 The lab prints each vehicle's proxy bodies and shapes at the state; a run whose state has
 a touched or moving proxy reports the words that differ and fails.
+
+### 8.51 A cold load in Chrome: the device loss at start, and the groups' kernel split by dispatch kind (2026-11-21)
+
+**What was wrong.** On #145's preview a windowed Chrome lost its WebGPU device on the
+derby's first steps ("A valid external Instance reference no longer exists"), then
+refused WebGPU on every reload ("no WebGPU adapter") until it was restarted. Headless
+Chrome, which the probes use, did not: it arms no GPU watchdog (`compute_spec.rs`).
+
+**Cause.** `Contact::new` created the contact groups', solo and larger groups' frame
+pipelines synchronously when the fleet was built. Their modules are the largest (about
+1 MB of WGSL each). With self-collision split (`prefer_self_split`) the page compiles them
+in the background after start, because the default path (the fleet-wide passes with self
+split) never dispatches them. So at start-up Chrome compiled them cold on its GPU
+process's main thread, for longer than the watchdog allows, and killed the GPU process.
+Fast arithmetic (§8.40) roughly doubles Metal's compile times, which made it fatal.
+
+Found by timing every synchronous pipeline creation in headless Chrome
+(`run.sh --probe --preload tools/vehicle-lab/sync-pipelines.js`): the frame pipelines
+were created at start, and after the fix, on the 4-car derby through its first
+collision (t = 6.3 s), they are never created at all.
+
+**Fix (lossless).** Each of the three is created at its first dispatch (`LazyPipe`):
+the same pipelines whenever they are made.
+
+**The longest compile of the load.** The next slowest kernel was the groups' pass,
+`explicit_beams_split_group` (412 KB of WGSL). Cold in Chrome on an M3 Max, fast
+arithmetic, one sample each:
+
+| Kernel, one `splitGroupStep` pass alone | Cold compile |
+|---|---|
+| the whole kernel (every pass) | 203 to 284 s (three runs) |
+| `fleetLevelsOnce` (the default levels) | 35.5 s |
+| `fleetLevelsLat` | 9.3 s |
+| `vvPassSmall` | 4.5 s |
+| `vvPass` | 2.9 s |
+| `fleetGroupLevels` | 2.3 s |
+| `fleetLevelsAny`, `vvPassSmallLevels` | 1.8, 1.7 s |
+| `fleetLevelsEnd` (the levels' end) | 1.3 s |
+| the frame's end, the front, the defer check, the begin | 0.2 to 0.3 s each |
+| **sum of the passes alone** | **59 s** |
+
+The passes alone add up to 59 s; together in one kernel they take 203 to 284 s. Apple's
+compiler slows down sharply on one giant function, so the fix is to stop compiling
+passes the frame never runs together.
+
+**The split.** Within one dispatch different groups can take different passes (a group's
+size, how many hits an owner lists), so the kernels are split by the dispatch's kind,
+which the host knows, not by pass. Three modules, each with one entry, beside the one
+with every pass (the same Slang, the same functions on the same words):
+
+- `explicit_beams_split_group_begin`: the frame's start;
+- `explicit_beams_split_group_levels`: a step's levels under the default fleet flags
+  (owners' state, front fleet-wide, groups of any size, hits by latency, levels once;
+  not the levels across the GPU, no ablation 512): `fleetGroupLevels` or
+  `fleetLevelsOnce`, then the frame's end;
+- `explicit_beams_split_group_lv`: the levels across the GPU's end.
+
+The schedule (`engine-exec`, so every host) picks them per dispatch
+(`schedule::GroupEntry`, `group_entries_apart`, `levels_once_entry`) only where they run
+what the kernel with every pass would, and counts them in readiness. The kernel with
+every pass stays for every other setting; a browser compiles it in the background.
+
+| Cold in Chrome (fast arithmetic) | Before | After |
+|---|---|---|
+| the groups' kernels the default path compiles before start | 203 to 284 s (one kernel) | 49.1 s (0.1 + 47.8 + 1.2 s) |
+
+**Checked.**
+- `fast-check.sh groupapart` (the switch `RUBBLE_GROUP_APART=0`, `set_group_apart`):
+  every fixture, 1 to 8 cars (falling, first collisions, pile, rest), bit for bit, in
+  bit-exact and in fast arithmetic. Each side made its own kernels (the "on" side the
+  begin and levels kernels, the "off" side the one with every pass).
+- Chrome validates all 140 modules (`explicit-wgsl-check.mjs`; its dump now takes each
+  split module's entry from `plan::split_modules`, which a pipeline compile of the
+  fleet, wheels and groups' modules needed).
+- `perf-verify.sh default`: all 11 suites pass (GPU == CPU reference, bit-exact).
+  `engine-metal` parity: vehicle, explicit, drive, loop cap and webgpu parity pass.
+- On CUDA (Modal T4, `ENGINE_CUDA_FMAD=0 run.sh --cuda --base 5ab97e41 --head bf83a455`,
+  two builds): all 12 matrix rows bit for bit, none slower (pile2 −3.0 %, side −1.9 %,
+  headon −1.2 %, barrier −1.1 %, the rest within ±0.5 %), verdict PASS, $0.02.
+- A windowed Chrome (the desktop app's browser pane) loaded the 4-car derby, compiled
+  the new kernels cold, ran its first collisions and every background compile with no
+  device loss. Headless probe, 20 s: real time, GPU 11.4 ms a step median, 14.8 ms worst.
+
+**The next slowest: the members' step, not split.** `explicit_beams_selfsplit_member_vv`
+(613 KB) took 118 s cold. Its dispatch kinds alone, cold (measured while other GPU
+jobs ran, so slower than alone): the members' rest 1.3 s, the step 157 s, and the
+step's two halves alone 48 s (a solo vehicle's frame step) and 32 s (a group member's).
+Both halves run in the same dispatch, each vehicle's workgroup taking one, so splitting
+them costs a second dispatch every substep (34 a frame) for good, to save a compile that
+happens once and that Chrome then caches. Not done; it stays the longest kernel of a
+cold load.
