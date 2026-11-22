@@ -4868,10 +4868,10 @@ void pairReuseBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
 // walk's cells and buckets of the triangle's box (or every candidate past
 // GRID_MAX_CELLS) and its box test; then tryContact (whose own box test, on the live
 // triangle's geometry, comes first).
-void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint beamOff, uint groupOff,
-                   uint groupCount, uint parity)
+// A listed pair's box test before its contact test (pairReuseTest's; false: not tested).
+bool pairReuseNear(uint gt, uint h, float3 origin, float cell)
 {
-    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return false;
     // The box from triGeoFill's records before its liveness (a dead triangle's empty box
     // fails tryContact's test, as in the walk).
     uint at = gP.triGeo + gt * TRI_GEO_RECS;
@@ -4886,7 +4886,7 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
     {
         float3 e = gNodes[h * 3u].xyz;
         float3 p = origin + e;
-        if (any(p < lo) || any(p > hi)) return;
+        if (any(p < lo) || any(p > hi)) return false;
         int3 c0 = int3(f0);
         int3 span = int3(fs);
         int3 c = int3(floor(e / cell));
@@ -4900,52 +4900,25 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
             for (uint i = 0u, iStop = EB_END(34, i, cells, 1u); i < iStop; i++)
                 covered = covered
                     || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
-            if (!covered) return;
+            if (!covered) return false;
         }
     }
 #ifdef EB_ABLATE
     // Measurement only (time): 2^26 the listed pairs' contact tests (their box tests kept).
-    if ((gP.ablate & 67108864u) != 0u) return;
+    if ((gP.ablate & 67108864u) != 0u) return false;
 #endif
-    tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
+    return true;
+}
+void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint beamOff, uint groupOff,
+                   uint groupCount, uint parity)
+{
+    if (pairReuseNear(gt, h, origin, cell)) tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
 }
 
 
 // The step's tests of the list (uniform; after the build or in its place): a pair a
 // lane; a build past the list's room walks with its tests instead.
-void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
-                    uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
-{
-    sync();
-    uint listed = mode == 2u ? gsCount[GRID_BUCKETS + RU_COUNT].load() : gsPairCount.load();
-    if (listed <= TRI_PAIR_CAP)
-    {
-        uint at = triPairsAt(v);
-        for (uint i = lane, iStop = EB_END(35, i, listed, LANES); i < iStop; i += LANES)
-            pairReuseTest(gNext[at + 2u * i], gNext[at + 2u * i + 1u], origin, r, cell, beamOff, groupOff, groupCount,
-                          parity);
-        piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-    }
-    else
-    {
-        uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(36, p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
-        {
-            uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
-            triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
-                         parity, 0u);
-        }
-    }
-    if (lane == 0u && mode == 1u)
-    {
-        if (gP.pieceBase != 0u) piecesClearBuild();
-        gsCount[GRID_BUCKETS + RU_VALID].store(listed <= TRI_PAIR_CAP ? 1u : 0u);
-        gsCount[GRID_BUCKETS + RU_COUNT].store(listed);
-        gsCount[GRID_BUCKETS + RU_STATS].add(1u);
-        gsCount[GRID_BUCKETS + RU_STATS + 2u].add(listed);
-        gsCount[GRID_BUCKETS + RU_STATS + 3u].max(listed);
-    }
-}
+#include "explicit_beams_pair_reuse_tests.slang"
 
 // Lane 0, the frame's end: the statistics into the vehicle's record.
 void pairReuseEnd(uint v, uint lane)
@@ -6573,41 +6546,60 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
         }
+        // (The second phase's grid walk at one call site: the reused list's past its room,
+        // or the walk's listed pairs past theirs.)
+        bool walk2 = false;
+        uint reuseListed = 0xFFFFFFFFu; // (set: the reused list's tests ran, pairReuseTestsEnd)
 #ifdef EB_ABLATE
-        if ((gP.ablate & 256u) == 0u)
+        if ((gP.ablate & 256u) != 0u) {} else
 #endif
+        // (And one loop for a list's pairs, the reused list's with their box tests: one call
+        // site of tryContact for both.)
+        uint pairN = 0u;
+        bool reusedList = false;
         if (gridOn != 0u && reuse != 0u)
+        {
 #ifdef EB_SELF_SPLIT
-            selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                           groupCount, parity);
+            walk2 = selfSplitTestsOrWalk(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
 #else
-            pairReuseTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                           groupCount, parity);
+            sync();
+            reuseListed = pairReuseListed(reuse);
+            walk2 = reuseListed > TRI_PAIR_CAP;
+            reusedList = !walk2;
+            pairN = walk2 ? 0u : reuseListed;
 #endif
+        }
         else if (gridOn != 0u && gP.triPairs != 0u)
         {
             // The walk's listed pairs, a pair a lane (triPairsAt); past the list's
             // room, the walk again with its tests.
             sync();
             uint listedPairs = gsPairCount.load();
-            if (listedPairs <= TRI_PAIR_CAP)
+            walk2 = listedPairs > TRI_PAIR_CAP;
+            pairN = walk2 ? 0u : listedPairs;
+        }
+        uint pairAt = triPairsAt(v);
+        for (uint i = lane, iStop = EB_END(87, i, pairN, LANES); i < iStop; i += LANES)
+        {
+            uint gt = gNext[pairAt + 2u * i];
+            uint h = gNext[pairAt + 2u * i + 1u];
+            if (!reusedList || pairReuseNear(gt, h, origin, cell))
+                tryContact(triGeoLoad(gt), h, origin, range, beamOff, groupOff, groupCount, parity);
+        }
+        if (reusedList) piecesTests(v, lane, triOff, origin, range, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
+        if (walk2)
+        {
+            uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+            for (uint p = lane, pStop = EB_END(88, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
             {
-                uint at = triPairsAt(v);
-                for (uint i = lane, iStop = EB_END(87, i, listedPairs, LANES); i < iStop; i += LANES)
-                    tryContact(triGeoLoad(gNext[at + 2u * i]), gNext[at + 2u * i + 1u], origin, range, beamOff,
-                               groupOff, groupCount, parity);
-            }
-            else
-            {
-                uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-                for (uint p = lane, pStop = EB_END(88, p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
-                {
-                    uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
-                    triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff,
-                                 groupOff, groupCount, parity, 0u);
-                }
+                uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
+                triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff,
+                             groupOff, groupCount, parity, 0u);
             }
         }
+#ifndef EB_SELF_SPLIT
+        if (reuseListed != 0xFFFFFFFFu) pairReuseTestsEnd(lane, reuse, reuseListed);
+#endif
 #ifdef EB_SELF_SPLIT
         // The pairs dispatch next; this step's rest opens the next step dispatch.
         sync();

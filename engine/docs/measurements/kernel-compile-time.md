@@ -439,3 +439,18 @@ cost is `tryContact` (about a thousand instructions with its force) inside each
 strategy's own nested candidate loops: one call site for it across the strategies means
 the strategies producing pairs for one consuming loop, a change to the narrow phase's
 shape (and its run time) of its own.
+
+### The solo frame: one grid walk and one pair loop for the second phase
+
+The solo frame's second phase (after the first phase's walk, brute pairs or early pairs)
+tests the reused pair list (`pairReuseTests`: its pairs, the pieces, or past the list's
+room the walk again), or the walk's listed pairs (or the walk again past theirs). Each
+had its own copy of the walk and of the pair loop's `tryContact`. Now one walk
+(`pairReuseTestsOrWalk` and the listed path report "walk") and one pair loop for both
+lists (the reused list's pairs with their box test, `pairReuseNear`), then the pieces;
+the same tests in the same order. Ablation first: without the reused list's tests the
+module compiled in 17.5 s instead of 30.4 s. `explicit_beams_solo_wide_nosurf` Chrome
+cold 34 -> 30.4 s (the walk) -> 25.3 s (the pair loop). Checked: fast-check (16 of 17 bit
+for bit, the known quirk), the scenario matrix (12 rows bit for bit, none slower), the
+pair-reuse, contact, self-split and bitwise GPU suites in bit-exact mode (35 tests),
+`sleep-check.sh` (21), Chrome's validation of all 140 modules.
