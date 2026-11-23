@@ -156,6 +156,11 @@ GOAL = (
                          "events": [{"t": 0, "obstacle": {"kind": "bricks", "ahead": 5, "cols": 6, "rows": 5, "deep": 2}}]},
          [], 0.7, "the bricks row with surface contact on"),
         ("pile8_s", 8, mountain(8), [], 8.0, "8 cars piling up on the mountain's ledges, surface contact on"),
+        # The peaks of whole 20 s runs with the generated sedan (perf doc §8.60): the
+        # saved moment a little before the worst vehicle step, so the timed frames span it.
+        ("derby20_peak", 20, derby(20), [], 13.5, "the derby's worst vehicle step of a 20 s run (t 13.58), 20 cars"),
+        ("mountain20_peak", 20, mountain(20), [], 14.95, "the mountain's worst whole step of a 20 s run (t 15.02), 20 cars"),
+        ("mountain20_t6", 20, mountain(20), [], 6.2, "the mountain's worst vehicle step of a 20 s run (t 6.27), 20 cars"),
     ]
 )
 ROWS_ALL = ROWS + GOAL
