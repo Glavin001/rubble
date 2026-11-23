@@ -6993,9 +6993,12 @@ the lock: deltas within one process are paired, the two baseline runs are not.
 
 From here every benchmark uses the generated sedan made from the current code
 (`cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out
-engine/out/gen/sedan_new`; AGENTS.md). It has 548 nodes, 3,546 beams and 540 collision
-triangles. The car of §8.52–§8.57 was a copy of the same generator from 2026-11-14
-(`~/Development/rubble-artifacts/sedan-live`), with 4,251 beams. Every row's state was
+engine/out/gen/sedan_new`; AGENTS.md). In the solver it has 548 nodes, 4,251 beams and
+528 collision triangles (the generator's own report counts 3,546 defined beams and 540
+triangles before the JBeam loader's additions). The car of §8.52–§8.57 was a copy of the
+same generator from 2026-11-14 (`~/Development/rubble-artifacts/sedan-live`), with the
+same counts in the solver; its JBeam files differ in their values, and the new export
+also has a lighter render mesh. Every row's state was
 saved again with it (`out/scenario-matrix`; the old states are kept as
 `out/scenario-matrix-sedan-nov14`). The code is f8cf855d, bit-exact, and each host's
 default schedules apply.
