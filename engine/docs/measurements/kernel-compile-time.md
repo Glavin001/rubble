@@ -618,3 +618,8 @@ a second sign, after the pieces' loop above, that this frame's native compile do
 take every merge. The suite added for it stays: `driving_on_the_solo_frame_bitwise`, the
 solo frame's wheels on both schedules against the CPU (it fails when either path's wheels
 are broken).
+
+Tried and dropped: one call site of `vvTriangleCandsSmall` in the small groups' tests loop
+(`vvTriangleCandsGridOr` returning the fallback to its caller): bit for bit, predicted
+18.6 -> 18.1 s, Chrome cold 19.0 -> 19.2 s (noise). At this size a copy of 850 instructions
+does not move Chrome's compile; the contact module's remaining cost is not in its copies.
