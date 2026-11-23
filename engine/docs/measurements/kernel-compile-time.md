@@ -534,3 +534,9 @@ Found on the way: a step with early pairs and a reused list (both are possible) 
 have read the early list with the reused list's indices in the first try (fixed: one
 count each); and with `EB_ABLATE` the frame did not compile (an `else` before a
 declaration, on main too).
+
+Checked against main's kernels: fast-check (16 of 17 bit for bit, the known `cars1_t20.0`
+quirk, the same words as main against itself), the scenario matrix (12 rows bit for bit,
+none slower: PASS in 32.9 s), `run.sh --world` (8 rows, PASS), twelve GPU suites in
+bit-exact mode (61 tests), `sleep-check.sh` (21), Chrome's validation of all 158 modules
+in both settings, `cargo check -p engine-metal -p engine-cuda`.
