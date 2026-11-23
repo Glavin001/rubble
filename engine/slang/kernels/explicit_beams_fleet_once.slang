@@ -300,9 +300,11 @@ void lvResFinal(LvRes s, uint h, uint4 tn, float alpha, float beta, float gamma,
 }
 
 // fleetLevelsLat with each hit worked out once (see above). Every lane of the group's
-// workgroup; a hit list past its room: fleetLevelsAny; more hits than lanes:
-// fleetLevelsLat.
-void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
+// workgroup; more hits than lanes: fleetLevelsLat. True (and nothing done) when a hit list
+// is past its room: the caller then runs fleetLevelsAny, at one call site (the compilers
+// inline every call: a call at each fallback was a copy of fleetLevelsAny each, half the
+// levels kernel). Uniform.
+bool fleetLevelsOnceTry(uint k, uint off, uint parity, uint lane, uint tag)
 {
     uint open = 0u;
     if (lane == 0u)
@@ -316,8 +318,7 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
     open = splitUniform(lane, open);
     if (open == 0u)
     {
-        fleetLevelsAny(k, off, parity, lane, tag);
-        return;
+        return true;  // (the caller runs fleetLevelsAny)
     }
     if (lane == 0u) gsCount[0].store(0u);
     sync();
@@ -344,16 +345,14 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
     over = splitUniform(lane, over);
     if (over != 0u || (gP.ablate & (65536u | 32768u | 16384u | 262144u)) != 0u)
     {
-        fleetLevelsAny(k, off, parity, lane, tag);
-        return;
+        return true;  // (the caller runs fleetLevelsAny)
     }
     uint H = splitUniform(lane, lane == 0u ? gsCount[0].load() : 0u);
     uint T = splitUniform(lane, gsOff[LAT_PRE + H]);
     if (T > LANES)
     {
         // (A lane with a second hit: fleetLevelsLat, which takes it in each phase.)
-        fleetLevelsLat(k, off, parity, lane, tag);
-        return;
+        return fleetLevelsLatTry(k, off, parity, lane, tag);
     }
     gFl = 2u;
     gFlOff = off;
@@ -370,10 +369,9 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
             uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
             uint h = gNext[base + 2u * i + 1u];
             uint which = x & 3u;
-            if (which == 3u)
-                vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
-            else
-                vvSnapNode(which == 0u ? tn.x : (which == 1u ? tn.y : tn.z), tn.w, parity, tag);
+            // (One call site for the node: the compilers inline every call.)
+            vvSnapNode(which == 3u ? h : (which == 0u ? tn.x : (which == 1u ? tn.y : tn.z)),
+                       which == 3u ? gStatic[gP.nodeInfoBase + h].w : tn.w, parity, tag);
         }
         sync();
         gVvTag = tag;
@@ -584,4 +582,9 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
     sync();
     for (uint m = lane, mStop = EB_END(445, m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
     flArgsZero(lane);
+    return false;
+}
+void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
+{
+    if (fleetLevelsOnceTry(k, off, parity, lane, tag)) fleetLevelsAny(k, off, parity, lane, tag);
 }

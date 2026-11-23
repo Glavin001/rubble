@@ -463,10 +463,9 @@ void fleetLevelsWide(uint tid, uint word)
         uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
         uint h = gNext[base + 2u * i + 1u];
         uint which = tid & 3u;
-        if (which == 3u)
-            vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
-        else
-            vvSnapNode(which == 0u ? tn.x : (which == 1u ? tn.y : tn.z), tn.w, parity, tag);
+        // (One call site for the node: the compilers inline every call.)
+        vvSnapNode(which == 3u ? h : (which == 0u ? tn.x : (which == 1u ? tn.y : tn.z)),
+                   which == 3u ? gStatic[gP.nodeInfoBase + h].w : tn.w, parity, tag);
         return;
     }
     gVvTag = gP.vvSplit != 0u ? tag : 0u;
@@ -532,7 +531,8 @@ void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, ui
         resMerge(h, tn.x, tn.y, tn.z);
         return;
     }
-    float rr = vvResOf(va, vh, h, tn, alpha, beta, gamma, nn, v, parity, 0u);
+    VvSums S = vvSumsOf(va, vh, h, tn, parity);
+    float rr = vvResOf(h, tn, S, alpha, beta, gamma, nn, v, 0u);
     if (phase == 0u)
     {
         if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
@@ -541,7 +541,7 @@ void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, ui
     float3 total = f1;
     if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
     float3 gg;
-    if (vvGuardOf(va, vh, h, tn, alpha, beta, gamma, v, total, parity, gg)) total = sadd3(total, gg);
+    if (vvGuardOf(h, tn, S, alpha, beta, gamma, v, total, gg)) total = sadd3(total, gg);
     resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f1, total);
 }
 

@@ -26,4 +26,4 @@ pollster.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
-naga = { version = "30", features = ["spv-in", "wgsl-in", "wgsl-out"] }
+naga = { version = "30", features = ["spv-in", "wgsl-in", "wgsl-out", "msl-out"] }

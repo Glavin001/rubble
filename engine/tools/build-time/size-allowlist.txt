@@ -2,7 +2,7 @@
 # Slang 3000) when the limit was set, each with the most lines it may have.
 # They may shrink (check.py --shrink lowers the numbers), not grow: split a
 # file instead, or raise its line in the same change, where review sees it.
-crates/engine-exec/src/explicit_plan.rs 3899
+crates/engine-exec/src/explicit_plan.rs 3870
 crates/engine-exec/src/rigid_plan.rs 2269
 crates/engine-ffi/src/lib.rs 3650
 crates/engine-fracture/src/plan.rs 1548
@@ -32,12 +32,12 @@ crates/engine-terrain/src/material.rs 1938
 crates/engine-terrain/src/plan.rs 2313
 crates/engine-vehiclegen/src/solid.rs 1707
 crates/engine-webgpu/src/bin/explicit_beams_scaling.rs 2193
-crates/engine-webgpu/src/explicit_beams_gpu.rs 5149
+crates/engine-webgpu/src/explicit_beams_gpu.rs 5117
 crates/engine-webgpu/src/gpu.rs 5004
 crates/engine-webgpu/src/gpu_tests.rs 5313
 crates/engine-webgpu/tests/vehicle.rs 1922
 crates/engine-webgpu/tests/vehicle_debug.rs 1606
-crates/engine-world-lab/examples/vehicle_lab.rs 3377
+crates/engine-world-lab/examples/vehicle_lab.rs 3374
 crates/engine-world-wasm/src/explicit.rs 1506
 crates/engine-world/src/destruction.rs 1609
 crates/engine-world/src/lab.rs 1775
@@ -46,7 +46,7 @@ crates/engine-world/src/play/showcase.rs 1963
 crates/engine-world/src/threshold.rs 4061
 crates/engine-world/src/vehicle_lab/mod.rs 3630
 experiments/gpu-floor/src/floor.rs 1950
-slang/kernels/explicit_beams.slang 11645
+slang/kernels/explicit_beams.slang 11550
 slang/kernels/explicit_beams_baseline.slang 3609
 slang/kernels/explicit_beams_ref.slang 4932
 slang/kernels/terrain_mpm.slang 3729
