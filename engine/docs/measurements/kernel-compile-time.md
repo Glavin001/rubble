@@ -591,3 +591,19 @@ the contact path against the split path), the scenario matrix (12 rows bit for b
 slower), `run.sh --world`, fifteen GPU suites in bit-exact mode and engine-world's
 `explicit_vehicles`, `sleep-check.sh` (21), Chrome's validation of all 158 modules in both
 settings.
+
+### The contact groups' members: one candidate loop (2026-11-23)
+
+The members' step of the contact module (`contactMembersStepAt`) had four call sites of
+`tryContact`: the early pairs, the grid's walk at the member's offsets (`triangleGridAt`),
+the brute pairs and every candidate. Now one `triangleCandidatesFrom` loop runs them
+(`offBase`: the walk's bucket offsets in gNext and the triangle's own geometry, as
+`triangleGridAt`; an early pair is its triangle against its one candidate). An early pair
+spends one loop-budget pass more (the candidate loop's), which matters only past the cap.
+`explicit_beams_contact_wide_nosurf`, Chrome cold: 25.5 -> 19.0 s (19.1, 18.9).
+
+What is left in it (74,500 instructions offline, against the larger groups' module's
+74,000 at 12.6 s): the small groups' passes (`vvPassSmallLevels` and `vvPassSmallTests`:
+`vvTry` twice, `vvClip` ten times, `vvTriangleCandsSmall` three times), and `beamUpdate`
+twice (the deferred breaks, one lane, and the beam phase: different points of the step, so
+not one loop without moving one). Each further merge is a few per cent.
