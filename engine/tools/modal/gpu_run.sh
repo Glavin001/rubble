@@ -226,10 +226,11 @@ esac
 if [ -n "${base_ref:-}${head_ref:-}" ]; then
   [ -n "${matrix_cuda:-}" ] || { echo "gpu_run: --base/--head are for --matrix-cuda" >&2; exit 2; }
   [ -n "${base_ref:-}" ] || { echo "gpu_run: --head needs --base" >&2; exit 2; }
-  # Every row's fixture, in the matrix's order, whichever rows run: the library's key
-  # covers the fixtures, so a build serves any selection of rows.
+  # Every row's fixture, in the matrix's order, whichever rows run (the goal's rows
+  # too: their surface contact needs modules the default rows do not): the library's
+  # key covers the fixtures, so a build serves any selection of rows.
   fx=()
-  for r in $(python3 "$matrix_py" --rows --two-builds); do
+  for r in $(python3 "$matrix_py" --rows --two-builds all); do
     [ -f "$repo/engine/out/scenario-matrix/portable/$r.pfx" ] && fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx")
   done
   "$here/build_ref.sh" "$base_ref" "$run/refs/base_replay" "${fx[@]}"
