@@ -118,6 +118,21 @@ void surfPairListSplit(uint v, uint i, float3 tlo, float3 thi, uint proxies, flo
 }
 #endif
 
+// surfAnyFast over the lanes (the prep's and the plan's: one proxy's test is a chain of
+// loads, a hull's a load a plane): lane's share of proxies 0.. with the given stride,
+// any of them fast; the workgroup's answer is gsSurfFast after a barrier (cleared by
+// lane 0 before surfPipeSkip's). The same answer, an or of the same tests.
+groupshared uint gsSurfFast;
+bool surfFastLanes(uint v, uint proxies, uint lane, uint step)
+{
+    for (uint k = lane, kStop = EB_END(771, k, proxies, step); k < kStop; k += step)
+    {
+        float3 vb;
+        if (surfProxyFast(v, k, vb)) return true;
+    }
+    return false;
+}
+
 // Whether workgroup v steps no surface (uniform): past the vehicles, asleep (the frame
 // did not step it), or no vehicle of the upload has surface contact.
 bool surfPipeSkip(uint v, uint lane)
@@ -147,14 +162,17 @@ void explicit_surface_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
     uint lane = lid.x;
+    if (lane == 0u) gsSurfFast = 0u;
     if (surfPipeSkip(v, lane)) return ebLoopCapFlush();
     uint4 rec = gMisc[segRec(v)];
+    if (rec.y != 0u && surfFastLanes(v, rec.w, lane, SURF_WG)) gsSurfFast = 1u;
+    GroupMemoryBarrierWithGroupSync();
     if (lane != 0u || rec.y == 0u) return ebLoopCapFlush();
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 sr = gStatic[gP.surfSeg + v];
     uint proxies = rec.w;
-    bool anyFast = proxies != 0u && surfAnyFast(v, proxies);
+    bool anyFast = gsSurfFast != 0u;
     // The listing's two counts (surfPairListSplit): the pairs from the region's start,
     // a triangle's against a hull from its end; the find's hit count cleared.
     uint n = uint(gAcc[surfPairCount(v)].load());
@@ -189,6 +207,7 @@ void explicit_surface_prep(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_SURF_ARGS
     surfArgsClear(v, lane);
 #endif
+    if (lane == 0u) gsSurfFast = 0u;
     if (surfPipeSkip(v, lane)) return ebLoopCapFlush();
     uint parity = (gMisc[v].w + gP.pad2) & 1u;
     uint4 r0 = gStatic[v * 4u];
@@ -204,11 +223,12 @@ void explicit_surface_prep(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
     uint bodies = proxies != 0u ? cplVeh(v).x : 0u;
-    bool anyFast = proxies != 0u && surfAnyFast(v, proxies);
+    if (surfFastLanes(v, proxies, lane, LANES)) gsSurfFast = 1u;
     bool pairs = proxies != 0u && surfPairsOn();
     if (lane == 0u) gsUniformSurf = pairs ? 1u : 0u;
     sync();
     pairs = gsUniformSurf != 0u;
+    bool anyFast = gsSurfFast != 0u;
     for (uint i = lane, iStop = EB_END(547, i, nodeCount, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
