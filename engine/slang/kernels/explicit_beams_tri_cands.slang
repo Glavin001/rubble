@@ -56,9 +56,13 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
 // candidate past GRID_MAX_CELLS cells). Candidates k = sub, sub + subs, ... (cells for
 // the walk). One function, so that a step that runs one of the four has one copy of
 // tryContact for them (the compilers inline every call): the same tests in the same order
-// as each had.
-void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
-                        uint beamOff, uint groupOff, uint groupCount, uint parity, uint mode)
+// as each had. offBase: the walk's bucket offsets in gNext from there and the triangle's
+// geometry its own (triangleGridAt, a contact group's member); TC_GS the workgroup's
+// (gsOff) and triGeoFill's geometry.
+static const uint TC_GS = 0xFFFFFFFFu;
+void triangleCandidatesFrom(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
+                            uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity, uint mode,
+                            uint offBase)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     TriGeo t;
@@ -75,7 +79,7 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
     }
     else
     {
-        t = mode == 3u && gP.triGeo != 0u ? triGeoLoad(gt) : triangleGeo(gt, origin, r, parity);
+        t = mode == 3u && offBase == TC_GS && gP.triGeo != 0u ? triGeoLoad(gt) : triangleGeo(gt, origin, r, parity);
         lo = t.lo;
         hi = t.hi;
     }
@@ -143,8 +147,8 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
                 }
             }
             if (dup) continue;
-            e0 = gsOff[b];
-            e1 = gsOff[b + 1u];
+            e0 = offBase == TC_GS ? gsOff[b] : gNext[offBase + b];
+            e1 = offBase == TC_GS ? gsOff[b + 1u] : gNext[offBase + b + 1u];
         }
         for (uint e = e0, eStop = EB_END_UNIFORM(644, e, e1, 1u, EB_LOOP_CAP); e < eStop; e++)
         {
@@ -187,6 +191,12 @@ void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, fl
             tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
         }
     }
+}
+void triangleCandidates(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
+                        uint beamOff, uint groupOff, uint groupCount, uint parity, uint mode)
+{
+    triangleCandidatesFrom(gt, sub, subs, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity,
+                           mode, TC_GS);
 }
 
 // triangleGridWalk's listing walk alone (its pairs into the list at listAt, for the test

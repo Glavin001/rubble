@@ -8958,44 +8958,45 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     // Measurement only: 1048576 the members' self-collision tests.
     if ((gP.ablate & 1048576u) != 0u) {} else
 #endif
-    if (early && pairs <= PAIR_PART)
     {
-        for (uint i = pl, iStop = EB_END(173, i, pairs, P); i < iStop; i += P)
+        // One of four tests from one loop of triangleCandidatesFrom (one copy of tryContact):
+        // cmode 5 the early pairs (a pair: its triangle against its one candidate, mode 0),
+        // 3 the grid's walk at the member's offsets, 1 the brute pairs, 0 every candidate.
+        uint cmode = 4u, cN = 0u, ck = 1u, cstride = P;
+        if (early && pairs <= PAIR_PART)
         {
-            uint e = gsPairs[m * PAIR_PART + i];
-            tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin, range,
-                       beamOff, groupOff, groupCount, parity);
+            cN = pairs;
+            cmode = 5u;
         }
-    }
-    else if (candCount > 0u && cell > 0.0 && gridM)
-    {
-        for (uint q = pl, qStop = EB_END(174, q, listed * GRID_SUBS, P); q < qStop; q += P)
+        else if (candCount > 0u && cell > 0.0 && gridM)
         {
-            uint t = gNext[listBase + q / GRID_SUBS];
-            triangleGridAt(triOff + t, q % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                           groupCount, parity, offBase);
+            cN = listed * GRID_SUBS;
+            ck = GRID_SUBS;
+            cmode = 3u;
         }
-    }
-    else if (candCount > 0u && cell > 0.0)
-    {
-        uint lanes = clamp(P / max(listed, 1u), 1u, candCount);
-        uint stride = (P / lanes) * lanes;
-        for (uint q = pl, qStop = EB_END(175, q, listed * lanes, stride); q < qStop && pl < stride; q += stride)
+        else if (candCount > 0u)
         {
-            uint t = gNext[listBase + q / lanes];
-            triangleGridBrute(triOff + t, q % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
-                              groupOff, groupCount, parity);
+            ck = clamp(P / max(listed, 1u), 1u, candCount);
+            cstride = (P / ck) * ck;
+            cN = listed * ck;
+            cmode = cell > 0.0 ? 1u : 0u;
         }
-    }
-    else if (candCount > 0u)
-    {
-        uint lanes = clamp(P / max(listed, 1u), 1u, candCount);
-        uint stride = (P / lanes) * lanes;
-        for (uint q = pl, qStop = EB_END(176, q, listed * lanes, stride); q < qStop && pl < stride; q += stride)
+        for (uint q = pl, qStop = EB_END(174, q, cN, cstride); q < qStop && pl < cstride; q += cstride)
         {
-            uint t = gNext[listBase + q / lanes];
-            triangleTest(triOff + t, q % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
-                         groupCount, parity);
+            uint gt = triOff;
+            uint sub = q % ck;
+            uint subs = ck;
+            if (cmode == 5u)
+            {
+                uint e = gsPairs[m * PAIR_PART + q];
+                gt += e >> 16;
+                sub = e & 0xFFFFu;
+                subs = candCount;
+            }
+            else
+                gt += gNext[listBase + q / ck];
+            triangleCandidatesFrom(gt, sub, subs, origin, range, cell, candOff, candCount, beamOff, groupOff, groupCount,
+                                   parity, cmode == 5u ? 0u : cmode, cmode == 3u ? offBase : TC_GS);
         }
     }
     if ((flagsU & 2u) != 0u)
