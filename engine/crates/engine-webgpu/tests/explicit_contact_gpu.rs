@@ -341,6 +341,23 @@ fn a_group_over_the_limit_runs_alone_and_is_reported() {
     g.set_contact_margin(0.0);
     g.frame(17);
     g.contact_status().unwrap();
+    // On the contact path (the groups' module over the groups alone), the vehicles of a
+    // group over the limit run alone in the solo module's dispatch: each one stepped (it
+    // falls), none left where it was.
+    let falling: Vec<ExplicitBeams> = (0..70)
+        .map(|k| point(Vec3::new(0.08 * k as f32, 5.0, 0.0), Vec3::ZERO, false))
+        .collect();
+    let mut g = gpu(&falling).unwrap();
+    g.set_group_split(false);
+    g.set_self_split(false);
+    // (1 cm: the frame's fall within its bounds; still one chain of 70.)
+    g.set_contact_margin(0.01);
+    g.frame(17);
+    let e = g.contact_status().unwrap_err();
+    assert!(e.contains("more than 64"), "{e}");
+    for (k, p) in g.positions().iter().enumerate() {
+        assert!(p[0].y < 5.0, "vehicle {k} of the group over the limit was not stepped (y {})", p[0].y);
+    }
 }
 
 /// A node leaving its frame bounds never stops a running sim: the error is handed

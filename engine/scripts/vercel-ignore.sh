@@ -19,7 +19,10 @@ if [[ -n "$ref" && -n "$sha" ]]; then
   fi
 fi
 
-prev="${VERCEL_GIT_PREVIOUS_SHA:-HEAD^}"
+#    Without a previous deployment (a branch's first push), build: HEAD^ would compare the
+#    last commit alone, and a push ending in a docs-only commit was skipped whole.
+prev="${VERCEL_GIT_PREVIOUS_SHA:-}"
+[[ -n "$prev" ]] || exit 1
 git cat-file -e "$prev^{commit}" 2>/dev/null || exit 1
 git diff --quiet "$prev" HEAD -- engine vercel.json ':(exclude)engine/docs' ':(exclude)engine/*.md' \
   ':(exclude)engine/stress-oracle/findings' ':(exclude)engine/stress-oracle/reference' \

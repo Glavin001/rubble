@@ -329,7 +329,7 @@ void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
         if (gP.vvOn != 0u)
         {
             uint groups = gArgs[3];
-            gArgs[0] = groups == 0u ? run : 0u;
+            gArgs[0] = groups == 0u || gArgs[19] != 0u ? run : 0u;
             gArgs[1] = 1u;
             gArgs[2] = 1u;
             gArgs[4] = groups == 0u ? 0u : run + groups;
