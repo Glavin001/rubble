@@ -540,3 +540,15 @@ quirk, the same words as main against itself), the scenario matrix (12 rows bit 
 none slower: PASS in 32.9 s), `run.sh --world` (8 rows, PASS), twelve GPU suites in
 bit-exact mode (61 tests), `sleep-check.sh` (21), Chrome's validation of all 158 modules
 in both settings, `cargo check -p engine-metal -p engine-cuda`.
+
+### The predictor, refitted and not adopted (2026-11-23)
+
+A fresh cold compile of the lab's 28 modules (this change; Chrome, the fast setting):
+contact 54.4 s (from 65: it holds the solo frame too), solo 14.2 s, members 9.5 s, levels
+9.2 s, every other module at most 2.4 s. `compile_cost.py --calibrate` on them gives
+K 4.639e-06, B 1.4258: the members' kernel predicted 9.99 s (under the cap by nothing) and
+contact 40.3 s against its measured 54.4 s. Kept the model of 2026-11-22 (B 1.758): it
+over-predicts the large kernels, so it is the stricter gate, and the allowlist's lines
+(which only come down) already stop any kernel from growing. The static count ranks
+kernels well but is off by up to 1.4x on one that had its copies removed, so a kernel
+near the cap is judged by a measured cold compile, not by moving the model.
