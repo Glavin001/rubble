@@ -658,10 +658,23 @@ Measured 2026-11-14/15 (M3 Max host, OrbStack Docker with Rosetta, Modal T4):
 nothing: it hashes its source files, sends the ones that changed, and reads the result.
 Many sessions can build and test at once, each in containers of its own. The archive
 never comes back here: the GPU stage reads it from the volume it was written to.
-`GPU_RUN_LOCAL_BUILD=1` builds here in Docker as before. The two-build A/B
-(`--base/--head`) still builds its commits here (`build_ref.sh`).
-`gpu_run.sh --remote-build -- <selection>` builds any selection this way;
-`remote_build.sh -- <selection>` only builds.
+**Choosing where to compile**, for any `gpu_run.sh` or `run.sh --cuda` run:
+`RUBBLE_BUILD=modal` or `RUBBLE_BUILD=local` (or `gpu_run.sh --build modal|local`;
+`MODAL_OPTS="--build local"` through `run.sh`). Every run then says where it built and
+how long that took (`gpu_run: built on Modal in 36 s` / `built locally in Docker in ...`),
+so the two are easy to compare.
+
+- **Default:** modal for the CUDA matrix, local for other selections.
+- **The two-build A/B** (`--base/--head`) builds its commits here (`build_ref.sh`). An
+  exported `RUBBLE_BUILD=modal` leaves it local with a note; an explicit `--build modal`
+  is refused.
+- `--fanout-tests` builds on Modal too (its test lists come from the remote build).
+- `GPU_RUN_LOCAL_BUILD=1` and `--remote-build` are kept as aliases.
+- `remote_build.sh -- <selection>` only builds.
+
+```bash
+RUBBLE_BUILD=local ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda perf=0
+```
 
 How it works (`remote_build.py`, a deployed Modal class, redeployed when its code or the
 build image changes):

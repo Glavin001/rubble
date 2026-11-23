@@ -21,6 +21,7 @@ pack_opts=() stage="" result_out=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --data) pack_opts+=(--data "$2"); shift 2 ;;
+    --list-tests) pack_opts+=(--list-tests); shift ;;
     --stage) stage="$2"; shift 2 ;;
     --result) result_out="$2"; shift 2 ;;
     --) shift; break ;;

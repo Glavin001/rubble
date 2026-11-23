@@ -55,9 +55,11 @@
 #                        (build_ref.sh, cached by commit) and ship it as the base of
 #                        matrix.py --two-builds (BASE_BIN)
 #   --head REF           the same for the head (default: the working tree's build)
-#   --remote-build       build on Modal's CPUs (remote_build.sh) instead of local Docker:
-#                        only changed source files leave this machine, the archive stays
-#                        on Modal (not with --base/--head or --fanout-tests yet)
+#   --build modal|local  where to compile (or RUBBLE_BUILD=modal|local): `modal` on
+#                        Modal's CPUs (remote_build.sh; only changed source files leave
+#                        this machine, the archive stays on Modal), `local` in Docker here.
+#                        Default: modal for --matrix-cuda, local otherwise. The two-build
+#                        A/B (--base/--head) builds local. --remote-build = --build modal
 #   --build-only         build and pack, do not call Modal
 #   --keep               keep the run directory (engine/target/gpu-run/<id>)
 set -euo pipefail
@@ -92,7 +94,8 @@ while [ $# -gt 0 ]; do
     --fanout-tests) fanout=tests; pack_opts=(--list-tests); shift ;;
     --matrix) fanout=matrix; shift ;;
     --matrix-cuda) fanout=matrix; matrix_cuda=1; shift ;;
-    --remote-build) remote_build=1; shift ;;
+    --build) build_where="$2"; shift 2 ;;
+    --remote-build) build_where=modal; shift ;;
     --base) base_ref="$2"; shift 2 ;;
     --head) head_ref="$2"; shift 2 ;;
     --) shift; break ;;
@@ -114,11 +117,28 @@ if [ -n "${matrix_cuda:-}" ]; then
   : "${cpus:=1}" "${mem:=2}" "${pack:=1}"
 fi
 : "${cpus:=8}" "${mem:=8}" "${pack:=0}"
-# The CUDA matrix builds on Modal by default (this machine compiles nothing), except the
-# two-build A/B, whose commits still build here (build_ref.sh). GPU_RUN_LOCAL_BUILD=1
-# builds here in Docker as before.
-if [ -n "${matrix_cuda:-}" ] && [ -z "${base_ref:-}${head_ref:-}" ] && [ "${GPU_RUN_LOCAL_BUILD:-0}" != 1 ]; then
-  : "${remote_build:=1}"
+# Where to compile: --build, else RUBBLE_BUILD, else modal for the CUDA matrix (this
+# machine compiles nothing) and local for the rest and for the two-build A/B, whose
+# commits build here (build_ref.sh). GPU_RUN_LOCAL_BUILD=1 is RUBBLE_BUILD=local.
+if [ -z "${build_where:-}" ] && [ -n "${RUBBLE_BUILD:-}" ] && [ -n "${base_ref:-}${head_ref:-}" ]; then
+  # (RUBBLE_BUILD=modal exported for every run: the two-build A/B still builds here.)
+  [ "$RUBBLE_BUILD" = modal ] && echo "gpu_run: the two-build A/B builds its commits here (RUBBLE_BUILD=modal applies to the other runs)" >&2
+  build_where=local
+fi
+: "${build_where:=${RUBBLE_BUILD:-}}"
+if [ -z "$build_where" ]; then
+  if [ "${GPU_RUN_LOCAL_BUILD:-0}" = 1 ]; then build_where=local
+  elif [ -n "${matrix_cuda:-}" ] && [ -z "${base_ref:-}${head_ref:-}" ]; then build_where=modal
+  else build_where=local; fi
+fi
+case "$build_where" in
+  modal) remote_build=1 ;;
+  local) remote_build=0 ;;
+  *) echo "gpu_run: --build (RUBBLE_BUILD) must be modal or local, not '$build_where'" >&2; exit 2 ;;
+esac
+if [ "$remote_build" = 1 ] && [ -n "${base_ref:-}${head_ref:-}" ]; then
+  echo "gpu_run: the two-build A/B (--base/--head) builds its commits here: use --build local (RUBBLE_BUILD=local)" >&2
+  exit 2
 fi
 [ $# -gt 0 ] || { echo "gpu_run: nothing to run; see --help" >&2; exit 2; }
 
@@ -284,12 +304,11 @@ if [ "$cuda_route" = 1 ]; then
     -e ENGINE_CUDA_REQUIRE_PTX=1)
 fi
 if [ "${remote_build:-0}" = 1 ]; then
-  if [ -n "${base_ref:-}${head_ref:-}" ] || [ "${#pack_opts[@]}" -gt 0 ]; then
-    echo "gpu_run: --remote-build does not take --base/--head or --fanout-tests yet" >&2; exit 2
-  fi
   stage_opt=()
   if [ -d "$run/stage" ]; then stage_opt=(--stage "$run/stage"); fi
-  "$here/remote_build.sh" ${data[@]+"${data[@]}"} ${stage_opt[@]+"${stage_opt[@]}"} --result "$run/remote.json" -- "${args[@]}"
+  # (pack_opts here is only --list-tests: --fanout-tests lists each binary's tests there.)
+  "$here/remote_build.sh" ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} ${stage_opt[@]+"${stage_opt[@]}"} \
+    --result "$run/remote.json" -- "${args[@]}"
 else
 docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_cache[@]+"${cuda_cache[@]}"} \
   -v "$repo:/repo" \
@@ -303,9 +322,9 @@ docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_
 fi
 t1=$(date +%s)
 if [ "${remote_build:-0}" = 1 ]; then
-  echo "gpu_run: remote build $((t1 - t0)) s" >&2
+  echo "gpu_run: built on Modal in $((t1 - t0)) s (RUBBLE_BUILD=local to build here)" >&2
 else
-  echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
+  echo "gpu_run: built locally in Docker in $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1) (RUBBLE_BUILD=modal to build on Modal)" >&2
 fi
 rm -rf "$run/stage"
 if [ "$build_only" = 1 ]; then

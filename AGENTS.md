@@ -35,8 +35,9 @@
 - Modal's GPU target is CUDA (`engine-cuda`). The CUDA matrix (`run.sh --cuda`) builds on
   Modal's CPUs by default, so this machine compiles nothing: only changed source files
   leave it (`engine/tools/modal/remote_build.sh`; a Rust edit about 20 s and half a cent,
-  README "Building on Modal"; `GPU_RUN_LOCAL_BUILD=1` builds in local Docker). Other
-  selections build locally with nvcc unless given `--remote-build`, and Modal runs the
+  README "Building on Modal"). Choose where any run compiles with `RUBBLE_BUILD=modal` or
+  `RUBBLE_BUILD=local` (`gpu_run.sh --build modal|local`): the default is modal for the
+  CUDA matrix and local for other selections and the two-build A/B. Modal runs the
   binary, seconds a container.
   `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`
   runs each test binary or each test in a container of its own, all at once (built in
