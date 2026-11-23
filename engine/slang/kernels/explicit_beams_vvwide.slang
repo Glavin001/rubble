@@ -8,6 +8,10 @@
 // on the GPU whether a frame holds a group, so a host launches both schedules every
 // frame and explicit_vv_gate sizes them: the wide passes get their workgroups when the
 // plan holds no group, today's per-vehicle dispatches when it holds one.
+// "No group" is no group of two or more members (§8.63): with vehicle contact the plan
+// makes a vehicle without partners a group of its own (explicit_beams_vv_group), whose
+// member step is the solo frame's bit for bit, so a frame of such groups alone runs the
+// wide passes, and the groups' own dispatches, sized from the gate's buffer, get none.
 //
 // Three small modules, each one entry of this file: the gate, and the node and close
 // passes with the bounds check (the wide modules themselves are unchanged: a fleet with
@@ -32,6 +36,11 @@ static const uint VW_BEAMS = 6u; // a thread a beam: the centred beams
 static const uint VW_BEAMS_ALL = 7u; // the beam pass: beams, candidates, triangles
 static const uint VW_END = 8u; // the end pass: triangles, beams
 static const uint VW_OLD = 9u;
+// The split group path's dispatches sized from the plan's arguments (vvArgs words 16,
+// 20, 24, 32, 36 and 44: the groups', the members', the tests', the fleet's scans, first
+// plan and larger groups'): the plan's own counts in a frame with a group of two or
+// more, 0 without (the groups of one are the wide passes' vehicles then).
+static const uint VW_GROUPS = 10u;
 // Words the gate's clear modes zero: the self split's arguments (two kinds, three step
 // slots of three words: selfArgsAt, selfWalkArgsAt) and the surface pass's (five
 // kinds: surfArgsAt).
@@ -46,11 +55,19 @@ void vwPut(uint slot, uint x)
     gVvWide[4u * slot + 1u] = 1u;
     gVvWide[4u * slot + 2u] = 1u;
 }
+// The plan's arguments at word w into slot `slot`, x times `old` (0 or 1).
+void vwPlan(uint slot, uint w, uint old)
+{
+    gVvWide[4u * slot] = old * gArgs[w];
+    gVvWide[4u * slot + 1u] = gArgs[w + 1u];
+    gVvWide[4u * slot + 2u] = gArgs[w + 2u];
+}
 
 // One workgroup, after the contact plan's passes, every frame. The step word picks what it
 // does (a parameter copy each):
-//   0  binding 10 the contact plan's arguments: from the plan's group count (vvArgs,
-//      word 3; with the arguments in every snapshot) the slots above.
+//   0  binding 10 the contact plan's arguments: from the plan's count of groups of two
+//      or more (vvArgs word 15, that count plus one; 0 in a plan before that word: its
+//      group count, word 3; with the arguments in every snapshot) the slots above.
 //   1  binding 10 the self split's arguments: zeroed.
 //   2  binding 10 the surface pass's arguments: zeroed.
 // (1 and 2, at a frame's start where the wide frame's walk, pairs and surface dispatches
@@ -69,9 +86,12 @@ void explicit_vv_gate(uint3 id : SV_DispatchThreadID)
         if (id.x < (mode == 1u ? VW_CLEAR_SELF : VW_CLEAR_SURF)) gArgs[id.x] = 0u;
         return;
     }
+    uint multi = gArgs[15] != 0u ? gArgs[15] - 1u : gArgs[3];
+    uint wide = multi == 0u ? 1u : 0u;
+    // (Slot VW_GROUPS + k on thread k: the plan's words 16, 20, 24, 32, 36, 44.)
+    if (id.x < 6u) vwPlan(VW_GROUPS + id.x, id.x < 3u ? 16u + 4u * id.x : (id.x < 5u ? 20u + 4u * id.x : 44u), 1u - wide);
     if (id.x != 0u) return;
     uint nv = gP.vehicles;
-    uint wide = gArgs[3] == 0u ? 1u : 0u;
     vwPut(VW_NV, wide * nv);
     vwPut(VW_NV2, wide * 2u * nv);
     vwPut(VW_NV3, wide * 3u * nv);

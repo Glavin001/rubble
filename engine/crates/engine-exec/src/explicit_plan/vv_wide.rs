@@ -10,6 +10,13 @@
 //! each a zero count in a frame with a group; today's per-vehicle launches that run
 //! every frame from its [`WideSlot::Old`], zero in a frame without one. The same results
 //! bit for bit as the path it replaces (`--ab-switch vvwide`).
+//!
+//! "No group" is no group of two or more members (§8.63): with vehicle contact the plan
+//! makes a vehicle without partners a group of its own, whose member step is the solo
+//! frame's bit for bit. The plan counts its groups of two or more apart
+//! ([`plan_groups_of_two`]), the gate and the host's read go by that count, and in a wide
+//! frame the split group path's dispatches that the plan's arguments size launch from
+//! the gate's buffer ([`gated_slot`]): the plan's counts with such a group, none without.
 
 use super::schedule::{group_split_ops, surf_args_offset, ArgBuf, FrameKind, Grid, GroupOp, Op, SelfDispatch, SplitLaunch, Switches};
 use super::{
@@ -21,8 +28,28 @@ use super::{
 };
 
 /// Bytes of the gate's buffer ([`ArgBuf::Wide`]): a slot of four words (x, 1, 1, unused)
-/// for each [`WideSlot`].
-pub const WIDE_ARGS_BYTES: u64 = 160;
+/// for each [`WideSlot`]. (Not state: the gate writes it every wide frame, and no
+/// snapshot or fixture holds it.)
+pub const WIDE_ARGS_BYTES: u64 = 256;
+
+/// The plan's arguments' word ([`super::BIND_ARGS`], the kernel's vvArgs) holding its
+/// count of groups of two or more members plus one; 0 in a plan written before it.
+pub const PLAN_GROUPS_OF_TWO_WORD: usize = 15;
+/// The plan's arguments' word holding its group count (groups of one included).
+pub const PLAN_GROUPS_WORD: usize = 3;
+
+/// The plan's groups of two or more members from its arguments' words (`args`, at least
+/// [`PLAN_GROUPS_OF_TWO_WORD`] + 1 of them; the kernel's explicit_vv_gate decides the
+/// same way): word 15 less one, or for a plan written before that word (0 there), its
+/// group count (a plan then made no group of one).
+pub fn plan_groups_of_two(args: &[u32]) -> Option<u32> {
+    let two = *args.get(PLAN_GROUPS_OF_TWO_WORD)?;
+    if two != 0 {
+        Some(two - 1)
+    } else {
+        args.get(PLAN_GROUPS_WORD).copied()
+    }
+}
 
 /// A slot of the gate's buffer (the kernel's VW_*): the workgroups of the wide launches it
 /// sizes when the plan holds no group (0 with one); [`WideSlot::Old`] the vehicles when
@@ -47,12 +74,39 @@ pub enum WideSlot {
     /// The end pass: triangles, beams.
     End = 8,
     Old = 9,
+    /// The split group path's dispatches the plan's arguments size ([`gated_slot`]): the
+    /// plan's counts at its byte offset 64 (the groups'), 80 (the members'), 96 (the
+    /// tests'), 128 (the fleet's scans), 144 (its first plan) and 176 (the larger groups')
+    /// with a group of two or more, 0 without.
+    Groups = 10,
+    Members = 11,
+    Tests = 12,
+    FleetScan = 13,
+    FleetFirst = 14,
+    FleetLarger = 15,
 }
 
 impl WideSlot {
     /// Its byte offset in the gate's buffer.
     pub fn offset(self) -> u64 {
         16 * self as u64
+    }
+}
+
+/// In a wide frame, the gate's slot that sizes a split group path dispatch the plan's
+/// arguments size at byte `offset` (the kernel's VW_GROUPS ..): the plan's count with a
+/// group of two or more members, 0 without, when the groups of one are the wide passes'.
+/// Panics for an offset no such dispatch reads.
+pub fn gated_slot(offset: u64) -> WideSlot {
+    use super::schedule::{FLEET_FIRST_ARGS, FLEET_LARGER_ARGS, FLEET_SCAN_ARGS, SPLIT_GROUP_ARGS, SPLIT_MEMBER_ARGS, SPLIT_TESTS_ARGS};
+    match offset {
+        SPLIT_GROUP_ARGS => WideSlot::Groups,
+        SPLIT_MEMBER_ARGS => WideSlot::Members,
+        SPLIT_TESTS_ARGS => WideSlot::Tests,
+        FLEET_SCAN_ARGS => WideSlot::FleetScan,
+        FLEET_FIRST_ARGS => WideSlot::FleetFirst,
+        FLEET_LARGER_ARGS => WideSlot::FleetLarger,
+        o => panic!("explicit plan: a wide frame's dispatch from the plan's arguments at byte {o} has no gate slot"),
     }
 }
 
@@ -109,14 +163,14 @@ impl FramePlanner {
         self.vv_wide && self.contact_active() && self.wide_ok() && self.wide_on && !self.sleep_on()
     }
 
-    /// The contact plan's group count as the host last read it back (`None`: not yet), a
-    /// hint only: [`Self::vv_wide`]'s frames hold both schedules, a launch each, and a
-    /// launch costs a host and a driver microseconds whether or not the GPU gives it a
+    /// The contact plan's groups of two or more members as the host last read them back
+    /// ([`plan_groups_of_two`]; `None`: not yet), a hint only: [`Self::vv_wide`]'s
+    /// frames hold both schedules, a launch each, and a launch costs a host and a driver microseconds whether or not the GPU gives it a
     /// workgroup, so a frame takes them only after a plan without a group was seen.
     /// Until then, and after a plan with a group, it is today's frame, which serves a
     /// plan without a group as before. Either frame is right for either plan, so a
     /// stale or missing hint costs time and never changes a result; a host reads the
-    /// count without waiting (the plan's arguments, word 3, after a frame).
+    /// count without waiting (the plan's arguments, words 3 and 15, after a frame).
     pub fn set_vv_wide_seen(&mut self, groups: Option<u32>) {
         self.vv_seen = groups;
     }
@@ -419,8 +473,22 @@ mod tests {
                 assert_eq!(counts[slot as usize], groups, "pass {pass}");
                 assert!(slot.offset() + 12 <= WIDE_ARGS_BYTES);
             }
-            assert!(WideSlot::Old.offset() + 16 == WIDE_ARGS_BYTES);
+            assert!(WideSlot::FleetLarger.offset() + 16 == WIDE_ARGS_BYTES);
         }
+    }
+
+    /// The host's read of the plan's groups of two or more: word 15 less one; a plan
+    /// before that word (0 there) by its group count, word 3.
+    #[test]
+    fn the_hosts_read_counts_groups_of_two_or_more() {
+        let mut args = [0u32; 48];
+        args[3] = 4;
+        assert_eq!(plan_groups_of_two(&args), Some(4));
+        args[15] = 1;
+        assert_eq!(plan_groups_of_two(&args), Some(0));
+        args[15] = 3;
+        assert_eq!(plan_groups_of_two(&args), Some(2));
+        assert_eq!(plan_groups_of_two(&args[..15]), None);
     }
 
     /// Cars with vehicle contact and self-collision split: off, today's launches; on, the
@@ -482,6 +550,18 @@ mod tests {
         assert_eq!(kept, old);
         let l = split_launch(&ops[last], false, up.layout.lanes, &on.kind).unwrap();
         assert_eq!(l.grid, Grid::Indirect(ArgBuf::Wide, WideSlot::Old.offset()));
+        // No launch of the wide frame is sized from the plan's arguments: the gate's slots
+        // size those (none when the plan's groups are all of one); today's frame keeps them.
+        let sized = |f: &super::super::schedule::Frame, buf: ArgBuf| {
+            f.ops().filter_map(|o| split_launch(o, false, up.layout.lanes, &f.kind)).filter(|l| matches!(l.grid, Grid::Indirect(b, _) if b == buf)).count()
+        };
+        assert_eq!(sized(&on, ArgBuf::Plan), 0);
+        assert!(sized(&off, ArgBuf::Plan) > 0);
+        for o in on.ops() {
+            if let (Op::Group(GroupOp::Group { args, .. } | GroupOp::Fleet { from: 0, args, .. }), Some(l)) = (o, split_launch(o, false, up.layout.lanes, &on.kind)) {
+                assert_eq!(l.grid, Grid::Indirect(ArgBuf::Wide, gated_slot(*args).offset()), "{o:?}");
+            }
+        }
         for k in 0..=steps as usize {
             let at = 512 * k + 4 * W_PERF_FLAGS;
             let flags = u32::from_le_bytes(on.params[at..at + 4].try_into().unwrap());

@@ -7861,7 +7861,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 // (words 0..2), else the frame with the groups over vehicles + groups (words 4..6);
 // and every group again for the larger groups' module (words 12..14) when one has
 // more than VV_PART members (`big`), else none.
-void vvArgs(uint nv, uint groups, bool big, bool larger)
+void vvArgs(uint nv, uint groups, uint multi, bool big, bool larger)
 {
     gArgs[12] = big ? groups : 0u;
     gArgs[13] = 1u;
@@ -7874,6 +7874,7 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[6] = 1u;
     // The plan's groups (vehicle sleep's awake list rewrites the arguments every frame).
     gArgs[3] = groups;
+    gArgs[15] = multi + 1u; // its groups of two or more members, plus one (explicit_vv_gate)
     // The split group path (explicit_beams_split.slang): the groups' passes (words
     // 16..18) and, with a group, the members' steps over every vehicle (20..22).
     gArgs[16] = groups;
@@ -8060,13 +8061,11 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         sync();
     }
     uint pairs = min(uint(gAcc[vvCtl(VV_PAIRS)].load()), gP.vvPairCap);
-    // Every vehicle is a member of a group, a vehicle without partners a group of its
-    // own: the members' step is the solo frame's bit for bit (contactMemberStep), and
-    // the split group path's vehicles' module then holds that step alone, half its size
-    // and its first-load compile (explicit_beams_split.slang explicit_beams_split_member;
-    // kernel-compile-time.md). A group past VV_MAX_GROUP members is reported below (the
-    // host's error); its vehicles run alone in the contact module, and are not stepped
-    // that frame on the split group path.
+    // Every vehicle is a member of a group, one without partners a group of its own: the
+    // member step is the solo frame's bit for bit, and the split path's vehicles' module
+    // holds that step alone (explicit_beams_split_member; kernel-compile-time.md). A group
+    // past VV_MAX_GROUP members is reported below; its vehicles run alone in the contact
+    // module, and are not stepped that frame on the split group path.
     for (uint v = lane, vStop = EB_END(126, v, nv, 256u); v < vStop; v += 256u)
     {
         gAcc[gP.vvLabel + v].store(int(v));
@@ -8194,14 +8193,15 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     {
         // A group past VV_PART members (within VV_MAX_GROUP: a larger one's
         // vehicles run alone, its member count 0).
-        bool big = false;
-        bool larger = false;
+        bool big = false, larger = false;
+        uint multi = 0u; // groups of two or more members (a count of 0: past VV_MAX_GROUP)
         for (uint g = 0u, gStop = EB_END(135, g, groups, 1u); g < gStop; g++)
         {
             if (gMisc[gP.vvGroups + g].y > VV_SIDE) big = true;
             if (gMisc[gP.vvGroups + g].y > VV_PART) larger = true;
+            if (gMisc[gP.vvGroups + g].y != 1u) multi++;
         }
-        vvArgs(nv, groups, big, larger);
+        vvArgs(nv, groups, multi, big, larger);
     }
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
