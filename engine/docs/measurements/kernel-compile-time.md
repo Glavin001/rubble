@@ -271,3 +271,241 @@ each as if it had one copy: `driveAheadPart` (5 call sites in the frame step, 6 
 3,047 statements), `beamSum` (275 copies of 111, through `vvBeamSumOf`), `drvTyre`,
 `surfaceStep` (twice in the contact module), `ebEnd` (1,358 copies of 12), `toFixed`
 (882 of 11), `surfApplyTo`, `tryContact`.
+
+### The burn-down from the compiler's own output (`tools/build-time/kernel_profile.py`)
+
+The static count overstates a call that passes a constant: splitting `driveAheadPart`
+(5 call sites, each with a constant `part`) by its part cut the counted statements of
+`explicit_beams_solo_wide_nosurf` by 24 % and changed nothing the compiler sees (its
+optimized entry point 83,059 instructions both ways; Chrome 41.1 -> 37.9 s, noise). The
+driver folds each site down to its branch before the costly passes.
+
+`kernel_profile.py` measures what is left: the module through naga's MSL, Apple's
+offline compiler and `air-opt` (every call inlined, `-O2`), the entry point's
+instructions, and from its line tables each source function's instructions, the copies
+that survived and the call paths that made them (`--attr N --who FN`). 15 s a module,
+no GPU, no browser (macOS with Xcode). Chrome's cold compile follows it as
+`1.07e-8 x instructions^1.914` s (the 28 lab modules: within 1.3x on average): 10 s at
+about 49,000 instructions.
+
+| Module (fast setting) | optimized instructions | Chrome cold |
+|---|---|---|
+| `explicit_beams_contact_wide_nosurf` | 173,434 | 118.8 s |
+| `explicit_beams_selfsplit_member_vv_wide` | 172,170 | 114.0 s |
+| `explicit_beams_split_grouplevels_wide` | 123,679 | 49.3 s |
+| `explicit_beams_solo_wide_nosurf` | 83,059 | 41.1 s |
+
+First fix, from its list: `fleetLevelsAny` was four copies of 15,625 instructions in the
+levels kernel, half of it: `fleetLevelsOnce` and `fleetLevelsLat` each called it at two
+fallbacks (a hit list past its room) and returned. They now return "fall back" and their
+callers call it once (`fleetLevelsOnceTry`, `fleetLevelsLatTry`); nothing ran after a
+fallback, so the same work in the same order. `explicit_beams_split_grouplevels_wide`
+73,206 instructions, Chrome cold 49.3 -> 15.4 s; `explicit_beams_split_group_wide`
+predicted 230 -> 108 s. Checked: fast-check against the previous kernels (16 of 17
+fixtures bit for bit, `cars1_t20.0` differing as with the same kernels on both sides),
+the scenario matrix (12 rows bit for bit, none slower; `--ab-switch kernel` now times its
+halves in rounds as the other switches do), Chrome's validation of all 140 modules in
+both settings.
+
+### Tried and dropped: masking the experiment-only switches
+
+Five perf switches are on in no default (drive-ahead, the levels across the GPU,
+tyre-early, self-hits-local, split-wheels-ahead), yet every pipeline carries their code:
+the flags word is a run-time uniform. Making the pipelines with each read of the word
+masked (`gP.perfFlags & mask`) was bit for bit (fast-check, the widening path, the
+scenario matrix, Chrome's validation) and cut the offline optimized size (solo 83,059 ->
+70,536, member 172,170 -> 150,870, contact 173,434 -> 160,905 instructions), but not
+Chrome's cold compile: solo 41.1 -> 39.9 s, contact 118.8 -> 129.9 s, member 114.0 ->
+123.0 s (noise). Like splitting `driveAheadPart` by its constant, code the compiler can
+only drop by folding a constant does not shorten Chrome's compile; removing copies from
+the source (`fleetLevelsAny`, 49 -> 15 s) does. So `kernel_profile.py`'s burn-down is read
+for duplicated copies, and a fix is judged by Chrome's cold compile, not the profile.
+
+### Every vehicle a group member: the members' module without the solo step
+
+The split group path's vehicles' module (`explicit_beams_split_member`, the vehicle
+lab's `explicit_beams_selfsplit_member_vv_wide`, compiled before the page runs) held two
+steps: a solo vehicle's (`explicitBeamsFrameStep`) and a group member's
+(`contactMemberStep`), each returning at once for the other kind. With vehicle contact,
+the grouping pass (`explicit_beams_vv_group`) now makes every vehicle a member, one
+without partners a group of its own, and the module holds the member step alone. A
+group past `VV_MAX_GROUP` members is the host's error as before (`contact_status`:
+"more than 64"); its vehicles still run alone in the contact module, and on the split
+group path are not stepped that frame. Any other vehicle reaching this module in no
+group fails the frame loudly (loop-cap id 646). The contact module (deferred on the lab's
+pages) keeps its solo half: dropping it would turn that error into a failed frame.
+
+| | before | after |
+|---|---|---|
+| optimized instructions (`kernel_profile.py`) | 172,170 | 88,433 |
+| Chrome cold compile | 114.0-123.0 s | 32.0-34.1 s |
+
+The member step gives a solo vehicle's results bit for bit, and a group of one costs
+the same at run time. Checked against the previous kernels: fast-check (16 of 17
+fixtures bit for bit, the 17th the known quirk), with the split group path off too
+(`--ab-switch groupsplit` in the new build: bit for bit), the scenario matrix (12 rows
+bit for bit, none slower), `sleep-check.sh` (21 checks), the contact, group-split and
+vehicle-grid GPU suites in bit-exact mode (18 tests, including a group over the limit),
+Chrome's validation of all 140 modules in both settings.
+
+### The members' module: one selfApply
+
+The members' module's entry runs either a member's step (`splitMemberHead`, through
+`contactMemberStepHead`) or, in the self split's rest dispatch, the member's rest
+(`memberRestStepHead`); each ended in the same tail with its own `selfApply`. The tail is
+now one function the entry calls once (`memberTail`,
+`slang/kernels/explicit_beams_member_tail.slang`), the heads returning what it is to do
+(the `MT_*` bits: Chrome sees a barrier's uniformity through a return value, not through
+the struct handed back by pointer, which it rejected). `contactMemberStep` keeps its
+form for the contact module (its head, then the tail).
+
+`explicit_beams_selfsplit_member_vv_wide`: 88,433 -> 76,220 optimized instructions, Chrome
+cold 32.0 -> 26.3 s. Checked against the kernels before the members' changes:
+fast-check (16 of 17 bit for bit, the known quirk), `groupsplit` in the new build, the
+scenario matrix (12 rows bit for bit, none slower), `sleep-check.sh` (21), the
+group-split, self-split and contact GPU suites in bit-exact mode (24 tests), Chrome's
+validation of all 140 modules in both settings.
+
+### The residual and the guard share their beam sums
+
+A staged hit's residual (`vvResOf`) and its guard (`vvGuardOf`) each summed the beam
+forces of the hit's four nodes (`vvResAcc`, through `vvBeamSumOf`): eight copies a call
+site, and eight sums at run time where four give the same values (nothing writes the
+beams' forces between the two). The four sums are now taken once, in one loop
+(`vvSumsOf`, `slang/kernels/explicit_beams_vv_sums.slang`), and both read them.
+`explicit_beams_split_grouplevels_wide`: 73,206 -> 65,284 optimized instructions, Chrome
+cold 15.4 -> 12.9 s. Checked: fast-check (16 of 17 bit for bit, the known quirk), the
+scenario matrix (12 rows bit for bit, none slower; the contact rows 1-9 % faster), the
+group-split, fleet-contact and contact GPU suites in bit-exact mode (17 tests), Chrome's
+validation of all 140 modules.
+
+Tried and dropped: one function for the members' two drive schedules (the normal step
+and PERF_SPLIT_WHEELS_AHEAD's tyres alone, one copy of `drvTyre`). Bit for bit, 76,220 ->
+70,924 optimized instructions, but Chrome cold the same (before 25.4 / 25.8 s, after
+25.4 / 25.7 s, alternating): the copy it removed is not where the compile spends its
+time. The profile ranks candidates; only a cold compile decides.
+
+### The levels kernel: one call site for the snapshot's nodes and the lane's residual
+
+Five places snapshot a hit's four nodes (`vvSnapNode`) with four calls, or pick one of
+two calls by the node; each is now one call with the node chosen by index (in a loop
+kept a loop by `opaqueCount`), the same calls in the same order. `latResidual` was called
+twice, for the lane's own hit and for another; it is now one call on a copy, kept again
+only for the lane's own (another's copy was dropped before too).
+`explicit_beams_split_grouplevels_wide`: 65,284 -> 56,910 optimized instructions, Chrome
+cold 12.9 -> 10.3 s (two samples each step). Checked: fast-check (16 of 17 bit for bit,
+the known quirk), the scenario matrix (12 rows bit for bit, none slower), the
+group-split, fleet-contact, contact and vehicle-grid GPU suites in bit-exact mode (19
+tests), `sleep-check.sh` (21), Chrome's validation of all 140 modules. Tried and dropped:
+`opaqueCount` on `vvSumsOf`'s loop (the same instructions and time: not unrolled).
+
+### The levels kernel under 10 s: one ordered application for both scans
+
+`vvApplyOrderedBuckets` was `vvApplyOrdered` with each hit's earlier and later hits of
+its point searched among its bucket's instead of all n: the same answers (any earlier
+hit, the smallest later one), so the same tries in the same order. Both are one function
+now (`vvApplyOrderedIn`, `bk` choosing the range), and the small groups' pass calls it
+once: one copy of `vvTry` where it had two. `explicit_beams_split_grouplevels_wide`:
+56,910 -> 53,664 optimized instructions, Chrome cold 10.3 -> 9.8 / 9.6 s. Checked:
+fast-check (16 of 17 bit for bit, the known quirk), `groupsplit`, the scenario matrix
+(12 rows bit for bit, none slower), the group-split, fleet-contact, contact and
+vehicle-grid GPU suites in bit-exact mode (19 tests), `sleep-check.sh` (21), Chrome's
+validation of all 140 modules.
+
+### The members' module: what its compile spends, by ablation
+
+Cutting one part of the member step at a time (measurement builds, their results
+meaningless) and compiling cold in Chrome: all of it 26 s; without the coupling's step
+24.9 s, the wheels' 24.4 s, the hits' tail 18.6 s, the self split's tests
+(`selfSplitTests`) 12.1 s. The tests cost half the compile for a fraction of the
+instructions; inside them the pieces' tests (`piecesTests`) were called at two places
+(the building step and a listed one) and the grid's walk at two (the self split's
+fallback past the list's room, and the step's own).
+
+Both are one call site now: `selfSplitTests` calls `piecesTests` once, and returns "walk"
+(`selfSplitTestsOrWalk`) for the member step to run its own grid walk instead of a copy.
+The same tests in the same order. `explicit_beams_selfsplit_member_vv_wide` Chrome cold
+26 -> 19.8 s (the pieces) -> 16.5 s (the walk), while the instructions fell only 76k ->
+73k: which copies cost the compile shows in a cold compile, not in the count. Checked:
+fast-check (16 of 17 bit for bit, the known quirk), `groupsplit`, the scenario matrix (12
+rows bit for bit, none slower), the self-split, group-split, contact and pair-reuse GPU
+suites in bit-exact mode (26 tests), `sleep-check.sh` (21), Chrome's validation of all
+140 modules.
+
+What is left of the members' module's 16.5 s, by the same ablation: the pieces' tests
+4.5 s, the grid walk 1.8 s, the brute pairs 1.8 s, the single triangle test 0.2 s; the
+hits' tail (selfApply: its rounds and serial residual, one copy each) about 7 s. The tests'
+cost is `tryContact` (about a thousand instructions with its force) inside each
+strategy's own nested candidate loops: one call site for it across the strategies means
+the strategies producing pairs for one consuming loop, a change to the narrow phase's
+shape (and its run time) of its own.
+
+### The solo frame: one grid walk and one pair loop for the second phase
+
+The solo frame's second phase (after the first phase's walk, brute pairs or early pairs)
+tests the reused pair list (`pairReuseTests`: its pairs, the pieces, or past the list's
+room the walk again), or the walk's listed pairs (or the walk again past theirs). Each
+had its own copy of the walk and of the pair loop's `tryContact`. Now one walk
+(`pairReuseTestsOrWalk` and the listed path report "walk") and one pair loop for both
+lists (the reused list's pairs with their box test, `pairReuseNear`), then the pieces;
+the same tests in the same order. Ablation first: without the reused list's tests the
+module compiled in 17.5 s instead of 30.4 s. `explicit_beams_solo_wide_nosurf` Chrome
+cold 34 -> 30.4 s (the walk) -> 25.3 s (the pair loop). Checked: fast-check (16 of 17 bit
+for bit, the known quirk), the scenario matrix (12 rows bit for bit, none slower), the
+pair-reuse, contact, self-split and bitwise GPU suites in bit-exact mode (35 tests),
+`sleep-check.sh` (21), Chrome's validation of all 140 modules.
+
+### One candidate test for the pieces, the brute pairs and every candidate
+
+`piecesTestTriangle`, `triangleGridBrute` and `triangleTest` were one loop each over a
+triangle's candidates (the box and covered-cell filter or not, the geometry from the
+records or computed, `pairFar` first for the pieces), each with its own `tryContact`. They
+are one function now (`triangleCandidates`, `slang/kernels/explicit_beams_tri_cands.slang`,
+the three kept as callers of it), and the member step, which runs one of the three a
+step, calls it from one loop (the self split's listed path reports "pieces",
+`selfSplitTestsHow`). The same tests in the same order. Chrome cold:
+`explicit_beams_selfsplit_member_vv_wide` 16.5 -> 13.6 s; with the earlier changes,
+`explicit_beams_contact_wide_nosurf` 81.6 s (from 119), `explicit_beams_solo_wide_nosurf`
+25.4 s, `explicit_beams_split_grouplevels_wide` 9.0 s. Checked: fast-check (16 of 17 bit
+for bit, the known quirk), `groupsplit`, the scenario matrix (12 rows bit for bit, none
+slower), the pair-reuse, contact, self-split, bitwise and group-split GPU suites in
+bit-exact mode (38 tests), `sleep-check.sh` (21), Chrome's validation of all 140 modules.
+
+The grid's testing walk joined it (`triangleCandidates` mode 3: the covered cells'
+buckets' entries, every candidate past GRID_MAX_CELLS cells, the entry loop budgeted as
+`triangleGridWalk`'s), so the member step's four strategies have one call site of
+`tryContact`: `explicit_beams_selfsplit_member_vv_wide` Chrome cold 13.6 -> 11.0 s.
+Checked as above (fast-check, `groupsplit`, the matrix, the five GPU suites in bit-exact
+mode, `sleep-check.sh`, Chrome's validation).
+
+### Both of the lab's blocking kernels under 10 s
+
+Three more single call sites in the members' module, each found by ablation:
+- The coupling's count: `cplCountBy`, `cplCountHeld` and `cplCountBuild` (every shape,
+  the node's list, the list rebuilt) are one per-node function (`cplCountShapes`) that
+  `cplCountStep` calls from one node loop; and the contact pass's two (`cplContacts`
+  without the list, `cplContactsListed` with it: identical bodies) are one. 11.0 -> 10.7 s.
+- The wheels: the normal step and PERF_SPLIT_WHEELS_AHEAD's tyres alone are one function
+  (`splitDrive`): one `drvTyre`. 10.7 -> 9.95 s. (The same change measured no gain at 25 s
+  and was dropped then: at 10 s the copy counts.)
+- The loop caps of the joined candidate loop kept every loop budgeted exactly as before
+  (the outer loop budgeted, the walk's entries a pass each, the entry loop capped):
+  writing them as an unconditional `EB_PASS` instead cost 5.5 s of compile.
+
+Chrome cold, the vehicle lab's derby and mountain pages:
+
+| Module | at the start | now |
+|---|---|---|
+| `explicit_beams_selfsplit_member_vv_wide` (blocking) | 114-123 s | 9.6 s |
+| `explicit_beams_split_grouplevels_wide` (blocking) | 49 s | 9.1-9.7 s |
+| every other blocking module | at most 2.5 s | the same |
+| `explicit_beams_solo_wide_nosurf` (deferred) | 41 s | 19.6 s |
+| `explicit_beams_contact_wide_nosurf` (deferred) | 119 s | 65 s |
+
+Checked: fast-check (16 of 17 bit for bit, the known quirk), `perf=67108864` and
+`groupsplit` in the new build, the scenario matrix (12 rows bit for bit, none slower),
+`run.sh --world` (8 rows, the World's cost within 2.5 ms), twelve GPU suites in bit-exact
+mode (pair reuse, self split, contact, bitwise, group split, drive, coupling shapes, rigid,
+surface proxies, loop caps, fleet contact, vehicle grid: 61 tests), `sleep-check.sh` (21),
+Chrome's validation of all 140 modules. The loop-cap suite also caught an uncapped loop an
+earlier commit here added (the `vvSnapNode` loops): capped now.

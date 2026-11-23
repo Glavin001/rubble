@@ -2433,24 +2433,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // tolerance report below, for a switch that is not bit for bit by design.)
             let mut physical: Vec<(Vec<Vec<glam::Vec3>>, usize, f64)> = Vec::new();
             if kernel_ab {
-                let timed = |y: &mut engine_webgpu::ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot| {
-                    // Two untimed frames first (a lazily created pipeline compiles there).
-                    for timed in [false, true] {
-                        y.restore(snap);
-                        y.wait();
-                        let t = std::time::Instant::now();
-                        for _ in 0..if timed { 20 } else { 2 } {
-                            y.frame(34);
-                            y.wait();
-                        }
-                        if timed {
-                            return t.elapsed().as_secs_f64() * 1e3 / 20.0;
-                        }
-                    }
-                    unreachable!()
-                };
-                let ms = timed(x, &snap);
-                out.push((ms, x.state_words(), x.coupling_words()));
+                // (--ab-frames frames a half, AB_ROUNDS halves in turn, B then A, pooled:
+                // the per-frame lines the scenario matrix reads, as the checks switch.)
+                let frames: u32 = arg("--ab-frames").and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
+                let rounds: u32 = std::env::var("AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
                 let bytes = x.snapshot_to_bytes(&snap);
                 let retired = lab.bench.debris.retired.clone();
                 engine_webgpu::set_explicit_module_override(kernel_dir.clone());
@@ -2465,9 +2451,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let zeros = vec![0u8; n_nodes];
                 y.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
                 let snap_b = y.snapshot_from_bytes(&bytes);
-                let ms = timed(y, &snap_b);
-                out.push((ms, y.state_words(), y.coupling_words()));
-                engine_webgpu::set_explicit_module_override(None);
+                // [on (this build, A), off (the directory's, B)]
+                let mut pooled: [Vec<Vec<f64>>; 2] = [Vec::new(), Vec::new()];
+                for _ in 0..rounds {
+                    engine_webgpu::set_explicit_module_override(kernel_dir.clone());
+                    pooled[1].push(ab_frames(y, &snap_b, frames, 2));
+                    engine_webgpu::set_explicit_module_override(None);
+                    pooled[0].push(ab_frames(x, &snap, frames, 2));
+                }
+                out.push((ab_report("on", &pooled[0], rounds), x.state_words(), x.coupling_words()));
+                out.push((ab_report("off", &pooled[1], rounds), y.state_words(), y.coupling_words()));
             }
             if let Some(mask) = checks_ab {
                 let frames: u32 = arg("--ab-frames").and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
@@ -2499,45 +2492,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     y.set_sleep_config(options(&script).vehicle_sleep_cfg);
                 }
                 let snap_b = y.snapshot_from_bytes(&bytes);
-                let run = |g: &mut engine_webgpu::ExplicitBeamsGpu, s: &engine_webgpu::GpuSnapshot| -> Vec<f64> {
-                    // One untimed frame first (a lazily created pipeline compiles there).
-                    g.restore(s);
-                    g.wait();
-                    g.frame(34);
-                    g.wait();
-                    g.restore(s);
-                    g.wait();
-                    (0..frames)
-                        .map(|_| {
-                            let t = std::time::Instant::now();
-                            g.frame(34);
-                            g.wait();
-                            t.elapsed().as_secs_f64() * 1e3
-                        })
-                        .collect()
-                };
                 let mut pooled: [Vec<Vec<f64>>; 2] = [Vec::new(), Vec::new()];
                 for _ in 0..rounds {
                     engine_webgpu::set_explicit_shader_checks_off(Some(mask));
-                    pooled[0].push(run(y, &snap_b));
+                    pooled[0].push(ab_frames(y, &snap_b, frames, 1));
                     engine_webgpu::set_explicit_shader_checks_off(Some(checks_ab_off));
-                    pooled[1].push(run(x, &snap));
+                    pooled[1].push(ab_frames(x, &snap, frames, 1));
                 }
                 engine_webgpu::set_explicit_shader_checks_off(None);
-                for (side, name) in ["on", "off"].into_iter().enumerate() {
-                    let runs = &pooled[side];
-                    let best = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).sum::<f64>() / runs[0].len() as f64;
-                    println!("     frames ({name}): best of {rounds} rounds a frame, mean {best:.3} ms");
-                    let mut each: Vec<f64> = runs.concat();
-                    let ms = each.iter().sum::<f64>() / each.len() as f64;
-                    each.sort_by(f64::total_cmp);
-                    println!("     frames ({name}): median {:.3} ms, min {:.3}, max {:.3} ({} frames)", each[each.len() / 2], each[0], each[each.len() - 1], each.len());
-                    if side == 0 {
-                        out.push((ms, y.state_words(), y.coupling_words()));
-                    } else {
-                        out.push((ms, x.state_words(), x.coupling_words()));
-                    }
-                }
+                out.push((ab_report("on", &pooled[0], rounds), y.state_words(), y.coupling_words()));
+                out.push((ab_report("off", &pooled[1], rounds), x.state_words(), x.coupling_words()));
             }
             // (AB_WARM_MS=n: frames from the snapshot for n ms before the timed halves, so a
             // GPU still at its idle clock after the process's start does not slow the
@@ -3372,4 +3336,37 @@ fn main() -> anyhow::Result<()> {
         println!("stats: {out}");
     }
     Ok(())
+}
+
+/// An A/B half: `warm` untimed frames from `snap` (a lazily created pipeline compiles
+/// there), then `frames` frames from it again, each one's ms.
+fn ab_frames(g: &mut engine_webgpu::ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot, frames: u32, warm: u32) -> Vec<f64> {
+    g.restore(snap);
+    g.wait();
+    for _ in 0..warm {
+        g.frame(34);
+        g.wait();
+    }
+    g.restore(snap);
+    g.wait();
+    (0..frames)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            g.frame(34);
+            g.wait();
+            t.elapsed().as_secs_f64() * 1e3
+        })
+        .collect()
+}
+
+/// A side's pooled rounds as the scenario matrix reads them (each frame's best round, and
+/// every frame's median): their mean ms a frame.
+fn ab_report(name: &str, runs: &[Vec<f64>], rounds: u32) -> f64 {
+    let best = (0..runs[0].len()).map(|k| runs.iter().map(|r| r[k]).fold(f64::MAX, f64::min)).sum::<f64>() / runs[0].len() as f64;
+    println!("     frames ({name}): best of {rounds} rounds a frame, mean {best:.3} ms");
+    let mut each: Vec<f64> = runs.concat();
+    let ms = each.iter().sum::<f64>() / each.len() as f64;
+    each.sort_by(f64::total_cmp);
+    println!("     frames ({name}): median {:.3} ms, min {:.3}, max {:.3} ({} frames)", each[each.len() / 2], each[0], each[each.len() - 1], each.len());
+    ms
 }

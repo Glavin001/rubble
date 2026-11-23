@@ -239,6 +239,14 @@ def main():
         return calibrate(found, times) or 0
     pred = {n: seconds(v[2], kb) for n, v in found.items()}
     if "--init" in flags:
+        # (A line may only come down: an existing line keeps the lower of its value and the
+        # new prediction plus headroom.)
+        old = {}
+        if os.path.exists(ALLOW):
+            for line in open(ALLOW):
+                line = line.split("#", 1)[0].split()
+                if len(line) == 2:
+                    old[line[0]] = float(line[1])
         with open(ALLOW, "w") as fh:
             fh.write(f"# Kernels predicted past {CAP_SECONDS:.0f} s of first-load compile "
                      "(tools/build-time/compile_cost.py), each with the seconds it may not exceed:\n"
@@ -246,7 +254,7 @@ def main():
                      "# when it is under the cap. --burndown says what to fix first.\n")
             for n in sorted(pred, key=lambda n: -pred[n]):
                 if pred[n] > CAP_SECONDS:
-                    fh.write(f"{n} {pred[n] * HEADROOM:.1f}\n")
+                    fh.write(f"{n} {min(pred[n] * HEADROOM, old.get(n, float('inf'))):.1f}\n")
         print(f"{sum(p > CAP_SECONDS for p in pred.values())} kernels -> {ALLOW}")
         return 0
     if "--check" in flags:
