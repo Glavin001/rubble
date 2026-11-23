@@ -87,7 +87,8 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
         resMerge(h, tn.x, tn.y, tn.z);
         return;
     }
-    float rr = vvResOf(va, vh, h, tn, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, parity, a);
+    VvSums S = vvSumsOf(va, vh, h, tn, parity);
+    float rr = vvResOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, a);
     if (phase == 0u)
     {
         if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, sscale(kept.nn, rr));
@@ -96,13 +97,14 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
     float3 total = kept.f1;
     if (rr > 0.0) total = sadd3(total, sscale(kept.nn, rr));
     float3 g;
-    if (vvGuardOf(va, vh, h, tn, kept.alpha, kept.beta, kept.gamma, kept.v, total, parity, g)) total = sadd3(total, g);
+    if (vvGuardOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.v, total, g)) total = sadd3(total, g);
     resFinal(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, kept.f1, total);
 }
 
 // fleetLevelsAny with the group's hits flattened over the lanes (see above). Every lane of
-// the group's workgroup; a hit list past its room: fleetLevelsAny itself.
-void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
+// the group's workgroup. True (and nothing done) when a hit list is past its room: the
+// caller then runs fleetLevelsAny itself, at one call site (fleetLevelsOnceTry). Uniform.
+bool fleetLevelsLatTry(uint k, uint off, uint parity, uint lane, uint tag)
 {
     uint open = 0u;
     if (lane == 0u)
@@ -116,8 +118,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     open = splitUniform(lane, open);
     if (open == 0u)
     {
-        fleetLevelsAny(k, off, parity, lane, tag);
-        return;
+        return true;  // (the caller runs fleetLevelsAny)
     }
     // The owners with hits (gsOff), their hits' prefix (gsOff past LAT_PRE), any list past
     // its room (then fleetLevelsAny, whose levels re-walk such an owner).
@@ -146,8 +147,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     over = splitUniform(lane, over);
     if (over != 0u || (gP.ablate & (65536u | 32768u | 16384u | 262144u)) != 0u)
     {
-        fleetLevelsAny(k, off, parity, lane, tag);
-        return;
+        return true;  // (the caller runs fleetLevelsAny)
     }
     uint H = splitUniform(lane, lane == 0u ? gsCount[0].load() : 0u);
     uint T = splitUniform(lane, gsOff[LAT_PRE + H]);
@@ -166,10 +166,9 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
             uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
             uint h = gNext[base + 2u * i + 1u];
             uint which = x & 3u;
-            if (which == 3u)
-                vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
-            else
-                vvSnapNode(which == 0u ? tn.x : (which == 1u ? tn.y : tn.z), tn.w, parity, tag);
+            // (One call site for the node: the compilers inline every call.)
+            vvSnapNode(which == 3u ? h : (which == 0u ? tn.x : (which == 1u ? tn.y : tn.z)),
+                       which == 3u ? gStatic[gP.nodeInfoBase + h].w : tn.w, parity, tag);
         }
         sync();
         gVvTag = tag;
@@ -288,13 +287,11 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
                     if (gNext[flLevelAt(va)] != l) continue;
                     // (The lane's first hit is the one it keeps: x == lane.)
                     bool mine = x == lane;
-                    if (mine)
-                        latResidual(va, vvHitSmall(0u, 0u, a, 0u), x - gsOff[LAT_PRE + j], asfloat(gStatic[va * 4u + 3u].z), parity, a, ph, ph != 0u, true, kept);
-                    else
-                    {
-                        LatKept other = kept;
-                        latResidual(va, vvHitSmall(0u, 0u, a, 0u), x - gsOff[LAT_PRE + j], asfloat(gStatic[va * 4u + 3u].z), parity, a, ph, false, false, other);
-                    }
+                    // (One call site, on a copy kept again only for the lane's own hit; another
+                    // hit's copy is dropped, as before. The compilers inline every call.)
+                    LatKept use = kept;
+                    latResidual(va, vvHitSmall(0u, 0u, a, 0u), x - gsOff[LAT_PRE + j], asfloat(gStatic[va * 4u + 3u].z), parity, a, ph, mine && ph != 0u, mine, use);
+                    if (mine) kept = use;
                 }
                 sync();
             }
@@ -321,6 +318,7 @@ void fleetLevelsLat(uint k, uint off, uint parity, uint lane, uint tag)
     sync();
     for (uint m = lane, mStop = EB_END(402, m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
     flArgsZero(lane);
+    return false;
 }
 
 // --- The fleet front's fused dispatches (PERF_FLEET_FUSE) ---

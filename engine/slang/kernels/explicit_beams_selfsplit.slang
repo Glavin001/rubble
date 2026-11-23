@@ -54,42 +54,52 @@ uint selfSplitRow(uint y) { return sleepListedOn() ? sleepRow(y) : y; }
 
 // pairReuseTests in the step dispatch (uniform): the listed pairs left to the pairs
 // dispatch, everything else as pairReuseTests runs it.
+// True (and nothing tested): the listed pairs are past the list's room, so the step walks
+// the grid itself (the caller's triangleGrid loop, selfSplitTests's below): one call site
+// of the walk where the member step has its own (the compilers inline every call).
+// What the step does after: 1 walk the grid (the listed pairs past the list's room), 2 the
+// pieces' tests (piecesBegin and its triangleCandidates loop, then on a building step
+// piecesClearBuild): for a caller with one call site for the walk and the candidates.
+uint selfSplitTestsHow(uint v, uint lane, uint mode)
+{
+    sync();
+    // A building step (mode 1): the walk dispatch lists and tests the pairs
+    // (selfSplitBuild); the volatile triangles here as pairReuseTests tests them. Its
+    // count, the list's validity and statistics after the walk (selfSplitWalkEnd).
+    bool build = mode == 1u;
+    uint listed = gsCount[GRID_BUCKETS + RU_COUNT].load();
+    if (!build && listed > TRI_PAIR_CAP) return 1u;
+    if (!build && lane == 0u)
+    {
+        gAcc[selfListedAt(v)].store(int(listed));
+        uint at = selfArgsAt(gP.pad2);
+        // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / SELF_PAIRS_WG workgroups a vehicle.)
+        gSelfArgs[at].max(int(min((listed + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG, (TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG)));
+        gSelfArgs[at + 1u].store(int(selfSplitRows()));
+        gSelfArgs[at + 2u].store(1);
+    }
+    return 2u;
+}
+bool selfSplitTestsOrWalk(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
+                          uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if (selfSplitTestsHow(v, lane, mode) == 1u) return true;
+    piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
+    if (mode == 1u && lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
+    return false;
+}
 void selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
                     uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    sync();
-    if (mode == 1u)
-    {
-        // A building step: the walk dispatch lists and tests the pairs (selfSplitBuild);
-        // the volatile triangles here as pairReuseTests tests them. Its count, the list's
-        // validity and statistics after the walk (selfSplitWalkEnd).
-        piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-        if (lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
+    if (!selfSplitTestsOrWalk(v, lane, mode, triOff, triCount, origin, r, cell, candOff, candCount, beamOff, groupOff,
+                              groupCount, parity))
         return;
-    }
-    uint listed = gsCount[GRID_BUCKETS + RU_COUNT].load();
-    if (listed <= TRI_PAIR_CAP)
+    uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+    for (uint p = lane, pStop = EB_END(477, p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
     {
-        if (lane == 0u)
-        {
-            gAcc[selfListedAt(v)].store(int(listed));
-            uint at = selfArgsAt(gP.pad2);
-            // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / SELF_PAIRS_WG workgroups a vehicle.)
-            gSelfArgs[at].max(int(min((listed + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG, (TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG)));
-            gSelfArgs[at + 1u].store(int(selfSplitRows()));
-            gSelfArgs[at + 2u].store(1);
-        }
-        piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-    }
-    else
-    {
-        uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(477, p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
-        {
-            uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
-            triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
-                         parity, 0u);
-        }
+        uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
+        triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
+                     parity, 0u);
     }
 }
 
