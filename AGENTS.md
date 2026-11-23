@@ -32,8 +32,12 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
-- Modal's GPU target is CUDA (`engine-cuda`): kernels compile to GPU code locally with
-  nvcc (free), and Modal only runs the binary, seconds a container.
+- Modal's GPU target is CUDA (`engine-cuda`). The CUDA matrix (`run.sh --cuda`) builds on
+  Modal's CPUs by default, so this machine compiles nothing: only changed source files
+  leave it (`engine/tools/modal/remote_build.sh`; a Rust edit about 20 s and half a cent,
+  README "Building on Modal"; `GPU_RUN_LOCAL_BUILD=1` builds in local Docker). Other
+  selections build locally with nvcc unless given `--remote-build`, and Modal runs the
+  binary, seconds a container.
   `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`
   runs each test binary or each test in a container of its own, all at once (built in
   local Docker). Vulkan on Modal (wgpu, the World, the matrix's `run.sh --modal`) is

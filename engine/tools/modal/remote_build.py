@@ -56,6 +56,8 @@ target_vol = _vol("rubble-rb-target")
 cargo_vol = _vol("rubble-rb-cargo")
 kern_vol = _vol("rubble-rb-kernels")
 archive_vol = modal.Volume.from_name("rubble-gpu-run-archives", create_if_missing=True)
+# The scenario matrix's saved states by SHA-256 (gpu_run.py's): the module list reads them.
+states_vol = modal.Volume.from_name("rubble-scenario-states", create_if_missing=True)
 
 BUILD_CPUS = 16
 WARM_SECS = 60
@@ -103,7 +105,7 @@ class _Snap:
 @app.cls(image=build_image, cpu=BUILD_CPUS, memory=MEM_GIB * 1024, timeout=1800, retries=0,
          scaledown_window=WARM_SECS,
          volumes={"/srcvol": src_vol, "/target": target_vol, "/cargo": cargo_vol,
-                  "/kernels": kern_vol, "/archives": archive_vol})
+                  "/kernels": kern_vol, "/archives": archive_vol, "/svol": states_vol})
 class Builder:
     """A build container. Cargo's target snapshot is written when the container stops
     (`flush`), not after each build: the next build on this warm container uses its disk,
@@ -179,9 +181,33 @@ def _build(spec: dict, dirty: dict) -> dict:
         "GPU_RUN_PACK_GZIP": "1",
         **spec.get("env", {}),
     }
+    if spec.get("modules_from") and not env.get("ENGINE_CUDA_EXPLICIT_MODULES"):
+        # The modules the fixtures' layouts launch (`explicit_replay --modules`, no device
+        # code), built in a target directory of its own so the two builds never
+        # invalidate each other; it lives inside the target, so it is snapshotted too.
+        t = time.time()
+        states_vol.reload()
+        probe_env = {**env, "ENGINE_CUDA_EXPLICIT_MODULES": "none",
+                     "CARGO_TARGET_DIR": str(target.local / "modules-probe")}
+        p = subprocess.run(["cargo", "run", "-q", "--profile", "fast", "-p", "engine-cuda", "--example",
+                            "explicit_replay", "--", "--modules", *[f"/svol/{n}" for n in spec["modules_from"]]],
+                           cwd="/repo/engine", env=probe_env, capture_output=True, text=True)
+        if p.returncode != 0:
+            print(p.stderr[-3000:], flush=True)
+            return {"code": p.returncode, "setup_s": time.time() - t0, "build_s": 0.0, "cores": cores,
+                    "commit_s": 0.0, "steps": times, "total_s": time.time() - t0,
+                    "error": "explicit_replay --modules failed"}
+        env["ENGINE_CUDA_EXPLICIT_MODULES"] = p.stdout.strip().splitlines()[-1]
+        times["modules"] = round(time.time() - t, 1)
     out = Path("/tmp/out")
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir()
+    # Files from outside the repo the archive ships (gpu_run.sh's OUT/stage: the car's
+    # JBeam export), sent inside the call: {container path: bytes}.
+    for path, data in spec.get("stage", {}).items():
+        f = out / "stage" / path.lstrip("/")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(data)
     stamp = Path("/tmp/before-build")
     stamp.touch()
     t_setup = time.time() - t0
@@ -199,6 +225,10 @@ def _build(spec: dict, dirty: dict) -> dict:
         if not dest.exists():
             dest.write_bytes(data)
         result.update(archive=sha, archive_mb=len(data) / 1e6)
+        # The manifest travels back, so the GPU stage needs no copy of the archive here.
+        import tarfile
+        with tarfile.open(out / "archive.tar.gz", mode="r:gz") as tar:
+            result["manifest"] = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
         # The target's snapshot: now when there is none yet, else when the container
         # stops, and only if cargo wrote something (cargo touches .cargo-lock every run).
         changed = subprocess.run(["find", str(target.local), "-newer", str(stamp), "-type", "f",
@@ -248,6 +278,28 @@ def main(spec: str) -> None:
     print(f"[remote_build] source: {len(changed)} files changed ({nbytes / 1e6:.2f} MB), {len(gone)} removed, "
           f"{time.time() - t:.1f} s", flush=True)
     s.update(files=changed, removed=gone, manifest=manifest)
+    if s.get("modules_from_local"):
+        # The fixtures go to the states volume by content (as gpu_run.py names them), only
+        # when missing: the GPU stage then finds them there too.
+        t = time.time()
+        have = {e.path.strip("/") for e in states_vol.listdir("/")}
+        names, up = [], []
+        for rel in s["modules_from_local"]:
+            f = root / rel
+            name = hashlib.sha256(f.read_bytes()).hexdigest() + f.suffix
+            names.append(name)
+            if name not in have:
+                up.append((f, name))
+        if up:
+            with states_vol.batch_upload(force=True) as b:
+                for f, name in up:
+                    b.put_file(str(f), f"/{name}")
+        s["modules_from"] = names
+        print(f"[remote_build] fixtures for the module list: {len(names)}, {len(up)} uploaded, "
+              f"{time.time() - t:.1f} s", flush=True)
+    if s.get("stage_dir"):
+        stage = Path(s["stage_dir"])
+        s["stage"] = {"/" + str(f.relative_to(stage)): f.read_bytes() for f in sorted(stage.rglob("*")) if f.is_file()}
     t = time.time()
     r = remote.remote(s)
     call = time.time() - t

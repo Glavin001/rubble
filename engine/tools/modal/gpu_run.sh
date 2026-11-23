@@ -55,6 +55,9 @@
 #                        (build_ref.sh, cached by commit) and ship it as the base of
 #                        matrix.py --two-builds (BASE_BIN)
 #   --head REF           the same for the head (default: the working tree's build)
+#   --remote-build       build on Modal's CPUs (remote_build.sh) instead of local Docker:
+#                        only changed source files leave this machine, the archive stays
+#                        on Modal (not with --base/--head or --fanout-tests yet)
 #   --build-only         build and pack, do not call Modal
 #   --keep               keep the run directory (engine/target/gpu-run/<id>)
 set -euo pipefail
@@ -89,6 +92,7 @@ while [ $# -gt 0 ]; do
     --fanout-tests) fanout=tests; pack_opts=(--list-tests); shift ;;
     --matrix) fanout=matrix; shift ;;
     --matrix-cuda) fanout=matrix; matrix_cuda=1; shift ;;
+    --remote-build) remote_build=1; shift ;;
     --base) base_ref="$2"; shift 2 ;;
     --head) head_ref="$2"; shift 2 ;;
     --) shift; break ;;
@@ -110,6 +114,12 @@ if [ -n "${matrix_cuda:-}" ]; then
   : "${cpus:=1}" "${mem:=2}" "${pack:=1}"
 fi
 : "${cpus:=8}" "${mem:=8}" "${pack:=0}"
+# The CUDA matrix builds on Modal by default (this machine compiles nothing), except the
+# two-build A/B, whose commits still build here (build_ref.sh). GPU_RUN_LOCAL_BUILD=1
+# builds here in Docker as before.
+if [ -n "${matrix_cuda:-}" ] && [ -z "${base_ref:-}${head_ref:-}" ] && [ "${GPU_RUN_LOCAL_BUILD:-0}" != 1 ]; then
+  : "${remote_build:=1}"
+fi
 [ $# -gt 0 ] || { echo "gpu_run: nothing to run; see --help" >&2; exit 2; }
 
 # The scenario matrix: its own selection (the lab), data (matrix.py and the scenes),
@@ -134,7 +144,18 @@ if [ "$fanout" = matrix ]; then
     envs+=("MATRIX_CUDA=1")
     # The device code the rows' fixtures may launch (their layouts' modules, listed by
     # explicit_replay --modules on this machine: no device needed), unless given.
-    if [ -z "${ENGINE_CUDA_EXPLICIT_MODULES:-}" ]; then
+    if [ -z "${ENGINE_CUDA_EXPLICIT_MODULES:-}" ] && [ "${remote_build:-0}" = 1 ]; then
+      # --remote-build: the builder lists them on Modal (remote_build.sh RB_MODULES_FROM);
+      # this machine compiles nothing.
+      RB_MODULES_FROM=""
+      for r in "${matrix_rows[@]}"; do
+        f="engine/out/scenario-matrix/portable/$r.pfx"
+        [ -f "$repo/$f" ] || { echo "gpu_run: --matrix-cuda: no portable fixture $f (matrix.py --make-portable)" >&2; exit 2; }
+        RB_MODULES_FROM="$RB_MODULES_FROM$f
+"
+      done
+      export RB_MODULES_FROM
+    elif [ -z "${ENGINE_CUDA_EXPLICIT_MODULES:-}" ]; then
       pfx=()
       for r in "${matrix_rows[@]}"; do pfx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx"); done
       ENGINE_CUDA_EXPLICIT_MODULES="$(cd "$repo/engine" && ENGINE_CUDA_EXPLICIT_MODULES=none cargo run -q --profile fast -p engine-cuda --example explicit_replay -- --modules "${pfx[@]}")" || {
@@ -262,6 +283,14 @@ if [ "$cuda_route" = 1 ]; then
     -e ENGINE_CUDA_FATBIN_CACHE=/cache/kernels/fatbins -e RUBBLE_SLANG_OBJ_CACHE=/cache/kernels/slang
     -e ENGINE_CUDA_REQUIRE_PTX=1)
 fi
+if [ "${remote_build:-0}" = 1 ]; then
+  if [ -n "${base_ref:-}${head_ref:-}" ] || [ "${#pack_opts[@]}" -gt 0 ]; then
+    echo "gpu_run: --remote-build does not take --base/--head or --fanout-tests yet" >&2; exit 2
+  fi
+  stage_opt=()
+  if [ -d "$run/stage" ]; then stage_opt=(--stage "$run/stage"); fi
+  "$here/remote_build.sh" ${data[@]+"${data[@]}"} ${stage_opt[@]+"${stage_opt[@]}"} --result "$run/remote.json" -- "${args[@]}"
+else
 docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_cache[@]+"${cuda_cache[@]}"} \
   -v "$repo:/repo" \
   -v "$run:/out" \
@@ -271,8 +300,13 @@ docker run --rm --platform "$platform" ${build_env[@]+"${build_env[@]}"} ${cuda_
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$jobs_default}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-$rjobs_default}" \
   "$image" bash -c 'if [ -n "${ENGINE_CUDA_FATBIN_CACHE:-}" ]; then python3 /opt/rubble/fatbin_cache.py "$ENGINE_CUDA_FATBIN_CACHE"; python3 /opt/rubble/fatbin_cache.py "$RUBBLE_SLANG_OBJ_CACHE" --max-gib 4; fi
     exec python3 /repo/engine/tools/modal/gpu_run_pack.py "$@"' gpu_run_pack /out ${pack_opts[@]+"${pack_opts[@]}"} ${data[@]+"${data[@]}"} -- "${args[@]}"
+fi
 t1=$(date +%s)
-echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
+if [ "${remote_build:-0}" = 1 ]; then
+  echo "gpu_run: remote build $((t1 - t0)) s" >&2
+else
+  echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
+fi
 rm -rf "$run/stage"
 if [ "$build_only" = 1 ]; then
   keep=1
@@ -319,6 +353,16 @@ json.dump({"gpu": gpu, "cap": int(cap), "repeat": int(repeat), "timing": timing 
            "env": env, "variants": variants,
            "fanout": fanout, "matrix_args": matrix_args, "matrix_rows": matrix_rows}, open(out, "w"))
 PY
+if [ "${remote_build:-0}" = 1 ]; then
+  # The archive is on Modal already: its key and manifest go in the spec.
+  python3 - "$run/spec.json" "$run/remote.json" <<'PY'
+import json, sys
+spec, remote = sys.argv[1:]
+s, r = json.load(open(spec)), json.load(open(remote))
+s.update(archive_key=r["archive"], archive_manifest=r["manifest"])
+json.dump(s, open(spec, "w"))
+PY
+fi
 
 # The Modal CLI in Docker with only this run's directory and the runner script
 # mounted: nothing else of the machine is reachable or uploaded. The login volume is
