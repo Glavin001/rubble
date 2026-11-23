@@ -83,16 +83,3 @@ crates/engine-world/src/vehicle_lab/mod.rs 3630
 crates/engine-world/tests/crush.rs 1182
 crates/engine-world/tests/threshold.rs 1086
 experiments/gpu-floor/src/floor.rs 1950
-slang/kernels/ccd_step.slang 1805
-slang/kernels/explicit_beams_baseline.slang 3609
-slang/kernels/explicit_beams_drive.slang 1869
-slang/kernels/explicit_beams_fleet.slang 2122
-slang/kernels/explicit_beams_ref.slang 4932
-slang/kernels/explicit_beams_rigid.slang 1494
-slang/kernels/explicit_beams_surface.slang 1344
-slang/kernels/soft_step.slang 2590
-slang/kernels/terrain_mpm.slang 3729
-slang/kernels/vehicle_coupling.slang 1131
-slang/kernels/vehicle_step.slang 2820
-slang/physics/feature_query.slang 1356
-slang/physics/heightfield.slang 1008

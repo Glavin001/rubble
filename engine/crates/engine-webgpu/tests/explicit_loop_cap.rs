@@ -283,9 +283,15 @@ fn shift_const(src: &str, name: &str) -> u32 {
 #[test]
 fn every_explicit_slang_loop_is_capped() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang/kernels");
-    // The file and everything it includes in this directory, followed through the
-    // includes (explicit_beams_frame.slang, explicit_loop_cap.slang, ...).
-    let mut files = vec![("explicit_beams.slang".to_string(), std::fs::read_to_string(dir.join("explicit_beams.slang")).unwrap())];
+    // The kernel and the World's coupling passes (which carry the same caps and budget),
+    // with everything they include in this directory, followed through the includes
+    // (explicit_beams_frame.slang, explicit_loop_cap.slang, vehicle_coupling_query.slang, ...).
+    let coupling = std::fs::read_to_string(dir.join("vehicle_coupling.slang")).unwrap();
+    assert!(coupling.contains("#include \"explicit_loop_cap.slang\""), "the coupling passes include the caps");
+    let mut files = vec![
+        ("explicit_beams.slang".to_string(), std::fs::read_to_string(dir.join("explicit_beams.slang")).unwrap()),
+        ("vehicle_coupling.slang".to_string(), coupling),
+    ];
     let mut at = 0;
     while at < files.len() {
         let text = files[at].1.clone();
@@ -299,10 +305,6 @@ fn every_explicit_slang_loop_is_capped() {
         }
     }
     assert!(files.iter().any(|f| f.0 == "explicit_loop_cap.slang"), "the caps are included");
-    // The World's coupling passes carry the same caps and budget.
-    let coupling = std::fs::read_to_string(dir.join("vehicle_coupling.slang")).unwrap();
-    assert!(coupling.contains("#include \"explicit_loop_cap.slang\""), "the coupling passes include the caps");
-    files.push(("vehicle_coupling.slang".to_string(), coupling));
     let mut loops = 0;
     for (name, text) in &files {
         let bad = uncapped_slang_loops(text);
