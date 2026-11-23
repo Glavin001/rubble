@@ -7044,6 +7044,123 @@ is still not explained by a measurement. Two vehicle peaks also stand out: 155 m
 derby at t 13.58 and 118 ms of whole step on the mountain at t 15.02. They are the moments
 to save as fixtures next, so that the matrix times the peaks themselves.
 
+### 8.61 Surface contact's pair path on a pile: a triangle against a hull on a workgroup of its own (2026-11-23)
+
+Branch `claude/cuda-surface-pairs-2`, from d39e259c (the tip of
+`claude/runtime-performance-optimization-79f988`). T4 on Modal, CUDA,
+`ENGINE_CUDA_FMAD=0`, bit-exact on; ms a frame of 34 steps. Before, by kernel
+(`PROFILE_SPLIT=1`): on the destroyed pile (mountain20_t20, 85.6 ms) the pair path's find
+`explicit_surface_find_pair_x` 16.5, the listing `cull_x` 4.8, `prep_args` 4.2, `plan`
+2.0; on derby20_t5 (53.5 ms) 5.0, 1.2, 2.3 and 0.5.
+
+**The cause (measured).** The saved state's pair lists (the portable fixtures read on the
+CPU): mountain20_t20 lists 5,777 pairs in its last step, 331 of them hits; 475 are against
+hull proxies (134 triangles, 250 segments, 91 nodes; hulls of 11 to 17 faces, 8 to 12
+vertices, 17 to 27 edges). derby20_t5 lists 341, 320 of them against one vehicle's three
+hulls of 18 faces, 32 vertices, 48 edges (63 triangles). The find runs a thread a pair
+and waits for its longest thread. Time-only builds, one category's narrow phase left
+out (results differ; `perf=` bits in a measurement build, both halves from the row's
+state):
+
+| left out | mountain20_t20 | derby20_t5 |
+|---|---|---|
+| every pair not against a hull | −0.8 ms (−1.0 %) | 0.0 |
+| a triangle against a hull | −12.5 ms (−14.6 %) | −3.4 ms (−6.3 %) |
+| … all but its separation test (fqSeparated) | −12.5 | −3.3 |
+| … all after fqContact's first walk | −7.8 | −0.8 |
+| … the deep path (fqOverlapAxis, walks 3 and 4) | 0.0, bit for bit: never taken | 0.0, bit for bit |
+
+So 134 (63) pairs, a tenth of a percent of the list's work, are three quarters of the
+kernel: one lane runs fqContact whole, a walk over every hull edge (fqSegTri's six
+candidates, each a closest-point query in strict arithmetic), the triangle's edges
+clipped by every plane, each corner measured against every plane, and the walk again for
+the candidates at the least gap: 100 to 370 µs a step on one lane, where the rest of the
+list takes about 120. The same work done twice (an earlier session's measurement build)
+adds 28.5 ms to the mountain. The hull's records come from gMisc on every use, a trip to
+L2 on CUDA (loads are `ld.cg` there), but that is the smaller part: staging them in
+workgroup memory alone (step 1) gives 1.6 ms.
+
+**What changed** (each lossless: the same contacts bit for bit; no buffer's layout).
+
+1. *Each hull's records once in workgroup memory* (`explicit_beams_surface_pool.slang`,
+   the find's module only: `EB_SURF_POOL`). A workgroup copies each distinct hull its
+   pairs meet into `gsSurfPool` (512 records, a lane a record) and the pair's shape reads
+   the same words there (`surfHullRec`: `SURF_POOL_FLAG` in `FqShape.hull`). A hull that
+   does not fit is read from gMisc.
+2. *A triangle against a hull on a workgroup of its own.* The fast schedules' listing
+   (`surfPairListSplit`) puts those pairs at the end of the vehicle's pair region,
+   counted at the find's hit count (zero after the prep, nothing else uses it before the
+   find); the plan reads both counts, clears the hit count and writes them in the
+   vehicle's record (`segRec(v).z`: from the start, low half; from the end, high half;
+   the total decides the pair path as before) and sizes the find for a workgroup a
+   `SURF_WG` pairs plus a workgroup a big pair. The apply's fallback maps a pair's index
+   to its slot (`surfPairSlot`). In a big pair's workgroup (`surfBigFind`) the lanes take
+   the hull's edges and planes: the order-free parts are reduced across them (the least
+   gap of the first walk, a min; each corner's greatest plane distance, a max; the
+   separation test, an or), the second walk's candidates within the tie of the least gap
+   are kept with their place in fqContact's order (`8 × item + candidate`), and lane 0
+   sums them in that order and finishes as fqContact does. The candidates come from the
+   functions fqContact itself now calls (`fqSegTriCand`, `fqInsidePair`: fqSegTri and
+   fqEdgesInside were split into them, the same operations). The first walk's culls prune
+   by each lane's own least gap; they are lossless (fqPrune), so the least gap is the
+   same whichever lane walks which edge. A deep contact or more than 32 kept candidates:
+   lane 0 runs fqContact whole. Every barrier is in uniform control flow (the
+   workgroup's part from `gsUniformSurf`; the rest straight-line).
+3. *The fast-proxy test over the lanes* (`surfFastLanes`). The prep ran `surfAnyFast` on
+   every lane and the plan on lane 0, a chain over the vehicle's proxies (a hull's a load
+   a plane); each lane now tests its share, the workgroup takes the or.
+
+**Results.** `ENGINE_CUDA_FMAD=0 WORST=1 MODAL_OPTS="--pack 4" tools/scenario-matrix/run.sh
+--cuda --base d39e259c --head 5641d340` over the 37 rows with fixtures: **PASS**, every
+row bit for bit, none slower. Mean of each frame's best round, the median of three
+processes (worst frame):
+
+| row | before | after | delta |
+|---|---|---|---|
+| mountain20_t20 | 85.86 (87.10) | 69.97 (71.16) | −18.5 % |
+| mountain20_t12 | 73.17 (76.42) | 61.11 (61.89) | −16.5 % |
+| mountain20_t7 | 56.26 (59.07) | 53.09 (54.51) | −5.6 % |
+| mountain20_t4 | 59.06 (73.46) | 55.14 (61.71) | −6.6 % |
+| mountain20_t2 | 33.33 (34.21) | 32.52 (33.36) | −2.4 % |
+| derby20_t10 | 47.28 (52.65) | 44.68 (46.94) | −5.5 % |
+| derby20_t5 | 52.54 (57.69) | 48.97 (50.90) | −6.8 % |
+| derby20_t2 | 37.54 (38.83) | 37.70 (39.00) | +0.4 % |
+| pole | 22.58 (51.90) | 16.82 (33.76) | −25.5 % |
+| bricks_s | 14.37 (16.43) | 12.68 (14.73) | −11.8 % |
+| pile8_s | 28.82 (30.01) | 27.59 (28.77) | −4.3 % |
+| wall_s | 9.00 (9.93) | 9.03 (9.97) | +0.3 % |
+| the 25 other rows (no pair against a hull) | | | −0.7 to +0.7 % |
+
+By kernel after (`PROFILE_SPLIT=1`, the head alone): mountain20_t20 find 4.04 (16.5),
+cull 4.85 (4.8), prep_args 2.37 (4.2), plan 0.29 (2.0): the pair path's four from about
+27.5 to 11.5 ms. derby20_t5 find 2.06 (5.0), prep_args 2.10 (2.3), cull 1.17 (1.2).
+
+Step 1 alone (c3a1e07d against d39e259c, two rows): mountain20_t20 −1.9 %, derby20_t5
+−1.4 %, bit for bit.
+
+**Checks.** `cargo test -p engine-exec` 29 pass; Chrome (`EXPLICIT_WGSL_MODULES_ONLY=1
+node --experimental-websocket explicit-wgsl-check.mjs`): all 158 modules (the find's
+workgroup memory about 11 KB); `tools/build-time/check.py` ok; `compile_cost.py --check`
+0 failing; `inline_budget.py` 0 past. Predicted first compile in a browser:
+`explicit_surface_find_pair_x` 2.4 → 1.8 s (its inlined lines 64,007 against a budget of
+86,840), `prep` 2.6, `prep_args` 2.2, `apply_pair_x` 2.4, `cull_x` 0.1, `plan` 0.0, each as
+at d39e259c. No new module.
+
+**Not verified.** The Mac (Metal) and Chrome's bit-for-bit A/B on the lab page (rungs 1.5
+to 3 there), by design of this session: no Mac GPU. On wgpu the vehicle-contact part of
+the fast schedules is off by default (§8.53), so the derby and mountain rows there run
+the kernels' own pass; a lone car's wide frames (pole, wall_s, bricks_s) take these
+pipelines natively too. One trap on the way: a measurement of the cooperative find in
+one build (on and off from one state) showed a half that did not repeat itself; it was
+the entry point passing the lane's pair index where the workgroup's was meant (fixed in
+5641d340 before any number above).
+
+**Next.** On the pile the listing (`cull_x`, 4.8 ms) is now the pair path's largest
+kernel: a thread an element against every proxy's bounds (six words from gNext each) and,
+for each it meets, `fqSeparated` with the shape's pose built again per element. Staging
+the vehicle's bounds (and the shapes' poses) in the workgroup, all of whose threads are
+one vehicle's, is the same kind of change; not measured.
+
 ### 8.63 The frames without a group again: groups of one do not count (2026-11-23)
 
 §8.57's schedule (`vvwide`) runs a frame whose contact plan holds no group on the wide
