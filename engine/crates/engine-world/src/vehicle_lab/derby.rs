@@ -716,7 +716,17 @@ mod tests {
     }
 }
 
+/// A native host's helpers (the page reads and compiles through its own paths).
 impl super::Lab {
+    /// Every World kernel compiled now, before any step is timed: a kernel the driver
+    /// compiles at its first use is load time, not a step's cost (the explicit solver's
+    /// pipelines are made at its upload). Blocks while they compile.
+    pub fn prewarm(&mut self, world: &crate::World) -> &mut Self {
+        let n = world.prewarm(engine_webgpu::KernelGroups::ALL);
+        println!("prewarm: {n} World kernels compiled before the run");
+        self
+    }
+
     /// [`Self::derby_plan`] read now, blocking, and ingested (a native host without the
     /// page's frame readback: the derby's AI then drives from the cars' current poses).
     pub fn read_derby_blocking(&mut self, world: &crate::World) -> &mut Self {
