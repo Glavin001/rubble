@@ -176,6 +176,12 @@ The rule for kernel code this enforces: a helper of more than a few statements i
 from one place in a kernel (loop over its cases, or select its arguments, and call it
 once), not once per case. A small function costs nothing at run time; a heavy one called
 from 200 places costs the compiler 200 copies.
+`compile_cost.py --dup-check` holds the rule itself: per kernel, the statements its heavy
+helpers (50 or more inlined statements a copy) duplicate by being inlined at more than one
+site, within its line in `duplication-allowlist.txt` (lines only come down; an unlisted
+kernel may have 1000). A second call site of a heavy helper fails it, naming the helper,
+even in a kernel under the 10 s cap. (Nested duplicates count at each level: a ratchet,
+not a cost.)
 
 And `tools/build-time/fanout.py --check`: each Slang file's fan-out, the kernel compiles
 an edit of it reruns (a compile's cache key is the text of every file it includes, under

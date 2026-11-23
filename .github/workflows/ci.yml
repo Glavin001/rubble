@@ -179,6 +179,10 @@ jobs:
           # down); the burn-down list says what to fix first.
           python3 tools/build-time/compile_cost.py --check "$wgsl"
           python3 tools/build-time/compile_cost.py --burndown 15 "$wgsl" | sed -n '/burn-down/,$p'
+          # The one-call-site rule: each kernel's statements duplicated by heavy helpers
+          # inlined at more than one site within its line (duplication-allowlist.txt, lines
+          # only come down).
+          python3 tools/build-time/compile_cost.py --dup-check "$wgsl"
           # Each Slang file's fan-out (the kernel compiles an edit of it reruns) within its
           # line (tools/build-time/fanout-allowlist.txt, lines only come down). Every compile
           # comes from the per-compile cache the build above filled.
