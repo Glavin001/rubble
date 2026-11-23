@@ -17,7 +17,7 @@ is checked by the ladder in AGENTS.md instead.
 PROFILE (default dev) picks the cargo profile; the kernels do not depend on it. Not the
 fast profile: there engine-webgpu compiles its kernels at run time (kernel_store), not in
 its build script.
-STRIP_LINES=1 drops the MSL and CUDA `#line` directives altogether: for a change that
+STRIP_LINES=1 drops the MSL and CUDA `#line` directives and blank lines: for a change that
 moves code between files or lines (the code compared, not where it came from).
 """
 import hashlib
@@ -105,6 +105,8 @@ def digest_dir(root):
                 data = LINE_RE.sub(normalise_line, data)
                 if os.environ.get("STRIP_LINES") == "1":
                     data = re.sub(rb"(?m)^#line [^\n]*\n", b"", data)
+                    # (And blank lines: the emitters set a file switch apart with one.)
+                    data = re.sub(rb"(?m)^[ \t]*\n", b"", data)
             if f.endswith(".rs"):
                 data = OUT_DIR_RE.sub(rb'"OUT[\1]/', data)
             if f.startswith("cuda_") and f.endswith(".rs"):
