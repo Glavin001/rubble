@@ -509,3 +509,28 @@ mode (pair reuse, self split, contact, bitwise, group split, drive, coupling sha
 surface proxies, loop caps, fleet contact, vehicle grid: 61 tests), `sleep-check.sh` (21),
 Chrome's validation of all 140 modules. The loop-cap suite also caught an uncapped loop an
 earlier commit here added (the `vvSnapNode` loops): capped now.
+
+### The solo frame: one candidate loop for the first phase's tests too (2026-11-23)
+
+The solo frame's first phase ran its own tests before the second phase's: the testing walk,
+the brute pairs, every candidate and the early pairs, each at a call site of `tryContact`.
+Now the first phase only chooses (the mode, the count, the lanes a triangle) and the
+second phase's one `triangleCandidates` loop runs the walk, the brute pairs and every
+candidate; the early pairs are the first entries of the pair loop (`earlyN`), ahead of a
+list's pairs in the same loop. The walk that only lists pairs (`triangleGridList`) has no
+`tryContact`. `pairReuseNear` and `pairReuseTest` moved to `explicit_beams_tri_cands.slang`.
+
+`explicit_beams_solo_wide_nosurf`, Chrome cold, the fast setting, two runs each: 20.2 and
+20.5 s on main, 14.5 and 14.6 s now. Predicted (`compile_cost.py`): 32.5 -> 27.9 s; the
+allowlist's lines came down for 40 kernels (every solo, frame and contact variant).
+
+Kept apart: the pieces' tests (`piecesTests`). Through the same loop (mode 2, as the
+member step runs them) the frame hung the GPU natively in `explicit_pair_reuse_gpu`
+(`piece_labels_keep_the_list_bit_for_bit`: wgpu's poll waiting, 0 % CPU, past 10 minutes;
+main 15 s), with the loop's logic the member step's. Not found which part of the
+compiled frame loops; the pieces kept their own loop.
+
+Found on the way: a step with early pairs and a reused list (both are possible) would
+have read the early list with the reused list's indices in the first try (fixed: one
+count each); and with `EB_ABLATE` the frame did not compile (an `else` before a
+declaration, on main too).
