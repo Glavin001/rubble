@@ -695,10 +695,29 @@ pub mod msl_layout {
     /// `[[vk::binding(n, 0)]] <type> gName;` → slot n, from kernel sources that
     /// number their globals with Vulkan bindings (the explicit-beams kernels,
     /// `engine_exec::explicit_plan`'s `BIND_*`).
+    /// Each source with the files it reaches by `#include "..."` (relative to the
+    /// including file): a kernel split into parts declares its globals in any of them.
     pub fn vk_binding_slots(sources: &[PathBuf]) -> Result<HashMap<String, u32>> {
         let mut map = HashMap::new();
-        for path in sources {
-            for line in std::fs::read_to_string(path)?.lines() {
+        let mut files: Vec<PathBuf> = sources.to_vec();
+        let mut at = 0;
+        while at < files.len() {
+            let path = files[at].clone();
+            at += 1;
+            let text = std::fs::read_to_string(&path)?;
+            for line in text.lines() {
+                let Some(inc) = line.trim_start().strip_prefix("#include \"").and_then(|r| r.split('"').next()) else {
+                    continue;
+                };
+                let Some(found) = path.parent().map(|d| d.join(inc)).filter(|p| p.is_file()) else {
+                    continue;
+                };
+                let found = found.canonicalize().unwrap_or(found);
+                if !files.contains(&found) {
+                    files.push(found);
+                }
+            }
+            for line in text.lines() {
                 let Some(rest) = line.trim_start().strip_prefix("[[vk::binding(") else {
                     continue;
                 };

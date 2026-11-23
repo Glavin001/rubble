@@ -141,12 +141,18 @@ shared instead:
   one in a small function: splitting the existing giants by hand would save under a
   second an edit against the risk to the vehicles they build, so they wait for a change
   that touches them; no new one is added.)
-- Sources stay under 1500 lines (Rust) and 3000 (Slang). The files over it when the
-  rule came in are in `tools/build-time/size-allowlist.txt`, each at most its listed
+- Sources aim for about 500 lines and stay under 1000, Rust and Slang (`check.py` reports
+  how many are past 500). The files over 1000 when the limit came in (2026-11-23; it was
+  1500 and 3000) are in `tools/build-time/size-allowlist.txt`, each at most its listed
   size: they may shrink (`check.py --shrink` lowers the numbers), not grow. Split a
   file that has to grow, or raise its line in the same change, where review sees it.
   Large files cost twice: every edit recompiles all of it, and the editor and the
-  reader carry all of it.
+  reader carry all of it. A Slang file is split into parts it `#include`s at the same
+  place (cut between top-level sections, outside any `#if` and any body), which leaves
+  every generated kernel byte for byte the same (`kernel_digest.py`, STRIP_LINES=1):
+  `explicit_beams.slang` went from 11,531 lines to a 481-line head and 19 parts of
+  300-750. Tools that read a kernel's source follow its includes (`vk_binding_slots`,
+  the loop-cap census).
 
 Also in CI (the web build's kernels job): `tools/build-time/inline_budget.py`, every
 explicit module's inlined size (`scripts/wgsl-inline-size.py`: the entry point with every
