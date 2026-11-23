@@ -125,7 +125,7 @@ if [ "$fanout" = matrix ]; then
   data+=(--data engine/tools/scenario-matrix)
   if [ -n "${CAR:-}" ]; then sedan="$CAR"; fi
   envs+=("CAR=@sedan")
-  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP; do
+  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP WORST; do
     v="$(printenv "$k" || true)"
     if [ -n "$v" ]; then envs+=("$k=$v"); fi
   done
