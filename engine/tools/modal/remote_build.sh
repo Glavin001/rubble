@@ -17,9 +17,13 @@ key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
 run="$repo/engine/target/remote-build/$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$run"
 t0=$(date +%s)
-# The tree: every tracked or untracked, not ignored file under engine/, except the large
-# assets (LFS fracture scenes and the like) no build reads. sha256 a file.
-(cd "$repo" && git ls-files -z -co --exclude-standard -- engine \
+# The tree: every tracked file under engine/ and every untracked one not ignored (two
+# lists: `-co --exclude-standard` together drops tracked files such as Cargo.lock), except
+# the large assets no build reads. sha256 a file.
+(cd "$repo" && { git ls-files -z -- engine; git ls-files -z -o --exclude-standard -- engine
+  # Cargo.lock is gitignored in this repo: the worktree's own lockfile, so the remote
+  # build resolves the same crate versions as a local one.
+  [ -f engine/Cargo.lock ] && printf 'engine/Cargo.lock\0'; } \
   | python3 -c '
 import hashlib, os, sys
 for p in sys.stdin.buffer.read().split(b"\0"):
@@ -30,7 +34,8 @@ for p in sys.stdin.buffer.read().split(b"\0"):
         st = os.stat(q)
     except FileNotFoundError:
         continue
-    if st.st_size > 8 << 20:
+    # (3D models and Blender files: no build reads them, and they were 100 of 147 MB.)
+    if st.st_size > 8 << 20 or q.endswith((".glb", ".blend", ".blend1")):
         continue
     print(hashlib.sha256(open(q, "rb").read()).hexdigest() + "\t" + q)
 ') > "$run/manifest.tsv"
@@ -44,12 +49,19 @@ json.dump({"key": key, "root": "/repo-local", "manifest": "/run-dir/manifest.tsv
 PY
 cli=rubble-modal-cli:1.6.2
 docker image inspect "$cli" >/dev/null 2>&1 || docker build -q -t "$cli" "$here" >/dev/null
-docker run --rm --name "rubble-rb-$$" \
-  -v "$run:/run-dir" \
-  -v "$repo:/repo-local:ro" \
-  -v "$repo/engine/tools/cuda:/ctx/cuda:ro" \
-  -v "$here/remote_build.py:/app/remote_build.py:ro" \
-  -v rubble-modal-config:/config:ro -e MODAL_CONFIG_PATH=/config/modal.toml \
-  -w /app "$cli" run /app/remote_build.py --spec /run-dir/spec.json
+mounts=(-v "$run:/run-dir" -v "$repo:/repo-local:ro" -v "$repo/engine/tools/cuda:/ctx/cuda:ro"
+  -v "$here/remote_build.py:/app/remote_build.py:ro"
+  -v rubble-modal-config:/config:ro -e MODAL_CONFIG_PATH=/config/modal.toml -w /app)
+# The build function is a deployed app (a warm container outlives one build and serves
+# the next); deployed again when remote_build.py or the build image's sources change.
+deployed="$repo/engine/target/remote-build/deployed.sha"
+want="$(cat "$here/remote_build.py" "$repo/engine/tools/cuda/Dockerfile" "$repo/engine/tools/cuda/install_linux_toolchain.sh" | shasum -a 256 | cut -c1-16)"
+if [ "$(cat "$deployed" 2>/dev/null)" != "$want" ]; then
+  echo "remote_build: deploying the build function (its code changed)" >&2
+  docker run --rm "${mounts[@]}" "$cli" deploy /app/remote_build.py >&2
+  echo "$want" > "$deployed"
+fi
+docker run --rm --name "rubble-rb-$$" "${mounts[@]}" --entrypoint python "$cli" \
+  /app/remote_build.py --spec /run-dir/spec.json
 echo "remote_build: total $(( $(date +%s) - t0 )) s" >&2
 cat "$run/result.json" 2>/dev/null; echo

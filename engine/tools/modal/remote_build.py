@@ -2,16 +2,23 @@
 the result. The archive lands in the GPU runner's archive volume (gpu_run.py), so a GPU
 stage can run it without the Mac downloading or uploading a binary.
 
-    engine/tools/modal/remote_build.sh [--cpus N] -- <cargo selection>   (from the repo)
+    engine/tools/modal/remote_build.sh -- <cargo selection>   (from the repo)
 
-Volumes (Modal, v2):
-* rubble-rb-src      /<tree key>/...      the source, synced by content (manifest.json)
-* rubble-rb-target   /<tree key>/...      cargo's target directory, one per tree
-* rubble-rb-cargo    /                    CARGO_HOME (registry, git checkouts)
-* rubble-rb-kernels  /fatbins, /slang     nvcc's fatbins and slangc's outputs by content
-                                           (ENGINE_CUDA_FATBIN_CACHE, RUBBLE_SLANG_OBJ_CACHE):
-                                           every tree and every session shares them
-* rubble-gpu-run-archives                 the packed archive, by SHA-256 (gpu_run.py's)
+Where things live, per tree (a worktree's path hashed: its "key"):
+* the source: `rubble-rb-src`, one zstd snapshot of the tree (`KEY.src.tar.zst`) and its
+  manifest (path -> sha256). The Mac sends only the files whose content changed, inside
+  the call; the container applies them and writes the snapshot back.
+* cargo's target: `rubble-rb-target`, one zstd snapshot (`KEY.tar.zst`).
+* CARGO_HOME (registry): `rubble-rb-cargo`, one snapshot, rewritten when Cargo.lock changes.
+* nvcc's fatbins and slangc's outputs: `rubble-rb-kernels`, by content (few, large files;
+  every tree and session shares them).
+* the packed archive: `rubble-gpu-run-archives`, by SHA-256 (gpu_run.py's).
+
+Cargo itself works on the container's local disk. On a Volume (network storage) every
+fingerprint check was a round trip: nothing changed took 59 s, a Rust edit 120 s.
+Snapshots are one sequential read and write each, and a warm container (kept 60 s after a
+build) still has the tree and target on its disk, so it restores nothing: each snapshot
+carries a version, and a container whose disk holds that version skips it.
 
 The build image is engine/tools/cuda/Dockerfile: the x86_64 toolchain CI and the old
 local route use, so the device code is the reference build's.
@@ -21,8 +28,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import modal
@@ -32,7 +41,8 @@ app = modal.App("rubble-remote-build")
 CTX = "/ctx/cuda"
 if modal.is_local():
     # (add_python: Modal's own runtime; the image's python3 3.10 stays for the packer.)
-    build_image = modal.Image.from_dockerfile(f"{CTX}/Dockerfile", context_dir=CTX, add_python="3.12")
+    build_image = (modal.Image.from_dockerfile(f"{CTX}/Dockerfile", context_dir=CTX, add_python="3.12")
+                   .apt_install("zstd"))
 else:
     build_image = modal.Image.debian_slim()
 
@@ -47,47 +57,140 @@ cargo_vol = _vol("rubble-rb-cargo")
 kern_vol = _vol("rubble-rb-kernels")
 archive_vol = modal.Volume.from_name("rubble-gpu-run-archives", create_if_missing=True)
 
-
-def _run(cmd: list[str], cwd: str, env: dict) -> tuple[int, float]:
-    t = time.time()
-    p = subprocess.run(cmd, cwd=cwd, env=env)
-    return p.returncode, time.time() - t
+BUILD_CPUS = 16
+WARM_SECS = 60
+CPU_PRICE, MEM_PRICE, MEM_GIB = 0.0000131, 0.00000222, 16
 
 
-@app.function(image=build_image, cpu=16, memory=16384, timeout=1800, retries=0,
-              volumes={"/srcvol": src_vol, "/target": target_vol, "/cargo": cargo_vol,
-                       "/kernels": kern_vol, "/archives": archive_vol})
-def build(spec: dict) -> dict:
+def _read(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
+
+
+class _Snap:
+    """A directory kept on local disk and as one zstd snapshot on a Volume, with a
+    version: restore only when the disk's version is not the Volume's."""
+
+    def __init__(self, local: Path, snap: Path, times: dict, name: str):
+        self.local, self.snap, self.times, self.name = local, snap, times, name
+        self.ver = snap.with_name(snap.name + ".version")
+        self.mark = local.parent / f".{local.name}.version"
+
+    def restore(self) -> bool:
+        want = _read(self.ver)
+        if want and _read(self.mark) == want and self.local.is_dir():
+            self.times[self.name + "_in"] = 0.0
+            return False
+        t = time.time()
+        shutil.rmtree(self.local, ignore_errors=True)
+        self.local.mkdir(parents=True)
+        if self.snap.exists():
+            subprocess.run(["bash", "-c", f"zstd -dc -T0 '{self.snap}' | tar -x -C '{self.local}'"], check=True)
+        self.mark.write_text(want)
+        self.times[self.name + "_in"] = round(time.time() - t, 1)
+        return True
+
+    def save(self) -> None:
+        t = time.time()
+        tmp = self.snap.with_name(self.snap.name + ".tmp")
+        subprocess.run(["bash", "-c", f"tar -C '{self.local}' -cf - . | zstd -q -T0 -1 -f -o '{tmp}'"], check=True)
+        os.replace(tmp, self.snap)
+        v = uuid.uuid4().hex
+        self.ver.write_text(v)
+        self.mark.write_text(v)
+        self.times[self.name + "_out"] = round(time.time() - t, 1)
+
+
+@app.cls(image=build_image, cpu=BUILD_CPUS, memory=MEM_GIB * 1024, timeout=1800, retries=0,
+         scaledown_window=WARM_SECS,
+         volumes={"/srcvol": src_vol, "/target": target_vol, "/cargo": cargo_vol,
+                  "/kernels": kern_vol, "/archives": archive_vol})
+class Builder:
+    """A build container. Cargo's target snapshot is written when the container stops
+    (`flush`), not after each build: the next build on this warm container uses its disk,
+    and a snapshot only serves a container that starts cold. A container that dies
+    without flushing leaves the older snapshot, which is still correct (cargo rebuilds
+    from it what changed since)."""
+
+    @modal.enter()
+    def start(self) -> None:
+        self.dirty: dict[str, _Snap] = {}
+
+    @modal.method()
+    def build(self, spec: dict) -> dict:
+        return _build(spec, self.dirty)
+
+    @modal.exit()
+    def flush(self) -> None:
+        for snap in self.dirty.values():
+            try:
+                snap.save()
+            except Exception as e:  # noqa: BLE001 - the older snapshot stays
+                print(f"[remote_build] snapshot of {snap.local} not saved: {e}", flush=True)
+        if self.dirty:
+            target_vol.commit()
+
+
+def _build(spec: dict, dirty: dict) -> dict:
     t0 = time.time()
     key = spec["key"]
-    src_vol.reload()
-    if not Path("/repo").exists():
-        os.symlink(f"/srcvol/{key}", "/repo")
-    tgt = Path("/target") / key
-    tgt.mkdir(parents=True, exist_ok=True)
-    cores = os.cpu_count() or 8
+    times: dict = {}
+    for v in (src_vol, target_vol, cargo_vol):
+        v.reload()
+    work = Path("/work") / key
+
+    # Source: the snapshot (when this disk does not hold it), then the changed files.
+    src = _Snap(work / "repo", Path("/srcvol") / f"{key}.src.tar.zst", times, "src")
+    src.restore()
+    for rel in spec.get("removed", []):
+        (src.local / rel).unlink(missing_ok=True)
+    for rel, data in spec.get("files", {}).items():
+        f = src.local / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(data)  # (written now: newer than the target's outputs, so cargo rebuilds)
+    if spec.get("files") or spec.get("removed") or not src.snap.exists():
+        src.save()
+        (Path("/srcvol") / f"{key}.manifest.json").write_text(json.dumps(spec["manifest"]))
+    repo = Path("/repo")
+    if repo.is_symlink():
+        repo.unlink()
+    elif repo.is_dir() and not any(repo.iterdir()):
+        repo.rmdir()  # (the image's WORKDIR)
+    os.symlink(src.local, repo)
+
+    target = _Snap(work / "target", Path("/target") / f"{key}.tar.zst", times, "target")
+    target.restore()
+    home = _Snap(Path("/work/cargo"), Path("/cargo/home.tar.zst"), times, "cargo")
+    home.restore()
+    lock = src.local / "engine/Cargo.lock"  # (gitignored: sent from the worktree when it has one)
+    lock_hash = hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else ""
+    lock_file = Path("/cargo/home.lock")
+
+    cores = int(spec.get("cpus", BUILD_CPUS))
     env = {
         **os.environ,
-        "CARGO_HOME": "/cargo",
-        "CARGO_TARGET_DIR": str(tgt),
+        "CARGO_HOME": str(home.local),
+        "CARGO_TARGET_DIR": str(target.local),
         "ENGINE_CUDA_FATBIN_CACHE": "/kernels/fatbins",
         "RUBBLE_SLANG_OBJ_CACHE": "/kernels/slang",
         "ENGINE_CUDA_REQUIRE_PTX": "1",
         "CARGO_BUILD_JOBS": str(spec.get("jobs") or cores),
         "RUBBLE_BUILD_JOBS": str(spec.get("kernel_jobs") or cores),
+        # The archive stays on Modal: fast compression (the packer's default is 6).
+        "GPU_RUN_PACK_GZIP": "1",
         **spec.get("env", {}),
     }
-    if not Path("/cargo/bin").exists():
-        # CARGO_HOME on the volume holds the registry; the toolchain's binaries stay in
-        # the image's own /opt/cargo (PATH).
-        Path("/cargo").mkdir(exist_ok=True)
     out = Path("/tmp/out")
-    out.mkdir(exist_ok=True)
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir()
+    stamp = Path("/tmp/before-build")
+    stamp.touch()
     t_setup = time.time() - t0
     cmd = ["python3", "/repo/engine/tools/modal/gpu_run_pack.py", str(out), *spec.get("pack_opts", []),
            "--", *spec["selection"]]
     print(f"[remote_build] {key}: {' '.join(spec['selection'])} on {cores} cores", flush=True)
-    code, t_build = _run(cmd, "/repo/engine", env)
+    t = time.time()
+    code = subprocess.run(cmd, cwd="/repo/engine", env=env).returncode
+    t_build = time.time() - t
     result = {"code": code, "setup_s": t_setup, "build_s": t_build, "cores": cores}
     if code == 0:
         data = (out / "archive.tar.gz").read_bytes()
@@ -96,59 +199,70 @@ def build(spec: dict) -> dict:
         if not dest.exists():
             dest.write_bytes(data)
         result.update(archive=sha, archive_mb=len(data) / 1e6)
+        # The target's snapshot: now when there is none yet, else when the container
+        # stops, and only if cargo wrote something (cargo touches .cargo-lock every run).
+        changed = subprocess.run(["find", str(target.local), "-newer", str(stamp), "-type", "f",
+                                  "!", "-name", ".cargo-lock", "-print", "-quit"],
+                                 capture_output=True, text=True).stdout.strip()
+        if not target.snap.exists():
+            target.save()
+        elif changed:
+            dirty[key] = target
+        if _read(lock_file) != lock_hash or not home.snap.exists():
+            home.save()
+            lock_file.write_text(lock_hash)
     t_c = time.time()
-    for v in (target_vol, kern_vol, cargo_vol, archive_vol):
+    for v in (src_vol, target_vol, kern_vol, cargo_vol, archive_vol):
         v.commit()
     result["commit_s"] = time.time() - t_c
+    result["steps"] = times
     result["total_s"] = time.time() - t0
     return result
 
 
-def sync(key: str, root: Path, files: list[tuple[str, str]]) -> dict:
-    """Upload the files whose content changed since the last sync of this tree, remove
-    the ones gone. `files`: (repo-relative path, sha256)."""
-    t0 = time.time()
+def _diff(key: str, root: Path, files: dict[str, str]) -> tuple[dict, list[str], int]:
+    """The files whose content changed since the tree's last build (its manifest on the
+    Volume), read here to travel inside the call, and the files gone."""
     try:
-        old = json.loads(b"".join(src_vol.read_file(f"{key}/.rb_manifest.json")))
-    except Exception:  # noqa: BLE001 - first sync of this tree
+        old = json.loads(b"".join(src_vol.read_file(f"{key}.manifest.json")))
+    except Exception:  # noqa: BLE001 - first build of this tree
         old = {}
-    new = dict(files)
-    changed = [p for p, h in new.items() if old.get(p) != h]
-    gone = [p for p in old if p not in new]
-    up_bytes = 0
-    if changed:
-        with src_vol.batch_upload(force=True) as b:
-            for p in changed:
-                b.put_file(str(root / p), f"/{key}/{p}")
-                up_bytes += (root / p).stat().st_size
-    for p in gone:
-        try:
-            src_vol.remove_file(f"/{key}/{p}")
-        except Exception:  # noqa: BLE001
-            pass
-    with src_vol.batch_upload(force=True) as b:
-        import io
-        b.put_file(io.BytesIO(json.dumps(new).encode()), f"/{key}/.rb_manifest.json")
-    return {"changed": len(changed), "removed": len(gone), "bytes": up_bytes, "secs": time.time() - t0}
+    changed = {p: (root / p).read_bytes() for p, h in files.items() if old.get(p) != h}
+    gone = [p for p in old if p not in files]
+    return changed, gone, sum(len(b) for b in changed.values())
 
 
-@app.local_entrypoint()
-def main(spec: str):
+def main(spec: str) -> None:
+    """The client (remote_build.sh runs it after `modal deploy`): the deployed function,
+    so a warm container outlives this call and serves the next build."""
+    remote = modal.Cls.from_name("rubble-remote-build", "Builder")().build
     s = json.loads(Path(spec).read_text())
     root = Path(s["root"])
-    files = [tuple(l.split("\t", 1)[::-1]) for l in Path(s["manifest"]).read_text().splitlines() if l]
-    st = sync(s["key"], root, [(p, h) for p, h in files])
-    print(f"[remote_build] sync: {st['changed']} files changed ({st['bytes'] / 1e6:.2f} MB), "
-          f"{st['removed']} removed, {st['secs']:.1f} s", flush=True)
+    manifest = {}
+    for line in Path(s["manifest"]).read_text().splitlines():
+        if line:
+            h, p = line.split("\t", 1)
+            manifest[p] = h
     t = time.time()
-    r = build.remote(s)
-    cores = r.get("cores", 16)
-    rate = cores * 0.0000131 + 16 * 0.00000222
-    print(f"[remote_build] build: exit {r['code']}, container {r['total_s']:.0f} s (setup {r['setup_s']:.0f}, "
-          f"cargo+pack {r['build_s']:.0f}, volume commits {r['commit_s']:.0f}); call {time.time() - t:.0f} s; "
-          f"about ${r['total_s'] * rate:.4f} at {cores} cores", flush=True)
+    changed, gone, nbytes = _diff(s["key"], root, manifest)
+    print(f"[remote_build] source: {len(changed)} files changed ({nbytes / 1e6:.2f} MB), {len(gone)} removed, "
+          f"{time.time() - t:.1f} s", flush=True)
+    s.update(files=changed, removed=gone, manifest=manifest)
+    t = time.time()
+    r = remote.remote(s)
+    call = time.time() - t
+    rate = r.get("cores", BUILD_CPUS) * CPU_PRICE + MEM_GIB * MEM_PRICE
+    print(f"[remote_build] build: exit {r['code']}, call {call:.0f} s (container {r['total_s']:.0f} s: setup "
+          f"{r['setup_s']:.0f}, cargo+pack {r['build_s']:.0f}, commits {r['commit_s']:.0f}; {r.get('steps')}); "
+          f"about ${r['total_s'] * rate:.4f} plus up to {WARM_SECS} s warm (${WARM_SECS * rate:.4f})", flush=True)
     if r.get("archive"):
         print(f"[remote_build] archive {r['archive']} ({r['archive_mb']:.0f} MB) in rubble-gpu-run-archives", flush=True)
         Path(s["result"]).write_text(json.dumps(r))
     if r["code"] != 0:
         raise SystemExit(r["code"])
+
+
+if __name__ == "__main__":
+    import sys
+
+    main(sys.argv[sys.argv.index("--spec") + 1])

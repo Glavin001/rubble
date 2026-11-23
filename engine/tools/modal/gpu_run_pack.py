@@ -58,6 +58,8 @@ DATA_SUFFIXES = {".truck", ".jbeam", ".pc", ".json", ".slang", ".wgsl", ".txt", 
 
 def cargo_json(args: list[str]) -> list[dict]:
     env = {**os.environ, "CARGO_TERM_COLOR": "always"}
+    import time
+    t0 = time.time()
     p = subprocess.run(
         ["cargo", *args, "--release", "--message-format=json-render-diagnostics"],
         cwd=ENGINE, env=env, stdout=subprocess.PIPE, text=True,
@@ -65,6 +67,7 @@ def cargo_json(args: list[str]) -> list[dict]:
     msgs = [json.loads(l) for l in p.stdout.splitlines() if l.startswith("{")]
     if p.returncode != 0:
         raise SystemExit(f"cargo {' '.join(args)} failed ({p.returncode})")
+    print(f"gpu_run_pack: cargo {' '.join(args[:3])} {time.time() - t0:.1f} s", file=sys.stderr)
     return msgs
 
 
@@ -228,7 +231,9 @@ def main() -> None:
         return info
 
     buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=6) as gz:
+    # (GPU_RUN_PACK_GZIP: remote_build.py packs at 1, the archive never leaving Modal.)
+    level = int(os.environ.get("GPU_RUN_PACK_GZIP", "6"))
+    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=level) as gz:
         with tarfile.open(fileobj=gz, mode="w") as tar:
             for e in exes:
                 stripped = out / f"{e['name']}.{e['kind']}"
