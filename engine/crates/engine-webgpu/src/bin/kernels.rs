@@ -9,6 +9,26 @@
 //! command and a reload:
 //!   cargo run --profile fast -p engine-webgpu --bin kernels -- --copy-to crates/engine-webgpu/generated/kernels
 fn main() {
+    // `--closures FILE`: every kernel compiled into a scratch directory with each compile's
+    // include closure logged to FILE (RUBBLE_SLANG_CLOSURE_LOG), for
+    // tools/build-time/fanout.py. Any build, any profile; cached compiles are not rerun.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--closures") {
+        let log = std::path::PathBuf::from(args.get(i + 1).expect("--closures FILE"));
+        let _ = std::fs::remove_file(&log);
+        std::env::set_var("RUBBLE_SLANG_CLOSURE_LOG", &log);
+        let out = std::env::temp_dir().join(format!("rubble-closures-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let r = engine_webgpu::compile_kernels_to(&out);
+        let _ = std::fs::remove_dir_all(&out);
+        if let Err(e) = r {
+            eprintln!("kernels --closures: {e}");
+            std::process::exit(1);
+        }
+        println!("{}", log.display());
+        return;
+    }
     let wgsl = engine_webgpu::explicit_beams_wgsl_dir();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--copy-to") {

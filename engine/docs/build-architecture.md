@@ -171,6 +171,16 @@ from one place in a kernel (loop over its cases, or select its arguments, and ca
 once), not once per case. A small function costs nothing at run time; a heavy one called
 from 200 places costs the compiler 200 copies.
 
+And `tools/build-time/fanout.py --check`: each Slang file's fan-out, the kernel compiles
+an edit of it reruns (a compile's cache key is the text of every file it includes, under
+its defines), within its line in `fanout-allowlist.txt`. Lines only come down; a new file
+is added with `--init`, so its number shows in review. `kernels --closures FILE` logs
+each compile's closure (RUBBLE_SLANG_CLOSURE_LOG; a few seconds from the per-compile
+cache), and the report without `--check` ranks the files by fan-out and by lines x
+fan-out: where moving code into a file fewer modules include saves most. At its start
+(2026-11-23, 721 compiles): `kernels/world_step.slang` 8,307 lines x 543,
+`kernels/explicit_beams.slang` 11,531 x 160.
+
 ## Kernel source
 
 - A loop cap names its loop by a permanent id (`EB_END(ID, ..)`, `EB_PASS(ID, ..)`),

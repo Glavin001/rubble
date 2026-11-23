@@ -29,6 +29,16 @@ mod kernel_compile {
 pub use kernel::Kernel;
 use kernel::kernel;
 
+/// Measurement (`kernels --closures`, tools/build-time/fanout.py): every kernel of this
+/// build compiled into `out` as the run-time store compiles them (each compile from the
+/// per-compile cache when it has it).
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn compile_kernels_to(out: &std::path::Path) -> Result<(), String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang");
+    kernel_compile::compile_all(&root, out).map(|_| ()).map_err(|e| format!("{e:#}"))
+}
+
 /// On wasm, how a build with its kernels compiled at run time (a fast web build) reads
 /// them: `load(rel)` returns the store's file `rel` (`wgsl/<name>.wgsl`, `wgsl_ok.txt`,
 /// `spirv_entries.txt`). Nothing to do anywhere else (embedded kernels, or native, which

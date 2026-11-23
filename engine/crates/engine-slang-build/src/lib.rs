@@ -498,6 +498,21 @@ fn compile_key(
         }
         h.finish()
     };
+    // Measurement (tools/build-time/fanout.py): with RUBBLE_SLANG_CLOSURE_LOG=FILE, a line
+    // a compile: its source, target, entries and defines, then the files of its closure
+    // (tab-separated): which compiles an edit of each file invalidates.
+    if let Some(log) = std::env::var_os("RUBBLE_SLANG_CLOSURE_LOG") {
+        use std::io::Write;
+        let mut line = format!("{}\t{}\t{:?}\t{:?}", rel(source).display(), target, entries, defines);
+        for (path, _) in &files {
+            line.push('\t');
+            line.push_str(&rel(path).display().to_string());
+        }
+        line.push('\n');
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
     Some(format!("{:016x}{:016x}", hash(1), hash(2)))
 }
 
