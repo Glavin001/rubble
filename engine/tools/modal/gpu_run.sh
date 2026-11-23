@@ -38,7 +38,7 @@
 #                        is neither read nor written)
 #   --data PATH          an extra repo-relative file or directory to ship (small)
 #   --sedan DIR          the generated sedan's JBeam export (default
-#                        ~/Development/rubble-artifacts/sedan-live/mods/sedan_new);
+#                        engine/out/gen/sedan_new (the generated sedan from the current code, AGENTS.md));
 #                        shipped when an argument says @sedan, which becomes its
 #                        path in the container (/scenarios/sedan_new)
 #   --fanout             one container per executable of the selection (each test
@@ -63,7 +63,7 @@ repo="$(cd "$here/../../.." && pwd)"
 
 gpu=T4 cpus="" mem="" pack="" allow_cold=0 warm=1 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
 fanout=""
-sedan="$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new"
+sedan="$repo/engine/out/gen/sedan_new"
 envs=() variants=() data=() pack_opts=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -125,7 +125,7 @@ if [ "$fanout" = matrix ]; then
   data+=(--data engine/tools/scenario-matrix)
   if [ -n "${CAR:-}" ]; then sedan="$CAR"; fi
   envs+=("CAR=@sedan")
-  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP; do
+  for k in FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT PROCS ALLOW_DIFF COUNTERS COUNTER_METRICS COUNTER_TOP WORST; do
     v="$(printenv "$k" || true)"
     if [ -n "$v" ]; then envs+=("$k=$v"); fi
   done
@@ -226,10 +226,11 @@ esac
 if [ -n "${base_ref:-}${head_ref:-}" ]; then
   [ -n "${matrix_cuda:-}" ] || { echo "gpu_run: --base/--head are for --matrix-cuda" >&2; exit 2; }
   [ -n "${base_ref:-}" ] || { echo "gpu_run: --head needs --base" >&2; exit 2; }
-  # Every row's fixture, in the matrix's order, whichever rows run: the library's key
-  # covers the fixtures, so a build serves any selection of rows.
+  # Every row's fixture, in the matrix's order, whichever rows run (the goal's rows
+  # too: their surface contact needs modules the default rows do not): the library's
+  # key covers the fixtures, so a build serves any selection of rows.
   fx=()
-  for r in $(python3 "$matrix_py" --rows --two-builds); do
+  for r in $(python3 "$matrix_py" --rows --two-builds all); do
     [ -f "$repo/engine/out/scenario-matrix/portable/$r.pfx" ] && fx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx")
   done
   "$here/build_ref.sh" "$base_ref" "$run/refs/base_replay" "${fx[@]}"

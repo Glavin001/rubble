@@ -27,7 +27,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 fixtures="${FIXTURES:-$engine/out/fixtures}"
 profile="${PROFILE:-fast}"
-car="${CAR:-$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new}"
+car="${CAR:-$engine/out/gen/sedan_new}"
 cd "$engine" || exit 1
 export RUBBLE_BIT_EXACT="${BIT_EXACT:-1}"
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"

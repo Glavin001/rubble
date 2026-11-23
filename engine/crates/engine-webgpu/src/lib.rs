@@ -7,6 +7,9 @@
 
 #[cfg(feature = "gpu")]
 mod compute_spec;
+/// Measurement: `RUBBLE_PIPE_LOG=1` prints each World pipeline's creation time.
+#[cfg(feature = "gpu")]
+mod explicit_pipe_log;
 #[cfg(feature = "gpu")]
 mod explicit_beams_gpu;
 pub mod kernel;

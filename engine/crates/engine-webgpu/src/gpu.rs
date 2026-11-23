@@ -82,7 +82,7 @@ struct LazyKernel {
 impl LazyKernel {
     fn build(&self, device: &wgpu::Device, name: &str) -> &wgpu::ComputePipeline {
         self.pipeline.get_or_init(|| scoped(device, || format!("pipeline {name}"), || {
-            let off = rigid_shader_checks_off(device, name);
+            let (_t, off) = (crate::explicit_pipe_log::Timed::new(name), rigid_shader_checks_off(device, name));
             let module = crate::explicit_beams_gpu::shader_module_without(device, wgpu::ShaderModuleDescriptor {
                 label: Some(name),
                 source: wgpu::ShaderSource::Wgsl(self.wgsl.as_str().into()),

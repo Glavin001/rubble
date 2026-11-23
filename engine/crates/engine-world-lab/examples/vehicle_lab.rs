@@ -1273,7 +1273,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     if let Some(r) = script.get("restart") {
         lab.restart(&mut world, r)?;
     }
-    lab.read_blocking(&world, true)?;
+    lab.prewarm(&world).read_blocking(&world, true)?;
     lab.bench.set_script(&script)?;
     println!("debris time to live {:?}; notes {:?}", lab.bench.debris.ttl, lab.bench.notes);
     let flag = |k: &str| arg(k).map(|x| x == "1");

@@ -173,9 +173,10 @@ impl ExplicitBeamsGpu {
 /// Frames between this host's reads of the contact plan's group count once one is known.
 const SEEN_EVERY: u32 = 4;
 
-/// The host's read of the contact plan's group count ([`FramePlanner::set_vv_wide_seen`]):
-/// four bytes of the plan's arguments copied after a frame's passes and mapped without
-/// waiting, taken at a later frame's start.
+/// The host's read of the contact plan's groups of two or more members
+/// ([`FramePlanner::set_vv_wide_seen`], [`plan::vv_wide::plan_groups_of_two`]): two words
+/// of the plan's arguments copied after a frame's passes and mapped without waiting, taken
+/// at a later frame's start.
 #[derive(Default)]
 pub(super) struct Seen {
     staging: std::sync::OnceLock<wgpu::Buffer>,
@@ -215,6 +216,17 @@ impl ExplicitBeamsGpu {
         self.planner.set_vv_wide_seen(groups);
     }
 
+    /// A split group path dispatch the plan's arguments size at byte `offset`: in a frame
+    /// holding the wide schedule from the gate's slot ([`plan::vv_wide::gated_slot`]: the
+    /// plan's count with a group of two or more members, none without), else the plan's.
+    pub(super) fn dispatch_plan_args(&self, pass: &mut wgpu::ComputePass, offset: u64) {
+        if self.vv_seen.used.get() {
+            pass.dispatch_workgroups_indirect(&self.vv_wide_pipes().args, plan::vv_wide::gated_slot(offset).offset());
+        } else {
+            pass.dispatch_workgroups_indirect(&self.contact.args, offset);
+        }
+    }
+
     /// A frame's start: a finished read handed to the planner.
     pub(super) fn vv_wide_seen(&mut self) {
         use std::sync::atomic::Ordering::{Acquire, Release};
@@ -224,7 +236,13 @@ impl ExplicitBeamsGpu {
                 let b = s.staging.get().expect("explicit beams: the plan's count is mapped");
                 let groups = {
                     let view = b.slice(..).get_mapped_range().expect("mapped");
-                    u32::from_le_bytes(view[..4].try_into().unwrap())
+                    let w = |k: usize| u32::from_le_bytes(view[4 * k..4 * k + 4].try_into().unwrap());
+                    // (Word 0 the plan's word PLAN_GROUPS_WORD, word 1 its
+                    // PLAN_GROUPS_OF_TWO_WORD.)
+                    let mut args = [0u32; plan::vv_wide::PLAN_GROUPS_OF_TWO_WORD + 1];
+                    args[plan::vv_wide::PLAN_GROUPS_WORD] = w(0);
+                    args[plan::vv_wide::PLAN_GROUPS_OF_TWO_WORD] = w(1);
+                    plan::vv_wide::plan_groups_of_two(&args).expect("both words")
                 };
                 b.unmap();
                 s.state.store(0, Release);
@@ -252,13 +270,16 @@ impl ExplicitBeamsGpu {
         let b = s.staging.get_or_init(|| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("explicit-beams-vv-plan-seen"),
-                size: 4,
+                size: 8,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
         });
-        // (The kernel's vvArgs word 3: the plan's groups.)
-        enc.copy_buffer_to_buffer(&self.contact.args, 12, b, 0, 4);
+        // (The kernel's vvArgs words 3 and 15: the plan's groups, and its groups of two
+        // or more plus one.)
+        for (k, word) in [plan::vv_wide::PLAN_GROUPS_WORD, plan::vv_wide::PLAN_GROUPS_OF_TWO_WORD].into_iter().enumerate() {
+            enc.copy_buffer_to_buffer(&self.contact.args, 4 * word as u64, b, 4 * k as u64, 4);
+        }
         s.age.set(0);
         s.state.store(1, Release);
     }

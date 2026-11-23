@@ -948,7 +948,7 @@ impl SelfSplit {
     }
 
     fn pipeline(&self, name: &str, entry: &str, layout: &wgpu::PipelineLayout) -> wgpu::ComputePipeline {
-        let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(name), self.bit_exact).into()),
         });
@@ -4550,12 +4550,12 @@ impl ExplicitBeamsGpu {
             GroupOp::Group { copy, tests, args: off, entry, .. } => {
                 pass.set_pipeline(if tests { &g.tests } else { g.group(entry) });
                 pass.set_bind_group(0, if tests { &g.bind } else { &g.bind_args }, &at(copy));
-                pass.dispatch_workgroups_indirect(args, off);
+                self.dispatch_plan_args(pass, off);
             }
             GroupOp::Wheels { copy } => {
                 pass.set_pipeline(g.wheels());
                 pass.set_bind_group(0, &g.bind, &at(copy));
-                pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
+                self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the
@@ -4573,12 +4573,12 @@ impl ExplicitBeamsGpu {
                     _ => &g.bind,
                 };
                 pass.set_bind_group(0, bind, &at(copy));
-                pass.dispatch_workgroups_indirect(if from == 0 { args } else { &g.fleet_args[from as usize - 1] }, off);
+                if from == 0 { self.dispatch_plan_args(pass, off) } else { pass.dispatch_workgroups_indirect(&g.fleet_args[from as usize - 1], off) }
             }
             GroupOp::Member(s) => {
                 pass.set_pipeline(g.member());
                 pass.set_bind_group(0, &g.bind, &at(s));
-                pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+                self.dispatch_plan_args(pass, SPLIT_MEMBER_ARGS);
             }
             GroupOp::SelfMember(s) => {
                 let p = self.self_split_pipes();
@@ -4598,7 +4598,7 @@ impl ExplicitBeamsGpu {
                 let p = self.self_split_pipes();
                 pass.set_pipeline(&p.vv_pipes()[0]);
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
-                pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+                self.dispatch_plan_args(pass, SPLIT_MEMBER_ARGS);
             }
             GroupOp::SoloRest { .. } | GroupOp::Surf { .. } => self.run_surface_op(pass, op),
             GroupOp::Wide(w) => self.run_vv_wide_op(pass, w),
