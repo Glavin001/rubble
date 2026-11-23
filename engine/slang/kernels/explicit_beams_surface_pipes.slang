@@ -431,7 +431,7 @@ void surfSpreadKind(uint v, uint first, bool apply)
 [numthreads(SURF_WG, 1, 1)]
 void explicit_surface_find(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    surfPoolFind(gid.y, gid.x * SURF_WG + lid.x, lid.x);
+    surfPoolFind(gid.y, gid.x, lid.x);
     ebLoopCapFlush();
 }
 #else
