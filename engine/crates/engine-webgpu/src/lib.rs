@@ -53,7 +53,6 @@ pub fn set_kernel_loader(load: fn(&str) -> Result<String, String>) {
 mod explicit_modules;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
-#[cfg(feature = "gpu")]
 mod fast_float;
 #[cfg(feature = "gpu")]
 mod features;
@@ -76,7 +75,6 @@ pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, group_split_default, set_explicit_shader_checks_off, explicit_shader_module, explicit_shader_checks_off, explicit_compilation_options, SHADER_CHECKS_OFF_METAL, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
-#[cfg(feature = "gpu")]
 pub use fast_float::{bit_exact_default, explicit_wgsl, fast_float_wgsl};
 #[cfg(feature = "gpu")]
 pub use features::{

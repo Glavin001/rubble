@@ -20,10 +20,12 @@
 // modules with its manifest.json. EXPLICIT_WGSL_PARALLEL=a,b (exact names) compiles
 // those at once, as a page's load does, and prints when each finishes.
 // EXPLICIT_WGSL_MODULES_ONLY=1: the shader modules only (Tint's validation, uniformity
-// included), no pipelines: seconds, not the driver's compile.
+// included), no pipelines: seconds, not the driver's compile. Then a directory without a
+// manifest.json is read as is: every .wgsl file in it (the build's own WGSL, CI's check).
+// EXPLICIT_WGSL_CHROME_FLAGS: more Chrome flags (CI: SwiftShader's WebGPU, CONTRIBUTING.md).
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, existsSync, openSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, openSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -103,13 +105,21 @@ window.__parallel = async (nonce, names) => {
 };
 window.__ready = true;
 </script>`;
-if (!existsSync(join(DIR, 'manifest.json'))) {
+// The modules' list: the manifest, or (modules only) every .wgsl file of the directory.
+let MANIFEST;
+if (existsSync(join(DIR, 'manifest.json'))) {
+  MANIFEST = readFileSync(join(DIR, 'manifest.json'), 'utf8');
+} else if (process.env.EXPLICIT_WGSL_MODULES_ONLY === '1') {
+  MANIFEST = JSON.stringify(readdirSync(DIR).filter((f) => f.endsWith('.wgsl')).sort()
+    .map((f) => ({ name: f.slice(0, -5), entry: '' })));
+} else {
   console.error(`no ${DIR}/manifest.json: run the explicit_wgsl_dump example first`);
   process.exit(2);
 }
 const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html' }).end(PAGE); return; }
+  if (p === '/manifest.json') { res.writeHead(200, { 'content-type': 'application/json' }).end(MANIFEST); return; }
   const path = normalize(join(DIR, p));
   if (!path.startsWith(DIR) || !existsSync(path)) { res.writeHead(404).end(); return; }
   res.writeHead(200, { 'content-type': p.endsWith('.json') ? 'application/json' : 'text/plain' }).end(readFileSync(path));
@@ -121,6 +131,7 @@ const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', '--no-first-run',
+  ...(process.env.EXPLICIT_WGSL_CHROME_FLAGS || '').split(/\s+/).filter(Boolean),
   // Dawn renames every symbol before Metal sees it, so a renamed entry point alone
   // would still hit the driver's shader cache: keep the names (EXPLICIT_WGSL_COLD).
   ...(DUMP ? ['--enable-dawn-features=disable_symbol_renaming,dump_shaders', '--enable-logging=stderr', '--v=0']
@@ -165,7 +176,7 @@ if (process.env.EXPLICIT_WGSL_PARALLEL) {
   process.exit(p.out.some((m) => m.err) ? 1 : 0);
 }
 // One module per call, each printed as it finishes (a long cold compile shows progress).
-const names = JSON.parse(readFileSync(join(DIR, 'manifest.json'), 'utf8')).map((m) => m.name)
+const names = JSON.parse(MANIFEST).map((m) => m.name)
   .filter((n) => !only.length || only.some((o) => n.includes(o)));
 const r = { out: [], errors: [] };
 let bad = 0;

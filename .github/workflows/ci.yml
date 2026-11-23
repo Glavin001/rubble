@@ -164,6 +164,11 @@ jobs:
         env:
           RUBBLE_WEB_PARTS: ${{ matrix.part }}
         run: bash engine/scripts/build-web.sh
+      # Node for Chrome's WGSL check below (the runner's Chrome, WebGPU in software).
+      - uses: actions/setup-node@v4
+        if: matrix.part == 'kernels'
+        with:
+          node-version: 24
       # Every explicit module's inlined size within its budget (a module past it would
       # compile slower in the browser; tools/build-time/inline-budget.txt).
       - name: Kernel inlined-size budget
@@ -183,6 +188,14 @@ jobs:
           # inlined at more than one site within its line (duplication-allowlist.txt, lines
           # only come down).
           python3 tools/build-time/compile_cost.py --dup-check "$wgsl"
+          # Chrome's own WGSL validation of every module as the hosts hand it to the browser
+          # (strict and fast arithmetic): barriers in uniform control flow, the rules naga
+          # does not hold (explicit-wgsl-check.mjs, modules only; SwiftShader's WebGPU).
+          browser="$RUNNER_TEMP/browser-wgsl"
+          cargo run -q --release -p engine-webgpu --no-default-features --bin kernels -- --browser-wgsl "$browser"
+          CHROME="$(command -v google-chrome)" EXPLICIT_WGSL_DIR="$browser" EXPLICIT_WGSL_MODULES_ONLY=1 \
+            EXPLICIT_WGSL_CHROME_FLAGS="--no-sandbox --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader --disable-vulkan-fallback-to-gl-for-testing --disable-gpu-sandbox" \
+            node crates/engine-webgpu/explicit-wgsl-check.mjs
           # Each Slang file's fan-out (the kernel compiles an edit of it reruns) within its
           # line (tools/build-time/fanout-allowlist.txt, lines only come down). Every compile
           # comes from the per-compile cache the build above filled.

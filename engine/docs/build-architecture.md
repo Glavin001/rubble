@@ -176,6 +176,14 @@ The rule for kernel code this enforces: a helper of more than a few statements i
 from one place in a kernel (loop over its cases, or select its arguments, and call it
 once), not once per case. A small function costs nothing at run time; a heavy one called
 from 200 places costs the compiler 200 copies.
+Chrome's own WGSL validation (Tint: barriers only in uniform control flow, the rules naga
+does not hold) runs on every module as the hosts hand it to the browser: `kernels
+--browser-wgsl DIR` writes each (the World's shaders through its report, the rest through
+`uniformize_workgroup_lanes`, and a `.fast.wgsl` copy with the fast setting's arithmetic),
+and `explicit-wgsl-check.mjs` with EXPLICIT_WGSL_MODULES_ONLY=1 creates each shader module
+in headless Chrome (in CI with SwiftShader's WebGPU; EXPLICIT_WGSL_CHROME_FLAGS). 2026-11-23:
+590 modules, all accepted; the build's raw WGSL without the host's uniform loads fails 127.
+
 `compile_cost.py --dup-check` holds the rule itself: per kernel, the statements its heavy
 helpers (50 or more inlined statements a copy) duplicate by being inlined at more than one
 site, within its line in `duplication-allowlist.txt` (lines only come down; an unlisted

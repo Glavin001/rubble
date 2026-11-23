@@ -29,6 +29,36 @@ fn main() {
         println!("{}", log.display());
         return;
     }
+    // `--browser-wgsl DIR`: every module of this build as a host hands it to the browser
+    // (the World's shaders through its own report: barriers, loop caps, uniform loads;
+    // every other module through uniformize_workgroup_lanes), and NAME.fast.wgsl with the
+    // fast setting's arithmetic: for explicit-wgsl-check.mjs (EXPLICIT_WGSL_MODULES_ONLY),
+    // Chrome's own WGSL validation in CI.
+    if let Some(i) = args.iter().position(|a| a == "--browser-wgsl") {
+        let to = std::path::PathBuf::from(args.get(i + 1).expect("--browser-wgsl DIR"));
+        let _ = std::fs::remove_dir_all(&to);
+        std::fs::create_dir_all(&to).unwrap();
+        let world: std::collections::HashMap<String, String> = engine_webgpu::WebGpuWorld::compile_shaders_report()
+            .into_iter()
+            .filter_map(|(n, r)| r.ok().map(|w| (n, w)))
+            .collect();
+        let dir = engine_webgpu::explicit_beams_wgsl_dir();
+        let mut n = 0;
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let Some(name) = p.file_name().and_then(|f| f.to_str()).and_then(|f| f.strip_suffix(".wgsl")) else { continue };
+            let raw = std::fs::read_to_string(&p).unwrap();
+            let strict = world.get(name).cloned().unwrap_or_else(|| engine_webgpu::uniformize_workgroup_lanes(&raw));
+            let fast = engine_webgpu::fast_float_wgsl(&strict).into_owned();
+            std::fs::write(to.join(format!("{name}.wgsl")), &strict).unwrap();
+            if fast != strict {
+                std::fs::write(to.join(format!("{name}.fast.wgsl")), fast).unwrap();
+            }
+            n += 1;
+        }
+        println!("{n} modules -> {}", to.display());
+        return;
+    }
     let wgsl = engine_webgpu::explicit_beams_wgsl_dir();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--copy-to") {
