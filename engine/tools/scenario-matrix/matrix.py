@@ -478,6 +478,10 @@ def print_counters(base, head):
               f"{cell('l1tex__t_sector_hit_rate.pct'):>11} {cell('lts__t_sector_hit_rate.pct'):>11}")
 
 
+# explicit_replay --run's peak line (print_peak).
+PEAK = re.compile(r"run peak: worst ([\d.]+) ms")
+
+
 def two_builds(rows):
     """The A/B of two builds (BASE_BIN against REPLAY_BIN; gpu_run.sh --base REF): each row's
     fixture replayed by one build's process, then the other's, PROCS times, the order
@@ -498,6 +502,7 @@ def two_builds(rows):
     for row in rows:
         t0 = time.time()
         times = {"base": [], "head": []}
+        worst = {"base": [], "head": []}
         states = {"base": [], "head": []}
         outs = []
         for i in range(procs):
@@ -507,6 +512,9 @@ def two_builds(rows):
                 outs.append(f"[{side} #{i}] " + out[-600:])
                 if ms is not None:
                     times[side].append(ms)
+                    w = PEAK.search(out)
+                    if w:
+                        worst[side].append(float(w.group(1)))
                 if st:
                     states[side].append(read_state(st))
         secs = time.time() - t0
@@ -535,7 +543,11 @@ def two_builds(rows):
         flag = "SLOWER" if slower else ("faster" if delta < -THRESHOLD and base - head > NOISE_MS else "")
         if slower or (not same and not allow_diff):
             bad.append(row[0])
-        print(f"{row[0]:<8} {bfb:>7} {head:>8.3f} {base:>8.3f} {delta:>+7.1f}%  {flag:<6} {noise:>5.1f}% {secs:>5.1f}  {row[5]}")
+        # WORST=1: each build's worst frame (each frame's best round), its processes' median.
+        peak = ""
+        if os.environ.get("WORST") == "1" and worst["base"] and worst["head"]:
+            peak = f" [worst frame head {med(worst['head']):.3f} / base {med(worst['base']):.3f} ms]"
+        print(f"{row[0]:<8} {bfb:>7} {head:>8.3f} {base:>8.3f} {delta:>+7.1f}%  {flag:<6} {noise:>5.1f}% {secs:>5.1f}  {row[5]}{peak}")
         for n in notes:
             print("    " + n)
         if os.environ.get("COUNTERS") == "1":
