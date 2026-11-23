@@ -365,6 +365,16 @@ void surfSpreadKind(uint v, uint first, bool apply)
 #endif
 }
 
+#ifdef EB_SURF_POOL
+#include "explicit_beams_surface_pool.slang"
+[shader("compute")]
+[numthreads(SURF_WG, 1, 1)]
+void explicit_surface_find(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    surfPoolFind(gid.y, gid.x * SURF_WG + lid.x, lid.x);
+    ebLoopCapFlush();
+}
+#else
 [shader("compute")]
 [numthreads(SURF_WG, 1, 1)]
 void explicit_surface_find(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -372,6 +382,7 @@ void explicit_surface_find(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     surfSpreadKind(gid.y, gid.x * SURF_WG + lid.x, false);
     ebLoopCapFlush();
 }
+#endif
 
 [shader("compute")]
 [numthreads(SURF_WG, 1, 1)]
