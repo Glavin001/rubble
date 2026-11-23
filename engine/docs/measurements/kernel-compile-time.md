@@ -607,3 +607,14 @@ What is left in it (74,500 instructions offline, against the larger groups' modu
 `vvTry` twice, `vvClip` ten times, `vvTriangleCandsSmall` three times), and `beamUpdate`
 twice (the deferred breaks, one lane, and the beam phase: different points of the step, so
 not one loop without moving one). Each further merge is a few per cent.
+
+Tried and dropped: the solo frame's wheels at one call site (`frameDrive`: driveStep's
+rays, bars and tyres, or the ahead schedule's tyres, after the coupling's first phase; one
+copy of drvTyre and of drvRays). Chrome cold 14.6 -> 13.5 s and the drive suite bit for bit
+against the CPU on both schedules, but `explicit_pair_reuse_gpu` (a vehicle without a
+drive: the reused list against the walk, 9,886 words apart) and two `self_split_gpu` tests
+failed natively, with the change's logic the same as before for a vehicle without a drive:
+a second sign, after the pieces' loop above, that this frame's native compile does not
+take every merge. The suite added for it stays: `driving_on_the_solo_frame_bitwise`, the
+solo frame's wheels on both schedules against the CPU (it fails when either path's wheels
+are broken).

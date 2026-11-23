@@ -72,10 +72,22 @@ fn input(f: u32) -> DriveInput {
 
 /// CPU and GPU frame by frame: every node's position and velocity and every wheel's
 /// state bit for bit. Returns how many wheel-frames had contact.
-fn compare(label: &str, mut fleet: Vec<ExplicitBeams>, frames: u32, contact: bool) -> Option<u32> {
+fn compare(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, contact: bool) -> Option<u32> {
+    compare_with(label, fleet, frames, contact, |_| {})
+}
+
+/// [`compare`] with the GPU set up by `setup` first.
+fn compare_with(
+    label: &str,
+    mut fleet: Vec<ExplicitBeams>,
+    frames: u32,
+    contact: bool,
+    setup: impl Fn(&mut ExplicitBeamsGpu),
+) -> Option<u32> {
     let (_, device, queue) = default_device().ok()?;
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_vehicle_contact(contact);
+    setup(&mut gpu);
     let mut cpu_world =
         engine_softbody::explicit_contact::ExplicitBeamsWorld::new(std::mem::take(&mut fleet));
     cpu_world.contact = contact;
@@ -139,6 +151,25 @@ fn driving_on_flat_ground_bitwise() {
         return;
     };
     assert!(t > 0);
+}
+
+/// The solo frame (not the wide passes), its wheels in the step's order and with the ahead
+/// schedule (`PERF_DRIVE_AHEAD`: the rays and bars beside the step before's beam phase),
+/// each against the CPU bit for bit (the frame's one call site of the wheels, frameDrive).
+#[test]
+fn driving_on_the_solo_frame_bitwise() {
+    use engine_exec::explicit_plan::PERF_DRIVE_AHEAD;
+    for ahead in [false, true] {
+        let label = if ahead { "flat, solo frame, wheels ahead" } else { "flat, solo frame" };
+        let Some(t) = compare_with(label, vec![driven(Vec3::new(0.0, 0.6, 0.0), 0.0, 0.0)], 160, false, |g| {
+            g.set_wide(false);
+            let f = g.perf_flags();
+            g.set_perf_flags(if ahead { f | PERF_DRIVE_AHEAD } else { f & !PERF_DRIVE_AHEAD });
+        }) else {
+            return;
+        };
+        assert!(t > 0);
+    }
 }
 
 #[test]
