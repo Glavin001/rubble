@@ -85,6 +85,37 @@ bool surfSpreadSkip(uint v)
 {
     return v >= gP.vehicles || surfaceOn() == 0u || sleepAsleep(v);
 }
+
+// The fast schedules' pair list: pair p of a vehicle's listing, lo of them from the
+// region's start, the rest (a triangle's against a hull) from its end.
+uint surfPairSlot(uint p, uint lo) { return p < lo ? p : SURF_PAIR_CAP - 1u - (p - lo); }
+
+// surfPairList for a triangle (the fast schedules' listing): a pair against a hull goes
+// to the region's end, counted at the find's hit count (cleared by the prep, read and
+// cleared by the plan), so the find gives it a workgroup of its own
+// (explicit_beams_surface_pool.slang). The same tests in the same order.
+void surfPairListSplit(uint v, uint i, float3 tlo, float3 thi, uint proxies, float3 x0, float3 x1, float3 x2, float r)
+{
+    for (uint k = 0u, kStop = EB_END(764, k, proxies, 1u); k < kStop; k++)
+    {
+        uint at = surfBoundsAt(v, k);
+        float3 lo = surfLoad3(at);
+        float3 hi = surfLoad3(at + 3u);
+        if (!(all(tlo <= hi) && all(thi >= lo))) continue;
+        if (surfPairSeparated(v, k, x0, x1, x2, r)) continue;
+        uint code = (SURF_TRI << 30) | (k << 20) | i;
+        if (gMisc[cplShape(v, k)].x == CPL_HULL)
+        {
+            uint q = uint(gAcc[surfHitCount(v)].add(1));
+            if (q < SURF_PAIR_CAP) gNext[surfPairAt(v, SURF_PAIR_CAP - 1u - q)] = code;
+        }
+        else
+        {
+            uint p = uint(gAcc[surfPairCount(v)].add(1));
+            if (p < SURF_PAIR_CAP) gNext[surfPairAt(v, p)] = code;
+        }
+    }
+}
 #endif
 
 // Whether workgroup v steps no surface (uniform): past the vehicles, asleep (the frame
@@ -124,12 +155,17 @@ void explicit_surface_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint4 sr = gStatic[gP.surfSeg + v];
     uint proxies = rec.w;
     bool anyFast = proxies != 0u && surfAnyFast(v, proxies);
-    uint listed = uint(gAcc[surfPairCount(v)].load());
+    // The listing's two counts (surfPairListSplit): the pairs from the region's start,
+    // a triangle's against a hull from its end; the find's hit count cleared.
+    uint n = uint(gAcc[surfPairCount(v)].load());
+    uint b = uint(gAcc[surfHitCount(v)].load());
+    gAcc[surfHitCount(v)].store(0);
+    uint listed = n + b;
     bool pairs = true;
     uint px = proxies;
     if (listed <= SURF_PAIR_CAP) px = anyFast ? (proxies | 0x80000000u) : 0u;
     else pairs = false;
-    gMisc[segRec(v)] = uint4(rec.x, pairs ? 1u : 0u, listed, px);
+    gMisc[segRec(v)] = uint4(rec.x, pairs ? 1u : 0u, pairs ? (n | (b << 16)) : listed, px);
     // (A vehicle with the pair path has the flag: its counts are its own.)
     if (r1.w != 0u || px != 0u)
     {
@@ -137,7 +173,8 @@ void explicit_surface_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         surfArgsWant(1u, surfChunks(sr.y));
         surfArgsWant(2u, surfChunks(r0.y));
     }
-    if (pairs && listed != 0u) surfArgsWant(3u, surfChunks(max(listed, SURF_HIT_CAP)));
+    // (The find: a workgroup each SURF_WG pairs, then a workgroup a big pair.)
+    if (pairs && listed != 0u) surfArgsWant(3u, max(surfChunks(max(listed, SURF_HIT_CAP)), surfChunks(n) + b));
     ebLoopCapFlush();
 }
 #elif !defined(EB_SURF_KIND)
@@ -271,7 +308,7 @@ void explicit_surface_cull(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             float3 x2 = nf3(gNodes[tn.z * 3u].xyz);
             float3 tlo = ssub3(min(min(x0, x1), x2), float3(r, r, r));
             float3 thi = sadd3(max(max(x0, x1), x2), float3(r, r, r));
-            surfPairList(v, SURF_TRI, e, tlo, thi, proxies, true, x0, x1, x2, r);
+            surfPairListSplit(v, e, tlo, thi, proxies, x0, x1, x2, r);
         }
         else if (e < triCount + segCount)
         {
@@ -321,7 +358,10 @@ void surfSpreadKind(uint v, uint first, bool apply)
     uint segCount = mine ? sr.y : 0u;
     uint4 rec = gMisc[segRec(v)];
     bool pairs = rec.y != 0u;
-    uint listed = rec.z;
+    // The pair path's list (explicit_surface_plan): rec.z's low half from the region's
+    // start, its high half from its end (surfPairSlot).
+    uint listedLo = pairs ? (rec.z & 0xFFFFu) : 0u;
+    uint listed = pairs ? listedLo + (rec.z >> 16) : 0u;
     uint px = rec.w;
     bool loops = r1.w != 0u || px != 0u;
 #if EB_SURF_KIND == 1
@@ -346,7 +386,7 @@ void surfSpreadKind(uint v, uint first, bool apply)
     if (pairs && !apply)
     {
         for (uint p = first, pStop = EB_END(602, p, listed, stride); p < pStop; p += stride)
-            surfPairFind(v, p, origin, r, r0, r1, sr);
+            surfPairFind(v, surfPairSlot(p, listedLo), origin, r, r0, r1, sr);
     }
     if (pairs && apply)
     {
@@ -359,7 +399,7 @@ void surfSpreadKind(uint v, uint first, bool apply)
         else
         {
             for (uint p = first, pStop = EB_END(604, p, listed, stride); p < pStop; p += stride)
-                surfPairApply(v, p, origin, r, r0, r1, sr);
+                surfPairApply(v, surfPairSlot(p, listedLo), origin, r, r0, r1, sr);
         }
     }
 #endif

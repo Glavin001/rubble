@@ -385,48 +385,69 @@ float4 fqPierce(float3 p0, float3 p1, float3 t0, float3 t1, float3 t2, out float
 // segment's two ends on the triangle (i = 0, 1), the triangle's three edges against
 // the segment (2..4), the pierce point (5), in the twin's order. One loop with one
 // call site of each query (see "One call site" above).
+// Candidate i of seg_triangle (false: none, the twin's `continue`), its gap as the shape
+// maps it.
+bool fqSegTriCand(FqShape s, float3 p0, float3 p1, float3 x0, float3 x1, float3 x2, uint i, out FqPair p,
+                  out float g)
+{
+    g = 0.0;
+    if (i >= 2u && i < 5u)
+    {
+        uint k = i - 2u;
+        float3 ea = fqX(x0, x1, x2, k);
+        float3 eb = fqX(x0, x1, x2, (k + 1u) % 3u);
+        float2 st = fqSegSeg(p0, p1, ea, eb);
+        float3 pa = sadd3(p0, sscale(ssub3(p1, p0), st.x));
+        float3 y = sadd3(ea, sscale(ssub3(eb, ea), st.y));
+        p.w = fqEdgeW(k, st.y);
+        p.q = y;
+        p.cs = pa;
+        p.d = fqLen(ssub3(pa, y));
+    }
+    else
+    {
+        float3 pe = i == 0u ? p0 : p1;
+        if (i == 5u)
+        {
+            float3 n = scross(ssub3(x1, x0), ssub3(x2, x0));
+            float d0 = sdot(ssub3(p0, x0), n);
+            float d1 = sdot(ssub3(p1, x0), n);
+            if (!((d0 < 0.0 && d1 > 0.0) || (d0 > 0.0 && d1 < 0.0)))
+            {
+                p.w = float3(0.0, 0.0, 0.0);
+                p.q = p.w;
+                p.cs = p.w;
+                p.d = 0.0;
+                return false;
+            }
+            pe = sadd3(p0, sscale(ssub3(p1, p0), sdiv(d0, nf(d0 - d1))));
+        }
+        p.q = fqClosestTri(pe, x0, x1, x2, p.w);
+        p.cs = pe;
+        if (i == 5u)
+        {
+            float3 qc = ssub3(p.q, pe);
+            p.d = 0.0;
+            if (!(sdot(qc, qc) < 1e-10)) return false;
+        }
+        else
+            p.d = fqLen(ssub3(p.q, pe));
+    }
+    g = fqMap(s, p);
+    return true;
+}
+
+// seg_triangle: segment p0–p1's candidate pairs against triangle x0 x1 x2: the
+// segment's two ends on the triangle (i = 0, 1), the triangle's three edges against
+// the segment (2..4), the pierce point (5), in the twin's order. One loop with one
+// call site of each query (see "One call site" above).
 void fqSegTri(FqShape s, float3 p0, float3 p1, float3 x0, float3 x1, float3 x2, inout FqAcc a)
 {
     for (uint i = 0u; i < 6u; i++)
     {
         FqPair p;
-        if (i >= 2u && i < 5u)
-        {
-            uint k = i - 2u;
-            float3 ea = fqX(x0, x1, x2, k);
-            float3 eb = fqX(x0, x1, x2, (k + 1u) % 3u);
-            float2 st = fqSegSeg(p0, p1, ea, eb);
-            float3 pa = sadd3(p0, sscale(ssub3(p1, p0), st.x));
-            float3 y = sadd3(ea, sscale(ssub3(eb, ea), st.y));
-            p.w = fqEdgeW(k, st.y);
-            p.q = y;
-            p.cs = pa;
-            p.d = fqLen(ssub3(pa, y));
-        }
-        else
-        {
-            float3 pe = i == 0u ? p0 : p1;
-            if (i == 5u)
-            {
-                float3 n = scross(ssub3(x1, x0), ssub3(x2, x0));
-                float d0 = sdot(ssub3(p0, x0), n);
-                float d1 = sdot(ssub3(p1, x0), n);
-                if (!((d0 < 0.0 && d1 > 0.0) || (d0 > 0.0 && d1 < 0.0))) continue;
-                pe = sadd3(p0, sscale(ssub3(p1, p0), sdiv(d0, nf(d0 - d1))));
-            }
-            p.q = fqClosestTri(pe, x0, x1, x2, p.w);
-            p.cs = pe;
-            if (i == 5u)
-            {
-                float3 qc = ssub3(p.q, pe);
-                if (!(sdot(qc, qc) < 1e-10)) continue;
-                p.d = 0.0;
-            }
-            else
-                p.d = fqLen(ssub3(p.q, pe));
-        }
-        float g = fqMap(s, p);
-        fqVisit(a, p, g);
+        float g;
+        if (fqSegTriCand(s, p0, p1, x0, x1, x2, i, p, g)) fqVisit(a, p, g);
     }
 }
 
@@ -469,26 +490,28 @@ bool fqClip(FqShape s, float3 p0, float3 p1, out float t0, out float t1)
     return t0 < t1;
 }
 
+// tri_edges_inside's pair of triangle edge k at clip parameter t (gap 0).
+FqPair fqInsidePair(float3 x0, float3 x1, float3 x2, uint k, float t)
+{
+    float3 p0 = fqX(x0, x1, x2, k);
+    float3 p1 = fqX(x0, x1, x2, (k + 1u) % 3u);
+    FqPair p;
+    p.w = fqEdgeW(k, t);
+    p.q = sadd3(p0, sscale(ssub3(p1, p0), t));
+    p.cs = p.q;
+    p.d = 0.0;
+    return p;
+}
+
 // tri_edges_inside for a box or a hull.
 void fqEdgesInside(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
 {
     for (uint k = 0u; k < 3u; k++)
     {
-        float3 p0 = fqX(x0, x1, x2, k);
-        float3 p1 = fqX(x0, x1, x2, (k + 1u) % 3u);
         float t0;
         float t1;
-        if (!fqClip(s, p0, p1, t0, t1)) continue;
-        for (uint e = 0u; e < 2u; e++)
-        {
-            float t = e == 0u ? t0 : t1;
-            FqPair p;
-            p.w = fqEdgeW(k, t);
-            p.q = sadd3(p0, sscale(ssub3(p1, p0), t));
-            p.cs = p.q;
-            p.d = 0.0;
-            fqVisit(a, p, 0.0);
-        }
+        if (!fqClip(s, fqX(x0, x1, x2, k), fqX(x0, x1, x2, (k + 1u) % 3u), t0, t1)) continue;
+        for (uint e = 0u; e < 2u; e++) fqVisit(a, fqInsidePair(x0, x1, x2, k, e == 0u ? t0 : t1), 0.0);
     }
 }
 
