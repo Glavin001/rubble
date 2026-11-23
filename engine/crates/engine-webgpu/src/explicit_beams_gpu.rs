@@ -2324,18 +2324,18 @@ impl ExplicitBeamsGpu {
         crate::explicit_loop_cap_hit(self.layout.loop_cap_flag(w))
     }
 
-    /// The contact groups of the current plan (blocking read; 0 when contact is
-    /// not active).
+    /// The contact groups of two or more vehicles of the current plan (blocking read; 0
+    /// when contact is not active): the plan's indirect-arguments word 15, less one.
     pub fn contact_groups(&self) -> u32 {
         if !self.contact_active() {
             return 0;
         }
         let raw = self.read(&self.contact.args);
-        bytemuck::cast_slice::<u8, u32>(&raw)[4]
+        bytemuck::cast_slice::<u8, u32>(&raw)[15].saturating_sub(1)
     }
 
     /// Diagnostic (blocking): the member count of each contact group of the current
-    /// plan.
+    /// plan but the groups of one (0: past VV_MAX_GROUP members, its vehicles alone).
     #[doc(hidden)]
     pub fn contact_group_sizes(&self) -> Vec<u32> {
         if !self.contact_active() {
@@ -2346,7 +2346,7 @@ impl ExplicitBeamsGpu {
         let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
         let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
         let at = self.planner.words[46] as usize;
-        (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
+        (0..n).map(|g| misc[(at + g) * 4 + 1]).filter(|&m| m != 1).collect()
     }
 
     /// Measurement (a blocking read): per vehicle the self-collision hits of the last

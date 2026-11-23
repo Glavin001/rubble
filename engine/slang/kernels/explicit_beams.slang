@@ -5873,6 +5873,16 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     // Vehicle sleep, awake-indexed: the workgroup's awake vehicle (or contact group).
     bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
+#if defined(EB_VV_SOLO) && defined(EB_VV_GROUPS) && !defined(EB_VV_SPLIT) && !defined(EB_SOLO_STEP)
+    // The contact groups' module: the workgroups past the vehicles step the groups
+    // (vvArgs' words 4..6, the same as with the solo frame here). Every vehicle is a
+    // group's member, one without partners a group of its own, so the workgroups of the
+    // vehicles have nothing to do; the vehicles of a group past VV_MAX_GROUP members run
+    // alone in the solo module's dispatch (words 0..2). So this module holds no copy of
+    // the solo frame (its first-load compile: kernel-compile-time.md).
+    if (sleepListed) v = sleepPick(gid.x, lane);
+    if (v >= gP.vehicles) contactGroup(v - gP.vehicles, lane);
+#else
 #ifdef EB_SOLO_STEP
     // (A step a dispatch: the entry picked the workgroup's vehicle, sleepPick, and gave
     // it as gid.x; past the awake vehicles, the one workgroup a dispatch keeps when none
@@ -6588,6 +6598,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         float3 p = gNodes[(nodeOff + i) * 3u].xyz;
         if (any(abs(p - gsVvBounds[0]) > gsVvBounds[1])) vvReportOutside(v);
     }
+#endif
 #endif
     ebLoopCapFlush();
 }
@@ -7829,14 +7840,18 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 // (words 0..2), else the frame with the groups over vehicles + groups (words 4..6);
 // and every group again for the larger groups' module (words 12..14) when one has
 // more than VV_PART members (`big`), else none.
-void vvArgs(uint nv, uint groups, uint multi, bool big, bool larger)
+void vvArgs(uint nv, uint groups, uint multi, bool big, bool larger, bool alone)
 {
     gArgs[12] = big ? groups : 0u;
     gArgs[13] = 1u;
     gArgs[14] = 1u;
-    gArgs[0] = groups == 0u ? nv : 0u;
+    // The solo module over the vehicles also when one runs alone (its group past
+    // VV_MAX_GROUP members: the groups' module holds no solo frame; word 19 keeps it for
+    // the awake list's rewrite).
+    gArgs[0] = groups == 0u || alone ? nv : 0u;
     gArgs[1] = 1u;
     gArgs[2] = 1u;
+    gArgs[19] = alone ? 1u : 0u;
     gArgs[4] = groups == 0u ? 0u : nv + groups;
     gArgs[5] = 1u;
     gArgs[6] = 1u;
@@ -8161,15 +8176,16 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     {
         // A group past VV_PART members (within VV_MAX_GROUP: a larger one's
         // vehicles run alone, its member count 0).
-        bool big = false, larger = false;
+        bool big = false, larger = false, alone = false;
         uint multi = 0u; // groups of two or more members (a count of 0: past VV_MAX_GROUP)
         for (uint g = 0u, gStop = EB_END(135, g, groups, 1u); g < gStop; g++)
         {
             if (gMisc[gP.vvGroups + g].y > VV_SIDE) big = true;
             if (gMisc[gP.vvGroups + g].y > VV_PART) larger = true;
             if (gMisc[gP.vvGroups + g].y != 1u) multi++;
+            if (gMisc[gP.vvGroups + g].y == 0u) alone = true;
         }
-        vvArgs(nv, groups, multi, big, larger);
+        vvArgs(nv, groups, multi, big, larger, alone);
     }
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)

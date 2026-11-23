@@ -1,14 +1,6 @@
 # Kernels predicted past 10 s of first-load compile (tools/build-time/compile_cost.py), each with the seconds it may not exceed:
 # today's prediction plus 10 %. Lines may only come down; a kernel leaves the list
 # when it is under the cap. --burndown says what to fix first.
-explicit_beams_contact_aero 347.7
-explicit_beams_contact_aero_wide 347.7
-explicit_beams_contact 330.2
-explicit_beams_contact_wide 330.2
-explicit_beams_contact_aero_nocpl 133.8
-explicit_beams_contact_aero_wide_nocpl 133.8
-explicit_beams_contact_nocpl 122.3
-explicit_beams_contact_wide_nocpl 122.3
 explicit_beams_solo_aero 109.1
 explicit_beams_solo_aero_wide 109.1
 explicit_beams_aero 109.0
@@ -17,12 +9,12 @@ explicit_beams_solo 103.8
 explicit_beams_solo_wide 103.8
 explicit_beams 103.7
 explicit_beams_wide 103.7
-explicit_beams_contact_aero_nosurf 101.9
-explicit_beams_contact_aero_wide_nosurf 101.9
+explicit_beams_contact_aero 96.8
+explicit_beams_contact_aero_wide 96.8
 explicit_beams_contact_big_aero 96.2
 explicit_beams_contact_big_aero_wide 96.2
-explicit_beams_contact_nosurf 91.8
-explicit_beams_contact_wide_nosurf 91.8
+explicit_beams_contact 91.8
+explicit_beams_contact_wide 91.8
 explicit_beams_contact_big 91.0
 explicit_beams_contact_big_wide 91.0
 explicit_beams_split_member_aero 75.2
@@ -41,6 +33,8 @@ explicit_beams_solo_nocpl 40.2
 explicit_beams_solo_wide_nocpl 40.2
 explicit_beams_nocpl 40.1
 explicit_beams_wide_nocpl 40.1
+explicit_beams_contact_aero_nocpl 35.6
+explicit_beams_contact_aero_wide_nocpl 35.6
 explicit_beams_selfsplit_step_aero 34.7
 explicit_beams_selfsplit_step_aero_wide 34.7
 explicit_beams_aero_seg 33.9
@@ -49,6 +43,8 @@ explicit_beams_solo_aero_nosurf 33.9
 explicit_beams_solo_aero_wide_nosurf 33.9
 explicit_beams_aero_nosurf 33.8
 explicit_beams_aero_wide_nosurf 33.8
+explicit_beams_contact_nocpl 32.4
+explicit_beams_contact_wide_nocpl 32.4
 explicit_beams_selfsplit_step 31.5
 explicit_beams_selfsplit_step_wide 31.5
 explicit_beams_seg 30.7
@@ -59,8 +55,12 @@ explicit_beams_nosurf 30.6
 explicit_beams_wide_nosurf 30.6
 explicit_beams_selfsplit_list 28.7
 explicit_beams_selfsplit_list_wide 28.7
+explicit_beams_contact_aero_nosurf 26.6
+explicit_beams_contact_aero_wide_nosurf 26.6
 explicit_beams_contact_big_aero_nosurf 26.3
 explicit_beams_contact_big_aero_wide_nosurf 26.3
+explicit_beams_contact_nosurf 23.8
+explicit_beams_contact_wide_nosurf 23.8
 explicit_beams_contact_big_nosurf 23.4
 explicit_beams_contact_big_wide_nosurf 23.4
 explicit_beams_selfsplit_member_vv_aero 18.8
