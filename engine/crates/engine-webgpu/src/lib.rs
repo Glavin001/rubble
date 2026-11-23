@@ -6,6 +6,8 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 #[cfg(feature = "gpu")]
+/// Measurement: `RUBBLE_PIPE_LOG=1` prints each World pipeline's creation time.
+mod explicit_pipe_log;
 mod compute_spec;
 #[cfg(feature = "gpu")]
 mod explicit_beams_gpu;

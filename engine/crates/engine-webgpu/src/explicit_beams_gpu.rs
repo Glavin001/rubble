@@ -46,9 +46,6 @@ use wgpu::util::DeviceExt;
 mod surface_gpu;
 #[path = "explicit_state_diff.rs"]
 mod state_diff;
-#[path = "explicit_pipe_log.rs"]
-mod pipe_log;
-pub(crate) use pipe_log::Timed as PipeTimed;
 pub use state_diff::state_differences;
 use surface_gpu::{split_entries, surface_split_for, Split};
 #[path = "explicit_vv_wide_gpu.rs"]
@@ -415,7 +412,6 @@ struct LazyPipe {
 impl LazyPipe {
     fn get(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
         self.pipe.get_or_init(|| {
-            let _t = pipe_log::Timed::new(self.entry);
             // (As the other explicit pipelines: wgpu's checks as explicit_shader_module
             // says, the compile options of explicit_compilation_options.)
             let module = explicit_shader_module(device, wgpu::ShaderModuleDescriptor {
@@ -767,7 +763,6 @@ fn split_pipe(
     entry: &str,
 ) -> wgpu::ComputePipeline {
     let name = split_module(which, aero, lanes);
-    let _t = pipe_log::Timed::new(name);
     let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
         label: Some(name),
         source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(name), bit_exact).into()),
@@ -953,8 +948,7 @@ impl SelfSplit {
     }
 
     fn pipeline(&self, name: &str, entry: &str, layout: &wgpu::PipelineLayout) -> wgpu::ComputePipeline {
-        let _t = pipe_log::Timed::new(name);
-        let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(name), self.bit_exact).into()),
         });
@@ -1965,7 +1959,6 @@ impl ExplicitBeamsGpu {
     /// The plain frame's pipeline and bind group, created at first use (see `frame`).
     fn frame_pipe(&self) -> &(wgpu::ComputePipeline, wgpu::BindGroup) {
         self.frame.get_or_init(|| {
-            let _t = pipe_log::Timed::new("explicit_beams_frame");
             let device = &self.device;
             let module = explicit_shader_module(&device, wgpu::ShaderModuleDescriptor {
                 label: Some("explicit_beams"),

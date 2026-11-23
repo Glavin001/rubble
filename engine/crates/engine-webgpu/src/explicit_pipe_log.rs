@@ -1,4 +1,4 @@
-//! Measurement only: `RUBBLE_PIPE_LOG=1` prints each explicit pipeline the host creates
+//! Measurement only: `RUBBLE_PIPE_LOG=1` prints each World kernel pipeline the host creates
 //! and how long the creation took (a pipeline created at its first use costs that frame
 //! its compile).
 
