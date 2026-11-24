@@ -93,6 +93,7 @@ kernels/soft_step_primal.slang 36
 kernels/explicit_beams_selfsplit.slang 30
 kernels/explicit_beams_selfsplit_frame.slang 30
 kernels/explicit_beams_surface_pipes.slang 20
+kernels/explicit_beams_surface_pool.slang 1
 kernels/compact_solve.slang 18
 kernels/terrain_surface.slang 18
 kernels/convex_sat_body.slang 16

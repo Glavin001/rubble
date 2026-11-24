@@ -44,12 +44,27 @@ bool surfSegRetired(uint gj)
 // The shared queries' hull records here: a proxy hull's (explicit_beams_rigid.slang
 // coupling region) planes, then its vertices, then its edges four to a record
 // (vehicle_coupling.slang cpl_plan, engine_exec explicit_plan::coupling). s.hull is the
-// gMisc record of its first plane.
-float4 fqHullPlane(FqShape s, uint f) { return asfloat(gMisc[s.hull + f]); }
-float3 fqHullVertex(FqShape s, uint i) { return asfloat(gMisc[s.hull + s.nf + i].xyz); }
+// gMisc record of its first plane (with SURF_POOL_FLAG: of gsSurfPool, the same words;
+// explicit_beams_surface_pool.slang).
+#ifdef EB_SURF_POOL
+static const uint SURF_POOL_FLAG = 0x80000000u;
+static const uint SURF_POOL_RECS = 512u;
+groupshared uint4 gsSurfPool[SURF_POOL_RECS];
+static uint gSurfPoolK = 0xFFFFFFFFu;
+static uint gSurfPoolAt = 0u;
+uint4 surfHullRec(FqShape s, uint i)
+{
+    if ((s.hull & SURF_POOL_FLAG) != 0u) return gsSurfPool[(s.hull & ~SURF_POOL_FLAG) + i];
+    return gMisc[s.hull + i];
+}
+#else
+uint4 surfHullRec(FqShape s, uint i) { return gMisc[s.hull + i]; }
+#endif
+float4 fqHullPlane(FqShape s, uint f) { return asfloat(surfHullRec(s, f)); }
+float3 fqHullVertex(FqShape s, uint i) { return asfloat(surfHullRec(s, s.nf + i).xyz); }
 uint2 fqHullEdge(FqShape s, uint e)
 {
-    uint4 r = gMisc[s.hull + s.nf + s.nv + e / 4u];
+    uint4 r = surfHullRec(s, s.nf + s.nv + e / 4u);
     uint m = e % 4u;
     uint x = m == 0u ? r.x : (m == 1u ? r.y : (m == 2u ? r.z : r.w));
     return uint2(x & 255u, (x >> 8) & 255u);
@@ -190,6 +205,9 @@ FqShape surfProxyShape(uint v, uint k, out uint j)
         s.nf = h.w >> 16;
         s.nv = pw.w & 255u;
         s.ne = (pw.w >> 8) & 255u;
+#ifdef EB_SURF_POOL
+        if (k == gSurfPoolK) s.hull = SURF_POOL_FLAG | gSurfPoolAt;
+#endif
     }
     return s;
 }

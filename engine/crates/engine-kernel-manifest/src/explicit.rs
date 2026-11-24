@@ -495,10 +495,16 @@ pub fn surface_fast_modules() -> Vec<SplitModule> {
         },
     ];
     for (i, kind) in ["1", "2", "3", "4", "1", "2", "3", "4"].into_iter().enumerate() {
+        let mut defines = vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")];
+        // The pair path's find: its hulls' records in workgroup memory
+        // (`explicit_beams_surface_pool.slang`).
+        if i == 3 {
+            defines.push(("EB_SURF_POOL", "1"));
+        }
         out.push(SplitModule {
             name: SURF_FAST_PASSES[3 + i].0.to_string(),
             entry: SURF_FAST_PASSES[3 + i].1,
-            defines: vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind), ("EB_SURF_SPREAD", "1"), ("EB_CPL_DIRECT", "1")],
+            defines,
         });
     }
     out
