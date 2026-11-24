@@ -498,3 +498,10 @@ for "off"): pile8_e off 28.1, on 175 at a 5 cm skin, 99 at 12 cm, 89.5 with the 
 motion relative to the group's (147 at 5 cm); side_e off 14.3, on 18.4; headon_e off 12.3, on 13.7.
 pile8_e without the pair search 50.9: the search and tests are 39 ms of the 61, the rest 23.
 (The earlier "21 ms without" for the pile was another state.)
+
+The edge pass's parts on pile8_e (89.8 ms; off 28.1), each switched off in turn (time only, the
+physics differs): the lists' rebuild 32 (89.8 -> 57.9), the kept pairs' tests 10 (-> 47.7), the
+motion check 0.4, the edges' per-step preparation 15 (-> 32.0), the rest 4. A box reject before a
+kept pair's test gave nothing (89.6). Next: one owner's changed partners or motion rebuilds every
+owner's list, and the positions at the build are kept a vehicle, not an owner (so one list cannot
+be rebuilt alone yet); the preparation works out every edge each step, listed or not.
