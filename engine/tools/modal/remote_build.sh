@@ -10,6 +10,8 @@
 #   --stage DIR    files from outside the repo to ship, laid out at their container paths
 #                  (gpu_run.sh's OUT/stage: the car's JBeam export)
 #   --result FILE  where to write the result (archive key, manifest, timings) as JSON
+#   --web          the release web build's kernels and World parts and the generated sedan,
+#                  packed for the Dawn runner (engine/tools/dawn): no cargo selection
 #
 # ENGINE_* variables reach the build (ENGINE_CUDA_SASS, ENGINE_CUDA_FMAD,
 # ENGINE_CUDA_EXPLICIT_MODULES, ...). The tree key is this worktree's path: each worktree
@@ -24,11 +26,12 @@ while [ $# -gt 0 ]; do
     --list-tests) pack_opts+=(--list-tests); shift ;;
     --stage) stage="$2"; shift 2 ;;
     --result) result_out="$2"; shift 2 ;;
+    --web) mode=web; shift ;;
     --) shift; break ;;
     *) echo "remote_build: unknown option $1" >&2; exit 2 ;;
   esac
 done
-[ $# -gt 0 ] || { echo "usage: remote_build.sh [--data P] [--stage DIR] [--result F] -- <cargo selection>" >&2; exit 2; }
+[ $# -gt 0 ] || [ "${mode:-}" = web ] || { echo "usage: remote_build.sh [--data P] [--stage DIR] [--result F] [--web] -- <cargo selection>" >&2; exit 2; }
 key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
 run="$repo/engine/target/remote-build/$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$run"
@@ -39,7 +42,9 @@ t0=$(date +%s)
 (cd "$repo" && { git ls-files -z -- engine; git ls-files -z -o --exclude-standard -- engine
   # Cargo.lock is gitignored in this repo: the worktree's own lockfile, so the remote
   # build resolves the same crate versions as a local one.
-  [ -f engine/Cargo.lock ] && printf 'engine/Cargo.lock\0'; } \
+  # (A fresh worktree has none: cargo resolves on Modal, as CI does. Not `[ ] && printf`:
+  # its false status would end the listing under pipefail, silently.)
+  if [ -f engine/Cargo.lock ]; then printf 'engine/Cargo.lock\0'; fi; } \
   | python3 -c '
 import hashlib, os, sys
 for p in sys.stdin.buffer.read().split(b"\0"):
@@ -59,7 +64,7 @@ echo "remote_build: $(wc -l < "$run/manifest.tsv" | tr -d ' ') files hashed in $
 env_json="$(python3 -c 'import json, os; print(json.dumps({k: v for k, v in os.environ.items() if k.startswith("ENGINE_")}))')"
 stage_mount=()
 if [ -n "$stage" ]; then stage_mount=(-v "$stage:/stage-local:ro"); fi
-python3 - "$run/spec.json" "$key" "$env_json" "${#pack_opts[@]}" ${pack_opts[@]+"${pack_opts[@]}"} "$([ -n "$stage" ] && echo /stage-local)" "$@" <<'PY'
+RB_MODE="${mode:-}" python3 - "$run/spec.json" "$key" "$env_json" "${#pack_opts[@]}" ${pack_opts[@]+"${pack_opts[@]}"} "$([ -n "$stage" ] && echo /stage-local)" "$@" <<'PY'
 import json, sys
 out, key, env, n, *rest = sys.argv[1:]
 n = int(n)
@@ -71,7 +76,7 @@ import os
 modules_from = [l for l in os.environ.get("RB_MODULES_FROM", "").splitlines() if l]
 json.dump({"key": key, "root": "/repo-local", "manifest": "/run-dir/manifest.tsv", "result": "/run-dir/result.json",
            "env": json.loads(env), "selection": sel, "pack_opts": pack_opts, "stage_dir": stage,
-           "modules_from_local": modules_from}, open(out, "w"))
+           "modules_from_local": modules_from, "mode": os.environ.get("RB_MODE", "")}, open(out, "w"))
 PY
 cli=rubble-modal-cli:1.6.2
 docker image inspect "$cli" >/dev/null 2>&1 || docker build -q -t "$cli" "$here" >/dev/null
