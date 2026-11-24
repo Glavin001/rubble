@@ -269,6 +269,45 @@ pole energy, every crash's energy). Self edge contact is left off (`SELF_EDGE=0`
 head-on's edges through rise 99 → ~170 (self and vehicle contact are separate passes over
 shared nodes); it stays a measured option for the pole case (47 → 30 new crossings).
 
+### The GPU's form of the sweeps: Jacobi on the split masses (2026-11-24)
+
+Gauss–Seidel is sequential: each change is applied before the next hit's is computed, which on
+the GPU needs colouring or one lane walking each contact group. Two parallel forms (every
+hit's change from the same sums, then all applied, the same accumulated clamp), over the same
+six runs of 60 + 60 (median, min–max; edge + node–edge on):
+
+| sweeps | nodes inside | edges through | overlap |
+|---|---|---|---|
+| Gauss–Seidel, 1 | 28 | 112 | 38 L |
+| Gauss–Seidel, 8 | 28 | 79 | 42 L |
+| Jacobi, own masses, 1 / 4 | 36 / 40 | 158 / – | 80 / 102 L |
+| Jacobi, own masses, 8 | diverges (coordinates blow up) | | |
+| **Jacobi, split masses, 1** (`CONTACT_SPLIT=1`) | **30** (28–35) | **80** (56–116) | **57 L** (32–68) |
+| Jacobi, split masses, 4 / 8 | 31 / 29 | 100 / 100 | 50 / 45 L |
+| no sweep (edge + node–edge alone) | 32 (30–38) | 99 (77–110) | 60 L (46–66) |
+| no sweep, node only (today's default) | 66 (48–71) | 162 | 151 L |
+| node only + split Jacobi 1 | 63 | 166 | 145 L |
+
+Jacobi on each node's own mass overshoots where hits share nodes (each hit asks for the whole
+stop) and diverges with more sweeps; on the split masses (each node's mass shared among its
+hits, the first pass's split) it is the damped form, stable at every count, and converges
+toward Gauss–Seidel. One sweep of it is the residual pass the GPU already runs
+(`vvResidualPhase`: the same split, one pass) with one change: a hit may take back force down
+to zero (the accumulated clamp) instead of only adding.
+
+The sweep is not what removes the overlap: edge + node–edge contact does (66 → 32 nodes, 151 →
+60 L); the clamp alone does nothing on node-only contact. What it buys is energy margin. The
+crash tests' worst rise per step (≤ 0.5 % of the start's energy is the bound):
+
+| 60 + 60 head on | 100 + 100 | 100 into 10 | 60 + 60, 0.8 m offset |
+|---|---|---|---|
+| edge + node–edge: 2032 J of 413 kJ (0.49 %) | 2702 J of 1129 kJ | 1289 J of 575 kJ | 165 J |
+| + split Jacobi, 1 sweep: 1394 J (0.34 %) | 1305 J | 606 J | 14 J |
+
+Both pass every guard (not fused: parted 9.0 / 6.0 m against the same with contact off; slow
+push 25 mm; cannonball; pole energy). Chosen for the GPU: **edge + node–edge + split Jacobi, one
+sweep**: it is the GPU's existing pass shape, and it halves the edge contact's energy rise.
+
 ## What the GPU port carries (the candidate default)
 
 1. **Edge hits in the owner's turn** (`explicit_contact/edge.rs`): edge against edge between
@@ -278,7 +317,7 @@ shared nodes); it stays a measured option for the pole case (47 → 30 new cross
    weight `t`) and the owner's edge as `[i, j, j]`, weights `[s, 0, 1 − s]`.
 2. **One splitting and the same guards** for every hit of the turn (first pass, staging, work
    guard, ledger, contact-force log), zero-weight nodes not counted for edge kinds.
-3. **Accumulated-impulse sweeps** replacing the residual pass for vehicle hits (one sweep;
-   the Jacobi form for the GPU if it measures as well, else coloured Gauss–Seidel).
+3. **The accumulated clamp in the residual pass** for vehicle hits (split Jacobi, one sweep:
+   the existing pass with a hit allowed to take back its first-pass force down to zero).
 4. Settings and flag bits for each (vehicle flags word bits 21+), GPU == CPU bit for bit with
    bit-exact on, every backend; the scenario matrix and the Chrome lab as `AGENTS.md`'s ladder.

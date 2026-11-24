@@ -41,12 +41,20 @@ pub(crate) fn contact_sweeps() -> u32 {
     *N.get_or_init(|| std::env::var("CONTACT_SWEEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
 }
 
-/// Vehicle contact's residual sweeps as Gauss–Seidel (under measurement, `CONTACT_GS=1`).
+/// The Jacobi sweeps on the sub-bodies' masses (`CONTACT_SPLIT=1`, the damped form).
+pub(crate) fn contact_split() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CONTACT_SPLIT").is_ok_and(|v| v == "1"))
+}
+
+/// The accumulated sweeps all at once from the same sums (`CONTACT_JACOBI=1`).
 pub(crate) fn contact_jacobi() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("CONTACT_JACOBI").is_ok_and(|v| v == "1"))
 }
 
+/// Vehicle contact's residual sweeps with the accumulated clamp (under measurement,
+/// `CONTACT_GS=1`; Gauss–Seidel unless `CONTACT_JACOBI=1`).
 pub(crate) fn gauss_seidel() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("CONTACT_GS").is_ok_and(|v| v == "1"))
@@ -1544,12 +1552,12 @@ impl ExplicitBeamsWorld {
     /// approach over the step at the forces now, on the nodes' own masses; None if it is
     /// not approaching or would not be.
     fn residual_of(&self, a: usize, x: &Hit) -> Option<f32> {
-        self.residual_signed(a, x).filter(|&r| r > 0.0)
+        self.residual_signed(a, x, None).filter(|&r| r > 0.0)
     }
 
     /// The normal force change that brings hit `x`'s pair's normal velocity at the end of
     /// the step to zero, at the forces now (signed: negative takes back an excess).
-    fn residual_signed(&self, a: usize, x: &Hit) -> Option<f32> {
+    fn residual_signed(&self, a: usize, x: &Hit, split: Option<(&[u32], &[Vec<u32>])>) -> Option<f32> {
         let acc = |v: usize, i: u32| {
             let n = &self.vehicles[v].nodes[i as usize];
             if n.has(NODE_IMMOVABLE) {
@@ -1558,6 +1566,9 @@ impl ExplicitBeamsWorld {
                 self.vehicles[v].force_now(i as usize) / n.mass
             }
         };
+        // Own masses, or the sub-bodies' (k/m) with `split` (the damped Jacobi form).
+        let ka = |i: u32| split.map_or(1.0, |s| s.0.get(i as usize).copied().unwrap_or(1).max(1) as f32);
+        let kb = |i: u32| split.map_or(1.0, |s| s.1[x.b].get(i as usize).copied().unwrap_or(1).max(1) as f32);
         let im = |n: &Node| if n.has(NODE_IMMOVABLE) { 0.0 } else { 1.0 / n.mass };
         let [i0, i1, i2] = x.tri;
         let [alpha, beta, gamma] = x.w;
@@ -1572,11 +1583,11 @@ impl ExplicitBeamsWorld {
         let an = (cacc - at).dot(x.n);
         let vn = v.dot(x.n);
         let imc = if x.t > 0.0 {
-            (1.0 - x.t) * (1.0 - x.t) * im(node) + x.t * x.t * im(node2)
+            (1.0 - x.t) * (1.0 - x.t) * im(node) * kb(x.h) + x.t * x.t * im(node2) * kb(x.h2)
         } else {
-            im(node)
+            im(node) * kb(x.h)
         };
-        let inv = imc + two_body_inverse_mass([im(n1), im(n2), im(n0)], x.w);
+        let inv = imc + two_body_inverse_mass([im(n1) * ka(i1), im(n2) * ka(i2), im(n0) * ka(i0)], x.w);
         if inv <= 0.0 {
             return None;
         }
@@ -1628,7 +1639,7 @@ impl ExplicitBeamsWorld {
                             }
                             let x = &hits[j];
                             let lam0 = first.get(j).map_or(0.0, |f| f.dot(x.n)).max(0.0) + out[j].unwrap_or(0.0);
-                            let d = self.residual_signed(a, x)?;
+                            let d = self.residual_signed(a, x, contact_split().then_some((split_a, split_b)))?;
                             let r = (lam0 + d).max(0.0) - lam0;
                             (r != 0.0).then_some(r)
                         })
@@ -1658,7 +1669,7 @@ impl ExplicitBeamsWorld {
                 }
                 let x = &hits[j];
                 let lam0 = first.get(j).map_or(0.0, |f| f.dot(x.n)).max(0.0) + out[j].unwrap_or(0.0);
-                let Some(d) = self.residual_signed(a, x) else { continue };
+                let Some(d) = self.residual_signed(a, x, None) else { continue };
                 let lam = (lam0 + d).max(0.0);
                 let r = lam - lam0;
                 if r == 0.0 {
