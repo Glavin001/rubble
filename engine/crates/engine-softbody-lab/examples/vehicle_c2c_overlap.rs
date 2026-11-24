@@ -472,6 +472,66 @@ fn main() -> Result<(), String> {
                 live.len()
             );
         }
+        if std::env::var("LOOPS").is_ok() {
+            // LOOPS=1: the skin's holes as loops of open edges (chained end to end), each
+            // with its length, centre, extent and the parts of its nodes.
+            let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
+            for &(x, y) in &open {
+                adj.entry(x).or_default().push(y);
+                adj.entry(y).or_default().push(x);
+            }
+            let mut used: std::collections::HashSet<(u32, u32)> = Default::default();
+            let mut loops: Vec<Vec<u32>> = Vec::new();
+            let mut starts: Vec<(u32, u32)> = open.clone();
+            starts.sort();
+            for &(x, y) in &starts {
+                if used.contains(&(x.min(y), x.max(y))) {
+                    continue;
+                }
+                let mut lp = vec![x, y];
+                used.insert((x.min(y), x.max(y)));
+                let mut cur = y;
+                loop {
+                    let next = adj[&cur].iter().copied().find(|&z| !used.contains(&(cur.min(z), cur.max(z))));
+                    let Some(z) = next else { break };
+                    used.insert((cur.min(z), cur.max(z)));
+                    if z == x {
+                        break;
+                    }
+                    lp.push(z);
+                    cur = z;
+                }
+                loops.push(lp);
+            }
+            loops.sort_by(|a, b| {
+                let len = |l: &Vec<u32>| (0..l.len()).map(|k| pos(l[k]).distance(pos(l[(k + 1) % l.len()]))).sum::<f32>();
+                len(b).total_cmp(&len(a))
+            });
+            for lp in &loops {
+                let len: f32 = (0..lp.len()).map(|k| pos(lp[k]).distance(pos(lp[(k + 1) % lp.len()]))).sum();
+                let c = lp.iter().map(|&i| pos(i)).sum::<Vec3>() / lp.len() as f32;
+                let lo = lp.iter().map(|&i| pos(i)).fold(Vec3::splat(f32::MAX), Vec3::min);
+                let hi = lp.iter().map(|&i| pos(i)).fold(Vec3::splat(f32::MIN), Vec3::max);
+                let mut parts: Vec<String> = lp
+                    .iter()
+                    .map(|&i| d.nodes[i as usize].name.trim_end_matches(|ch: char| ch.is_ascii_digit() || ch == '_').to_string())
+                    .collect();
+                parts.sort();
+                parts.dedup();
+                println!(
+                    "  hole: {} edges, {:.2} m round, centre ({:.2}, {:.2}, {:.2} from the nose), extent {:.2} x {:.2} x {:.2}; parts {:?}",
+                    lp.len(),
+                    len,
+                    c.x,
+                    c.y,
+                    c.z - nose,
+                    hi.x - lo.x,
+                    hi.y - lo.y,
+                    hi.z - lo.z,
+                    parts
+                );
+            }
+        }
         if std::env::var("OPEN").is_ok() {
             // OPEN=1: the front metre's open edges by node name (where the hull has holes).
             let mut v: Vec<String> = open_front
@@ -746,6 +806,7 @@ fn main() -> Result<(), String> {
     let mut worst = [Dir::default(); 2];
     // Per direction, each gap entry's path distance to the other car's nearest open edge.
     let mut gap_rim: [Vec<f32>; 2] = Default::default();
+    let mut gap_rim_parts: [HashMap<String, usize>; 2] = Default::default();
     let (mut slab_max, mut slab_vol_max, mut slab_t) = (0.0f32, 0.0f32, 0.0f32);
     let mut entered: [HashMap<String, usize>; 2] = Default::default();
     // REVERSE=s: after the crash, both drivers reverse at full throttle for s
@@ -997,7 +1058,7 @@ fn main() -> Result<(), String> {
             let o = 1 - c;
             let (x, y) = (&w.vehicles[c], &hulls[o]);
             // The other car's open skin edges (on one live triangle) now: a hole's rim.
-            let rims: Vec<(Vec3, Vec3)> = {
+            let rims: Vec<(Vec3, Vec3, u32, u32)> = {
                 let s = &w.vehicles[o];
                 let mut cnt: HashMap<(u32, u32), usize> = HashMap::new();
                 for t in 0..s.triangles.len() {
@@ -1012,7 +1073,7 @@ fn main() -> Result<(), String> {
                 }
                 cnt.into_iter()
                     .filter(|(_, c)| *c == 1)
-                    .map(|((a, b), _)| (s.origin + s.nodes[a as usize].pos, s.origin + s.nodes[b as usize].pos))
+                    .map(|((a, b), _)| (s.origin + s.nodes[a as usize].pos, s.origin + s.nodes[b as usize].pos, a, b))
                     .collect()
             };
             let mut r = Dir::default();
@@ -1058,14 +1119,23 @@ fn main() -> Result<(), String> {
                         r.gap += 1;
                         // Its path's nearest approach to a rim (m).
                         let (q0, p1) = (prev_pos[c][i as usize], p);
-                        let dmin = rims
+                        let (dmin, rim) = rims
                             .iter()
-                            .map(|&(ra, rb)| {
+                            .map(|&(ra, rb, ia, ib)| {
                                 let (s1, t1) = seg_seg(q0, p1, ra, rb);
-                                (q0 + (p1 - q0) * s1).distance(ra + (rb - ra) * t1)
+                                ((q0 + (p1 - q0) * s1).distance(ra + (rb - ra) * t1), (ia, ib))
                             })
-                            .fold(f32::MAX, f32::min);
+                            .fold((f32::MAX, (0, 0)), |m, x| if x.0 < m.0 { x } else { m });
                         gap_rim[c].push(dmin);
+                        if dmin <= 0.2 {
+                            let part = |i: u32| {
+                                let n = &l.desc.nodes[i as usize].name;
+                                n.trim_end_matches(|ch: char| ch.is_ascii_digit() || ch == '_').to_string()
+                            };
+                            let (pa, pb) = (part(rim.0), part(rim.1));
+                            let key = if pa <= pb { format!("{pa}-{pb}") } else { format!("{pb}-{pa}") };
+                            *gap_rim_parts[c].entry(key).or_default() += 1;
+                        }
                     }
                     *entered[c]
                         .entry(l.desc.nodes[i as usize].name.clone())
@@ -1328,6 +1398,9 @@ fn main() -> Result<(), String> {
             within(0.20),
             v.len() - within(0.20)
         );
+        let mut by: Vec<(&String, &usize)> = gap_rim_parts[c].iter().collect();
+        by.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        println!("    the open edge each passed nearest, by its nodes' part: {:?}", by);
     }
     println!(
         "  slab overlap: deepest {:.0} mm at {:.0} ms, largest volume {:.1} L",
