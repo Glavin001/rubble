@@ -435,10 +435,13 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
     for (uint a = 0u, aStop = EB_END(812, a, k, 1u); a < aStop; a++)
         for (uint m = 0u, mStop = EB_END(813, m, k, 1u); m < mStop; m++)
             if (a != m && (gsVvPair[a * VV_PART + m] & 1u) != 0u && edgePairOn(vvMember(off, a), vvMember(off, m))) anyEdge = true;
-    edgeResetPrepare(k, off, lane, anyEdge);
     float rmax = 0.0;
     for (uint a = 0u, aStop = EB_END(816, a, k, 1u); a < aStop; a++) rmax = max(rmax, asfloat(gStatic[vvMember(off, a) * 4u + 3u].z));
     float pad = nf(rmax + EDGE_DEPTH_M);
+    gEdgeNearK = k;
+    edgeNearBoxes(k, off, parity, pad + 2.0 * edgeSkin() + 0.01, lane);
+    edgeResetPrepare(k, off, lane, anyEdge);
+    gEdgeNearK = 0u;
     // The candidates of the last build stand while no node of the group has moved a skin
     // since and no owner's partners changed (any pair in contact now was then within reach +
     // 2 skins); else they are found again. (Lossless: the same hits as a search every step.)
@@ -481,6 +484,7 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
                 if (m != a && (gsVvPair[a * VV_PART + m] & 1u) != 0u && edgePairOn(va, vb)) sig ^= (vb + 1u) * 2654435761u;
             }
             sig |= 1u;
+            gsEdgeSig[a] = sig;
             uint ca = edgeCandAcc(va);
             if (uint(gAcc[ca + 1u].load()) != sig || gAcc[ca + 2u].load() != 0
                 || asfloat(gAcc[edgeV1(va).x + 9u].load()) > edgeSkin() * edgeSkin())
@@ -543,13 +547,7 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
             for (uint i = lane, iStop = EB_END(860, i, r0.y, LANES); i < iStop; i += LANES) gBeams[built + i] = float4(edgeWorld(v, r0.x + i), 0.0);
             if (lane == 0u)
             {
-                uint sig = 0x9E3779B9u;
-                for (uint m = 0u, mStop = EB_END(861, m, k, 1u); m < mStop; m++)
-                {
-                    uint vb = vvMember(off, m);
-                    if (m != a && (gsVvPair[a * VV_PART + m] & 1u) != 0u && edgePairOn(v, vb)) sig ^= (vb + 1u) * 2654435761u;
-                }
-                gAcc[edgeCandAcc(v) + 1u].store(gAcc[edgeCandAcc(v) + 2u].load() != 0 ? 0 : int(sig | 1u));
+                gAcc[edgeCandAcc(v) + 1u].store(gAcc[edgeCandAcc(v) + 2u].load() != 0 ? 0 : int(gsEdgeSig[a]));
             }
         }
         sync();
@@ -570,8 +568,6 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
         }
     }
     sync();
-    // (The levels give an owner with edge hits alone its level: vvLevelsSet.)
-    for (uint a = lane, aStop = EB_END(824, a, k, LANES); a < aStop; a += LANES) gsEdgeHas[a] = edgeHits(vvMember(off, a)) != 0u ? 1u : 0u;
 }
 
 // The snapshot of owner va's edge hits' nodes (the levels', before any hit applies).

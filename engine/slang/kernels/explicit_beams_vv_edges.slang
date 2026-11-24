@@ -34,8 +34,8 @@ static const uint EDGE_CAND = 32u; // candidate pairs a listed item (explicit_pl
 static const float EDGE_SKIN = 0.12;
 // The candidate list's mode (a thread's): edgeTry keeps the pairs within reach + 2 skins
 // instead of testing them.
-// Each member's edge hits this step (edgeTestsSmall).
-groupshared uint gsEdgeHas[VV_PART];
+// Each member's partners' signature this step (lane 0's).
+groupshared uint gsEdgeSig[VV_PART];
 static uint gEdgeCollect = 0u;
 static float gEdgeCollectReach = 0.0;
 
@@ -121,6 +121,32 @@ SkinE edgeLoad(uint v, uint k)
     return e;
 }
 
+// Edges near no partner are not worked out (edgePrepare): the members of the small groups'
+// pass (k members at off; 0: every edge), the reach past a partner's box that counts.
+static uint gEdgeNearK = 0u;
+static uint gEdgeNearA = 0u;
+// Per member its partners' boxes' union grown by the reach.
+groupshared float3 gsEdgeNearLo[VV_PART];
+groupshared float3 gsEdgeNearHi[VV_PART];
+void edgeNearBoxes(uint k, uint off, uint parity, float reach, uint lane)
+{
+    for (uint a = lane, aStop = EB_END(890, a, k, LANES); a < aStop; a += LANES)
+    {
+        float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
+        float3 hi = -lo;
+        for (uint m = 0u, mStop = EB_END(891, m, k, 1u); m < mStop; m++)
+        {
+            if ((gsVvPair[a * VV_PART + m] & 1u) == 0u) continue;
+            uint kb = vvBoxKey(vvMember(off, m), parity);
+            lo = min(lo, float3(vvUnkey(gAcc[kb].load()), vvUnkey(gAcc[kb + 1u].load()), vvUnkey(gAcc[kb + 2u].load())));
+            hi = max(hi, float3(vvUnkey(gAcc[kb + 3u].load()), vvUnkey(gAcc[kb + 4u].load()), vvUnkey(gAcc[kb + 5u].load())));
+        }
+        gsEdgeNearLo[a] = lo - float3(reach, reach, reach);
+        gsEdgeNearHi[a] = hi + float3(reach, reach, reach);
+    }
+    sync();
+}
+
 // Vehicle v's edge k this step (edge.rs skin_edges): the live triangles' unit normals
 // summed in the triangles' order, the outer skin's when the edge has any; written to
 // its scratch, its ends into the vehicle's box when live.
@@ -132,6 +158,14 @@ void edgePrepare(uint v, uint k)
     uint4 rec = gStatic[v0.x + k];
     float3 wi = edgeSkinAt(v, rec.x);
     float3 wj = edgeSkinAt(v, rec.y);
+    // (Farther from every partner's box than the lists reach, the range, the depth and two
+    // skins: no list takes it and no kept pair of it can hit before the next build. Not live.)
+    if (gEdgeNearK != 0u && (any(max(wi, wj) < gsEdgeNearLo[gEdgeNearA]) || any(min(wi, wj) > gsEdgeNearHi[gEdgeNearA])))
+    {
+        gBeams[v0.z + EDGE_SCR * k] = float4(wi, asfloat(0u));
+        gBeams[v0.z + EDGE_SCR * k + 1u] = float4(wj, 0.0);
+        return;
+    }
     float3 sum = float3(0.0, 0.0, 0.0);
     bool outer = false;
     uint faces = 0u;
@@ -592,6 +626,7 @@ void edgeResetPrepare(uint k, uint off, uint lane, bool prepare)
             q -= n;
             a++;
         }
+        gEdgeNearA = a;
         edgePrepare(vvMember(off, a), q);
     }
     sync();

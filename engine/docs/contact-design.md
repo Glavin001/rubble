@@ -505,3 +505,6 @@ motion check 0.4, the edges' per-step preparation 15 (-> 32.0), the rest 4. A bo
 kept pair's test gave nothing (89.6). Next: one owner's changed partners or motion rebuilds every
 owner's list, and the positions at the build are kept a vehicle, not an owner (so one list cannot
 be rebuilt alone yet); the preparation works out every edge each step, listed or not.
+Edges near no partner (its box grown by the lists' reach) are not worked out: read per partner box
+the pile got slower (89.5 -> 94), per member's joint box all three rows gain. Last run pile8_e,
+side_e, headon_e: see the commit; before 89.5, 18.4, 13.7.
