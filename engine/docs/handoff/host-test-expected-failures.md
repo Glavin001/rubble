@@ -21,6 +21,11 @@ for real is time-boxed; this file is updated with what it finds).
 | `showcase_skin_integrity::t_bone_118_into_61_kmh` | 31c20eb2 | Shards struck 115/106/79, striker 184/171/173 | Struck: class C; striker: class A | Same |
 | `showcase_skin_integrity::random_impacts` | same | 11 shards (random 0, 103 km/h at 3°) | Class C (underbody, arch liner) | Same |
 | `showcase_skin_integrity::grab_rear_and_roof` | same | 288 shards (bootlid 2 m) | Classes A and B | Same |
+| `gen_sedan_contact::head_on_cars_back_apart` | 2026-11-24 (written ahead of the fix) | Two generated sedans after a 60 + 60 km/h head-on, both reversing 2 s: 0.14 m further apart against ≥ 1 m (contact off: 17 m) | Vehicle contact holds them: nodes inside the other car held there by anti-clip (known-bugs S4) | Edge-against-triangle vehicle contact, close the skin, then the outward side (S4) |
+| `gen_sedan_contact::head_on_no_node_inside_the_other_car` | same | 23 / 35 nodes past the band inside the other car at 0.6 s, deepest 142 / 241 mm, against 0 | Most enter through gaps in the collision skin | Same |
+| `gen_sedan_contact::head_on_no_edge_through_the_other_car` | same | 62 / 54 skin edges through the other car's triangles against 0 | Node-only contact: edges pass between nodes | Edge-against-triangle contact |
+| `gen_sedan_contact::pole_own_panels_stay_apart` | same | 52 new own-skin crossings at a 64 km/h pole (front left door through the left fender), against 0 | Self contact is node against triangle | Edge-against-triangle self contact |
+| `gen_sedan_contact::collision_skin_does_not_cross_itself_at_rest` | same | 89 own-skin crossings at spawn against 0 | Authoring: the rigger's skin passes through itself (rear bumper, sills, fender corners) | Fix in the rigger |
 
 Fixed and removed from the list:
 - `gen3_rig::rest_fidelity_at_spawn_and_parked` (the test's allowance now counts every node a vertex is bound to; 1.057 → 0.542 mm against 1 mm).

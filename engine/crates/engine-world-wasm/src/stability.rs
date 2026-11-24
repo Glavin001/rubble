@@ -73,8 +73,9 @@ pub const GRAVITY: f64 = 9.81;
 /// The box check: a vehicle's bounding box diagonal past `BOX_FACTOR` × its first
 /// (spawn) diagonal + `BOX_MARGIN` metres (a car torn apart with debris thrown 50 m
 /// is inside it) while its kinetic energy is above `ENERGY_FLOOR` and `BOX_ENERGY_RISE`
-/// × the lowest it has been since the last launch + the work of its fall since
-/// that low (a car tumbling on down a mountain may leave a torn-off part far behind).
+/// × the lowest it has been over the last `REBOUND_WINDOW` seconds (since the last
+/// launch) + the work of its fall since that low (a car tumbling on down a mountain,
+/// or driven on, may leave a torn-off part far behind).
 pub const BOX_FACTOR: f32 = 10.0;
 pub const BOX_MARGIN: f32 = 50.0;
 pub const BOX_ENERGY_RISE: f64 = 1.5;
@@ -205,7 +206,10 @@ struct Track {
     last: Option<Sample>,
     /// The lowest centre of mass so far (m): the fall's work is counted from the start.
     lowest: f64,
-    /// The lowest kinetic energy since the start or the last launch (J).
+    /// The lowest kinetic energy over the last `REBOUND_WINDOW` seconds since the last
+    /// launch (J). (Since the start, a car parked at first had a low of 0 J for good:
+    /// driven on at 66 km/h with a torn-off part left 100 m behind it, its box tripped
+    /// the check; 2026-11-24.)
     kinetic_low: f64,
     /// The centre of mass height at that low (m): the fall since it is a source.
     low_height: f64,
@@ -215,6 +219,9 @@ struct Track {
     /// energy from nowhere: the fleet's sum does not rise by it.
     fleet_low: f64,
     sources_low: f64,
+    /// The readbacks of the last `REBOUND_WINDOW` seconds since the last launch: (t,
+    /// kinetic energy, height, the fleet's mechanical energy, the inputs counted).
+    recent: std::collections::VecDeque<(f64, f64, f64, f64, f64)>,
     damage: Option<(u32, u32, u32)>,
 }
 
@@ -279,6 +286,7 @@ impl StabilityGuard {
                 // (Added to what it has: an upper bound of what the launch gives.)
                 self.launched += 0.5 * s.mass * speed * speed;
                 v.kinetic_low = f64::INFINITY;
+                v.recent.clear();
             }
         }
         // The rebound check starts over from the next readback.
@@ -397,11 +405,16 @@ impl StabilityGuard {
             }
             v.last = Some(*s);
             v.lowest = v.lowest.min(s.height);
-            if s.kinetic < v.kinetic_low {
-                v.kinetic_low = s.kinetic;
-                v.low_height = s.height;
-                v.fleet_low = fleet_energy;
-                v.sources_low = sources_now;
+            // The low over the last REBOUND_WINDOW seconds (a launch clears the window).
+            v.recent.push_back((t, s.kinetic, s.height, fleet_energy, sources_now));
+            while v.recent.front().is_some_and(|r| r.0 < t - REBOUND_WINDOW) {
+                v.recent.pop_front();
+            }
+            if let Some(&(_, k, h, f, src)) = v.recent.iter().min_by(|a, b| a.1.total_cmp(&b.1)) {
+                v.kinetic_low = k;
+                v.low_height = h;
+                v.fleet_low = f;
+                v.sources_low = src;
             }
         }
         if self.fleet > self.vehicles.len() || self.unbounded {
@@ -720,6 +733,58 @@ mod tests {
         assert_eq!(g.observe(0.0, &[car(8.0, -100.0, 5.39, 0.0), car(40.0, -100.0, 5.39, 0.0)]), None);
         let trip = g.observe(1.0, &[car(28.0, -100.0, 104.4, 0.0), car(40.0, -100.0, 5.39, 0.0)]).cloned();
         assert!(trip.is_some_and(|t| t.reason.contains("104 m across")), "no trip");
+    }
+
+    /// The report of 2026-11-24 (vehicle lab, drive, four generated sedans, `surface=1`):
+    /// the player's car, parked at the start, is driven up to speed, hits a pole and
+    /// leaves a torn-off part there (heavier than the debris limit, so it stays), then
+    /// drives on at 66 km/h until its box is 104 m across at 302 kJ. The tyres gave it
+    /// that energy over the drive: not a trip. (The box check counted its rise from
+    /// the lowest energy since the start, 0 kJ parked, with no drive allowance.)
+    #[test]
+    fn a_part_left_behind_while_driving_on_does_not_trip() {
+        let mut g = StabilityGuard::new(4);
+        let parked = car(0.0, 0.38, 5.39, 0.0);
+        let mut t = 0.0;
+        let mut observe = |g: &mut StabilityGuard, t: f64, speed: f32, size: f32, extra: f64| {
+            let s = [car(speed, 0.48, size, extra), parked, parked, parked];
+            assert_eq!(g.observe(t, &s), None, "t = {t:.3}, {speed} m/s, {size} m across");
+        };
+        // Parked, then 10 s up to 20 m/s.
+        for k in 0..=600 {
+            t = k as f64 / 60.0;
+            observe(&mut g, t, 20.0 * k as f32 / 600.0, 5.39, 0.0);
+        }
+        // The pole: 20 → 5 m/s in 0.2 s, crush vibration.
+        for k in 1..=12 {
+            t += 1.0 / 60.0;
+            observe(&mut g, t, 20.0 - 15.0 * k as f32 / 12.0, 5.6, 20.0e3);
+        }
+        // Back up to 18.4 m/s (66 km/h) over 4 s and on: the part stays at the pole,
+        // so the box grows with the distance driven, to 104 m.
+        let mut dist = 0.0f32;
+        let mut speed = 5.0f32;
+        while dist < 99.0 {
+            t += 1.0 / 60.0;
+            speed = (speed + 13.4 / 240.0).min(18.4);
+            dist += speed / 60.0;
+            observe(&mut g, t, speed, 5.6 + dist, 58.0e3);
+        }
+    }
+
+    /// The same drive, but at 66 km/h the car goes from 300 kJ to 2,000 kJ and 104 m
+    /// across in one readback: that still trips.
+    #[test]
+    fn a_blow_up_while_driving_still_trips() {
+        let mut g = StabilityGuard::new(1);
+        let mut t = 0.0;
+        for k in 0..=600 {
+            t = k as f64 / 60.0;
+            assert_eq!(g.observe(t, &[car(18.4 * k as f32 / 600.0, 0.48, 5.39, 0.0)]), None);
+        }
+        t += 1.0 / 60.0;
+        let trip = g.observe(t, &[car(18.4, 0.48, 104.0, 1.75e6)]).cloned();
+        assert!(trip.is_some(), "no trip");
     }
 
     /// `n` nodes on a line `length` long, all at velocity `v`, 10 kg each.

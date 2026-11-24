@@ -138,6 +138,8 @@ The BeamNG mod's shared tyre content isn't converted. On pressure wheels it ride
   1. **Edge-against-triangle contact between vehicles** (§38.1's beam-edge narrow phase against the partner's live triangles);
   2. **close the generated sedan's skin** (authoring);
   3. **the outward side again** once nothing hooks between nodes.
+- **Tests (2026-11-24, `engine-softbody-authoring/tests/gen_sedan_contact.rs`, CPU, 14 s; on the expected-failure list until fixed):** cars back apart after the head-on (0.14 m against ≥ 1 m); no node inside the other car (23 / 35); no skin edge through it (62 / 54); a car's own panels stay apart at a 64 km/h pole (52 new crossings, the front left door through the fender: the user's screenshots); the collision skin does not cross itself at rest (89 at spawn: rigger). Passing: pole crashes at 40 / 64 / 90 km/h stay finite and create no energy.
+- **The lab's instability stop after the pole was the guard's false alarm (fixed 2026-11-24):** the user's car, parked at the start, was driven on at 66 km/h with a torn-off part left at the pole, 104 m across; the box check measured the energy's rise from its low since the start (0 kJ, parked), with no drive allowance. It now measures from the low of the last second, as the rebound check does (`stability.rs`, tests `a_part_left_behind_while_driving_on_does_not_trip`, `a_blow_up_while_driving_still_trips`).
 - **Not yet measured:** panels into the car's own seats (self contact). Interior parts with collision faces should show up as own nodes inside own part hulls; seats skinned to nodes without faces would only overlap visually.
 
 ### L1. A small projectile passes through a car with node-only contact (Confirmed, CPU and GPU World)
