@@ -64,10 +64,10 @@ pub(super) fn edge_tables(
         let hits_at = next_init.len() as u32;
         let list_at = hits_at + 2 * room;
         // (The listed edges and points, then the grid's entries: EDGE_CELLS_MAX an edge, 8 a
-        // point; then the long edges' list.)
+        // point; then the long edges' list, the owner work list and its scan's block sums.)
         next_init.extend(std::iter::repeat_n(
             0,
-            2 * room as usize + (2 + EDGE_CELLS_MAX) * edges.len() + 9 * v.contact_points.len(),
+            2 * room as usize + (3 + EDGE_CELLS_MAX) * edges.len() + edges.len() / 32 + 1 + 9 * v.contact_points.len(),
         ));
         let counter = acc_init.len() as u32;
         acc_init.extend(std::iter::repeat_n(0, EDGE_ACC));
