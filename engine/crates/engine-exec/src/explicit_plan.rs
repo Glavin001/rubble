@@ -204,10 +204,13 @@ pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
-pub const PARAM_WORDS: usize = 107;
+pub const PARAM_WORDS: usize = 108;
 /// Params word: edge vehicle contact's tables in gStatic (0: none; [`ExplicitUpload`]'s
 /// `edge_base`, explicit_beams_vv_edges.slang).
 pub const W_EDGE: usize = 106;
+/// Params word: contact offsets' tables in gStatic (0: none; `ExplicitBeams::contact_offset`,
+/// explicit_beams_members.slang contactOffsets).
+pub const W_OFFSET: usize = 107;
 /// gBeams float4 per skin edge of edge contact's step scratch (its ends, outward normal
 /// and flags, its faces' opposite corners).
 pub const EDGE_SCRATCH: usize = 5;
@@ -256,7 +259,7 @@ pub mod param_words_serde {
     pub fn serialize<S: Serializer>(w: &[u32; PARAM_WORDS], s: S) -> Result<S::Ok, S::Error> {
         // (Without edge contact, word 106 is 0: saved as the 106 words of the layout before
         // it, so a state saved here replays in a build from before the word.)
-        let n = if w[106..].iter().all(|&x| x == 0) { 106 } else { PARAM_WORDS };
+        let n = (106..=PARAM_WORDS).rev().find(|&n| n == 106 || w[n - 1] != 0).unwrap_or(PARAM_WORDS);
         w[..n].serialize(s)
     }
 
@@ -1279,6 +1282,7 @@ impl ExplicitUpload {
     ) -> Self {
         let nv = vehicles.len();
         let any_edge = edge::any_edge(vehicles);
+        let any_offset = vehicles.iter().any(|v| v.contact_offset.iter().any(|&o| o > 0.0));
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
@@ -2615,6 +2619,7 @@ impl ExplicitUpload {
             0
         };
         let edge_base = if any_edge { edge::edge_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { 0 };
+        let offset_base = if any_offset { edge::offset_tables(vehicles, &mut statics, &mut lists, &mut beams) } else { 0 };
         let beam_order_base = if beam_order_default() && total_beams > 0 {
             let base = statics.len() as u32;
             statics.extend(beam_order);
@@ -2735,7 +2740,7 @@ impl ExplicitUpload {
             beam_order_base,
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
-        let flags = if any_edge { perf_flags_default() & !PERF_FLEET_FAMILY } else { perf_flags_default() };
+        let flags = if any_edge || any_offset { perf_flags_default() & !PERF_FLEET_FAMILY } else { perf_flags_default() };
         (words[W_PERF_FLAGS], words[W_BEAM_ORDER + 1]) = (flags & !PERF_FLEET_WALK_BOX, (flags & PERF_FLEET_WALK_BOX) << 1);
         words[W_VV_SCRATCH] = vv_scratch;
         words[W_VV_SCRATCH_OFF] = vv_scratch_off;
@@ -2745,6 +2750,7 @@ impl ExplicitUpload {
         words[W_VV_FLEET_BOX] = vv_fleet_box;
         words[W_VV_ROOM] = vv_room(nv) as u32;
         words[W_EDGE] = edge_base;
+        words[W_OFFSET] = offset_base;
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -3096,7 +3102,7 @@ impl FramePlanner {
     /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
-        let flags = if self.words[W_EDGE] != 0 { flags & !PERF_FLEET_FAMILY } else { flags };
+        let flags = if self.words[W_EDGE] != 0 || self.words[W_OFFSET] != 0 { flags & !PERF_FLEET_FAMILY } else { flags };
         // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
         self.words[W_PERF_FLAGS] = flags & !(PERF_KEEP_TRACK_REST | PERF_FLEET_WALK_BOX);
         self.words[W_BEAM_ORDER + 1] = (self.words[W_BEAM_ORDER + 1] & !(PERF_FLEET_WALK_BOX << 1)) | (flags & PERF_FLEET_WALK_BOX) << 1;
@@ -3278,7 +3284,7 @@ impl FramePlanner {
     pub fn settings(&self) -> PlannerSettings {
         // (Without edge contact the last word, W_EDGE, is 0: saved as the 106 words of the
         // layout before it, so a build from before the word reads the state.)
-        let n = if self.words[W_EDGE] == 0 { W_EDGE } else { PARAM_WORDS };
+        let n = (106..=PARAM_WORDS).rev().find(|&n| n == 106 || self.words[n - 1] != 0).unwrap_or(PARAM_WORDS);
         PlannerSettings {
             words: self.words[..n].to_vec(),
             state: self.state(),

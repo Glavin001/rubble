@@ -94,3 +94,42 @@ pub(super) fn edge_tables(
     beams.extend(std::iter::repeat_n([0.0f32; 4], scratch_at as usize - beams.len()));
     base
 }
+
+/// Contact offsets' tables ([`super::W_OFFSET`], explicit_beams_members.slang contactOffsets):
+/// at base - 1 the vectors' first float4 in gBeams; per global node (its outer triangles'
+/// first entry in gLists, their count, its offset's bits, 0), the triangles (live outer,
+/// not anti-clip-only) in their order; then per vehicle (its largest offset's bits, 0, 0, 0).
+pub(super) fn offset_tables(
+    vehicles: &[ExplicitBeams],
+    statics: &mut Vec<[u32; 4]>,
+    lists: &mut Vec<u32>,
+    beams: &mut Vec<[f32; 4]>,
+) -> u32 {
+    let total: usize = vehicles.iter().map(|v| v.nodes.len()).sum();
+    statics.push([beams.len() as u32, 0, 0, 0]);
+    beams.extend(std::iter::repeat_n([0.0f32; 4], total));
+    let base = statics.len() as u32;
+    let mut tri_at = 0u32;
+    for v in vehicles {
+        let mut adj: Vec<Vec<u32>> = vec![Vec::new(); v.nodes.len()];
+        for (t, tri) in v.triangles.iter().enumerate() {
+            if v.tri_anti_only(t) || !v.tri_outer.get(t).copied().unwrap_or(true) {
+                continue;
+            }
+            for &i in &tri.nodes {
+                adj[i as usize].push(tri_at + t as u32);
+            }
+        }
+        for (i, a) in adj.iter().enumerate() {
+            let o = v.contact_offset.get(i).copied().unwrap_or(0.0);
+            statics.push([lists.len() as u32, a.len() as u32, o.to_bits(), 0]);
+            lists.extend(a);
+        }
+        tri_at += v.triangles.len() as u32;
+    }
+    for v in vehicles {
+        let m = v.contact_offset.iter().copied().fold(0.0f32, f32::max);
+        statics.push([m.to_bits(), 0, 0, 0]);
+    }
+    base
+}

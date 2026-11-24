@@ -441,8 +441,10 @@ impl ExplicitBeamsWorld {
                     vl = vl.min(n.vel);
                     vh = vh.max(n.vel);
                 }
-                let alo = lo - (-vl * time + m);
-                let ahi = hi + (vh * time + m);
+                // (Contact offsets: the triangles reach past the nodes by up to the largest.)
+                let om = Vec3::splat(v.contact_offset.iter().copied().fold(0.0f32, f32::max));
+                let alo = lo - om - (-vl * time + m);
+                let ahi = hi + om + (vh * time + m);
                 (alo - Vec3::splat(BOX_MARGIN), ahi + Vec3::splat(BOX_MARGIN))
             })
             .collect()
@@ -726,8 +728,9 @@ impl ExplicitBeamsWorld {
                 lo = lo.min(x);
                 hi = hi.max(x);
             }
+            let om = Vec3::splat(v.contact_offset.iter().copied().fold(0.0f32, f32::max));
             self.boxes
-                .push((lo - Vec3::splat(BOX_MARGIN), hi + Vec3::splat(BOX_MARGIN)));
+                .push((lo - om - Vec3::splat(BOX_MARGIN), hi + om + Vec3::splat(BOX_MARGIN)));
         }
         self.edge_begin();
         let mut stats = ContactStats::default();
@@ -834,12 +837,7 @@ impl ExplicitBeamsWorld {
             }
             stats.triangles_tested += 1;
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
-            let wa = &self.frame[a];
-            let (mut p0, mut p1, mut p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
-            // Contact offsets: the owner's triangle at its nodes pushed out (its paint).
-            if !offs.is_empty() {
-                (p0, p1, p2) = (p0 + offs[i0 as usize], p1 + offs[i1 as usize], p2 + offs[i2 as usize]);
-            }
+            let [p0, p1, p2] = owner_corners(&self.frame[a], &offs, [i0, i1, i2]);
             // A broken triangle, or an anti-clip-only one while its vehicle's
             // anti-clip is off: no candidates.
             let dead = self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false)
@@ -1753,4 +1751,13 @@ fn gas_energy(v: &ExplicitBeams, j: usize) -> f64 {
         };
     }
     sign * u
+}
+
+/// An owner triangle's corners in the contact frame, each pushed out by its node's
+/// contact offset when the vehicle has them (the paint: `contact_offset_vectors`).
+fn owner_corners(frame: &[Vec3], offs: &[Vec3], nodes: [u32; 3]) -> [Vec3; 3] {
+    if offs.is_empty() {
+        return nodes.map(|i| frame[i as usize]);
+    }
+    nodes.map(|i| frame[i as usize] + offs[i as usize])
 }

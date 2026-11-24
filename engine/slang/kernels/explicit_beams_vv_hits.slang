@@ -107,8 +107,16 @@ uint vvClip(VvTri t, uint gt, uint h, float3 p, uint vh, float r, out float alph
         float3 oa = vvRel(va, va);
         VvTri pf;
         pf.p0 = ssub3(t.p0, sscale(gNodes[t.tn.x * 3u + 1u].xyz, STEP));
-        float3 b1 = ssub3(nf3(oa + gNodes[t.tn.y * 3u].xyz), sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
-        float3 b2 = ssub3(nf3(oa + gNodes[t.tn.z * 3u].xyz), sscale(gNodes[t.tn.z * 3u + 1u].xyz, STEP));
+        float3 a1 = nf3(oa + gNodes[t.tn.y * 3u].xyz);
+        float3 a2 = nf3(oa + gNodes[t.tn.z * 3u].xyz);
+        if (gP.offsetBase != 0u)
+        {
+            // (Contact offsets: the triangle's corners as vvTriangle's.)
+            a1 = sadd3(a1, contactOff(t.tn.y));
+            a2 = sadd3(a2, contactOff(t.tn.z));
+        }
+        float3 b1 = ssub3(a1, sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
+        float3 b2 = ssub3(a2, sscale(gNodes[t.tn.z * 3u + 1u].xyz, STEP));
         vvFrame(pf, b1, b2);
         float3 q0 = ssub3(ssub3(p, sscale(gNodes[h * 3u + 1u].xyz, STEP)), pf.p0);
         float a0 = 0.0;
@@ -706,6 +714,12 @@ bool vvNearBox(uint gt, uint va, float r, float3 blo, float3 bhi, float extra)
     float3 p0 = nf3(o + gNodes[tn.x * 3u].xyz);
     float3 p1 = nf3(o + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(o + gNodes[tn.z * 3u].xyz);
+    if (gP.offsetBase != 0u)
+    {
+        p0 = sadd3(p0, contactOff(tn.x));
+        p1 = sadd3(p1, contactOff(tn.y));
+        p2 = sadd3(p2, contactOff(tn.z));
+    }
     float3 r3 = float3(r, r, r) + float3(extra, extra, extra);
     return vvOverlap(ssub3(min(min(p0, p1), p2), r3), sadd3(max(max(p0, p1), p2), r3), blo, bhi);
 }

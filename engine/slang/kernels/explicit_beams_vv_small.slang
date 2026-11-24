@@ -20,6 +20,12 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         vvSnapshot(off, k, parity, lane);
         sync();
     }
+    // Contact offsets: every member's vectors at the pass's start.
+    if (gP.offsetBase != 0u)
+    {
+        for (uint m = 0u, mStop = EB_END(873, m, k, 1u); m < mStop; m++) contactOffsets(vvMember(off, m), lane, LANES);
+        sync();
+    }
 #ifdef EB_EDGE
     // Edge vehicle contact (explicit_beams_vv_edges.slang): every member's edges this step.
     if (edgeOn()) edgeResetPrepare(k, off, lane, true);

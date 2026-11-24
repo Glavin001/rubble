@@ -1,7 +1,7 @@
 # Rust functions over 200 lines (tools/build-time/check.py) when the limit was set,
 # each with the most lines it may have. They may shrink (check.py --shrink lowers the
 # numbers), not grow: split one instead, or raise its line in the same change.
-crates/engine-exec/src/explicit_plan.rs::with_sleep 1546
+crates/engine-exec/src/explicit_plan.rs::with_sleep 1549
 crates/engine-exec/src/rigid_plan.rs::encode_step 647
 crates/engine-ffi/src/lib.rs::publish 467
 crates/engine-ffi/tests/town_probe.rs::town_pack_loads_steps_and_breaks 254
@@ -26,7 +26,7 @@ crates/engine-softbody-authoring/src/authoring/gen2/model.rs::clean_slivers 279
 crates/engine-softbody-authoring/src/authoring/gen2/model.rs::interior 248
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs::bridge_seams 317
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs::edge_nodes 308
-crates/engine-softbody-authoring/src/authoring/gen2/rig.rs::rig_with 3038
+crates/engine-softbody-authoring/src/authoring/gen2/rig.rs::rig_with 3039
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs::skin_hull 260
 crates/engine-softbody-authoring/src/authoring/gen2/sedan.rs::sedan 1528
 crates/engine-softbody-authoring/src/authoring/gen2/shell.rs::lattice_defined 319
@@ -85,18 +85,18 @@ crates/engine-softbody-lab/examples/showcase_probe.rs::main 2075
 crates/engine-softbody-lab/examples/showcase_probe.rs::static_torsion 472
 crates/engine-softbody-lab/examples/sidepole_sweep.rs::main 418
 crates/engine-softbody-lab/examples/skin_shards_probe.rs::skin_stats 232
-crates/engine-softbody-lab/examples/vehicle_c2c_overlap.rs::main 757
+crates/engine-softbody-lab/examples/vehicle_c2c_overlap.rs::main 768
 crates/engine-softbody-lab/examples/visual_bind_probe.rs::main 444
 crates/engine-softbody/src/crash_rigs.rs::mdb214_jbeam 226
 crates/engine-softbody/src/drive_ai.rs::derby_input 225
-crates/engine-softbody/src/explicit_beams.rs::from_desc_jbeam_with 227
+crates/engine-softbody/src/explicit_beams.rs::from_desc_jbeam_with 228
 crates/engine-softbody/src/explicit_beams.rs::from_truck_yawed_tyres 408
 crates/engine-softbody/src/explicit_beams.rs::node_pass 227
 crates/engine-softbody/src/explicit_contact.rs::triangle_loop 205
 crates/engine-softbody/src/explicit_drive.rs::drive_pass 321
 crates/engine-softbody/src/explicit_jbeam_ext.rs::add_pressure_wheel 310
 crates/engine-softbody/src/hires.rs::hires_car_jbeam 546
-crates/engine-softbody/src/jbeam.rs::load_jbeam 902
+crates/engine-softbody/src/jbeam.rs::load_jbeam 903
 crates/engine-softbody/src/pack.rs::core_plan 223
 crates/engine-softbody/src/procedural.rs::car_truck_layout 939
 crates/engine-softbody/src/truck.rs::data_rest 291

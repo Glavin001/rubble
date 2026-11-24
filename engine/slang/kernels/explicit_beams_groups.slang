@@ -23,6 +23,7 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // local node 208 of the page's 463-node car, 256 lanes a member: the position of
 // global node 0), so vehicles reported frame-bounds errors native never shows. With
 // centred damping (§39) it runs again after the correction (a superset of the box).
+float contactOffMax(uint v);
 void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)
 {
     float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
@@ -36,6 +37,10 @@ void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity,
         has = true;
     }
     if (!has) return;
+    // (Contact offsets: the triangles reach out past the nodes by up to the largest.)
+    float om = contactOffMax(v);
+    lo = lo - float3(om, om, om);
+    hi = hi + float3(om, om, om);
     uint key = vvBoxKey(v, parity);
     gAcc[key].min(vvKey(lo.x));
     gAcc[key + 1u].min(vvKey(lo.y));

@@ -307,11 +307,11 @@ struct Params
     // their ranks hold this many times the fleet's contact points, and a node's two-body
     // point counts this many owners (0: VV_PART, a layout before the word).
     uint vvRoom;
-#ifdef EB_EDGE
     // Edge vehicle contact's tables (explicit_plan's W_EDGE; 0: none;
-    // explicit_beams_vv_edges.slang; built with EB_EDGE only).
+    // explicit_beams_vv_edges.slang, built with EB_EDGE only).
     uint edgeBase;
-#endif
+    // Contact offsets' tables (explicit_plan's W_OFFSET; 0: none; contactOffsets).
+    uint offsetBase;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
