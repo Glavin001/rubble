@@ -488,5 +488,7 @@ lamps, trim, tyres); torn triangles (3 x rest) left out.
 | head on 30, A pressing, 2.5 s | 7.11/7.27/7.50 | 0.87/0.98/1.10 | 0/0/0.75 | 0/0/0.19 |
 | head on 60, A pressing, 2.5 s | 4.29/5.59/7.05 | 3.10/3.78/5.22 | 0.04/0.90/2.08 | 0/0/3.41 |
 
-The side scene (worst 5.48 off, 0.38 on at 60 km/h) is not trusted: the turned car B rolls off 9 to
-23 m with its handbrake on (its nodes are turned, perhaps not its wheels' axes).
+Side impact into B's middle (2 s; an earlier version was 1.4 m off centre): 30 km/h worst
+1.86/2.01/2.08 off, 0/0/0 on; 60 km/h worst 1.40/1.43/2.16 off, 1.37/1.38/1.40 on, at the end
+0/0.44/0.77 off, 0/0/0 on; 60 km/h pressed at the end 1.93/2.44/2.79 off, 0/0/0.53 on.
+Tests: gen_sedan_paint.rs (three pass, three listed as expected failures).
