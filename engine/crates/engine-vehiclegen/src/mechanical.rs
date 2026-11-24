@@ -199,6 +199,39 @@ fn sh(st: &Structure, name: &str) -> DVec3 {
 
 const CORNERS: [(&str, f64, bool); 4] = [("FL", 1.0, true), ("FR", -1.0, true), ("RL", 1.0, false), ("RR", -1.0, false)];
 
+/// The fuel tank and the radiator (parts of `sedan_parts`).
+fn fuel_tank_and_radiator(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
+    let f = &g.f;
+    let r = |x: f64, y: f64, z: f64| f.p(x, y, z);
+    // ---- fuel tank: a soft box of 8 under the boot floor, on straps
+    {
+        let mut p = MechPart::new("fuel_tank", "fuel");
+        let zr = g.axle_r;
+        let (x0, x1, y0, y1, z0, z1) = (-0.40, 0.16, 0.335, 0.440, zr - 0.62, zr - 0.25);
+        for (i, (x, y, z)) in [(x0, y0, z0), (x1, y0, z0), (x0, y1, z0), (x1, y1, z0), (x0, y0, z1), (x1, y0, z1), (x0, y1, z1), (x1, y1, z1)].into_iter().enumerate() {
+            p.node(&format!("{}", i + 1), r(x, y, z), 5.0);
+        }
+        p.mesh = rbox(r(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1)), DVec3::new(0.5 * (f.x(x1) - f.x(x0)), 0.5 * (y1 - y0), 0.5 * (z1 - z0)), 0.03, 3, Mat::TrimBlack);
+        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 50.0, 5000.0, INF), deform_group: None });
+        p.mounts.push(Mount { group: "fuel_tank".into(), from: p.names(), to: ["e1_2dl", "e1_2ul", "e1_2dr", "e1_2ur", "e1_3dl", "e1_3dr", "e3_2", "e3_3"].iter().map(|n| format!("sh_{n}")).collect(), beams: 28, kind: BeamKind::Normal, v: vals(30_000.0, 500.0, 5000.0, 35e3), precomp: 1.0 });
+        out.push(p);
+    }
+    // ---- radiator on the radiator support
+    {
+        let mut p = MechPart::new("radiator", "cooling");
+        let a3 = sh(st, "sh_a3_uc");
+        let z = a3.z + 0.062;
+        let (hx, y0, y1) = (f.x(0.36), sh(st, "sh_a3_dc").y + 0.035, a3.y - 0.045);
+        for (tg, x, y) in [("ul", hx, y1), ("ur", -hx, y1), ("dl", hx, y0), ("dr", -hx, y0)] {
+            p.node(tg, DVec3::new(x, y, z), 1.4);
+        }
+        p.mesh = box_(DVec3::new(0.0, 0.5 * (y0 + y1), z), DVec3::new(hx, 0.5 * (y1 - y0), 0.018), Mat::TrimBlack, None);
+        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 50.0, 7500.0, INF), deform_group: Some(("radiator".into(), 0.05)) });
+        p.mounts.push(Mount { group: "radiator".into(), from: p.names(), to: ["a3_ul", "a3_uc", "a3_ur", "a3_dc", "a2_ul", "a2_ur"].iter().map(|n| format!("sh_{n}")).collect(), beams: 12, kind: BeamKind::Normal, v: vals(1e6, 150.0, 7500.0, 20e3), precomp: 1.0 });
+        out.push(p);
+    }
+}
+
 /// The sedan's mechanical and interior parts on the body-in-white `st`.
 pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     let f = &g.f;
@@ -564,33 +597,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         }
         out.push(p);
     }
-    // ---- fuel tank: a soft box of 8 under the boot floor, on straps
-    {
-        let mut p = MechPart::new("fuel_tank", "fuel");
-        let zr = g.axle_r;
-        let (x0, x1, y0, y1, z0, z1) = (-0.40, 0.16, 0.335, 0.440, zr - 0.62, zr - 0.25);
-        for (i, (x, y, z)) in [(x0, y0, z0), (x1, y0, z0), (x0, y1, z0), (x1, y1, z0), (x0, y0, z1), (x1, y0, z1), (x0, y1, z1), (x1, y1, z1)].into_iter().enumerate() {
-            p.node(&format!("{}", i + 1), r(x, y, z), 5.0);
-        }
-        p.mesh = rbox(r(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1)), DVec3::new(0.5 * (f.x(x1) - f.x(x0)), 0.5 * (y1 - y0), 0.5 * (z1 - z0)), 0.03, 3, Mat::TrimBlack);
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 50.0, 5000.0, INF), deform_group: None });
-        p.mounts.push(Mount { group: "fuel_tank".into(), from: p.names(), to: ["e1_2dl", "e1_2ul", "e1_2dr", "e1_2ur", "e1_3dl", "e1_3dr", "e3_2", "e3_3"].iter().map(|n| format!("sh_{n}")).collect(), beams: 28, kind: BeamKind::Normal, v: vals(30_000.0, 500.0, 5000.0, 35e3), precomp: 1.0 });
-        out.push(p);
-    }
-    // ---- radiator on the radiator support
-    {
-        let mut p = MechPart::new("radiator", "cooling");
-        let a3 = sh(st, "sh_a3_uc");
-        let z = a3.z + 0.062;
-        let (hx, y0, y1) = (f.x(0.36), sh(st, "sh_a3_dc").y + 0.035, a3.y - 0.045);
-        for (tg, x, y) in [("ul", hx, y1), ("ur", -hx, y1), ("dl", hx, y0), ("dr", -hx, y0)] {
-            p.node(tg, DVec3::new(x, y, z), 1.4);
-        }
-        p.mesh = box_(DVec3::new(0.0, 0.5 * (y0 + y1), z), DVec3::new(hx, 0.5 * (y1 - y0), 0.018), Mat::TrimBlack, None);
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 50.0, 7500.0, INF), deform_group: Some(("radiator".into(), 0.05)) });
-        p.mounts.push(Mount { group: "radiator".into(), from: p.names(), to: ["a3_ul", "a3_uc", "a3_ur", "a3_dc", "a2_ul", "a2_ur"].iter().map(|n| format!("sh_{n}")).collect(), beams: 12, kind: BeamKind::Normal, v: vals(1e6, 150.0, 7500.0, 20e3), precomp: 1.0 });
-        out.push(p);
-    }
+    fuel_tank_and_radiator(g, st, &mut out);
 
     // ---- interior: seats on four feet, the rear bench, the instrument
     // panel on its cross-car beam, the console
