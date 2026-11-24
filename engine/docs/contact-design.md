@@ -331,3 +331,44 @@ every guard passes (not fused: 6.00 m against 6.00 m; 60 + 60 rise 1394 J of 413
    the existing pass with a hit allowed to take back its first-pass force down to zero).
 4. Settings and flag bits for each (vehicle flags word bits 21+), GPU == CPU bit for bit with
    bit-exact on, every backend; the scenario matrix and the Chrome lab as `AGENTS.md`'s ladder.
+
+## The GPU port: what it touches (read from the kernels, 2026-11-24)
+
+Until it lands, the GPU upload refuses a vehicle with `edge_contact` (`ExplicitUpload::with_sleep`
+asserts) rather than step it without. Today a GPU hit is always (gt, h): a triangle and one
+contacter node, two words in the owner's list at `gP.vvHits`, its weights, normal and side
+re-derived from positions wherever it is used (`vvTry`, `vvStagedHit`, `lvTryStage`).
+
+**Live paths** (each must carry edge hits bit for bit with `bit_exact` on):
+1. World: `contactGroup` (`explicit_beams_vv_levels.slang`), small groups `vvPassSmall`
+   (≤ `VV_SIDE` members, module `explicit_beams_contact`), big `vvPass` (`explicit_beams_contact_big`).
+2. Lab (group split on): the fleet dispatches (`FLEET_STATE`, `FRONT`, `ANY`), kept pairs
+   (`fkTest` / `fkPairTry`), levels `fleetLevelsOnceTry` (`HITLAT` + `LEVELS_ONCE`) falling back
+   to `fleetLevelsAny`, and `fleetGroupLevels` for an owner past `FL_SCAN_MOST` hits.
+Measurement-only (`fleet_levels`, `fleetLevelsLat`, `vvwide`) and the frozen reference kernels
+(`explicit_beams_ref_*`, `baseline*`) need not carry it; their scenes keep edge contact off.
+
+**What an edge hit needs on the GPU:**
+- *Static, per vehicle*: the skin edges' topology (i, j and their triangles, outer and inside
+  faces apart; CSR in `gLists`, the `surf_seg` pattern: a `gStatic` record and a params word,
+  `PARAM_WORDS` bumped) and a flag bit (vehicle flags bit 21).
+- *Per step*: each edge's liveness and outward normal from its live triangles (the outer
+  faces' when it has any), its convexity and opposite corners: one pass over the edges.
+- *Detection*: per pair of members with overlapping boxes, A's edges against B's (each pair
+  once, the lower index's turn) and B's contact nodes against A's outer convex edges (both
+  ways, each owner's turn), the CPU's tests in `explicit_contact/edge.rs` exactly.
+- *The list*: a hit kind bit in the first word (owner edge index) and the partner's edge or
+  node in the second; s, t, n, gap re-derived each phase like today's hits. Order: after the
+  owner's node hits, by (partner, kind, B edge, A edge) as the CPU appends them.
+- *Split counts*: the owner edge's two nodes (weight > 0) in `vvSplitTri`, h and h2 (t > 0)
+  in `vvSplitPoint`, and the same in the clear.
+- *Snapshot*: h2 and both edge nodes (`vvSnapNode`).
+- *Apply*: five-node variants of `vvTry`'s adds and of `resStage` / `resFinal` / `resMerge`
+  (wired to four nodes by role today), and the residual's accumulated clamp
+  (`vvResOf`: r = max(λ0 + d, 0) − λ0, λ0 the first pass's normal force) for edge-contact pairs.
+- *Order of dependent hits*: an edge hit reads its contacter h's force like a node hit and also
+  adds to h2, so per owner the edge hits run after every node hit (a second ordered sweep
+  after `vvApplyOrderedIn`), in list order.
+- *Proof*: `explicit_contact_gpu.rs` gains GPU == CPU scenes with edge contact on (the 60 + 60
+  head-on, bit for bit); fast-check and the scenario matrix stay bit for bit with it off (no
+  kernel word changes there); then a matrix row with it on for its cost.
