@@ -78,6 +78,10 @@ fn skin_edges(v: &ExplicitBeams) -> Vec<SkinEdge> {
         if v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t) {
             continue;
         }
+        // The outer skin's (a face inside the car is not part of its outside).
+        if !v.tri_outer.get(t).copied().unwrap_or(true) {
+            continue;
+        }
         let n = tri.nodes;
         if n.iter().any(|&i| v.is_retired(i as usize)) {
             continue;
@@ -389,4 +393,99 @@ impl ExplicitBeamsWorld {
         }
         out
     }
+}
+
+/// Edge against edge within one car (self contact, `edge_contact`): pairs of the outer
+/// skin's live edges sharing no node, not both in one self group, not within the contact
+/// range at rest (the first pass records those, as node contact's spawn exclusion), by the
+/// car-to-car rule (closest points inside both, normal e × f out of the first edge's side
+/// and into the second's, gap −EDGE_DEPTH..r). Each pair once, as hits of the self pass.
+pub(crate) fn self_edge_hits(v: &mut ExplicitBeams) -> Vec<crate::explicit_beams::SelfHit> {
+    let edges = skin_edges(v);
+    let r = v.collision_range;
+    let group = |i: u32| v.self_groups.get(i as usize).copied().unwrap_or(0);
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    let pad = r + EDGE_DEPTH;
+    for (k, e) in edges.iter().enumerate() {
+        let (lo, hi) = (cell(e.p.min(e.q) - Vec3::splat(pad)), cell(e.p.max(e.q) + Vec3::splat(pad)));
+        for x in lo.0..=hi.0 {
+            for y in lo.1..=hi.1 {
+                for z in lo.2..=hi.2 {
+                    grid.entry((x, y, z)).or_default().push(k as u32);
+                }
+            }
+        }
+    }
+    let first = v.self_edge_excl.is_none();
+    let mut excl = v.self_edge_excl.take().unwrap_or_default();
+    let mut out = Vec::new();
+    let mut seen: Vec<u32> = Vec::new();
+    for (kf, f) in edges.iter().enumerate() {
+        seen.clear();
+        let (lo, hi) = (cell(f.p.min(f.q)), cell(f.p.max(f.q)));
+        for x in lo.0..=hi.0 {
+            for y in lo.1..=hi.1 {
+                for z in lo.2..=hi.2 {
+                    if let Some(l) = grid.get(&(x, y, z)) {
+                        seen.extend_from_slice(l);
+                    }
+                }
+            }
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        for &ke in &seen {
+            if ke as usize <= kf {
+                continue;
+            }
+            let e = &edges[ke as usize];
+            if e.i == f.i || e.i == f.j || e.j == f.i || e.j == f.j {
+                continue;
+            }
+            let g = group(e.i);
+            if g != 0 && group(e.j) == g && group(f.i) == g && group(f.j) == g {
+                continue;
+            }
+            let key = (e.i, e.j, f.i, f.j);
+            let (s, t) = engine_schema::feature_query::closest_seg_seg(e.p, e.q, f.p, f.q);
+            let (ca, cb) = (e.p + (e.q - e.p) * s, f.p + (f.q - f.p) * t);
+            if first {
+                if ca.distance(cb) < r + 0.005 {
+                    excl.insert(key);
+                }
+                continue;
+            }
+            if excl.contains(&key) || s <= END || s >= 1.0 - END || t <= END || t >= 1.0 - END {
+                continue;
+            }
+            let mut n = (e.q - e.p).cross(f.q - f.p);
+            let len = n.length();
+            if len < 1e-8 {
+                continue;
+            }
+            n /= len;
+            if n.dot(e.out) < 0.0 {
+                n = -n;
+            }
+            if n.dot(f.out) >= 0.0 {
+                continue;
+            }
+            let gap = n.dot(cb - ca);
+            if gap > r || gap < -EDGE_DEPTH {
+                continue;
+            }
+            out.push(crate::explicit_beams::SelfHit {
+                hn: f.i,
+                tri: [e.i, e.j, e.j],
+                w: [s, 0.0, 1.0 - s],
+                depth: (r - gap).min(r),
+                n,
+                hn2: f.j,
+                t,
+                kind: 1,
+            });
+        }
+    }
+    v.self_edge_excl = Some(excl);
+    out
 }

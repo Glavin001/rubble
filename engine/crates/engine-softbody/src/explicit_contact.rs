@@ -24,6 +24,7 @@ use crate::explicit_beams::{
 use glam::Vec3;
 
 mod edge;
+pub(crate) use edge::self_edge_hits;
 
 /// Speculative look-ahead for vehicle contact (under measurement, `SPECULATIVE=1`).
 /// The push-out rate (m/s) of a pair already behind the surface (under measurement,
