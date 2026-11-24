@@ -29,3 +29,6 @@ gen_sedan_contact::head_on_no_node_inside_the_other_car
 gen_sedan_contact::head_on_no_edge_through_the_other_car
 gen_sedan_contact::pole_own_panels_stay_apart
 gen_sedan_contact::collision_skin_does_not_cross_itself_at_rest
+gen_sedan_contact::fast_head_on_no_overlap
+gen_sedan_contact::unequal_head_on_no_overlap
+gen_sedan_contact::offset_head_on_no_overlap

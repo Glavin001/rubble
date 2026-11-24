@@ -26,6 +26,9 @@ for real is time-boxed; this file is updated with what it finds).
 | `gen_sedan_contact::head_on_no_edge_through_the_other_car` | same | 78 / 88 skin edges through the other car's triangles at the worst sample against 0 (edge contact on: 46 / 48) | Node-only contact: edges pass between nodes | Edge-against-triangle contact |
 | `gen_sedan_contact::pole_own_panels_stay_apart` | same | 52 new own-skin crossings at a 64 km/h pole (front left door through the left fender), against 0 | Self contact is node against triangle | Edge-against-triangle self contact |
 | `gen_sedan_contact::collision_skin_does_not_cross_itself_at_rest` | same | 89 own-skin crossings at spawn against 0 | Authoring: the rigger's skin passes through itself (rear bumper, sills, fender corners) | Fix in the rigger |
+| `gen_sedan_contact::fast_head_on_no_overlap` | 2026-11-24 (ahead of the fix) | 100 + 100 km/h head on, worst sample: 26 / 23 nodes inside the other car (243 / 201 mm), 96 / 90 edges through, against 0 | Fixed 25 mm band against 28 mm a step; node-only and memory side rules (`docs/contact-design.md`) | The contact design |
+| `gen_sedan_contact::unequal_head_on_no_overlap` | same | 100 into 10 km/h: 21 / 26 nodes (133 / 228 mm), 70 / 67 edges | Same | Same |
+| `gen_sedan_contact::offset_head_on_no_overlap` | same | 60 + 60 km/h at 0.8 m offset: 17 / 20 nodes (347 / 286 mm), 58 / 65 edges | Same | Same |
 
 Fixed and removed from the list:
 - `gen3_rig::rest_fidelity_at_spawn_and_parked` (the test's allowance now counts every node a vertex is bound to; 1.057 → 0.542 mm against 1 mm).

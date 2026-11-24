@@ -18,6 +18,9 @@
 use engine_softbody::desc::SoftVehicleDesc;
 use engine_softbody::explicit_beams::{ExplicitBeams, StaticShape, STEP};
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+use engine_softbody::explicit_drive::DriveInput;
+use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
+use glam::Quat;
 use engine_softbody_authoring::authoring::rig;
 use engine_softbody_authoring::vehicle_compare::settings;
 use glam::Vec3;
@@ -222,6 +225,8 @@ struct HeadOn {
     /// vehicle contact, and with it off.
     parted: f32,
     parted_free: f32,
+    /// At the end: per car, its nearest contact node outside the other's hull (m).
+    gap_end: [f32; 2],
     finite: bool,
 }
 
@@ -246,56 +251,148 @@ fn parted_after_push(mut w: ExplicitBeamsWorld) -> (f32, bool) {
 }
 
 fn head_on() -> HeadOn {
-    static R: OnceLock<HeadOn> = OnceLock::new();
-    R.get_or_init(|| {
-        let d = desc();
-        let zmax = d.nodes.iter().map(|n| n.position[2]).fold(f32::MIN, f32::max);
-        let mut turned = d.clone();
-        for n in &mut turned.nodes {
-            n.position = [-n.position[0], n.position[1], -n.position[2]];
+    pair_crash(60, 60, 0, 600, true)
+}
+
+/// Two generated sedans nose to nose (5 cm apart), car A at `kmh_a` towards car B, car B
+/// at `kmh_b` towards car A, car B moved `offset_mm` sideways; run `ms`, sampled every 20
+/// ms; `push`: then the fused check (`parted_after_push`). Cached per scene.
+fn pair_crash(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool) -> HeadOn {
+    static R: OnceLock<Mutex<HashMap<(u32, u32, i32, u32, bool), HeadOn>>> = OnceLock::new();
+    let m = R.get_or_init(Default::default);
+    let key = (kmh_a, kmh_b, offset_mm, ms, push);
+    if let Some(r) = m.lock().unwrap().get(&key) {
+        return r.clone();
+    }
+    let d = desc();
+    let zmax = d.nodes.iter().map(|n| n.position[2]).fold(f32::MIN, f32::max);
+    let mut turned = d.clone();
+    for n in &mut turned.nodes {
+        n.position = [-n.position[0], n.position[1], -n.position[2]];
+    }
+    let a = spawn(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * (kmh_a as f32 / 3.6));
+    let b = spawn(
+        &turned,
+        Vec3::new(offset_mm as f32 * 1e-3, 0.0, 0.025 + zmax),
+        -Vec3::Z * (kmh_b as f32 / 3.6),
+    );
+    let mut w = ExplicitBeamsWorld::new(vec![a, b]);
+    if kmh_b == 0 && ms > 1000 {
+        // The slow push: car B braked (handbrake), car A pressing on at a light throttle.
+        w.vehicles[0].set_drive_input(DriveInput { forward: 0.3, ..Default::default() });
+        w.vehicles[1].set_drive_input(DriveInput { brake: 1.0, handbrake: 1.0, ..Default::default() });
+    }
+    let steps = (ms as f32 * 1e-3 / STEP).round() as usize;
+    let every = (0.02 / STEP).round() as usize;
+    let mut r = HeadOn::default();
+    for k in 1..=steps {
+        w.step();
+        if k % every != 0 && k != steps {
+            continue;
         }
-        let v = 60.0 / 3.6;
-        let a = spawn(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * v);
-        let b = spawn(&turned, Vec3::new(0.0, 0.0, 0.025 + zmax), -Vec3::Z * v);
-        let mut w = ExplicitBeamsWorld::new(vec![a, b]);
-        let crash = (0.6 / STEP).round() as usize;
-        let every = (0.02 / STEP).round() as usize;
-        let mut r = HeadOn::default();
-        for k in 1..=crash {
-            w.step();
-            if k % every != 0 {
-                continue;
-            }
-            let hulls = [hull(&w.vehicles[0]), hull(&w.vehicles[1])];
-            for c in 0..2 {
-                let (x, o) = (&w.vehicles[c], &hulls[1 - c]);
-                let band = w.vehicles[1 - c].collision_range;
-                let mut inside = 0;
-                for &i in &x.contact_points {
-                    let p = x.origin + x.nodes[i as usize].pos;
-                    if winding(p, o) > 0.5 {
-                        let dd = dist(p, o);
-                        if dd > band {
-                            inside += 1;
-                        }
-                        r.deepest[c] = r.deepest[c].max(dd);
+        let hulls = [hull(&w.vehicles[0]), hull(&w.vehicles[1])];
+        for c in 0..2 {
+            let (x, o) = (&w.vehicles[c], &hulls[1 - c]);
+            let band = w.vehicles[1 - c].collision_range;
+            let mut inside = 0;
+            let mut nearest = f32::MAX;
+            for &i in &x.contact_points {
+                let p = x.origin + x.nodes[i as usize].pos;
+                let dd = dist(p, o);
+                if winding(p, o) > 0.5 {
+                    if dd > band {
+                        inside += 1;
                     }
+                    r.deepest[c] = r.deepest[c].max(dd);
+                } else {
+                    nearest = nearest.min(dd);
                 }
-                r.inside[c] = r.inside[c].max(inside);
-                r.edges[c] = r.edges[c].max(edges_through(&w.vehicles[c], &w.vehicles[1 - c]));
+            }
+            r.inside[c] = r.inside[c].max(inside);
+            r.edges[c] = r.edges[c].max(edges_through(&w.vehicles[c], &w.vehicles[1 - c]));
+            if k == steps {
+                r.gap_end[c] = nearest;
             }
         }
+    }
+    r.finite = w.vehicles.iter().all(finite);
+    if push {
         let mut free = w.clone();
         free.contact = false;
         let (on, f1) = parted_after_push(w);
         let (off, f2) = parted_after_push(free);
         r.parted = on;
         r.parted_free = off;
-        r.finite = f1 && f2;
-        println!("head on 60 + 60 km/h: {r:?}");
-        r
-    })
-    .clone()
+        r.finite &= f1 && f2;
+    }
+    println!("pair {kmh_a} into {kmh_b} km/h, offset {offset_mm} mm, {ms} ms: {r:?}");
+    m.lock().unwrap().insert(key, r.clone());
+    r
+}
+
+/// The overlap invariants of one pair scene: no node inside the other car past the band
+/// and no skin edge through it, at the worst sample.
+fn no_overlap(name: &str, scene: &str, r: &HeadOn) -> bool {
+    let pass = r.finite && r.inside == [0, 0] && r.edges == [0, 0];
+    row(
+        name,
+        scene,
+        format!(
+            "{} / {} nodes past the band (deepest {:.0} / {:.0} mm), {} / {} edges through",
+            r.inside[0],
+            r.inside[1],
+            r.deepest[0] * 1e3,
+            r.deepest[1] * 1e3,
+            r.edges[0],
+            r.edges[1]
+        ),
+        "0, 0".into(),
+        pass,
+    );
+    pass
+}
+
+/// Faster: 100 + 100 km/h head on (each car moves 28 mm a step, more than the 25 mm band).
+/// Bound: exact. FAILS today (2026-11-24): see the printed row.
+#[test]
+fn fast_head_on_no_overlap() {
+    assert!(no_overlap("no overlap, fast head-on", "head on 100 + 100, worst to 0.6 s", &pair_crash(100, 100, 0, 600, false)));
+}
+
+/// Unequal: 100 km/h into a car doing 10 towards it (the relative speed sets the contact,
+/// not either car's own). Bound: exact. FAILS today (2026-11-24): see the printed row.
+#[test]
+fn unequal_head_on_no_overlap() {
+    assert!(no_overlap("no overlap, 100 into 10", "head on 100 + 10, worst to 0.6 s", &pair_crash(100, 10, 0, 600, false)));
+}
+
+/// Offset: 60 + 60 km/h, car B 0.8 m to the side (front corners, wheels). Bound: exact.
+/// FAILS today (2026-11-24): see the printed row.
+#[test]
+fn offset_head_on_no_overlap() {
+    assert!(no_overlap("no overlap, offset head-on", "head on 60 + 60, 0.8 m offset, worst to 0.6 s", &pair_crash(60, 60, 800, 600, false)));
+}
+
+/// A slow push leaves no gap: car A at 4 km/h (1.1 m/s) into car B at rest, A at a light
+/// throttle (0.3) and B braked, 2 s. They end touching:
+/// each car's nearest node no further from the other's collision skin than the band plus
+/// 10 mm, and nothing inside. Bound: the band is where contact acts (the dissipative law
+/// holds a pair at its edge, not beyond); 10 mm a **Choice** (a contact settling under
+/// friction). This keeps any contact rule from stopping cars short of each other.
+#[test]
+fn slow_push_ends_touching() {
+    let r = pair_crash(4, 0, 0, 2000, false);
+    let band = 0.025;
+    let gap = r.gap_end[0].min(r.gap_end[1]);
+    let pass = r.finite && r.inside == [0, 0] && gap <= band + 0.01;
+    row(
+        "a slow push ends touching",
+        "car at 4 km/h into a parked car, 2 s",
+        format!("nearest node {:.0} mm from the other's skin; {} / {} inside", gap * 1e3, r.inside[0], r.inside[1]),
+        "≤ band + 10 mm, 0 inside".into(),
+        pass,
+    );
+    assert!(pass);
 }
 
 /// Two cars that hit each other are not fused: pushed apart after the head-on, they part
@@ -511,6 +608,113 @@ fn pole_crashes_stay_finite_and_create_no_energy() {
                 r.growth
             ),
             "≤ 0.5 % of start, ×3".into(),
+            pass,
+        );
+        ok &= pass;
+    }
+    assert!(ok);
+}
+
+// --- A cannonball into the door ------------------------------------------------------
+
+/// A steel ball (radius `radius_mm`) fired square at the parked car's front left door at
+/// `speed` m/s, 0.3 s: the most car contact nodes inside the ball deeper than the band at
+/// any step, the deepest, and the steps its centre's path crossed a live collision
+/// triangle (tunnelling: a panel the ball tears open dies first, so a live one crossed was
+/// never met).
+#[derive(Clone, Debug, Default)]
+struct Shot {
+    inside: usize,
+    deepest: f32,
+    crossed: usize,
+    /// The ball's speed at the end and the share of its momentum the car took.
+    speed_end: f32,
+    taken: f32,
+    finite: bool,
+}
+
+fn shot(speed: u32, radius_mm: u32) -> Shot {
+    static R: OnceLock<Mutex<HashMap<(u32, u32), Shot>>> = OnceLock::new();
+    let m = R.get_or_init(Default::default);
+    if let Some(r) = m.lock().unwrap().get(&(speed, radius_mm)) {
+        return r.clone();
+    }
+    let d = desc();
+    let mut s = spawn(d, Vec3::ZERO, Vec3::ZERO);
+    let door: Vec<Vec3> = (0..s.nodes.len())
+        .filter(|&i| d.nodes[i].name.starts_with("door_FL"))
+        .map(|i| s.origin + s.nodes[i].pos)
+        .collect();
+    let aim = door.iter().copied().sum::<Vec3>() / door.len() as f32;
+    let side = door.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+    let radius = radius_mm as f32 * 1e-3;
+    let mass = 7850.0 * 4.0 / 3.0 * std::f32::consts::PI * radius.powi(3);
+    let mut set = ProxySet {
+        bodies: vec![RigidProxy {
+            body: 0,
+            pos: Vec3::new(side + radius + 0.3, aim.y, aim.z),
+            rot: Quat::IDENTITY,
+            vel: Vec3::new(-(speed as f32), 0.0, 0.0),
+            ang_vel: Vec3::ZERO,
+            inv_mass: 1.0 / mass,
+            inv_inertia: Vec3::splat(1.0 / (0.4 * mass * radius * radius)),
+            share: 1.0,
+            count: 0,
+        }],
+        shapes: vec![ProxyShape::new(0, Vec3::ZERO, Quat::IDENTITY, ProxyGeom::Sphere { radius }, 0, None)],
+        frozen: false,
+    };
+    set.begin_window();
+    s.rigid = Some(Box::new(set));
+    let band = s.collision_range;
+    let mut r = Shot { finite: true, ..Default::default() };
+    let mut prev = s.rigid.as_ref().unwrap().bodies[0].pos;
+    for _ in 0..(0.3 / STEP).round() as usize {
+        s.step();
+        let c = s.rigid.as_ref().unwrap().bodies[0].pos;
+        r.finite &= finite(&s) && c.is_finite();
+        if !r.finite {
+            break;
+        }
+        let mut inside = 0;
+        for &i in &s.contact_points {
+            let dd = radius - (s.origin + s.nodes[i as usize].pos).distance(c);
+            if dd > band {
+                inside += 1;
+            }
+            r.deepest = r.deepest.max(dd);
+        }
+        r.inside = r.inside.max(inside);
+        if hull(&s).iter().any(|t| seg_tri(prev, c, t)) {
+            r.crossed += 1;
+        }
+        prev = c;
+    }
+    let b = &s.rigid.as_ref().unwrap().bodies[0];
+    r.speed_end = b.vel.length();
+    let pc: Vec3 = s.nodes.iter().map(|n| n.vel * n.mass).sum();
+    r.taken = pc.x.abs() / (mass * speed as f32);
+    println!("ball r {radius_mm} mm at {speed} m/s into the door: {r:?}; ball at {:?}", b.pos);
+    m.lock().unwrap().insert((speed, radius_mm), r.clone());
+    r
+}
+
+/// A cannonball never shares space with the car: a 0.1 m steel ball at 30 and 150 m/s
+/// into the front door, no car node inside the ball past the band and the ball never
+/// through a live panel. Bound: exact (two solids; a torn panel is dead, so crossing a live
+/// one is tunnelling). FAILS today (2026-11-24): see the printed rows (node contact with
+/// rigid bodies has no push-out, known-bugs B1).
+#[test]
+fn cannonball_never_inside_the_car() {
+    let mut ok = true;
+    for speed in [30, 150] {
+        let r = shot(speed, 100);
+        let pass = r.finite && r.inside == 0 && r.crossed == 0;
+        row(
+            "a cannonball never shares space with the car",
+            &format!("steel ball r 0.1 m at {speed} m/s into the front door"),
+            format!("{} nodes inside it past the band (deepest {:.0} mm), {} steps through a live panel", r.inside, r.deepest * 1e3, r.crossed),
+            "0, 0".into(),
             pass,
         );
         ok &= pass;
