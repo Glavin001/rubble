@@ -126,6 +126,48 @@ class Builder:
     def build(self, spec: dict) -> dict:
         return _build(spec, self.dirty)
 
+    @modal.method()
+    def build_stream(self, spec: dict):
+        """`build`, yielding each output line as it comes, then `{"result": ...}`: a
+        deployed class's logs do not stream to a caller, a generator's values do."""
+        import io
+        import queue
+        import sys
+        import threading
+        q: queue.Queue = queue.Queue()
+
+        class Lines(io.TextIOBase):
+            def write(self, s: str) -> int:
+                q.put(("out", s))
+                return len(s)
+
+        done: dict = {}
+
+        def work() -> None:
+            old = sys.stdout
+            sys.stdout = Lines()
+            try:
+                done["r"] = _build(spec, self.dirty)
+            except Exception as e:  # noqa: BLE001 - reported to the caller
+                done["r"] = {"code": 1, "error": repr(e), "setup_s": 0, "build_s": 0, "commit_s": 0, "total_s": 0}
+            finally:
+                sys.stdout = old
+                q.put(("done", ""))
+
+        threading.Thread(target=work, daemon=True).start()
+        buf = ""
+        while True:
+            kind, s = q.get()
+            if kind == "done":
+                break
+            buf += s
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                yield {"line": line}
+        if buf:
+            yield {"line": buf}
+        yield {"result": done["r"]}
+
     @modal.exit()
     def flush(self) -> None:
         for snap in self.dirty.values():
@@ -312,7 +354,12 @@ def _build(spec: dict, dirty: dict) -> dict:
 
     sampler = threading.Thread(target=sample, daemon=True)
     sampler.start()
-    code = subprocess.run(cmd, cwd="/repo/engine", env=env).returncode
+    # (Each line through print: build_stream's caller sees it as it comes.)
+    proc = subprocess.Popen(cmd, cwd="/repo/engine", env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+    for line in proc.stdout:
+        print(line.rstrip("\n"), flush=True)
+    code = proc.wait()
     t_build = time.time() - t
     stop.set()
     sampler.join(timeout=2)
@@ -404,7 +451,7 @@ def _diff(key: str, root: Path, files: dict[str, str]) -> tuple[dict, list[str],
 def main(spec: str) -> None:
     """The client (remote_build.sh runs it after `modal deploy`): the deployed function,
     so a warm container outlives this call and serves the next build."""
-    remote = modal.Cls.from_name("rubble-remote-build", "Builder")().build
+    remote = modal.Cls.from_name("rubble-remote-build", "Builder")().build_stream
     s = json.loads(Path(spec).read_text())
     root = Path(s["root"])
     manifest = {}
@@ -454,8 +501,13 @@ def main(spec: str) -> None:
             Path(s["result"]).write_text(json.dumps({"code": 0, "bundle": name, "reused": True}))
             return
     t = time.time()
-    with modal.enable_output():
-        r = remote.remote(s)
+    # The build's output as it comes (cargo, slangc, wasm-pack, ...), then its result.
+    r = {"code": 1, "setup_s": 0, "build_s": 0, "commit_s": 0, "total_s": 0, "error": "no result"}
+    for item in remote.remote_gen(s):
+        if "line" in item:
+            print("  | " + item["line"], flush=True)
+        else:
+            r = item["result"]
     call = time.time() - t
     rate = r.get("cores", BUILD_CPUS) * CPU_PRICE + MEM_GIB * MEM_PRICE
     print(f"[remote_build] build: exit {r['code']}, call {call:.0f} s (container {r['total_s']:.0f} s: setup "

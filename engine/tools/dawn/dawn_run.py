@@ -66,16 +66,22 @@ def run(spec: dict) -> dict:
     p = subprocess.Popen(cmd, cwd="/dawn", env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = []
     cap = spec.get("cap", 900)
-    deadline = time.time() + cap
+    # A timer, not a check per line: a harness that goes quiet (a profiler slowing the
+    # wasm, a hang) is still killed on time. (A per-line check let one run reach the
+    # container's 1800 s limit.)
+    def kill() -> None:
+        if p.poll() is None:
+            print(f"[dawn_run] killed at the {cap} s cap", flush=True)
+            p.kill()
+
+    timer = threading.Timer(cap, kill)
+    timer.start()
     for line in p.stdout:
         line = line.rstrip("\n")
         lines.append(line)
         print(line, flush=True)
-        if time.time() > deadline:
-            p.kill()
-            print(f"[dawn_run] killed at the {cap} s cap", flush=True)
-            break
     p.wait()
+    timer.cancel()
     done.set()
     caches.commit()
     result = next((json.loads(l[7:]) for l in lines if l.startswith("RESULT ")), None)

@@ -35,7 +35,10 @@ if (!B || !CAR) throw new Error('BUNDLE and CAR must be set');
 // then reads navigator.gpu.
 Object.assign(globalThis, globals);
 globalThis.Window ??= class Window {};
-const gpu = create([]);
+// --dawn-features a,b: Dawn toggles for create() (e.g. skip_validation, to measure what
+// validation costs; never for a bit-for-bit verdict's own setup).
+const dawnFeatures = arg('--dawn-features', '');
+const gpu = create(dawnFeatures ? [`enable-dawn-features=${dawnFeatures}`] : []);
 if (globalThis.navigator) Object.defineProperty(globalThis.navigator, 'gpu', { value: gpu, configurable: true });
 else globalThis.navigator = { gpu };
 
@@ -62,7 +65,9 @@ const files = list.filter((f) => f.endsWith('.jbeam')).map((f) => [f, readFileSy
 const pcName = list.find((f) => f.endsWith('.pc'));
 const pc = pcName ? readFileSync(join(CAR, pcName), 'utf8') : undefined;
 
-const spec = { vehicle: { jbeam: files, pc }, scene, cars, bitExact: true,
+// (--gpu-timing step|phases: the World's own GPU timestamps a step, frame.gpuTimes().)
+const gpuTiming = arg('--gpu-timing', 'step');
+const spec = { vehicle: { jbeam: files, pc }, scene, cars, bitExact: true, gpuTiming,
   ...(scene === 'mountain' ? { mountain: { terrain: arg('--terrain', 'ledges') } } : {}) };
 // Every progress line the lab reports (each kernel's compile, as the page's loading card
 // shows them), with the time since the harness began.
@@ -71,13 +76,29 @@ const stamp = () => `[+${((performance.now() - t0) / 1000).toFixed(1)} s]`;
 // steps): timing waits until none are left, so a compile never lands in a frame's time.
 const pending = new Set();
 out.compileMs = {};
+// --max-compile-s S: a kernel still compiling after S seconds means this driver's cache
+// is cold for it: stop at once, naming the driver and the kernel (a timing run should not
+// spend 25 minutes filling a cache; a cache-fill run gives no limit).
+const maxCompile = Number(arg('--max-compile-s', 0)) * 1000;
+const timers = new Map();
 const progress = (...m) => {
   const text = m.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ');
   console.log(stamp(), 'lab:', text);
   const c = /^compiling (\S+)/.exec(text);
-  if (c) pending.add(c[1]);
+  if (c) {
+    pending.add(c[1]);
+    if (maxCompile) timers.set(c[1], setTimeout(() => {
+      console.log('RESULT ' + JSON.stringify({ ...out, coldCache: { kernel: c[1], driver: out.adapter?.description,
+        limitS: maxCompile / 1000 } }));
+      process.exit(4);
+    }, maxCompile));
+  }
   const d = /^compiled (\S+) (\d+)/.exec(text);
-  if (d) { pending.delete(d[1]); out.compileMs[d[1]] = Number(d[2]); }
+  if (d) {
+    pending.delete(d[1]);
+    out.compileMs[d[1]] = Number(d[2]);
+    clearTimeout(timers.get(d[1]));
+  }
 };
 const { world, lab } = await rw.createVehicleLab(spec, progress);
 console.log(stamp(), 'lab built');
@@ -108,10 +129,62 @@ console.log(stamp(), `timing ${timeFrames} frames from t ${out.simTime.toFixed(2
 
 // Frame time: `timeFrames` World steps (60 Hz frames) from here as fast as readbacks
 // allow, as the page's automation steps (wall, ms a frame).
+// --cpu-prof: V8's sampling profiler around the timed frames; the functions with the most
+// self time (wasm, JS, or "(program)" for native code such as Dawn) go in the result.
+const prof = process.argv.includes('--cpu-prof');
+let session = null;
+if (prof) {
+  const { Session } = await import('node:inspector/promises');
+  session = new Session();
+  session.connect();
+  await session.post('Profiler.enable');
+  await session.post('Profiler.setSamplingInterval', { interval: 200 });
+  await session.post('Profiler.start');
+}
+// The GPU's own time a step (timestamps, gpuTiming), summed per segment: wall minus GPU is
+// what Dawn, the readbacks and the host add. (The CPU time is not the host's work: the
+// step loop polls on every macrotask while it waits.)
+const gt = { steps: 0, totalMs: 0, segments: new Map() };
+const onFrame = (f) => {
+  for (const t of f.gpuTimes?.() ?? []) {
+    gt.steps++;
+    gt.totalMs += t.totalMs;
+    for (const [n, ms] of t.segments) gt.segments.set(n, (gt.segments.get(n) ?? 0) + ms);
+  }
+};
 const f0 = performance.now();
-await rw.stepFrames(world, timeFrames, () => {}, before);
-await rw.drain(world, () => {});
+const c0 = process.cpuUsage();
+await rw.stepFrames(world, timeFrames, onFrame, before);
+await rw.drain(world, onFrame);
 out.msPerFrame = (performance.now() - f0) / timeFrames;
+if (gt.steps) {
+  out.gpuMsPerFrame = gt.totalMs / gt.steps;
+  out.gpuSegments = [...gt.segments.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15)
+    .map(([n, ms]) => [n, +(ms / gt.steps).toFixed(3)]);
+  console.log(stamp(), `GPU ${out.gpuMsPerFrame.toFixed(2)} ms a frame (${gt.steps} steps timed); top: ` +
+    out.gpuSegments.slice(0, 6).map(([n, ms]) => `${n} ${ms}`).join(', '));
+}
+if (session) {
+  const { profile } = await session.post('Profiler.stop');
+  const self = new Map();
+  const dt = profile.timeDeltas;
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  profile.samples.forEach((id, i) => {
+    const n = byId.get(id);
+    const f = n.callFrame;
+    const name = `${f.functionName || '(anon)'} ${f.url ? f.url.split('/').pop() : ''}`.trim();
+    self.set(name, (self.get(name) ?? 0) + (dt[i] ?? 0));
+  });
+  const total = [...self.values()].reduce((a, b) => a + b, 0);
+  out.profileTop = [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25)
+    .map(([k, v]) => `${(100 * v / total).toFixed(1)}% ${k}`);
+  for (const l of out.profileTop) console.log('  prof', l);
+}
+// This process's CPU time a frame (user + system, every thread: JS, Dawn's validation
+// and submission): close to the wall time means the frame waits on the CPU, not the GPU.
+const c1 = process.cpuUsage(c0);
+out.cpuMsPerFrame = (c1.user + c1.system) / 1000 / timeFrames;
+console.log(stamp(), `${out.msPerFrame.toFixed(2)} ms a frame wall, ${out.cpuMsPerFrame.toFixed(2)} ms CPU`);
 lap('timed');
 
 if (mask) {
