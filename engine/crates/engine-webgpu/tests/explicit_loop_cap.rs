@@ -283,19 +283,28 @@ fn shift_const(src: &str, name: &str) -> u32 {
 #[test]
 fn every_explicit_slang_loop_is_capped() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang/kernels");
-    let main = std::fs::read_to_string(dir.join("explicit_beams.slang")).unwrap();
-    // The file and its includes (explicit_beams_rigid.slang, explicit_loop_cap.slang).
-    let mut files = vec![("explicit_beams.slang".to_string(), main.clone())];
-    for l in main.lines() {
-        if let Some(inc) = l.trim().strip_prefix("#include \"").and_then(|r| r.strip_suffix('"')) {
+    // The kernel and the World's coupling passes (which carry the same caps and budget),
+    // with everything they include in this directory, followed through the includes
+    // (explicit_beams_frame.slang, explicit_loop_cap.slang, vehicle_coupling_query.slang, ...).
+    let coupling = std::fs::read_to_string(dir.join("vehicle_coupling.slang")).unwrap();
+    assert!(coupling.contains("#include \"explicit_loop_cap.slang\""), "the coupling passes include the caps");
+    let mut files = vec![
+        ("explicit_beams.slang".to_string(), std::fs::read_to_string(dir.join("explicit_beams.slang")).unwrap()),
+        ("vehicle_coupling.slang".to_string(), coupling),
+    ];
+    let mut at = 0;
+    while at < files.len() {
+        let text = files[at].1.clone();
+        at += 1;
+        for l in text.lines() {
+            let Some(inc) = l.trim().strip_prefix("#include \"").and_then(|r| r.strip_suffix('"')) else { continue };
+            if inc.contains('/') || files.iter().any(|f| f.0 == inc) {
+                continue;
+            }
             files.push((inc.to_string(), std::fs::read_to_string(dir.join(inc)).unwrap()));
         }
     }
     assert!(files.iter().any(|f| f.0 == "explicit_loop_cap.slang"), "the caps are included");
-    // The World's coupling passes carry the same caps and budget.
-    let coupling = std::fs::read_to_string(dir.join("vehicle_coupling.slang")).unwrap();
-    assert!(coupling.contains("#include \"explicit_loop_cap.slang\""), "the coupling passes include the caps");
-    files.push(("vehicle_coupling.slang".to_string(), coupling));
     let mut loops = 0;
     for (name, text) in &files {
         let bad = uncapped_slang_loops(text);
@@ -307,14 +316,22 @@ fn every_explicit_slang_loop_is_capped() {
     }
     assert!(loops > 150, "the scan found the kernel's loops ({loops})");
     // Each entry point that flushes the flag does so at every return.
+    let main: String = files.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("\n");
     let s = strip_comments(&main);
     for (at, _) in s.match_indices("[shader(\"compute\")]") {
         let open = at + s[at..].find('{').unwrap();
         let body = &s[open..close_of(s.as_bytes(), open)];
         let name = s[at..open].split("void ").nth(1).unwrap_or("").split('(').next().unwrap_or("");
         if body.contains("ebLoopCapFlush") {
-            assert!(!body.contains("return;"), "{name}: a return without ebLoopCapFlush");
-            assert!(body.trim_end_matches('}').trim_end().ends_with("ebLoopCapFlush();"), "{name}: no flush at its end");
+            // (A bare return right after the flush is one too.)
+            for (r, _) in body.match_indices("return;") {
+                assert!(body[..r].trim_end().ends_with("ebLoopCapFlush();"), "{name}: a return without ebLoopCapFlush");
+            }
+            // (The last statement, past any closing `#endif`: a body split by the
+            // preprocessor flushes at the end of each branch.)
+            let end: Vec<&str> = body.trim_end_matches('}').lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            let last = end.iter().rev().find(|l| !l.starts_with('#')).copied().unwrap_or("");
+            assert!(last.ends_with("ebLoopCapFlush();"), "{name}: no flush at its end");
         }
     }
     // The scan rejects what it should.

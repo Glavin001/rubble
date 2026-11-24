@@ -22,10 +22,11 @@ Exits 1 with one line per broken rule:
   rustc compiles a function as one unit: an edit inside one of 3000 lines rebuilt the
   crate 0.7 s slower than one inside a small one (engine/docs/measurements/build-time.md),
   and the reader carries all of it.
-- Size: no Rust or Slang source over its limit (Rust 1500 lines, Slang 3000), except
-  the files in size-allowlist.txt, each at most its listed size (they may shrink, not
+- Size: no Rust or Slang source over 1000 lines (the target is about 500), except the
+  files in size-allowlist.txt, each at most its listed size (they may shrink, not
   grow). A file that must grow past its line is split, or its line raised in the same
-  change, where review sees it.
+  change, where review sees it. A Slang file is split into parts it `#include`s, proved
+  lossless with tools/build-time/kernel_digest.py (STRIP_LINES=1).
 """
 import json
 import os
@@ -37,7 +38,9 @@ ENGINE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ALLOWLIST = os.path.join(ENGINE, "tools", "build-time", "size-allowlist.txt")
 FN_ALLOWLIST = os.path.join(ENGINE, "tools", "build-time", "fn-size-allowlist.txt")
 FN_LIMIT = 200
-LIMITS = {".rs": 1500, ".slang": 3000}
+LIMITS = {".rs": 1000, ".slang": 1000}
+# The size a file aims for (reported, not enforced).
+TARGET = 500
 SCAN = ["crates", "slang", "experiments"]
 
 KERNEL_BUILDS = ["engine-webgpu", "engine-metal", "engine-cuda", "engine-viewer"]
@@ -226,8 +229,8 @@ def load_allowlist():
 def write_allowlist(allowed):
     with open(ALLOWLIST, "w") as fh:
         fh.write(
-            "# Sources over the size limit (tools/build-time/check.py: Rust 1500 lines,\n"
-            "# Slang 3000) when the limit was set, each with the most lines it may have.\n"
+            "# Sources over the size limit (tools/build-time/check.py: 1000 lines, Rust and\n"
+            "# Slang; about 500 the target) when the limit was set, each with the most lines it may have.\n"
             "# They may shrink (check.py --shrink lowers the numbers), not grow: split a\n"
             "# file instead, or raise its line in the same change, where review sees it.\n"
         )
@@ -274,8 +277,9 @@ def main():
     check_fn_sizes(problems, shrink, False)
     for p in problems:
         print(p)
+    over = sum(1 for n in sizes().values() if n > TARGET)
     if not problems:
-        print("build architecture: ok")
+        print(f"build architecture: ok ({over} sources past the {TARGET}-line target)")
     return 1 if problems else 0
 
 
