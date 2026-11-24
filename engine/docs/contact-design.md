@@ -443,8 +443,11 @@ contact with a clear error; the lab page's control is off until they ship.
   gate fails. Not the missing levels-once module:
   with it on for offsets (an experiment, perf=4 on one build) 12 rows bit for bit and PASS, pile2
   -0.8 %, barrier -0.3 %, pile32 -28.3 %. It is not adopted: the module is then 22,198 statements,
-  10.2 s predicted against the 10 s cap (about 220 statements to find). The cause of pile2 and
-  barrier is open; whether a car without offsets pays the same is not measured.
+  10.2 s predicted against the 10 s cap (about 220 statements to find). A car without offsets pays most of
+  it too (the fleet family on/off, its own saved states): barrier +10.8 %, pile2 +5.5 %. So barrier
+  is the schedule's own cost on a two-body group; of pile2's +14.4 % with offsets the rest may be
+  offsets or the different saved state (not separated). A schedule chosen by group size would
+  take both; the family's default predates this work.
 - A portable fixture stores its planner words, perf flags included, and `apply` does not
   mask them: fixtures made by a build replay that build's schedule on any other. Earlier
   "7-11 % slower" figures of this day are void for that reason.
