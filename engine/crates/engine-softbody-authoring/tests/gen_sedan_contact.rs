@@ -720,8 +720,8 @@ fn shot(speed: u32, radius_mm: u32) -> Shot {
 /// A cannonball never shares space with the car: a 0.1 m steel ball at 30 and 150 m/s
 /// into the front door, no car node inside the ball past the band and the ball never
 /// through a live panel. Bound: exact (two solids; a torn panel is dead, so crossing a live
-/// one is tunnelling). FAILS today (2026-11-24): see the printed rows (node contact with
-/// rigid bodies has no push-out, known-bugs B1).
+/// one is tunnelling). Passes since 2026-11-24 at 30 and 150 m/s (it failed before: node
+/// contact with rigid bodies had no push-out, known-bugs B1).
 #[test]
 fn cannonball_never_inside_the_car() {
     let mut ok = true;
