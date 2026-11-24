@@ -479,7 +479,8 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// For [`FramePlanner::set_perf_flags`]'s callers; kept as bit 30 of the word after [`W_BEAM_ORDER`] (the fleet
 /// copies' perf word has no free bit): the fleet-wide walk tests a candidate's position before it loads its records,
-/// its big triangles on threads of their own (flWalkBox; §8.56). On by default but in a browser (rung 3 not run).
+/// its big triangles on threads of their own (flWalkBox; §8.56). On by default, in a browser too: Chrome's A/B
+/// (rung 3) held it bit for bit on 8 cars on the ledges and in the derby, and it is faster there on a pile (§8.64).
 pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
@@ -490,7 +491,7 @@ pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
 /// [`PERF_FLEET_KEEP`] (§8.39: bit for bit natively and in Chrome, faster at the median
 /// with 8 cars, a tie at 32; on by the owner's decision, 2026-11-19); and
-/// [`PERF_HIT_SLOT_MAP`] (§8.46);
+/// [`PERF_HIT_SLOT_MAP`] (§8.46); [`PERF_FLEET_WALK_BOX`] (§8.56, §8.64);
 /// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
     std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).map(|f| f & !PERF_KEEP_TRACK_REST).unwrap_or(

@@ -7217,3 +7217,126 @@ both settings, `tools/build-time/check.py`, and `compile_cost.py --check`
 lines: the gate is now 152, still a 0.0 s compile. Not run: the Mac matrix and the Chrome
 page. On the Mac `vvwide` is on by default for fleets of at most eight, so the same
 recovery is expected there.
+
+### 8.64 Chrome: the fast schedules' switches on the lab page (2026-11-24)
+
+Three changes proven natively and on CUDA were off in a browser (wasm32): surface contact
+on the fast schedules (`surffast`, §8.53 and §8.61), the fleet walk on a pile by boxes
+(`PERF_FLEET_WALK_BOX`, §8.56), and vehicle contact's frames without a group of two or
+more on the wide passes (`vvwide`, §8.57 and §8.63). This section is their rung 3: Chrome's
+bit-for-bit A/B on the lab page, then whole runs before and after.
+
+**Settable from the page.** The lab has three controls, applied as it runs:
+- "surface contact on the fast schedules": default, off, lone cars, or lone and touching
+  cars;
+- "cars apart on the fleet-wide passes": default, on, or off;
+- "pile walk by boxes", a perf flag.
+
+The schedule settings are process-wide host settings
+(`explicit_plan::schedule::host_setting`). In the browser they stand in for
+`RUBBLE_SURFACE_FAST` and `RUBBLE_VV_WIDE`, and they are set before the page lists its
+kernels to compile. A part turned on whose modules were not listed rebuilds the lab in
+place. `WebWorld.explicitAbSwitch` A/Bs a host switch by name: `surffast` (both parts),
+`surffast_wide`, `surffast_contact` or `vvwide`. The recorder's `--ab` takes a list of
+masks and names. Every A/B below is frame-locked, with bit-exact results on and
+`car=gen`, the generated sedan from the current code. Each sample is every state word
+after N frames of 34 steps.
+
+| A/B | page query | samples | verdict |
+|---|---|---|---|
+| `surffast` | pole, 1 car, `surfaceFast=all` | 40 (20 frames, to 40 s) | bit for bit |
+| `surffast_wide` | full wall, 1 car, `surfaceFast=wide` | 40 (20 frames, to 40 s) | bit for bit; wide frames taken |
+| `surffast`, `surffast_contact`, `vvwide`, `536870912` | mountain ledges, 8 cars, `surfaceFast=all&vvWide=on` | 10 each (3 frames, every 2 s to 20 s) | bit for bit |
+| the same four | derby, 8 cars, the same query | 10 each | **`surffast` and `surffast_contact` differ at t 4 s**; `vvwide` and `536870912` bit for bit |
+| `surffast_contact`, `surffast_wide` | the derby again (every 0.5 s to 7 s) | 14 each | `surffast_contact` differs at t 4 s only (the same words); `surffast_wide` bit for bit |
+| `vvwide`, `536870912` | derby, 8 cars, surface contact off, `vvWide=on` | 12 each | bit for bit; `vvwide`'s frames never taken |
+
+The commands, from `engine/`:
+
+```
+tools/vehicle-lab/run.sh --probe --locked --ab surffast --abUntil 40 "pole1:car=gen&mode=crash&crashKind=pole&cars=1&surface=1&surfaceFast=all"
+tools/vehicle-lab/run.sh --probe --locked --ab surffast_wide --abUntil 40 "wall1:car=gen&mode=crash&crashKind=wall&cars=1&surface=1&surfaceFast=wide"
+tools/vehicle-lab/run.sh --probe --locked --ab surffast,surffast_contact,vvwide,536870912 --abFrames 3 --abEvery 2 --abUntil 20 "mountain8:car=gen&mode=mountain&cars=8&terrain=ledges&surface=1&surfaceFast=all&vvWide=on"
+tools/vehicle-lab/run.sh --probe --locked --ab surffast,surffast_contact,vvwide,536870912 --abFrames 3 --abEvery 2 --abUntil 20 "derby8:car=gen&mode=derby&derbyCars=8&surface=1&surfaceFast=all&vvWide=on"
+```
+
+Multi-car samples are 3 frames, not 20: at 20 frames each sample of four switches costs
+minutes at 8 cars, past the 15-minute bound of a GPU job.
+
+**The derby's difference.** It repeats: a second run gives the same words at the same
+time. From that state, one step with `surffast_contact` on and off differs in six words
+only. Those are the accelerations (`acc`) of two nodes of the second car, nodes 207 and
+213, and all six are NaN on both sides, with different NaN bit patterns. After four steps
+1,605 node words differ, all finite. So both schedules make the same NaN accelerations,
+and the two schedules carry them into the nodes differently. The saved state replays bit
+for bit natively on Metal, with the bounds checks off and on (`RUBBLE_SHADER_CHECKS_OFF=0`):
+
+```
+FRAMES=3 EXTRA="--scenario out/chrome/derby8.json --surface 1" tools/explicit-2khz/fast-check.sh surffast out/fixtures-chrome/cars8_t4.00_derby_surffast.fx
+```
+
+`out/chrome/derby8.json` is `{"scene":"derby","cars":8,"surface":true}`. This is Chrome's
+alone, and it starts from NaN accelerations, which are a bug of their own (known-bugs.md
+F11). The vehicle-contact part of `surffast` stays off in the browser, as it already is on
+native wgpu (§8.53).
+
+**`vvwide`** was bit for bit wherever its frames ran: the derby before its first contact,
+with the vehicle-contact part of `surffast` on (`vv wide used 1` at every sample from 0.5
+to 3.5 s). With surface contact its frames need that part, which stays off. In the derby
+without surface contact, Chrome never took its frames in 30 s, although every one of its
+modules had compiled by 65 s (`--kernelLog`). The cause was not found. With nothing to
+measure, it stays off in the browser.
+
+**Whole runs.** These use the page's own real-time loop, 20 simulated seconds each,
+surface contact on, `car=gen`, the release build. The numbers are the vehicles' GPU ms a
+step (median / p95 / worst) and the share of real time. "Before" is main at 8e4377ac with
+these commits' plumbing and all three switches off, as main's defaults have them. "After"
+has the `surffast` wide part and the walk box on.
+
+| scene | before | after |
+|---|---|---|
+| drive, 1 car | 17.0 / 20.1 / 29.6, 62 % | 6.5 / 6.6 / 7.7, 98 % |
+| pole crash, 1 car | 17.4 / 23.1 / 34.4, 54 % | 6.9 / 7.1 / 12.5, 89 % |
+| mountain ledges, 8 cars | 47.2 / 203.0 / 233.7, 15 % | 27.2 / 180.7 / 211.2, 14 % |
+| mountain ledges, 20 cars | 45.1 / 55.4 / 475.7, 23 % | 36.6 / 251.8 / 425.9, 21 % |
+| derby, 8 cars | 19.5 / 36.9 / 75.5, 50 % | 21.8 / 25.8 / 76.8, 54 % |
+| derby, 20 cars | 28.7 / 78.2 / 83.1, 33 % | 25.3 / 39.0 / 65.7, 37 % |
+
+The lone cars take the wide passes now: 2.6 times faster, and near real time. With
+several cars, contact is active from the start, so the wide part does not act there and
+the difference is the walk box.
+
+The page's real-time loop is not frame-locked, so two runs of one build follow different
+trajectories. That is why the before column's mountain-20 p95 (55 ms) is so far below the
+after column's: in that run the pile formed late. To judge the walk box, derby 8 and
+mountain 20 ran twice more each, alternating `fleetWalkBox=0` and `=1`:
+
+| scene | walk box off (two runs) | walk box on (two runs) |
+|---|---|---|
+| mountain, 20 cars | 44.5 / 247.3 / 423.5, 20 %; 43.5 / 244.9 / 421.9, 20 % | 35.9 / 219.0 / 428.0, 22 %; 36.4 / 226.5 / 431.8, 21 % |
+| derby, 8 cars | 20.4 / 23.6 / 63.8, 58 %; 20.2 / 24.3 / 37.0, 58 % | 18.7 / 63.9 / 76.5, 47 %; 20.0 / 25.4 / 71.6, 57 % |
+
+On the mountain it is faster in all three pairs: 44 → 36 ms at the median, the p95 lower.
+The derby is a tie at the median within the spread between runs (20.0 against 20.2 ms over
+three runs each). Its p95, worst and real-time share swing from run to run on both sides.
+The walk box is on in the browser.
+
+**Compile cost.** No kernel changed (`compile_cost.py --check` and `--dup-check` pass).
+What changed is which kernels a page lists. A lone surface car's page now also compiles
+the wide passes and the surface pipelines, and the first load after the change took 37.5 s
+against 3.3 s warm. That was once, with Metal's shader cache cold for those modules; later
+loads are 3.6 s. With `tools/vehicle-lab/sync-pipelines.js` preloaded (pole, 1 car;
+mountain, 8 cars), no synchronous pipeline creation took over 200 ms (F10). This was
+headless and the cache was warm. A cold windowed load was not tried.
+
+**Gates.** All of these pass:
+- `cargo test -p engine-exec`;
+- `tools/build-time/check.py`, after three files were split for its size rule
+  (`explicit_plan/host_setting.rs`, `vehicle_lab/settings.rs`, and the vv specs in
+  `explicit_vv_wide_gpu.rs`);
+- `inline_budget.py`, `compile_cost.py --check`, `compile_cost.py --dup-check`;
+- `fanout.py --check`;
+- Chrome's validation of all 158 modules (`EXPLICIT_WGSL_MODULES_ONLY=1`);
+- `cargo check -p engine-world-wasm --target wasm32-unknown-unknown`.
+
+Logs are in `out/chrome/` (`base-*`, `after-*`, `wb0r*`/`wb1r*`, `ab-*`, `sync-*`).
