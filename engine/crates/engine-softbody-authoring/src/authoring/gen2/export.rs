@@ -86,15 +86,8 @@ fn rows(header: Value, rows: Vec<Value>) -> String {
     s
 }
 
-/// JBeam files (path under the vehicles folder, text) and the `.pc`.
-pub fn jbeam_files(
-    car: &Car,
-    flex: &[(Part, Flex)],
-    deform_groups: &[(String, Vec<usize>, f32)],
-) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    // Main part: slots and the reference nodes.
-    let subs = subs(car);
+/// The main part: the slots and the reference nodes.
+fn main_part(car: &Car, subs: &[(Part, String)], out: &mut Vec<(String, String)>) {
     let slots: Vec<Value> = Part::ALL
         .iter()
         .map(|p| p.name().to_string())
@@ -124,6 +117,35 @@ pub fn jbeam_files(
     );
     main += "}\n}\n";
     out.push((format!("{NAME}/{NAME}.jbeam"), main));
+}
+
+/// The configuration (`.pc`).
+fn pc_file(subs: &[(Part, String)], out: &mut Vec<(String, String)>) {
+    let mut parts = Map::new();
+    for p in Part::ALL {
+        parts.insert(p.name().into(), json!(p.name()));
+    }
+    for s in subs {
+        parts.insert(sub_name(&s.1), json!(sub_name(&s.1)));
+    }
+    let pc = json!({"format": 2, "mainPartName": NAME, "model": NAME, "parts": parts, "vars": {}});
+    out.push((
+        format!("{NAME}/{NAME}.pc"),
+        serde_json::to_string_pretty(&pc).unwrap(),
+    ));
+}
+
+/// JBeam files (path under the vehicles folder, text) and the `.pc`.
+pub fn jbeam_files(
+    car: &Car,
+    flex: &[(Part, Flex)],
+    deform_groups: &[(String, Vec<usize>, f32)],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    // Main part: slots and the reference nodes.
+    let subs = subs(car);
+    main_part(car, &subs, &mut out);
+    let n = |i: usize| car.nodes[i].name.clone();
 
     let units: Vec<(Part, Option<&str>)> = Part::ALL
         .iter()
@@ -493,17 +515,6 @@ pub fn jbeam_files(
         out.push((format!("{NAME}/{}.jbeam", pname), text));
     }
     // The configuration.
-    let mut parts = Map::new();
-    for p in Part::ALL {
-        parts.insert(p.name().into(), json!(p.name()));
-    }
-    for s in &subs {
-        parts.insert(sub_name(&s.1), json!(sub_name(&s.1)));
-    }
-    let pc = json!({"format": 2, "mainPartName": NAME, "model": NAME, "parts": parts, "vars": {}});
-    out.push((
-        format!("{NAME}/{NAME}.pc"),
-        serde_json::to_string_pretty(&pc).unwrap(),
-    ));
+    pc_file(&subs, &mut out);
     out
 }

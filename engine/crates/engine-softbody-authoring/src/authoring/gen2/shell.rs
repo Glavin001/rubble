@@ -247,6 +247,29 @@ pub fn lattice_with(st: &Structure, feel: &CrashFeel) -> Lattice {
     l
 }
 
+/// Torsion bars over the floor's cells: sill to tunnel side, and across the
+/// tunnel, between consecutive rows (the node ids of each cell's four corners).
+fn floor_torsion_cells(at: &dyn Fn(&str) -> usize) -> Vec<[usize; 4]> {
+    let mut torsion = Vec::new();
+    for k in 1..5 {
+        for s in ["l", "r"] {
+            torsion.push([
+                at(&format!("c1_{k}o{s}")),
+                at(&format!("c1_{k}t{s}")),
+                at(&format!("c1_{}t{s}", k + 1)),
+                at(&format!("c1_{}o{s}", k + 1)),
+            ]);
+        }
+        torsion.push([
+            at(&format!("c1_{k}tl")),
+            at(&format!("c1_{k}tr")),
+            at(&format!("c1_{}tr", k + 1)),
+            at(&format!("c1_{}tl", k + 1)),
+        ]);
+    }
+    torsion
+}
+
 fn lattice_defined(st: &Structure) -> Lattice {
     let n = st.nodes.len();
     let id: HashMap<&str, usize> = st
@@ -543,23 +566,7 @@ fn lattice_defined(st: &Structure) -> Lattice {
     budget(st, &mut beams);
     // Torsion bars over the floor's cells: sill to tunnel side, and across
     // the tunnel, between consecutive rows.
-    let mut torsion = Vec::new();
-    for k in 1..5 {
-        for s in ["l", "r"] {
-            torsion.push([
-                at(&format!("c1_{k}o{s}")),
-                at(&format!("c1_{k}t{s}")),
-                at(&format!("c1_{}t{s}", k + 1)),
-                at(&format!("c1_{}o{s}", k + 1)),
-            ]);
-        }
-        torsion.push([
-            at(&format!("c1_{k}tl")),
-            at(&format!("c1_{k}tr")),
-            at(&format!("c1_{}tr", k + 1)),
-            at(&format!("c1_{}tl", k + 1)),
-        ]);
-    }
+    let torsion = floor_torsion_cells(&at);
     Lattice {
         beams,
         torsion: torsion
