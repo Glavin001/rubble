@@ -3749,6 +3749,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // ------------------------------------------------------------------
     if inp.hull_triangles() {
         skin_hull(&mut r, inp);
+        fill_holes(&mut r);
         r.car.tri_aero = Some((hull_drag_coef(&r, inp, ph.drag_cd), 0.0));
     }
     // ------------------------------------------------------------------
@@ -3759,6 +3760,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         defined.is_some() && std::env::var("RIG_NO_INNER_SKINS").map_or(true, |v| v != "1");
     if inner_skins {
         interior_skins(&mut r);
+        fill_holes(&mut r);
     }
     // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.
@@ -4882,6 +4884,191 @@ fn interior_skins(r: &mut Rig) {
             let f: Vec<usize> = face.iter().map(|&k| ids[k]).collect();
             poly(&f, Part::Engine, Some(sub));
         }
+    }
+    r.car.tris.extend(add);
+}
+
+/// The longest hole (its rim's length, m) [`fill_holes`] closes. **Choice**: past the
+/// corners over the lamps (2.2 m round, between the hood's side edge and the fender's top),
+/// short of the doors' and the trunk lid's outlines (3.0–4.5 m) and the underside's
+/// opening; `RIG_FILL_HOLES_M` sets it (2.5 m measured). **Off by default (0):** measured
+/// over six runs of the 60 + 60 head-on it cuts node-only contact's overlap (nodes inside
+/// 71 → 60, 191 → 166 L) but not edge contact's (26 → 30, 49 → 58 L, within the spread),
+/// and the right lamp corner stays open where the skin has doubled layers at its seams.
+pub const FILL_HOLES_M: f32 = 0.0;
+
+/// Closes the collision skin's small holes (known-bugs S4: the corners over the lamps let a
+/// partner's nodes into the engine bay). A hole is a loop of open edges (on one triangle
+/// each), followed the way its triangle runs, so loops that share a node come apart. Each
+/// loop no longer than [`FILL_HOLES_M`] is filled by ear clipping in its best-fit plane,
+/// its triangles running against the rim's (facing as the skin round it does), of the part
+/// of their first node, inner as the rim's triangle. A flat part's single face (the
+/// radiator, the seats' flat panels) is such a loop: it gets its other side.
+fn fill_holes(r: &mut Rig) {
+    let max = std::env::var("RIG_FILL_HOLES_M").ok().and_then(|v| v.parse().ok()).unwrap_or(FILL_HOLES_M);
+    if max <= 0.0 {
+        return;
+    }
+    let mut uses: HashMap<(usize, usize), usize> = HashMap::new();
+    for t in &r.car.tris {
+        for e in 0..3 {
+            let (a, b) = (t.n[e], t.n[(e + 1) % 3]);
+            *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    // The open edges as their triangle runs them (a → b), with the triangle's index.
+    let mut out_of: std::collections::BTreeMap<usize, Vec<(usize, usize)>> = Default::default();
+    for (k, t) in r.car.tris.iter().enumerate() {
+        for e in 0..3 {
+            let (a, b) = (t.n[e], t.n[(e + 1) % 3]);
+            if uses[&(a.min(b), a.max(b))] == 1 {
+                out_of.entry(a).or_default().push((b, k));
+            }
+        }
+    }
+    let mut used: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut add: Vec<Tri> = Vec::new();
+    // Loops, each as (nodes in the rim's running order, a rim triangle's index).
+    let mut loops: Vec<(Vec<usize>, usize)> = Vec::new();
+    let starts: Vec<(usize, usize, usize)> =
+        out_of.iter().flat_map(|(&a, v)| v.iter().map(move |&(b, k)| (a, b, k))).collect();
+    let mut walked: std::collections::HashSet<(usize, usize)> = Default::default();
+    for &(a0, b0, k0) in &starts {
+        if used.contains(&(a0, b0)) {
+            continue;
+        }
+        let mut lp = vec![a0];
+        let mut mine = vec![(a0, b0)];
+        used.insert((a0, b0));
+        let mut cur = b0;
+        let mut closed = false;
+        for _ in 0..64 {
+            if cur == a0 {
+                closed = true;
+                break;
+            }
+            lp.push(cur);
+            let Some(&(next, _)) = out_of.get(&cur).and_then(|v| v.iter().find(|&&(n, _)| !used.contains(&(cur, n)))) else {
+                break;
+            };
+            used.insert((cur, next));
+            mine.push((cur, next));
+            cur = next;
+        }
+        if closed && lp.len() >= 3 {
+            walked.extend(mine.iter().map(|&(a, b)| (a.min(b), a.max(b))));
+            loops.push((lp, k0));
+        }
+    }
+    // Where neighbouring triangles run a shared edge the same way (a doubled layer at a
+    // seam) the walk breaks: the rest as plain loops (components of the open edges whose
+    // every node has two), in the running order most of their rim triangles give.
+    {
+        let mut nb: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+        let mut dir: HashMap<(usize, usize), usize> = HashMap::new();
+        for &(a, b, k) in &starts {
+            let key = (a.min(b), a.max(b));
+            if walked.contains(&key) {
+                continue;
+            }
+            nb.entry(a).or_default().push(b);
+            nb.entry(b).or_default().push(a);
+            dir.insert((a, b), k);
+        }
+        let mut seen: std::collections::HashSet<usize> = Default::default();
+        for (&s0, _) in nb.iter() {
+            if seen.contains(&s0) {
+                continue;
+            }
+            let mut comp = vec![s0];
+            let mut stack = vec![s0];
+            seen.insert(s0);
+            while let Some(x) = stack.pop() {
+                for &y in &nb[&x] {
+                    if seen.insert(y) {
+                        comp.push(y);
+                        stack.push(y);
+                    }
+                }
+            }
+            if comp.len() < 3 || comp.iter().any(|x| nb[x].len() != 2) {
+                continue;
+            }
+            let mut lp = vec![s0];
+            let (mut prev, mut cur) = (s0, nb[&s0][0]);
+            while cur != s0 && lp.len() <= comp.len() {
+                lp.push(cur);
+                let next = if nb[&cur][0] != prev { nb[&cur][0] } else { nb[&cur][1] };
+                prev = cur;
+                cur = next;
+            }
+            if lp.len() != comp.len() {
+                continue;
+            }
+            let n = lp.len();
+            let along = (0..n).filter(|&k| dir.contains_key(&(lp[k], lp[(k + 1) % n]))).count();
+            if 2 * along < n {
+                lp.reverse();
+            }
+            let k0 = (0..n)
+                .find_map(|k| dir.get(&(lp[k], lp[(k + 1) % n])).copied())
+                .or_else(|| (0..n).find_map(|k| dir.get(&(lp[(k + 1) % n], lp[k])).copied()))
+                .unwrap_or(0);
+            loops.push((lp, k0));
+        }
+    }
+    for (lp, k0) in loops {
+        let pts: Vec<Vec3> = lp.iter().map(|&i| r.g(i)).collect();
+        let len: f32 = (0..pts.len()).map(|k| pts[k].distance(pts[(k + 1) % pts.len()])).sum();
+        if len > max {
+            continue;
+        }
+        // The cap runs against the rim: the loop reversed, ear-clipped in its plane
+        // (Newell's normal of the reversed loop).
+        let mut ring: Vec<usize> = (0..lp.len()).rev().collect();
+        let mut nrm = Vec3::ZERO;
+        for k in 0..ring.len() {
+            let (p, q) = (pts[ring[k]], pts[ring[(k + 1) % ring.len()]]);
+            nrm += Vec3::new((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y));
+        }
+        let nrm = nrm.normalize_or_zero();
+        if nrm == Vec3::ZERO {
+            continue;
+        }
+        let (part, inner) = (r.car.nodes[lp[0]].part, r.car.tris[k0].inner);
+        let sub = r.car.tris[k0].sub.clone();
+        let mut guard = 0;
+        while ring.len() > 3 && guard < 256 {
+            guard += 1;
+            let m = ring.len();
+            let ear = (0..m).find(|&k| {
+                let (ia, ib, ic) = (ring[(k + m - 1) % m], ring[k], ring[(k + 1) % m]);
+                let (pa, pb, pc) = (pts[ia], pts[ib], pts[ic]);
+                if (pb - pa).cross(pc - pb).dot(nrm) <= 0.0 {
+                    return false;
+                }
+                !ring.iter().any(|&j| {
+                    if j == ia || j == ib || j == ic {
+                        return false;
+                    }
+                    let p = pts[j];
+                    let s1 = (pb - pa).cross(p - pa).dot(nrm);
+                    let s2 = (pc - pb).cross(p - pb).dot(nrm);
+                    let s3 = (pa - pc).cross(p - pc).dot(nrm);
+                    s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0
+                })
+            });
+            let Some(k) = ear else { break };
+            let (ia, ib, ic) = (ring[(k + m - 1) % m], ring[k], ring[(k + 1) % m]);
+            add.push(Tri { n: [lp[ia], lp[ib], lp[ic]], part, group: None, sub: sub.clone(), inner });
+            ring.remove(k);
+        }
+        if ring.len() == 3 {
+            add.push(Tri { n: [lp[ring[0]], lp[ring[1]], lp[ring[2]]], part, group: None, sub: sub.clone(), inner });
+        }
+    }
+    if std::env::var("RIG_HULL_DEBUG").is_ok() {
+        eprintln!("fill_holes: {} triangles close the skin's holes up to {max} m round", add.len());
     }
     r.car.tris.extend(add);
 }

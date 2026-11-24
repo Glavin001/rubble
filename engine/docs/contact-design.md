@@ -201,3 +201,20 @@ no difference beyond the spread; 16 sweeps a little. The 80 mm car-to-car band i
 on overlap but fails the per-step energy test (60 + 60: 3.6 kJ, 100 into 10: 5.9 kJ, bound
 2.1 / 2.9). Per step, edge alone fails the 60 + 60's energy narrowly (2.6 kJ); edge + node–edge
 passes (2.0 kJ). 100 + 100 stays far from clean with every variant.
+
+### Authoring: the collision skin's holes (2026-11-24)
+
+`LOOPS=1` (probe) lists the skin's holes as loops. Over the generated sedan's front: a
+0.42 × 0.45 m hole at each corner over the lamps (between the hood's side edge and the
+fender's top front: the seam zipper's 0.3 m reach does not cross it; the lamp lenses are
+triangulated over the body's nodes, far from the lamp), the radiator, rear seat and console
+as one-sided flat faces, the doors' and trunk lid's outlines, and the underside. The skin
+also has doubled layers at its seams: 91 shared edges walked the same way by both triangles
+(the same defect as the 89 crossings at rest, `collision_skin_does_not_cross_itself_at_rest`).
+
+`fill_holes` (gen2 rig, `RIG_FILL_HOLES_M`, off by default) closes loops up to a length by ear
+clipping (2.5 m: 20 triangles; the left lamp corner and the flat parts close, the right lamp
+corner does not, its rim shared with the doubled layers). Six runs of the 60 + 60 head-on:
+node-only contact 71 → 60 nodes inside, 191 → 166 L; with edge contact 26 → 30, 49 → 58 L
+(within the spread). So with edge contact the remaining overlap does not come through these
+holes; kept off. The doubled seam layers remain an authoring bug to fix in `bridge_seams`.
