@@ -723,6 +723,43 @@ modules, SASS for the T4; end to end from the Mac):
 - **Cost model.** About $0.0003 a second for 16 cores and 16 GiB: a Rust-edit verdict is
   well under a cent, build and GPU together.
 
+**After #158 (Slang sources split into parts), 2026-11-24, same setup:**
+
+| Build | Remote, warm container | Cost |
+|---|---|---|
+| Nothing changed | 14 s | $0.0028 |
+| A Rust edit in engine-cuda, or that edit undone | 23 s | $0.0050 |
+| A line added in `explicit_beams_vv_levels.slang` (one part of `explicit_beams.slang`): 3 modules recompile | 178 s | $0.042 |
+| That kernel edit undone | 23 s | $0.0049 |
+
+- **An edit to one part now recompiles only the modules that use it.** The line added in
+  `vv_levels` made nvcc compile 3 of the 34 explicit modules:
+  - `split_group_wide`: 137–216 s, depending on which Modal host ran it;
+  - `contact_wide_nosurf`: 77–101 s;
+  - `split_grouplevels_wide`: 38–52 s.
+
+  Before the split, a line shift in `explicit_beams.slang` changed most modules' CUDA,
+  because every later line moved and the loop-cap words carry `__LINE__`. Now a module
+  that doesn't use the edited part produces the same CUDA, and its fatbin comes from the
+  cache.
+- **An edit to a part every module uses** (`explicit_beams_beam_phase.slang`) took
+  307–322 s, before the module-list fix below. It reaches the largest module.
+- **Each build reports what compiled:**
+  `[remote_build] nvcc ran 3 time(s), slangc 148: explicit_beams_split_group_wide.cu 137 s (done at 156 s), ...`.
+  A sampler in the builder reads `/proc` twice a second, so the build and its cache keys
+  are untouched; a wrapper at `NVCC` would change the fatbin key, which covers the
+  compiler's own bytes.
+- **The module list is kept between builds.** `explicit_replay --modules` (33–38 s
+  after any kernel edit, because its build reruns slangc for every module) is kept in
+  `rubble-rb-kernels/module-lists/`. Its key is the fixtures, the Rust sources and
+  manifests, and the ENGINE_* settings. Kernel source never changes the list, so a
+  kernel-only edit skips that step. The client reads the entry and passes it in, because
+  a container's view of a Volume didn't show another container's entry even after
+  `reload()`.
+- **What bounds a kernel edit now is the largest module the edit reaches,** compiled on
+  one core: `split_group_wide` at 137–216 s, depending on the Modal host (the Mac's
+  figure for it is 136–160 s). Shortening it is a kernel-side change: split that module.
+
 ## Build speed (CUDA route)
 
 Measured 2026-11-21 on the M3 Max (16 cores, OrbStack), `engine-cuda`'s `explicit_replay`
