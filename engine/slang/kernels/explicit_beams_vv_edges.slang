@@ -28,7 +28,10 @@ static const uint EDGE_SCR = 5u;
 static const uint EDGE_BUCKETS = 2048u; // explicit_plan.rs EDGE_BUCKETS
 static const uint EDGE_BLOCK = 32u; // buckets a block of the starts' scan
 static const uint EDGE_CAND = 32u; // candidate pairs a listed item (explicit_plan.rs EDGE_CAND)
-static const float EDGE_SKIN = 0.05; // the candidate list's margin (m): rebuilt past it
+// The candidate list's margin (m): rebuilt once a node moved past it. The 8-car pile on CUDA,
+// ms a frame: 2 cm 298, 5 cm 175, 8 cm 116, 12 cm 99, 16 cm 94, 20 cm 92, 30 cm 1,593 (the lists
+// overflow EDGE_CAND and every step searches); two cars the same at 5 to 20 cm. Lossless.
+static const float EDGE_SKIN = 0.12;
 // The candidate list's mode (a thread's): edgeTry keeps the pairs within reach + 2 skins
 // instead of testing them.
 // Each member's edge hits this step (edgeTestsSmall).
