@@ -387,12 +387,15 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
 
 uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, uint lane)
 {
-    // Contact offsets: every member's vectors at the pass's start (positions are final).
+    // Contact offsets: every member's vectors at the pass's start (positions are final). (On the split path each member's step
+    // computed them: explicit_beams_split_member.)
+#ifndef EB_VV_SPLIT
     if (gP.offsetBase != 0u)
     {
         for (uint m = 0u, mStop = EB_END(872, m, k, 1u); m < mStop; m++) contactOffsets(vvMember(off, m), lane, LANES);
         sync();
     }
+#endif
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     // (S) the partner scans: lane per ordered pair (a, b).
     for (uint p = lane, pStop = EB_END(247, p, k * k, LANES); p < pStop; p += LANES)
