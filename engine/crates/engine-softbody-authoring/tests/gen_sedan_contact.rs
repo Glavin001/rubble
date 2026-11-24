@@ -51,12 +51,17 @@ fn desc() -> &'static SoftVehicleDesc {
 /// The car on its wheels 2 cm over the ground at `at`, moving at `vel`; surface
 /// contact on (the lab's `surface=1`).
 fn spawn(d: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> ExplicitBeams {
+    spawn_with(d, at, vel, std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1"))
+}
+
+/// [`spawn`] with edge contact (`ExplicitBeams::edge_contact`) on or off.
+fn spawn_with(d: &SoftVehicleDesc, at: Vec3, vel: Vec3, edge: bool) -> ExplicitBeams {
     let lift = 0.02 - d.nodes.iter().map(|n| n.position[1]).fold(f32::MAX, f32::min);
     let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(d, at + Vec3::Y * lift, vel, settings())
         .expect("spawn the sedan");
     s.surface_contact = true;
-    // Measurement switches for the fixes under way (off: today's rule).
-    s.edge_contact = std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1");
+    s.edge_contact = edge;
+    // A measurement switch (off: today's rule).
     s.outward_skin = std::env::var("OUTWARD").is_ok_and(|v| v == "1");
     s.finish();
     s
@@ -263,9 +268,14 @@ fn head_on() -> HeadOn {
 /// at `kmh_b` towards car A, car B moved `offset_mm` sideways; run `ms`, sampled every 20
 /// ms; `push`: then the fused check (`parted_after_push`). Cached per scene.
 fn pair_crash(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool) -> HeadOn {
-    static R: OnceLock<Mutex<HashMap<(u32, u32, i32, u32, bool), HeadOn>>> = OnceLock::new();
+    pair_crash_with(kmh_a, kmh_b, offset_mm, ms, push, std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1"))
+}
+
+/// [`pair_crash`] with edge contact on or off on both cars.
+fn pair_crash_with(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool, edge: bool) -> HeadOn {
+    static R: OnceLock<Mutex<HashMap<(u32, u32, i32, u32, bool, bool), HeadOn>>> = OnceLock::new();
     let m = R.get_or_init(Default::default);
-    let key = (kmh_a, kmh_b, offset_mm, ms, push);
+    let key = (kmh_a, kmh_b, offset_mm, ms, push, edge);
     if let Some(r) = m.lock().unwrap().get(&key) {
         return r.clone();
     }
@@ -275,11 +285,12 @@ fn pair_crash(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool) -> He
     for n in &mut turned.nodes {
         n.position = [-n.position[0], n.position[1], -n.position[2]];
     }
-    let a = spawn(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * (kmh_a as f32 / 3.6));
-    let b = spawn(
+    let a = spawn_with(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * (kmh_a as f32 / 3.6), edge);
+    let b = spawn_with(
         &turned,
         Vec3::new(offset_mm as f32 * 1e-3, 0.0, 0.025 + zmax),
         -Vec3::Z * (kmh_b as f32 / 3.6),
+        edge,
     );
     let mut w = ExplicitBeamsWorld::new(vec![a, b]);
     if kmh_b == 0 && ms > 1000 {
@@ -737,3 +748,60 @@ fn pair_crashes_create_no_energy() {
     }
     assert!(ok);
 }
+
+// --- The fix: edge contact (`ExplicitBeams::edge_contact`, opt-in; docs/contact-design.md) ---
+// With it on, the cars are not fused, no crash creates energy and a slow push ends touching
+// (the guards of the fix; what it leaves inside at the worst moment is the head-on tests'
+// rows run with EDGE_CONTACT=1).
+
+/// [`head_on_cars_are_not_fused`] with edge contact on.
+#[test]
+fn edge_contact_head_on_cars_are_not_fused() {
+    let r = pair_crash_with(60, 60, 0, 600, true, true);
+    let pass = r.finite && r.parted >= 0.8 * r.parted_free;
+    row(
+        "edge contact: cars are not fused after a head-on",
+        "head on 60 + 60, pushed apart 2 × 3 m/s",
+        format!("parted {:.2} m in 1 s; {:.2} m with contact off", r.parted, r.parted_free),
+        "≥ 80 % of contact off".into(),
+        pass,
+    );
+    assert!(pass);
+}
+
+/// [`pair_crashes_create_no_energy`] with edge contact on.
+#[test]
+fn edge_contact_crashes_create_no_energy() {
+    let mut ok = true;
+    for (a, b, off, ms) in [(60, 60, 0, 600), (100, 100, 0, 600), (100, 10, 0, 600), (60, 60, 800, 600)] {
+        let r = pair_crash_with(a, b, off, ms, a == 60 && off == 0, true);
+        let pass = r.finite && r.rise <= 5e-3 * r.start;
+        row(
+            "edge contact: a car-to-car crash creates no energy",
+            &format!("head on {a} + {b}, offset {off} mm"),
+            format!("rise {:.1} J of {:.0} kJ; contact position steps {:.1} kJ", r.rise, r.start * 1e-3, r.steps_energy * 1e-3),
+            "≤ 0.5 % of start".into(),
+            pass,
+        );
+        ok &= pass;
+    }
+    assert!(ok);
+}
+
+/// [`slow_push_ends_touching`] with edge contact on.
+#[test]
+fn edge_contact_slow_push_ends_touching() {
+    let r = pair_crash_with(4, 0, 0, 2000, false, true);
+    let band = 0.025;
+    let gap = r.gap_end[0].min(r.gap_end[1]);
+    let pass = r.finite && r.inside == [0, 0] && gap <= band + 0.01;
+    row(
+        "edge contact: a slow push ends touching",
+        "car at 4 km/h into a parked car, 2 s",
+        format!("nearest node {:.0} mm from the other's skin; {} / {} inside", gap * 1e3, r.inside[0], r.inside[1]),
+        "≤ band + 10 mm, 0 inside".into(),
+        pass,
+    );
+    assert!(pass);
+}
+

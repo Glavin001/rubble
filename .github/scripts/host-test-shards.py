@@ -32,7 +32,7 @@ RUN_SECONDS = {
     ("engine-softbody-authoring", "test", "sedan_energy"): 80,
     ("engine-softbody-authoring", "test", "showcase_skin_integrity"): 48,
     # Measured locally (15 s on an M-series Mac); a runner's estimate.
-    ("engine-softbody-authoring", "test", "gen_sedan_contact"): 40,
+    ("engine-softbody-authoring", "test", "gen_sedan_contact"): 65,
     ("engine-softbody", "lib", "engine_softbody"): 25,
     ("engine-softbody-authoring", "test", "raycast_wheel_visual"): 25,
     ("engine-softbody-authoring", "test", "explicit_drive"): 16,
