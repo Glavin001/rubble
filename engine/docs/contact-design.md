@@ -474,3 +474,19 @@ contact with a clear error; the lab page's control is off until they ship.
   patch, panels to author closed.
 - The edge pass's time (8-car pile, CUDA, 175 ms at a 5 cm skin): hits not kept -8, then no pair
   tests -108, then no grids -9: the pair search, not the owners one after another. Skin 12 cm: 99.
+
+### What is seen: paint cutting paint (vehicle_paint_overlap, 2026-11-24, CPU reference)
+
+Length of the lines where one car's painted triangles cut the other's (m); min / median / max of 8
+runs; control with contact off 141 / 145 / 145 (2 runs, 60 km/h), 0 at spawn. Paint only (no glass,
+lamps, trim, tyres); torn triangles (3 x rest) left out.
+
+| scene | worst, edge off | worst, edge on | at the end, edge off | at the end, edge on |
+|---|---|---|---|---|
+| head on 60, 1.5 s | 3.06/5.71/8.10 | 2.08/3.21/5.32 | 0/0/0 | 0/0/0 |
+| head on 100, 1.5 s | 8.55/12.08/19.20 | 0.38/2.23/4.65 | 0.18/4.56/8.08 | 0/0/0 |
+| head on 30, A pressing, 2.5 s | 7.11/7.27/7.50 | 0.87/0.98/1.10 | 0/0/0.75 | 0/0/0.19 |
+| head on 60, A pressing, 2.5 s | 4.29/5.59/7.05 | 3.10/3.78/5.22 | 0.04/0.90/2.08 | 0/0/3.41 |
+
+The side scene (worst 5.48 off, 0.38 on at 60 km/h) is not trusted: the turned car B rolls off 9 to
+23 m with its handbrake on (its nodes are turned, perhaps not its wheels' axes).
