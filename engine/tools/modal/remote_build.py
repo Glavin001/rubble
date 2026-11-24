@@ -136,7 +136,8 @@ def _build(spec: dict, dirty: dict) -> dict:
     t0 = time.time()
     key = spec["key"]
     times: dict = {}
-    for v in (src_vol, target_vol, cargo_vol):
+    # (kern_vol too: another container's cached module list and fatbins become visible.)
+    for v in (src_vol, target_vol, cargo_vol, kern_vol):
         v.reload()
     work = Path("/work") / key
 
@@ -186,19 +187,33 @@ def _build(spec: dict, dirty: dict) -> dict:
         # code), built in a target directory of its own so the two builds never
         # invalidate each other; it lives inside the target, so it is snapshotted too.
         t = time.time()
-        states_vol.reload()
-        probe_env = {**env, "ENGINE_CUDA_EXPLICIT_MODULES": "none",
-                     "CARGO_TARGET_DIR": str(target.local / "modules-probe")}
-        p = subprocess.run(["cargo", "run", "-q", "--profile", "fast", "-p", "engine-cuda", "--example",
-                            "explicit_replay", "--", "--modules", *[f"/svol/{n}" for n in spec["modules_from"]]],
-                           cwd="/repo/engine", env=probe_env, capture_output=True, text=True)
-        if p.returncode != 0:
-            print(p.stderr[-3000:], flush=True)
-            return {"code": p.returncode, "setup_s": time.time() - t0, "build_s": 0.0, "cores": cores,
-                    "commit_s": 0.0, "steps": times, "total_s": time.time() - t0,
-                    "error": "explicit_replay --modules failed"}
-        env["ENGINE_CUDA_EXPLICIT_MODULES"] = p.stdout.strip().splitlines()[-1]
-        times["modules"] = round(time.time() - t, 1)
+        # The list depends on the fixtures (their layouts) and the Rust that maps a layout
+        # to modules, never on kernel source; but the probe's build reruns slangc for
+        # every module after any kernel edit (33-38 s). So the answer is kept by the
+        # fixtures, the Rust sources and manifests, and the ENGINE_* settings: a kernel-only
+        # edit reuses it, and any Rust change asks again.
+        # (The client looks the answer up and passes it in: a container's view of a Volume
+        # did not show another container's entry even after reload().)
+        memo = Path("/kernels/module-lists") / (_modules_key(spec) + ".txt")
+        if spec.get("modules_memo"):
+            env["ENGINE_CUDA_EXPLICIT_MODULES"] = spec["modules_memo"]
+            times["modules"] = 0.0
+        else:
+            states_vol.reload()
+            probe_env = {**env, "ENGINE_CUDA_EXPLICIT_MODULES": "none",
+                         "CARGO_TARGET_DIR": str(target.local / "modules-probe")}
+            p = subprocess.run(["cargo", "run", "-q", "--profile", "fast", "-p", "engine-cuda", "--example",
+                                "explicit_replay", "--", "--modules", *[f"/svol/{n}" for n in spec["modules_from"]]],
+                               cwd="/repo/engine", env=probe_env, capture_output=True, text=True)
+            if p.returncode != 0:
+                print(p.stderr[-3000:], flush=True)
+                return {"code": p.returncode, "setup_s": time.time() - t0, "build_s": 0.0, "cores": cores,
+                        "commit_s": 0.0, "steps": times, "total_s": time.time() - t0,
+                        "error": "explicit_replay --modules failed"}
+            env["ENGINE_CUDA_EXPLICIT_MODULES"] = p.stdout.strip().splitlines()[-1]
+            memo.parent.mkdir(parents=True, exist_ok=True)
+            memo.write_text(env["ENGINE_CUDA_EXPLICIT_MODULES"])
+            times["modules"] = round(time.time() - t, 1)
     out = Path("/tmp/out")
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir()
@@ -215,8 +230,47 @@ def _build(spec: dict, dirty: dict) -> dict:
            "--", *spec["selection"]]
     print(f"[remote_build] {key}: {' '.join(spec['selection'])} on {cores} cores", flush=True)
     t = time.time()
+    # What compiled, and for how long: a sampler watches the process table for nvcc and
+    # slangc (twice a second) and keeps each process's module and run time. Watching from
+    # outside leaves the build and its cache keys untouched (a wrapper at NVCC would
+    # change the fatbin cache's key, which covers the compiler's own bytes).
+    import threading
+    seen: dict[int, list] = {}
+    stop = threading.Event()
+
+    def sample() -> None:
+        # (/proc directly: the build image has no `ps`.)
+        while not stop.is_set():
+            now = time.time() - t
+            for d in os.listdir("/proc"):
+                if not d.isdigit():
+                    continue
+                try:
+                    words = Path(f"/proc/{d}/cmdline").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                words = [w.decode(errors="replace") for w in words if w]
+                if not words:
+                    continue
+                tool = words[0].rsplit("/", 1)[-1]
+                if tool not in ("nvcc", "slangc"):
+                    continue
+                pid = int(d)
+                if pid not in seen:
+                    src = next((w for w in words if w.endswith((".cu", ".slang"))), "?")
+                    seen[pid] = [tool, src.rsplit("/", 1)[-1], now, now]
+                seen[pid][3] = now
+            stop.wait(0.5)
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
     code = subprocess.run(cmd, cwd="/repo/engine", env=env).returncode
     t_build = time.time() - t
+    stop.set()
+    sampler.join(timeout=2)
+    compiled = sorted(((round(e - s, 1), round(e, 1), m) for tool, m, s, e in seen.values() if tool == "nvcc"),
+                      reverse=True)
+    slang_new = sum(1 for v in seen.values() if v[0] == "slangc")
     result = {"code": code, "setup_s": t_setup, "build_s": t_build, "cores": cores}
     if code == 0:
         data = (out / "archive.tar.gz").read_bytes()
@@ -246,8 +300,24 @@ def _build(spec: dict, dirty: dict) -> dict:
         v.commit()
     result["commit_s"] = time.time() - t_c
     result["steps"] = times
+    result["nvcc"] = compiled  # [(seconds it ran, finished at s after the build began, module)], longest first
+    result["slangc_runs"] = slang_new
     result["total_s"] = time.time() - t0
     return result
+
+
+def _modules_key(spec: dict) -> str:
+    """The module list's key: the fixtures, the Rust sources and manifests (by content) and
+    the ENGINE_* settings; not the kernel sources, which do not change the list."""
+    h = hashlib.sha256()
+    for path, digest in sorted(spec.get("manifest", {}).items()):
+        if path.endswith((".rs", ".toml", ".lock")):
+            h.update(f"{path} {digest}\n".encode())
+    for k, v in sorted(spec.get("env", {}).items()):
+        h.update(f"{k}={v}\n".encode())
+    for n in spec["modules_from"]:
+        h.update(f"fixture {n}\n".encode())
+    return h.hexdigest()[:32]
 
 
 def _diff(key: str, root: Path, files: dict[str, str]) -> tuple[dict, list[str], int]:
@@ -295,6 +365,10 @@ def main(spec: str) -> None:
                 for f, name in up:
                     b.put_file(str(f), f"/{name}")
         s["modules_from"] = names
+        try:
+            s["modules_memo"] = b"".join(kern_vol.read_file(f"module-lists/{_modules_key(s)}.txt")).decode().strip()
+        except Exception:  # noqa: BLE001 - not listed yet for these fixtures and this Rust
+            pass
         print(f"[remote_build] fixtures for the module list: {len(names)}, {len(up)} uploaded, "
               f"{time.time() - t:.1f} s", flush=True)
     if s.get("stage_dir"):
@@ -310,6 +384,9 @@ def main(spec: str) -> None:
     if r.get("archive"):
         print(f"[remote_build] archive {r['archive']} ({r['archive_mb']:.0f} MB) in rubble-gpu-run-archives", flush=True)
         Path(s["result"]).write_text(json.dumps(r))
+    nv = r.get("nvcc", [])
+    print(f"[remote_build] nvcc ran {len(nv)} time(s), slangc {r.get('slangc_runs', 0)}"
+          + (": " + ", ".join(f"{m} {d:.0f} s (done at {e:.0f} s)" for d, e, m in nv[:8]) if nv else ""), flush=True)
     if r["code"] != 0:
         raise SystemExit(r["code"])
 

@@ -1,0 +1,19 @@
+[package]
+name = "engine-vehiclerig-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen face of the vehicle rigger: a generated design's parameters in, the soft-body mod's files out (the vehicle lab's Design panel)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+engine-vehiclegen.workspace = true
+engine-softbody-authoring.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3"
