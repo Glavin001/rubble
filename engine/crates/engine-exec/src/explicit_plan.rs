@@ -216,7 +216,10 @@ pub mod param_words_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(w: &[u32; PARAM_WORDS], s: S) -> Result<S::Ok, S::Error> {
-        w.as_slice().serialize(s)
+        // (Without edge contact, word 106 is 0: saved as the 106 words of the layout before
+        // it, so a state saved here replays in a build from before the word.)
+        let n = if w[106..].iter().all(|&x| x == 0) { 106 } else { PARAM_WORDS };
+        w[..n].serialize(s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u32; PARAM_WORDS], D::Error> {
