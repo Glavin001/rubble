@@ -492,3 +492,9 @@ Side impact into B's middle (2 s; an earlier version was 1.4 m off centre): 30 k
 1.86/2.01/2.08 off, 0/0/0 on; 60 km/h worst 1.40/1.43/2.16 off, 1.37/1.38/1.40 on, at the end
 0/0.44/0.77 off, 0/0/0 on; 60 km/h pressed at the end 1.93/2.44/2.79 off, 0/0/0.53 on.
 Tests: gen_sedan_paint.rs (three pass, three listed as expected failures).
+
+Edge contact's cost on one saved state (CUDA T4, ms a frame, the same fixture with W_EDGE cleared
+for "off"): pile8_e off 28.1, on 175 at a 5 cm skin, 99 at 12 cm, 89.5 with the lists' rebuild on
+motion relative to the group's (147 at 5 cm); side_e off 14.3, on 18.4; headon_e off 12.3, on 13.7.
+pile8_e without the pair search 50.9: the search and tests are 39 ms of the 61, the rest 23.
+(The earlier "21 ms without" for the pile was another state.)

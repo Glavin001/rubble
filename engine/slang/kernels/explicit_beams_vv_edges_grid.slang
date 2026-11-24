@@ -442,6 +442,19 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
     // The candidates of the last build stand while no node of the group has moved a skin
     // since and no owner's partners changed (any pair in contact now was then within reach +
     // 2 skins); else they are found again. (Lossless: the same hits as a search every step.)
+    // (A motion the whole group shares changes no pair's distance: the members' mean motion,
+    // each by one node's, is taken off first. Any shared vector is valid, so its rounding
+    // needs no care.)
+    float3 common = float3(0.0, 0.0, 0.0);
+    float counted = 0.0;
+    for (uint a = 0u, aStop = EB_END(889, a, anyEdge ? k : 0u, 1u); a < aStop; a++)
+    {
+        uint v = vvMember(off, a);
+        if (gAcc[edgeCandAcc(v) + 1u].load() == 0) continue;
+        common += edgeWorld(v, gStatic[v * 4u].x) - gBeams[edgeBuiltAt(v)].xyz;
+        counted += 1.0;
+    }
+    common /= max(counted, 1.0);
     for (uint a = 0u, aStop = EB_END(854, a, anyEdge ? k : 0u, 1u); a < aStop; a++)
     {
         uint v = vvMember(off, a);
@@ -450,7 +463,7 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
         uint built = edgeBuiltAt(v);
         for (uint i = lane, iStop = EB_END(855, i, r0.y, LANES); i < iStop; i += LANES)
         {
-            float3 d = ssub3(edgeWorld(v, r0.x + i), gBeams[built + i].xyz);
+            float3 d = ssub3(edgeWorld(v, r0.x + i), gBeams[built + i].xyz) - common;
             gAcc[edgeV1(v).x + 9u].max(asint(sdot(d, d)));
         }
     }
