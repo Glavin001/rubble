@@ -29,6 +29,13 @@ pub trait Design {
     /// (new parts, extras merged into existing parts, markers)
     fn parts(&self, cb: &CarBody) -> (Parts, Parts, Vec<Marker>);
     fn post(&self, _parts: &mut Parts) {}
+    /// How the finished car stands in the world when it is not as built
+    /// (a raked stance): the design builds every part, wheels included, in
+    /// its own body frame, and the build puts the whole car by this rigid
+    /// pose. None: the body frame is the world's.
+    fn pose(&self) -> Option<Pose> {
+        None
+    }
     /// What the physics rigger needs besides the meshes (None: not rigged).
     fn rig_spec(&self) -> Option<RigSpec> {
         None
@@ -57,6 +64,61 @@ pub trait Design {
     }
 }
 
+/// A rigid pose of the whole car: pitched about the lateral axis through
+/// (`pivot_y`, `pivot_z`) by `pitch` radians (positive: nose up, +z is the
+/// nose) and then lifted by `lift` metres. The car as the design builds it
+/// (its body frame, which the rigger rigs in) goes to the world by
+/// [`Pose::apply`].
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Pose {
+    pub pivot_y: f64,
+    pub pivot_z: f64,
+    pub pitch: f64,
+    pub lift: f64,
+}
+
+impl Pose {
+    /// The rotation (about +x) as a matrix.
+    pub fn rotation(&self) -> glam::DMat3 {
+        glam::DMat3::from_rotation_x(-self.pitch)
+    }
+    /// A point of the body frame in the world.
+    pub fn apply(&self, p: glam::DVec3) -> glam::DVec3 {
+        let c = glam::DVec3::new(0.0, self.pivot_y, self.pivot_z);
+        self.rotation() * (p - c) + c + glam::DVec3::new(0.0, self.lift, 0.0)
+    }
+    /// A world point in the body frame.
+    pub fn invert(&self, p: glam::DVec3) -> glam::DVec3 {
+        let c = glam::DVec3::new(0.0, self.pivot_y, self.pivot_z);
+        self.rotation().transpose() * (p - c - glam::DVec3::new(0.0, self.lift, 0.0)) + c
+    }
+    /// A direction of the body frame in the world.
+    pub fn apply_dir(&self, d: glam::DVec3) -> glam::DVec3 {
+        self.rotation() * d
+    }
+    /// Put the parts and markers (as the design built them) in the world.
+    pub fn place(&self, parts: &mut Parts, markers: &mut [Marker]) {
+        let r = self.rotation();
+        let t = self.apply(glam::DVec3::ZERO);
+        for (_, m) in parts.0.iter_mut() {
+            m.transform(Some(r), t);
+        }
+        for k in markers {
+            k.pos = self.apply(k.pos);
+            k.xaxis = self.apply_dir(k.xaxis);
+        }
+    }
+}
+
+/// One axle's wheel for [`RigSpec::rear_wheel`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxleWheel {
+    pub wheel_y: f64,
+    pub tyre_d: f64,
+    pub tyre_w: f64,
+    pub rim_d: f64,
+}
+
 /// One part's surface tags, per vertex of its render buffers
 /// ([`crate::export::RenderPart`], the `.glb`'s vertex order).
 #[derive(Clone, Debug)]
@@ -80,6 +142,13 @@ pub struct RigSpec {
     pub tyre_w: f64,
     pub rim_d: f64,
     pub wheel_y: f64,
+    /// The rear axle's wheel when it differs from the front's (the fields
+    /// above are the front's): staggered tyres, a raked stance. None: both
+    /// axles alike.
+    pub rear_wheel: Option<AxleWheel>,
+    /// The car's pose in the world (None: the body frame is the world's).
+    /// Every other field is in the body frame.
+    pub pose: Option<Pose>,
     pub z_front: f64,
     pub z_rear: f64,
     pub doors: Vec<String>,
@@ -280,11 +349,14 @@ pub struct BuildOpts {
     /// every panel and pane a closed solid ([`crate::solid`]); false: the
     /// legacy sheets (the Python generator's output)
     pub solid: bool,
+    /// the car as it stands in the world ([`Design::pose`]); false: in its
+    /// body frame, where the rigger works
+    pub posed: bool,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { uv: true, h: 0.02, solid: true }
+        BuildOpts { uv: true, h: 0.02, solid: true, posed: true }
     }
 }
 
@@ -297,7 +369,7 @@ pub fn build(d: &dyn Design, o: BuildOpts) -> Built {
 pub fn build_with_body(d: &dyn Design, o: BuildOpts) -> (Built, CarBody) {
     reset_islands();
     let (mut parts, cb) = body_parts_with(d, o.h, o.uv, o.solid);
-    let (new, extras, markers) = d.parts(&cb);
+    let (new, extras, mut markers) = d.parts(&cb);
     for (k, m) in &extras.0 {
         parts.extend(k, m);
     }
@@ -305,6 +377,9 @@ pub fn build_with_body(d: &dyn Design, o: BuildOpts) -> (Built, CarBody) {
         parts.insert(&k, m);
     }
     d.post(&mut parts);
+    if let Some(pose) = d.pose().filter(|_| o.posed) {
+        pose.place(&mut parts, &mut markers);
+    }
     let atlas = if o.uv { pack(&mut parts, 0.012) } else { 0.0 };
     if o.uv {
         normalise_other(&mut parts);

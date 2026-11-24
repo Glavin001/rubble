@@ -25,6 +25,9 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+mod rename_rig;
+use rename_rig::*;
+
 #[derive(Deserialize)]
 pub struct RigDims {
     pub wheelbase: f32,
@@ -39,6 +42,22 @@ pub struct RigDims {
     pub z_rear: f32,
     pub doors: Vec<String>,
     pub rear_closure: String,
+    /// The rear axle's wheel when it differs from the front's (the fields
+    /// above are the front's).
+    #[serde(default)]
+    pub rear_wheel: Option<RearWheel>,
+    /// The car's pose in the world: everything else here is in the body
+    /// frame, which the rigger rigs in; the rig is posed afterwards.
+    #[serde(default)]
+    pub pose: Option<engine_vehiclegen::Pose>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+pub struct RearWheel {
+    pub wheel_y: f32,
+    pub tyre_d: f32,
+    pub tyre_w: f32,
+    pub rim_d: f32,
 }
 
 #[derive(Deserialize)]
@@ -231,6 +250,11 @@ impl VgInput {
         let bytes = glb(&rp, &b.markers, b.paint, b.metallic, b.roughness);
         let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
         let mut me = Self::new(rig, bytes)?;
+        // The rigger works in the design's body frame: a posed design's
+        // render model (built in the world) goes back through the pose.
+        if let Some(ps) = spec.pose {
+            unpose(&mut me.model, &ps);
+        }
         me.structure = spec.structure.as_deref().cloned();
         me.mechanical = spec.mechanical.as_ref().clone();
         if !opts.solid {
@@ -245,10 +269,20 @@ impl VgInput {
         // skins); the hood's edge nodes then drift 16 mm parked
         // (`gen3_rig`), so it waits for the rigger to read the tags itself.
         let sheets = if std::env::var("VG_RIG_OUTER").is_ok_and(|v| v == "1") {
-            engine_vehiclegen::assemble::outer_parts(&b.parts)
+            let mut o = b.parts.clone();
+            if let Some(ps) = spec.pose {
+                // (the body frame, as the sheet build below)
+                let r = ps.rotation().transpose();
+                for (_, m) in o.0.iter_mut() {
+                    let t = ps.invert(glam::DVec3::ZERO);
+                    m.transform(Some(r), t);
+                }
+            }
+            engine_vehiclegen::assemble::outer_parts(&o)
         } else {
             let o = engine_vehiclegen::BuildOpts {
                 solid: false,
+                posed: false,
                 ..opts
             };
             engine_vehiclegen::build(d.as_ref(), o).parts
@@ -415,6 +449,29 @@ impl VgInput {
     }
 }
 
+/// A posed design's render model back in its body frame.
+fn unpose(m: &mut Model, ps: &engine_vehiclegen::Pose) {
+    let inv = |p: Vec3| {
+        let q = ps.invert(glam::DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+        Vec3::new(q.x as f32, q.y as f32, q.z as f32)
+    };
+    let back = ps.rotation().transpose();
+    for p in &mut m.parts {
+        for q in &mut p.pos {
+            *q = inv(*q);
+        }
+        for n in &mut p.nrm {
+            let d = back * glam::DVec3::new(n.x as f64, n.y as f64, n.z as f64);
+            *n = Vec3::new(d.x as f32, d.y as f32, d.z as f32);
+        }
+    }
+    let rot = Quat::from_rotation_x(ps.pitch as f32);
+    for k in &mut m.markers {
+        k.pos = inv(k.pos);
+        k.rot = rot * k.rot;
+    }
+}
+
 /// A `.glb`'s meshes and markers as a render model (world space).
 pub fn model_of(g: &Glb) -> Model {
     let mut parts = Vec::new();
@@ -495,6 +552,10 @@ impl RigInput for VgInput {
     fn ray_y(&self) -> f32 {
         self.ray_y
     }
+    fn wheel_sizes(&self) -> Option<[(f32, f32); 2]> {
+        let (f, r) = (&self.rig.dims, self.rig.dims.rear_wheel?);
+        Some([(0.5 * f.tyre_d, f.tyre_w), (0.5 * r.tyre_d, r.tyre_w)])
+    }
     /// The greenhouse's corner is the design's roof-rail key line (the
     /// daylight opening's top, down the A- and C-pillars), not gen3's
     /// "normal 50° from up" (a raked windscreen leans past that at its
@@ -508,6 +569,9 @@ impl RigInput for VgInput {
     }
     fn rear_closure(&self) -> String {
         self.rig.dims.rear_closure.clone()
+    }
+    fn doors(&self) -> Vec<String> {
+        self.rig.dims.doors.clone()
     }
     fn definitions(&self) -> Option<super::body2::Defs<'_>> {
         self.structure.as_ref().map(|s| super::body2::Defs {
@@ -573,9 +637,22 @@ pub struct Built {
 
 /// Rig a design and bind its art `.glb` to the lattice.
 pub fn build(input: VgInput) -> Result<Built, String> {
-    let rig = rig::rig_with(&input);
+    let rig = rig_only(&input);
     let skin = bind_art(&input, &rig, &input.glb)?;
     Ok(Built { input, rig, skin })
+}
+
+/// The lattice alone (the physics): `build` less the binding of the art's skins.
+pub fn rig_only(input: &VgInput) -> Rig {
+    let mut rig = rig::rig_with(input);
+    // (A posed design is rigged in its body frame and put in the world.)
+    if let Some(ps) = input.rig.dims.pose {
+        rig.transform(|g| {
+            let q = ps.apply(glam::DVec3::new(g.x as f64, g.y as f64, g.z as f64));
+            Vec3::new(q.x as f32, q.y as f32, q.z as f32)
+        });
+    }
+    rig
 }
 
 /// An art `.glb`'s weighted skins on `rig`'s lattice (the design's own art, or a
@@ -608,8 +685,18 @@ pub const LITE_EDGE: f64 = 0.035;
 /// full art (a phone's GPU memory); the page picks it only there.
 /// Returns the `.glb` bytes and its skins.
 pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), String> {
+    lite_art_of(&b.input, &b.rig, params, h)
+}
+
+/// [`lite_art`] from the design's input and its lattice (no art skins needed).
+pub fn lite_art_of(
+    input: &VgInput,
+    rig: &Rig,
+    params: &str,
+    h: f64,
+) -> Result<(Vec<u8>, Skin), String> {
     use engine_vehiclegen::export::{glb, render_parts};
-    let name = b.input.design();
+    let name = input.design();
     let d = engine_vehiclegen::design_from_json(name, params)?;
     let opts = engine_vehiclegen::BuildOpts {
         h,
@@ -626,7 +713,7 @@ pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), Stri
     let lite = crate::glb::read(&bytes)?;
     // The same meshes, by name and order: the JBeam's flexbody rows name them.
     let names = |g: &Glb| g.meshes.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
-    let (lo, art) = (names(&lite), names(&b.input.glb));
+    let (lo, art) = (names(&lite), names(&input.glb));
     if lo != art {
         let only = |a: &[String], b: &[String]| {
             a.iter()
@@ -643,7 +730,7 @@ pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), Stri
             art.len()
         ));
     }
-    let skin = bind_art(&b.input, &b.rig, &lite)?;
+    let skin = bind_art(input, rig, &lite)?;
     Ok((bytes, skin))
 }
 
@@ -710,171 +797,33 @@ pub fn files_with(b: &Built, lite: Option<&(Vec<u8>, Skin)>) -> Vec<(String, Vec
     out
 }
 
-/// gen2's export names (vehicle `gen2`, parts `gen2_*`) as the design's.
-fn rename(s: &str, name: &str) -> String {
-    s.replace("gen2_", &format!("{name}_"))
-        .replace("\"gen2\"", &format!("\"{name}\""))
-        .replace("Rubble gen2 sedan", &format!("Rubble {name} (vehicle-gen)"))
-}
 
-/// `gen2/gen2_body.jbeam` as `<name>/<name>_body.jbeam`.
-fn rename_path(p: &str, name: &str) -> String {
-    p.replace("gen2", name)
-}
-
-/// The rig data of a Rust-generated design (what `rigexport.py` writes for a
-/// Python one), in memory.
-fn rig_json_of(
-    name: &str,
-    d: &dyn engine_vehiclegen::Design,
-    cb: &engine_vehiclegen::carbody::CarBody,
-    markers: &[engine_vehiclegen::export::Marker],
-    spec: &engine_vehiclegen::RigSpec,
-) -> RigJson {
-    const KEYLINES: [&str; 10] = [
-        "floor",
-        "sill",
-        "door_bottom",
-        "widest",
-        "waist",
-        "shoulder",
-        "belt",
-        "roof_rail",
-        "glass_edge",
-        "centre",
-    ];
-    let (dz, dv, dxy) = (0.02f64, 1.0 / 16.0, 0.02f64);
-    let tube = &cb.l.tube;
-    let z0 = spec.z_rear - 0.06;
-    let nz = (((spec.z_front + 0.06) - z0) / dz + 0.5).floor() as usize + 1;
-    let zs: Vec<f64> = (0..nz).map(|i| z0 + dz * i as f64).collect();
-    let f = |x: f64| x as f32;
-    let mut lines = BTreeMap::new();
-    for (k, n) in KEYLINES.iter().enumerate().take(tube.nk) {
-        lines.insert(
-            n.to_string(),
-            zs.iter()
-                .map(|&z| {
-                    let p = tube.key(k, z);
-                    [f(p.x), f(p.y)]
-                })
-                .collect(),
-        );
+/// The files a browser needs to drive a Rust-generator design from its parameters: the
+/// physics (JBeam parts, `.pc`) and the lighter render ([`lite_art_of`], body edge `h`)
+/// bound to the lattice, with `files.json` listing them. The same bytes as the CLI's
+/// `<design>.lite.*` and physics files (`files_with`), without the full art and its
+/// skins (140 MB the page would not draw). `params` is the JSON `VgInput::from_rust` takes.
+pub fn web_files(design: &str, params: &str, h: f64) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let input = VgInput::from_rust(design, params)?;
+    let rig = rig_only(&input);
+    let lite = lite_art_of(&input, &rig, params, h)?;
+    let name = input.design().to_string();
+    let mut out = physics_files(&input, &rig);
+    // (`physics_files` lists a part's path twice where two parts share a name: a folder
+    // on disk keeps the later file, so the later one is the part. Same here.)
+    let mut last: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, (p, _)) in out.iter().enumerate() {
+        last.insert(p.clone(), i);
     }
-    let nv = ((tube.nk - 1) as f64 / dv).round() as usize + 1;
-    let xy: Vec<Vec<[f32; 2]>> = zs
-        .iter()
-        .map(|&z| {
-            (0..nv)
-                .map(|j| {
-                    let p = tube.eval(z, dv * j as f64);
-                    [f(p.x), f(p.y)]
-                })
-                .collect()
-        })
-        .collect();
-    let (nx, ny) = (61usize, 111usize);
-    let tab = |g: &dyn Fn(f64, f64) -> f64| -> Vec<Vec<f32>> {
-        (0..nx)
-            .map(|i| {
-                (0..ny)
-                    .map(|j| f(g(dxy * i as f64, dxy * j as f64)))
-                    .collect()
-            })
-            .collect()
-    };
-    let skins = cb
-        .skins
-        .iter()
-        .map(|(n, m)| {
-            let loops = engine_vehiclegen::panels::boundary_loops(m)
-                .into_iter()
-                .filter(|l| l.len() >= 3)
-                .map(|l| {
-                    l.iter()
-                        .map(|&i| {
-                            let p = m.v[i as usize];
-                            // 0.1 mm, as rigexport.py rounds (shut lines'
-                            // points coincide across parts).
-                            let r = |x: f64| ((x * 1e4).round() * 1e-4) as f32;
-                            [r(p.x), r(p.y), r(p.z)]
-                        })
-                        .collect()
-                })
-                .collect();
-            (n.clone(), loops)
-        })
-        .collect();
-    let mk = markers
-        .iter()
-        .map(|m| {
-            (
-                m.name.clone(),
-                MarkerJson {
-                    pos: [f(m.pos.x), f(m.pos.y), f(m.pos.z)],
-                    axis: [f(m.xaxis.x), f(m.xaxis.y), f(m.xaxis.z)],
-                },
-            )
-        })
-        .collect();
-    RigJson {
-        format: 1,
-        design: name.to_string(),
-        base: None,
-        title: d.name(),
-        dims: RigDims {
-            wheelbase: f(spec.wheelbase),
-            track: f(spec.track),
-            axle_f: f(spec.axle_f),
-            axle_r: f(spec.axle_r),
-            tyre_d: f(spec.tyre_d),
-            tyre_w: f(spec.tyre_w),
-            rim_d: f(spec.rim_d),
-            wheel_y: f(spec.wheel_y),
-            z_front: f(spec.z_front),
-            z_rear: f(spec.z_rear),
-            doors: spec.doors.clone(),
-            rear_closure: spec.rear_closure.clone(),
-        },
-        arches: spec
-            .arches
-            .iter()
-            .map(|a| Arch {
-                center: [f(a.0), f(a.1)],
-                r: f(a.2),
-            })
-            .collect(),
-        keys: Keys {
-            z0: f(z0),
-            dz: f(dz),
-            n: nz,
-            lines,
-        },
-        zlines: d
-            .zlines()
-            .iter()
-            .map(|(n, z)| (n.to_string(), f(*z)))
-            .collect(),
-        vlines: d.vlines().iter().map(|&v| f(v)).collect(),
-        sections: Sections {
-            z0: f(z0),
-            dz: f(dz),
-            nz,
-            dv: f(dv),
-            nv,
-            xy,
-        },
-        ends: Ends {
-            x0: 0.0,
-            y0: 0.0,
-            d: f(dxy),
-            nx,
-            ny,
-            front_z: tab(&|x, y| (spec.front_z)(x, y)),
-            rear_z: tab(&|x, y| (spec.rear_z)(x, y)),
-        },
-        skins,
-        markers: mk,
-        physics: serde_json::to_value(&spec.physics).unwrap(),
-    }
+    let mut i = 0;
+    out.retain(|(p, _)| {
+        i += 1;
+        last[p] == i - 1
+    });
+    out.push((format!("{name}/{}", lite_glb_file(&name)), lite.0));
+    out.push((format!("{name}/{}", lite_skin_file(&name)), lite.1.encode()));
+    let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
+    let index = serde_json::to_string(&list).unwrap();
+    out.push(("files.json".into(), index.into_bytes()));
+    Ok(out)
 }

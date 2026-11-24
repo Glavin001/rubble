@@ -346,8 +346,9 @@ pub struct DerbyGame {
     pub events: Vec<(f64, String)>,
     /// The last input sent to each car (only changes are sent).
     sent: Vec<Option<DriveInput>>,
-    /// A drive state per car to decode its wheel records into.
-    drive: Option<Drive>,
+    /// A drive state per vehicle type to decode a car's wheel records into (car `v` is of
+    /// type `v % len`; empty: no drive).
+    drives: Vec<Drive>,
     /// Poses read so far.
     pub readings: u64,
 }
@@ -355,6 +356,12 @@ pub struct DerbyGame {
 impl DerbyGame {
     /// A new round of `n` cars like `car_drive` (the cars' raycast wheels).
     pub fn new(spec: DerbySpec, n: usize, car_drive: Option<&Drive>) -> Self {
+        Self::new_mixed(spec, n, car_drive.cloned().into_iter().collect())
+    }
+
+    /// A new round of `n` cars of several types: car `v` has `drives[v % drives.len()]`'s
+    /// wheels.
+    pub fn new_mixed(spec: DerbySpec, n: usize, drives: Vec<Drive>) -> Self {
         Self {
             spec,
             cars: vec![DerbyCar::default(); n],
@@ -365,7 +372,7 @@ impl DerbyGame {
             winner: None,
             events: Vec::new(),
             sent: vec![None; n],
-            drive: car_drive.cloned(),
+            drives,
             readings: 0,
         }
     }
@@ -379,9 +386,10 @@ impl DerbyGame {
     /// and `drive` every car's drive region (`stride` records a car), as the solver's
     /// misc buffer holds them.
     pub fn ingest_drive(&mut self, origins: &[u32], drive: &[u32], stride: usize) {
-        let Some(mut d) = self.drive.clone() else {
+        if self.drives.is_empty() {
             return;
-        };
+        }
+        let mut drives = self.drives.clone();
         let f = |w: u32| f32::from_bits(w);
         let words = 4 * stride;
         for (v, car) in self.cars.iter_mut().enumerate() {
@@ -391,7 +399,9 @@ impl DerbyGame {
             ) else {
                 continue;
             };
-            engine_exec::explicit_plan::drive::decode(w, &mut d);
+            let nd = drives.len();
+            let d = &mut drives[v % nd];
+            engine_exec::explicit_plan::drive::decode(w, d);
             let mask = (car.attached.len() == d.wheels.len() && car.attached.iter().any(|a| *a))
                 .then_some(car.attached.as_slice());
             car.grounded = d
@@ -400,7 +410,7 @@ impl DerbyGame {
                 .enumerate()
                 .filter(|(k, s)| s.contact && mask.is_none_or(|m| m[*k]))
                 .count() as u32;
-            let (c, fwd, up) = wheel_frame(&d, mask);
+            let (c, fwd, up) = wheel_frame(d, mask);
             let p = Vec3::new(f(o[0]), f(o[1]), f(o[2])) + c;
             if p.is_finite() && fwd.is_finite() && up.is_finite() && d.speed.is_finite() {
                 car.pose = Some(Pose {
