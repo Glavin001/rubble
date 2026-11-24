@@ -479,8 +479,7 @@ pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// For [`FramePlanner::set_perf_flags`]'s callers; kept as bit 30 of the word after [`W_BEAM_ORDER`] (the fleet
 /// copies' perf word has no free bit): the fleet-wide walk tests a candidate's position before it loads its records,
-/// its big triangles on threads of their own (flWalkBox; §8.56). On by default, in a browser too: Chrome's A/B
-/// (rung 3) held it bit for bit on 8 cars on the ledges and in the derby, and it is faster there on a pile (§8.64).
+/// its big triangles on threads of their own (flWalkBox; §8.56). On by default, in a browser too (Chrome's A/B: §8.64).
 pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
