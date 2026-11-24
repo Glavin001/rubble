@@ -331,6 +331,10 @@ pub struct ExplicitBeamsWorld {
     /// default until the GPU kernels carry it (the CPU reference and the kernels
     /// agree bit for bit); `FINAL_GUARD=1` (or this field) turns it on.
     pub final_guard: bool,
+    /// The edge pass's counts so far (a measurement): pairs tested, closest points at an
+    /// end, parallel, close but not facing, crossed deeper than `EDGE_DEPTH`, hits, hits
+    /// crossed (gap below zero).
+    pub edge_stats: [u64; 7],
 }
 
 /// A dissipative two-body hit as the contact pass staged it: node `h` of
@@ -376,6 +380,7 @@ impl ExplicitBeamsWorld {
             plan_steps: 34,
             staged_hits: Vec::new(),
             final_guard: std::env::var("FINAL_GUARD").is_ok_and(|v| v == "1"),
+            edge_stats: [0; 7],
         }
     }
 

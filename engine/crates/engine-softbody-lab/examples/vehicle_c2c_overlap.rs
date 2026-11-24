@@ -1182,6 +1182,9 @@ fn main() -> Result<(), String> {
                 (vb - va).dot(ax),
                 ke * 1e-3
             );
+            if w.edge_stats[0] > 0 {
+                println!("       edge pass so far: tested {} at-end {} parallel {} not-facing {} deeper {} hits {} crossed-hits {}", w.edge_stats[0], w.edge_stats[1], w.edge_stats[2], w.edge_stats[3], w.edge_stats[4], w.edge_stats[5], w.edge_stats[6]);
+            }
             if let Some(lg) = w.ledger.as_ref() {
                 // LEDGER=1: vehicle contact's work so far (normal, friction, position
                 // steps) and self contact's, kJ; contacts must not do positive work.

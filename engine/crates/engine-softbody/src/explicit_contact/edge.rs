@@ -35,6 +35,15 @@ use std::collections::HashMap;
 /// memory depth (`CLIP_DEPTH`), for the same reason (a deeper crossing is no longer a
 /// local contact: its normal and side are not known).
 pub const EDGE_DEPTH: f32 = crate::explicit_contact::CLIP_DEPTH;
+/// Measurement switches (`EDGE_FACING=0`: no check that B faces A; `EDGE_DEPTH_M`:
+/// the crossing depth still pushed, m).
+fn facing_check() -> bool {
+    !std::env::var("EDGE_FACING").is_ok_and(|v| v == "0")
+}
+fn edge_depth() -> f32 {
+    std::env::var("EDGE_DEPTH_M").ok().and_then(|v| v.parse().ok()).unwrap_or(EDGE_DEPTH)
+}
+
 /// Closest points this close to an end (of the segment's parameter) are the node's.
 const END: f32 = 1e-3;
 /// Grid cell of the edge broad phase (m): about a skin edge's length.
@@ -132,10 +141,10 @@ impl ExplicitBeamsWorld {
         }
     }
 
-    fn edge_hits(&self, a: usize, b: usize, ea: &[SkinEdge], eb: &[SkinEdge]) -> Vec<EdgeHit> {
+    fn edge_hits(&mut self, a: usize, b: usize, ea: &[SkinEdge], eb: &[SkinEdge]) -> Vec<EdgeHit> {
         let r = self.vehicles[a].collision_range.max(self.vehicles[b].collision_range);
         let travel = |v: &ExplicitBeams| v.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max) * STEP;
-        let pad = r + EDGE_DEPTH + travel(&self.vehicles[a]) + travel(&self.vehicles[b]);
+        let pad = r + edge_depth() + travel(&self.vehicles[a]) + travel(&self.vehicles[b]);
         // A's edges in the grid, by their padded boxes.
         let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
         for (k, e) in ea.iter().enumerate() {
@@ -167,12 +176,15 @@ impl ExplicitBeamsWorld {
             for &k in &seen {
                 let e = &ea[k as usize];
                 let (s, t) = engine_schema::feature_query::closest_seg_seg(e.p, e.q, f.p, f.q);
+                self.edge_stats[0] += 1;
                 if s <= END || s >= 1.0 - END || t <= END || t >= 1.0 - END {
+                    self.edge_stats[1] += 1;
                     continue;
                 }
                 let mut n = (e.q - e.p).cross(f.q - f.p);
                 let len = n.length();
                 if len < 1e-8 {
+                    self.edge_stats[2] += 1;
                     continue;
                 }
                 n /= len;
@@ -180,14 +192,27 @@ impl ExplicitBeamsWorld {
                     n = -n;
                 }
                 // B's skin must face A here (B's outward against n), else no contact.
-                if n.dot(f.out) >= 0.0 {
+                if facing_check() && n.dot(f.out) >= 0.0 {
+                    // (Counted only when close: the pairs the check turns away.)
+                    let g = n.dot((f.p + (f.q - f.p) * t) - (e.p + (e.q - e.p) * s));
+                    if g <= r && g >= -edge_depth() {
+                        self.edge_stats[3] += 1;
+                    }
                     continue;
                 }
                 let ca = e.p + (e.q - e.p) * s;
                 let cb = f.p + (f.q - f.p) * t;
                 let g = n.dot(cb - ca);
-                if g > r || g < -EDGE_DEPTH {
+                if g > r {
                     continue;
+                }
+                if g < -edge_depth() {
+                    self.edge_stats[4] += 1;
+                    continue;
+                }
+                self.edge_stats[5] += 1;
+                if g < 0.0 {
+                    self.edge_stats[6] += 1;
                 }
                 out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p: (r - g).min(r) });
             }
