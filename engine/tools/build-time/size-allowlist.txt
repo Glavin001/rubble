@@ -4,7 +4,7 @@
 # file instead, or raise its line in the same change, where review sees it.
 crates/engine-cuda/src/explicit.rs 1092
 crates/engine-cuda/src/lib.rs 1082
-crates/engine-exec/src/explicit_plan.rs 3870
+crates/engine-exec/src/explicit_plan.rs 3869
 crates/engine-exec/src/explicit_plan/schedule.rs 1365
 crates/engine-exec/src/rigid_plan.rs 2269
 crates/engine-ffi/src/controls.rs 1188
@@ -22,7 +22,7 @@ crates/engine-softbody-authoring/src/authoring/gen2/build.rs 1472
 crates/engine-softbody-authoring/src/authoring/gen2/model.rs 3762
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs 5303
 crates/engine-softbody-authoring/src/authoring/gen2/sedan.rs 1628
-crates/engine-softbody-authoring/src/authoring/lint.rs 1399
+crates/engine-softbody-authoring/src/authoring/lint.rs 1360
 crates/engine-softbody-authoring/src/authoring/node_frames.rs 1220
 crates/engine-softbody-authoring/src/authoring/parts/body.rs 1637
 crates/engine-softbody-authoring/src/authoring/parts/design.rs 1690
@@ -40,9 +40,9 @@ crates/engine-softbody-lab/examples/beam_rate_histogram.rs 1112
 crates/engine-softbody-lab/examples/sedan_stiffness.rs 1589
 crates/engine-softbody-lab/examples/showcase_probe.rs 2724
 crates/engine-softbody-lab/examples/skin_shards_probe.rs 1006
-crates/engine-softbody-lab/examples/vehicle_c2c_overlap.rs 1077
-crates/engine-softbody/src/explicit_beams.rs 5881
-crates/engine-softbody/src/explicit_contact.rs 1761
+crates/engine-softbody-lab/examples/vehicle_c2c_overlap.rs 1056
+crates/engine-softbody/src/explicit_beams.rs 5815
+crates/engine-softbody/src/explicit_contact.rs 1751
 crates/engine-softbody/src/explicit_drive.rs 1576
 crates/engine-softbody/src/explicit_jbeam_ext.rs 1697
 crates/engine-softbody/src/explicit_ref.rs 1193
@@ -62,13 +62,12 @@ crates/engine-webgpu/src/bin/soft_calibrate.rs 1064
 crates/engine-webgpu/src/explicit_beams_gpu.rs 5100
 crates/engine-webgpu/src/gpu.rs 4952
 crates/engine-webgpu/src/gpu_tests.rs 5313
-crates/engine-webgpu/src/lib.rs 1377
+crates/engine-webgpu/src/lib.rs 1375
 crates/engine-webgpu/tests/softbody.rs 1145
 crates/engine-webgpu/tests/vehicle.rs 1922
 crates/engine-webgpu/tests/vehicle_debug.rs 1606
 crates/engine-world-lab/examples/vehicle_lab.rs 3372
 crates/engine-world-wasm/src/explicit.rs 1506
-crates/engine-world-wasm/src/stability.rs 1135
 crates/engine-world/src/destruction.rs 1609
 crates/engine-world/src/explicit_vehicles.rs 1054
 crates/engine-world/src/lab.rs 1775

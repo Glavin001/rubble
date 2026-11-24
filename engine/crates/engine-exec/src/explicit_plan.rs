@@ -3265,8 +3265,11 @@ impl FramePlanner {
     /// Everything this planner holds that its layout does not give it: the words, the
     /// contact plan's state, the host's frame choices ([`portable`]).
     pub fn settings(&self) -> PlannerSettings {
+        // (Without edge contact the last word, W_EDGE, is 0: saved as the 106 words of the
+        // layout before it, so a build from before the word reads the state.)
+        let n = if self.words[W_EDGE] == 0 { W_EDGE } else { PARAM_WORDS };
         PlannerSettings {
-            words: self.words.to_vec(),
+            words: self.words[..n].to_vec(),
             state: self.state(),
             contact_on: self.contact.on,
             wide_on: self.wide_on,
@@ -3278,7 +3281,9 @@ impl FramePlanner {
 
     /// Put back [`Self::settings`] (on a planner made from the same layout).
     pub fn apply(&mut self, s: &PlannerSettings) {
-        self.words.copy_from_slice(&s.words);
+        // (Fewer words: a state from before the last words, which were 0.)
+        self.words.fill(0);
+        self.words[..s.words.len()].copy_from_slice(&s.words);
         self.restore(s.state);
         self.contact.on = s.contact_on;
         self.wide_on = s.wide_on;
