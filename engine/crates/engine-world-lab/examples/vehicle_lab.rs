@@ -10,6 +10,8 @@
 //! - `--mode cpu` (default): the CPU reference (`vehicle_lab::cpu`): no GPU. `--mode gpu`:
 //!   the GPU World (takes the machine's GPU lock; run it under a kill timer,
 //!   `perl -e 'alarm 600; exec @ARGV'`, one GPU job at a time).
+//! - `--vehicles a,b,c`: a mixed run (GPU World): car `k` is of the `k % n`-th type, each a mod
+//!   folder or a design's name (`--mods DIR`/`<design>_new`, default `out/gen`).
 //! - `--car showcase` (default: the page's authored sedan, low resolution) | `sedan` (the
 //!   explicit solver's procedural sedan).
 //! - `--surface 0|1`: the car's opt-in surface contact (default: the script's, else off).
@@ -31,6 +33,36 @@ fn arg(k: &str) -> Option<String> {
     a.iter()
         .position(|x| x == k)
         .and_then(|i| a.get(i + 1).cloned())
+}
+
+/// `--vehicles a,b,c`: the vehicle types of a mixed run (car `k` is of type `k % n`; the GPU
+/// World only), each a mod folder or a design's name (its folder `<design>_new` under
+/// `--mods DIR`, default `out/gen`). Set once by `main`; empty without the flag.
+static MIXED: std::sync::OnceLock<Vec<ExplicitBeams>> = std::sync::OnceLock::new();
+
+/// The templates of a GPU run: the mixed types when `--vehicles` is given, else `template`.
+fn run_templates(template: &ExplicitBeams) -> Vec<ExplicitBeams> {
+    match MIXED.get() {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => vec![template.clone()],
+    }
+}
+
+fn load_vehicles(list: &str) -> anyhow::Result<Vec<ExplicitBeams>> {
+    let mods = arg("--mods").unwrap_or_else(|| "out/gen".into());
+    list.split(',')
+        .filter(|n| !n.is_empty())
+        .map(|n| {
+            let dir = if std::path::Path::new(n).join("files.json").is_file() {
+                n.to_string()
+            } else {
+                format!("{mods}/{n}_new")
+            };
+            let t = car(&dir)?;
+            println!("vehicle {n}: {} nodes, {} beams, {:.0} kg", t.nodes.len(), t.beams.len(), t.nodes.iter().map(|x| x.mass).sum::<f32>());
+            Ok(t)
+        })
+        .collect()
 }
 
 fn car(name: &str) -> anyhow::Result<ExplicitBeams> {
@@ -197,7 +229,7 @@ fn run(
         .unwrap_or(0);
     let t0 = std::time::Instant::now();
     let (stats, table) = if gpu {
-        let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |_| {})?;
+        let (mut world, mut lab) = Lab::build_mixed(GpuContext::Default, &run_templates(template), opts, |_| {})?;
         lab.read_blocking(&world, true)?;
         // `restart` in the script (the page's crash presets and restarts): applied in
         // place, as the page does, after the build.
@@ -237,6 +269,25 @@ fn run(
         world.poll_blocking()?;
         if let Some(x) = world.explicit_vehicles() {
             x.kernel_status().map_err(anyhow::Error::msg)?;
+        }
+        // `--state-hash`: every vehicle's node words (FNV-1a) at the end of the run, one
+        // line a car and one for them all: a run's state compared bit for bit with
+        // another build's (run with bit-exact results on).
+        if arg("--state-hash").as_deref() == Some("1") {
+            if let Some(x) = world.explicit_vehicles() {
+                let mut all = 0xcbf29ce484222325u64;
+                for k in 0..lab.vehicle_count() {
+                    let [off, len, _] = lab.follow_plan(k).expect("car");
+                    let words = engine_webgpu::explicit_coupling::read_words(world.device(), world.queue(), x.nodes_buffer(), off, len);
+                    let mut h = 0xcbf29ce484222325u64;
+                    for w in &words {
+                        h = (h ^ u64::from(*w)).wrapping_mul(0x100000001b3);
+                        all = (all ^ u64::from(*w)).wrapping_mul(0x100000001b3);
+                    }
+                    println!("state-hash car {k}: {} nodes {h:016x}", words.len() / 12);
+                }
+                println!("state-hash all: {all:016x}");
+            }
         }
         (lab.bench.stats(), lab.bench.table())
     } else {
@@ -1263,7 +1314,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         let off = s.split_once(':').and_then(|(_, off)| off.parse().ok()).unwrap_or(0);
         engine_webgpu::set_explicit_shader_checks_off(Some(off));
     }
-    let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
+    let (mut world, mut lab) = Lab::build_mixed(GpuContext::Default, &run_templates(template), opts, |d| {
         d.gpu_timing = match timing.as_deref() {
             Some("phases") => GpuTiming::Phases,
             Some("step") => GpuTiming::Step,
@@ -3275,6 +3326,10 @@ fn main() -> anyhow::Result<()> {
     };
     let name = arg("--car").unwrap_or_else(|| "showcase".into());
     let template = car(&name)?;
+    if let Some(list) = arg("--vehicles") {
+        anyhow::ensure!(gpu, "--vehicles runs in the GPU World (--mode gpu)");
+        let _ = MIXED.set(load_vehicles(&list)?);
+    }
     println!(
         "car {name}: {} nodes, {} beams, {} collision triangles, {:.0} kg",
         template.nodes.len(),

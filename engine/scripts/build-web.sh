@@ -2,7 +2,7 @@
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
 # demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), Broadside (broadside.html), the timber yard (timber.html), the large-maps city (city.html), the motion demo (motion.html:
 # CCD, characters, bullets), the fracture lab (fracture/), the generated vehicle models viewer (models/), the live vehicle designer (vehicle-designer.html), Rubble's generated sedan
-# (__mods/sedan_new, made by running its generator) and a landing page (index.html).
+# (__mods/<design>_new for every registered vehicle design, made by running its generator) and a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
 #
 #   bash engine/scripts/build-web.sh            # output: engine/web-dist/
@@ -295,30 +295,36 @@ done
 step "Scene snapshots (scene_export, host build)"
 cargo run "${PROFILE_ARGS[@]}" -p engine-scenes --no-default-features --bin scene_export
 
-step "Generated sedan (the generator and rigger, run)"
-# Rubble's generated sedan is built here from its code (engine-vehiclegen's design,
-# engine-softbody-lab's rigger: the vehicle_gen_rig example), never committed: the BeamNG mod
-# folder the vehicle lab and softbody.html load from __mods/sedan_new (JBeam, .pc, .glb,
-# .rskin and files.json). A local $OUT/__mods that is a link to one's own mods folder
-# (which may hold community cars, local only) is kept as it is and used instead.
+step "Generated vehicles (the generator and rigger, run: every registered design)"
+# Rubble's generated vehicles are built here from their code (engine-vehiclegen's registry,
+# engine-softbody-lab's rigger: the vehicle_gen_rig example), never committed: one BeamNG mod
+# folder per design, __mods/<design>_new (JBeam, .pc, .glb, .rskin and files.json; the sedan
+# is __mods/sedan_new), and __mods/designs.json (name, title, folder, pc) which the vehicle
+# lab lists its "Vehicles" choices from. A local $OUT/__mods that is a link to one's own
+# mods folder (which may hold community cars, local only) is kept as it is and used instead.
 MODS_LINK=""
 if [[ -L "$OUT/__mods" ]]; then
   MODS_LINK="$(readlink "$OUT/__mods")"
-  echo "    $OUT/__mods links to $MODS_LINK: using that local folder (the sedan is not generated)"
+  echo "    $OUT/__mods links to $MODS_LINK: using that local folder (the vehicles are not generated)"
 else
-  SEDAN_DIR="$(mktemp -d)/sedan_new"
-  gen_sedan() {
-    cargo run "${PROFILE_ARGS[@]}" -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out "$SEDAN_DIR"
-  }
-  # The design is built in memory from the generator's own parameters: its output
-  # depends only on these crates' sources, the lock file and the compiler.
-  sedan_key="$( ( (git ls-files -z crates/engine-vehiclegen crates/engine-softbody \
+  MODS_TMP="$(mktemp -d)"
+  RIG=(cargo run "${PROFILE_ARGS[@]}" -q -p engine-softbody-lab --example vehicle_gen_rig --)
+  DESIGNS=($("${RIG[@]}" --list))
+  "${RIG[@]}" --list-json > "$MODS_TMP/designs.json"
+  # A design is built in memory from the generator's own parameters: its output depends
+  # only on these crates' sources, the lock file and the compiler.
+  mods_key="$( ( (git ls-files -z crates/engine-vehiclegen crates/engine-softbody \
     crates/engine-softbody-authoring crates/engine-vehicle crates/engine-schema Cargo.toml \
     Cargo.lock rust-toolchain.toml \
     ':(exclude,glob)crates/*/tests/**' ':(exclude,glob)crates/*/examples/**'
     printf '%s\0' crates/engine-softbody-lab/examples/vehicle_gen_rig.rs) | sort -z | xargs -0 cat
     rustc --version) | key)"
-  cached sedan "$sedan_key" "$SEDAN_DIR" gen_sedan
+  for design in "${DESIGNS[@]}"; do
+    gen_design() {
+      cargo run "${PROFILE_ARGS[@]}" -p engine-softbody-lab --example vehicle_gen_rig -- "$design" --out "$MODS_TMP/${design}_new"
+    }
+    cached "mod-$design" "$mods_key" "$MODS_TMP/${design}_new" gen_design
+  done
 fi
 
 step "vibe-city scene packs (engine/scenes/vibe-city, bun)"
@@ -342,13 +348,16 @@ if [[ -n "$MODS_LINK" ]]; then
   ln -s "$MODS_LINK" "$OUT/__mods"
 else
   mkdir -p "$OUT/__mods"
-  mv "$SEDAN_DIR" "$OUT/__mods/sedan_new"
-  # Every file the folder's files.json lists must be in it (the loader fetches each).
-  for f in $(tr ',' '\n' < "$OUT/__mods/sedan_new/files.json" | tr -d '[]"'); do
-    if [[ ! -f "$OUT/__mods/sedan_new/$f" ]]; then
-      echo "error: __mods/sedan_new/files.json lists $f, which the export does not contain" >&2
-      exit 1
-    fi
+  cp "$MODS_TMP/designs.json" "$OUT/__mods/designs.json"
+  for design in "${DESIGNS[@]}"; do
+    mv "$MODS_TMP/${design}_new" "$OUT/__mods/${design}_new"
+    # Every file the folder's files.json lists must be in it (the loader fetches each).
+    for f in $(tr ',' '\n' < "$OUT/__mods/${design}_new/files.json" | tr -d '[]"'); do
+      if [[ ! -f "$OUT/__mods/${design}_new/$f" ]]; then
+        echo "error: __mods/${design}_new/files.json lists $f, which the export does not contain" >&2
+        exit 1
+      fi
+    done
   done
 fi
 cp "$WEB"/index.html "$WEB"/play.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/vehicle-lab.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$WEB"/three.html "$OUT"/

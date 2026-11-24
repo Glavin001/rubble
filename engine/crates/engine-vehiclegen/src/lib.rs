@@ -44,3 +44,8 @@ pub fn default_params_json(name: &str) -> Result<String, String> {
 pub fn design_names() -> Vec<&'static str> {
     designs::names()
 }
+
+/// Every registered design's (name, one-line title), in registry order.
+pub fn design_titles() -> Vec<(&'static str, &'static str)> {
+    designs::REGISTRY.iter().map(|e| (e.name, e.title)).collect()
+}
