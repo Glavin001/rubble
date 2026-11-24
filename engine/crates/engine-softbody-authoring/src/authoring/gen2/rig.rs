@@ -199,6 +199,14 @@ fn inner_x_at(v: &[Vec3], z: f32, dz: f32) -> Option<f32> {
         .reduce(f32::min)
 }
 
+/// Largest |x| of `v` within `dy` of height `y`.
+fn half_w_at_y(v: &[Vec3], y: f32, dy: f32) -> Option<f32> {
+    v.iter()
+        .filter(|p| (p.y - y).abs() < dy)
+        .map(|p| p.x.abs())
+        .reduce(f32::max)
+}
+
 fn marker(m: &Model, name: &str) -> Vec3 {
     m.markers
         .iter()
@@ -2630,7 +2638,45 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     };
 
     // Trunk lid: deck rows and the rear face, 5 columns.
-    let trunk_ids = {
+    let trunk_ids = if tk_hi.z - tk_lo.z < 0.10 && tk_hi.y - tk_lo.y > 0.90 {
+        // A closure too short along the car for deck rows and more than
+        // 0.9 m tall (a full-height tailgate): nodes at its top edge and its
+        // foot alone lie in one plane, which no skin fit can use. Its rows
+        // go up the face, 5 columns, and the inner row stands 6 cm behind
+        // the face. (A short flat closure, the estate's 0.5 m, keeps the
+        // deck rows: its skin fit holds.)
+        let part = Part::Trunk;
+        let ys = span(tk_hi.y - 0.04, tk_lo.y + 0.04, if census { 3 } else { 4 });
+        let mut grid = Vec::new();
+        for (kr, &y) in ys.iter().enumerate() {
+            let w = half_w_at_y(&trunk_top, y, 0.04).unwrap_or(0.65) - 0.025;
+            let mut row = Vec::new();
+            for (kc, f) in [-1.0f32, -0.5, 0.0, 0.5, 1.0].iter().enumerate() {
+                let xx = f * w;
+                let p = mirror(end_pt(false, xx.abs(), y), if xx < 0.0 { -1.0 } else { 1.0 });
+                row.push(Some(r.node(&format!("tk_o{kr}{kc}"), p, part, Some(Role::Sheet), true)));
+            }
+            grid.push(row);
+        }
+        let inner_y: Vec<f32> = if census { vec![ys[1]] } else { vec![ys[0], ys[ys.len() - 1]] };
+        let mut inner = Vec::new();
+        for (kr, &y) in inner_y.iter().enumerate() {
+            for (k, &xx) in [-0.45f32, 0.0, 0.45].iter().enumerate() {
+                let p = mirror(end_pt(false, xx.abs(), y), if xx < 0.0 { -1.0 } else { 1.0 });
+                inner.push(r.node(&format!("tk_i{kr}{k}"), inward(p, 0.06), part, Some(Role::DoorFrame), false));
+            }
+        }
+        r.car.panel(&grid, part, &vec![Role::Sheet; grid.len()], Role::Sheet, true);
+        let mut all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
+        all.extend(&inner);
+        graph(&mut r, &all, 0.85, part, Role::Sheet, &|_| false);
+        if rigid_panels {
+            let at = inward(end_pt(false, 0.0, 0.5 * (ys[0] + ys[ys.len() - 1])), RIGIDIFIER_DEPTH);
+            let own = all.clone();
+            all.push(rigidifier(&mut r, "tk_r0", at, part, &own));
+        }
+        all
+    } else {
         let part = Part::Trunk;
         let mut grid = Vec::new();
         // Census: two deck rows and the rear face (18 nodes with the inner row).

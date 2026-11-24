@@ -31,14 +31,14 @@ use crate::uvpack::Parts;
 // -- the reference car ---------------------------------------------------------------
 const R_WHEELBASE: f64 = 2.830;
 const R_TRACK: f64 = 1.600;
-const R_TYRE_D: f64 = 0.683;
+pub(crate) const R_TYRE_D: f64 = 0.683;
 const R_FRONT: f64 = 2.385; // ZFRONT
 const R_REAR: f64 = -2.495; // ZREAR
 const R_WIDTH: f64 = 1.860;
-const R_HEIGHT: f64 = 1.450;
-const R_ARCH_R: f64 = 0.398;
+pub(crate) const R_HEIGHT: f64 = 1.450;
+pub(crate) const R_ARCH_R: f64 = 0.398;
 
-fn refdims() -> RefDims {
+pub(crate) fn refdims() -> RefDims {
     RefDims { axle_f: R_WHEELBASE / 2.0, axle_r: -R_WHEELBASE / 2.0, tip: R_FRONT, tail: R_REAR, arch_zone: 0.55 }
 }
 
@@ -1098,7 +1098,7 @@ if !solid {
 /// the sill's inner face at the foot and stops under the roof rail; each
 /// jamb face has a seal land, a step in 16 mm down; the inner face is
 /// 132 mm in. 72 mm wide: the slot between the door cards.
-fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
+pub(crate) fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
     // (v: 1 the sill, 2 the doors' bottom edge, 7 the roof rail)
     let (v0, v1) = (1.60, 6.95);
     let at = |v: f64, dz: f64, depth: f64| {

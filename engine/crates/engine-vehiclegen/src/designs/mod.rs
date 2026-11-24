@@ -8,6 +8,7 @@ pub mod mach1;
 pub mod mach1_gasser;
 pub mod police;
 pub mod sedan;
+pub mod suv4x4;
 pub mod wagon;
 
 use crate::assemble::Design;
@@ -55,6 +56,16 @@ fn gasser_defaults() -> String {
     serde_json::to_string_pretty(&mach1_gasser::livery(mach1::Mach1Params::default())).unwrap()
 }
 
+fn suv_params(json: &str) -> Result<suv4x4::Suv4x4Params, String> {
+    let p: suv4x4::Suv4x4Params = serde_json::from_str(json).map_err(|e| format!("parameters: {e}"))?;
+    p.validate()?;
+    Ok(p)
+}
+
+fn suv_defaults() -> String {
+    serde_json::to_string_pretty(&suv4x4::Suv4x4Params::default()).unwrap()
+}
+
 pub static REGISTRY: &[Entry] = &[
     Entry {
         name: "sedan",
@@ -85,6 +96,12 @@ pub static REGISTRY: &[Entry] = &[
         title: "Drag-strip gasser (Mach 1 variant)",
         defaults: gasser_defaults,
         build: |j| Ok(Box::new(mach1_gasser::Gasser::new(mach1_params(j)?))),
+    },
+    Entry {
+        name: "suv_4x4",
+        title: "Off-road 4x4 (tailgate, flares, roof rack)",
+        defaults: suv_defaults,
+        build: |j| Ok(Box::new(suv4x4::Suv4x4::new(suv_params(j)?))),
     },
 ];
 

@@ -108,7 +108,8 @@ fn every_design_rigs_and_rests_within_5_mm() {
         // standing on its wheels: the lowest point (a raycast wheel's rim of
         // rubber included) is at the ground, not sunk or hovering
         let low = lowest_point(&sim);
-        println!("{name}: {nd} nodes, {} beams, worst drift {:.1} mm at {}, broken {broken}, bent {bent}, lowest point {:.0} mm", sim.beams.len(), worst.1 * 1e3, worst.0, low * 1e3);
+        let mass: f32 = desc.nodes.iter().map(|n| n.mass).sum();
+        println!("{name}: {nd} nodes, {} beams, {mass:.0} kg, worst drift {:.1} mm at {}, broken {broken}, bent {bent}, lowest point {:.0} mm", sim.beams.len(), worst.1 * 1e3, worst.0, low * 1e3);
         assert!(low.abs() < 0.03, "{name}: the parked car's lowest point is {:.0} mm from the ground", low * 1e3);
         assert_eq!((broken, bent), (0, 0), "{name}");
         assert!(worst.1 <= 0.005, "{name}: drift {:.1} mm at {}", worst.1 * 1e3, worst.0);
