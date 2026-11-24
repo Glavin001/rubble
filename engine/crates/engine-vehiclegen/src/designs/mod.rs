@@ -6,6 +6,7 @@
 
 pub mod police;
 pub mod sedan;
+pub mod wagon;
 
 use crate::assemble::Design;
 
@@ -30,6 +31,10 @@ fn sedan_defaults() -> String {
     serde_json::to_string_pretty(&sedan::SedanParams::default()).unwrap()
 }
 
+fn wagon_defaults() -> String {
+    serde_json::to_string_pretty(&wagon::livery(sedan::SedanParams::default())).unwrap()
+}
+
 fn police_defaults() -> String {
     serde_json::to_string_pretty(&police::livery(sedan::SedanParams::default())).unwrap()
 }
@@ -46,6 +51,12 @@ pub static REGISTRY: &[Entry] = &[
         title: "Police interceptor (sedan variant)",
         defaults: police_defaults,
         build: |j| Ok(Box::new(police::Police::new(sedan_params(j)?))),
+    },
+    Entry {
+        name: "wagon",
+        title: "Estate wagon (sedan variant)",
+        defaults: wagon_defaults,
+        build: |j| Ok(Box::new(wagon::Wagon::new(sedan_params(j)?))),
     },
 ];
 

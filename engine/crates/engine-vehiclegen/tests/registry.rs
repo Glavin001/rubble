@@ -21,7 +21,13 @@ fn the_registry_lists_designs_and_each_builds_from_its_defaults() {
             // solid panels: closed, as the sedan's are
             if m.surf.as_ref().is_some_and(|s| s.iter().any(|x| *x != Surf::Outer)) {
                 let r = check(m);
-                assert!(r.closed(), "{n}/{name}: {} open edges", r.boundary_edges);
+                assert!(
+                    r.closed(),
+                    "{n}/{name}: {} open edges, {} non-manifold, {} pieces",
+                    r.boundary_edges,
+                    r.nonmanifold_edges,
+                    r.components
+                );
             }
         }
     }

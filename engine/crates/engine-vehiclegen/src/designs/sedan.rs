@@ -134,8 +134,27 @@ impl SedanParams {
     }
 }
 
+/// What a variant changes in the sedan (the Rust form of the Python
+/// generator's `derive`): everything left at its default is the sedan.
+#[derive(Clone, Default)]
+pub struct Variant {
+    /// Replacement key lines: (index, x table, y table), reference metres.
+    pub keys: Vec<(usize, Pchip, Pchip)>,
+    /// The tail face in reference coordinates (default: the sedan's).
+    pub rear_ref: Option<fn(f64, f64) -> f64>,
+    /// First say on a panel's name (None: the sedan's rule).
+    pub assign: Option<fn(&str, i64, Side) -> Option<String>>,
+    /// Replaces the tail cap's layout (nose, arches and the tail's end fit
+    /// stay the sedan's).
+    pub tail: Option<fn(&Sedan, &mut CarBody)>,
+    /// A tailgate instead of a boot lid: the rear closure's name and
+    /// the layout without the sedan's back-light / C-pillar stations.
+    pub tailgate: bool,
+}
+
 #[derive(Clone)]
 pub struct Sedan {
+    pub v: Variant,
     pub p: SedanParams,
     pub f: Frame,
     zf_ax: f64,
@@ -146,6 +165,10 @@ pub struct Sedan {
 
 impl Sedan {
     pub fn new(p: SedanParams) -> Sedan {
+        Self::with_variant(p, Variant::default())
+    }
+
+    pub fn with_variant(p: SedanParams, v: Variant) -> Sedan {
         let wheel_y = p.tyre_d / 2.0;
         let dy = p.ride + (wheel_y - R_TYRE_D / 2.0);
         // roof: scale above the shoulder so the top lands at `height` (+ dy)
@@ -166,7 +189,7 @@ impl Sedan {
                 arch_k: arch_r / R_ARCH_R,
             },
         );
-        Sedan { zf_ax: p.wheelbase / 2.0, zr_ax: -p.wheelbase / 2.0, wheel_y, arch_r, f, p }
+        Sedan { v, zf_ax: p.wheelbase / 2.0, zr_ax: -p.wheelbase / 2.0, wheel_y, arch_r, f, p }
     }
 
     fn arch_centres(&self) -> [(f64, f64); 2] {
@@ -196,7 +219,8 @@ impl Sedan {
     }
 
     pub fn rear_z(&self, x: f64, y: f64) -> f64 {
-        self.f.z(Self::rear_z_ref(self.f.xi(x), self.f.yi(y)))
+        let r = self.v.rear_ref.unwrap_or(Self::rear_z_ref);
+        self.f.z(r(self.f.xi(x), self.f.yi(y)))
     }
 
     fn front_fn(&self) -> FaceFn {
@@ -389,7 +413,11 @@ impl Design for Sedan {
 
     fn tube(&self) -> Tube {
         let f = Rc::new(self.f.clone());
-        let keys: Vec<Key> = Self::ref_keys()
+        let mut ref_keys = Self::ref_keys();
+        for (i, px, py) in &self.v.keys {
+            ref_keys[*i] = (px.clone(), py.clone());
+        }
+        let keys: Vec<Key> = ref_keys
             .into_iter()
             .map(|(px, py)| {
                 if f.is_identity() {
@@ -460,6 +488,11 @@ impl Design for Sedan {
         let fdoor = matches!(i, "DF" | "WB" | "WT" | "FG");
         let rdoor = matches!(i, "BP" | "RG" | "RQ");
         let r = |n: String| Some((n, Mat::Paint));
+        if let Some(h) = self.v.assign {
+            if let Some(n) = h(zf, lo as i64, side) {
+                return r(n);
+            }
+        }
         if lo == 0 {
             return if fdoor || rdoor { r("body_shell".into()) } else { None };
         }
@@ -528,12 +561,12 @@ impl Design for Sedan {
 
     fn build_layout(&self, cb: &mut CarBody) {
         // back light, quarter glass and C-pillar
-        let ov: [(&str, &[(usize, f64)]); 4] = [
+        let ov: [(&str, &[(usize, f64)]); 4] = if self.v.tailgate { [("RQ", &[]), ("AR1", &[]), ("AR2", &[]), ("AR3", &[])] } else { [
             ("RQ", &[(11, -1.00), (12, -1.00)]),
             ("AR1", &[(11, -1.20), (12, -1.20)]),
             ("AR2", &[(8, -1.32), (9, -1.22), (10, -1.18), (11, -1.45), (12, -1.45)]),
             ("AR3", &[(8, -1.80), (9, -1.75), (10, -1.70), (11, -1.70), (12, -1.70)]),
-        ];
+        ] };
         for (name, zs) in ov {
             let i = cb.zi(name);
             for &(jl, z) in zs {
@@ -574,7 +607,7 @@ impl Design for Sedan {
             z_front: self.f.z(R_FRONT),
             z_rear: self.f.z(R_REAR),
             doors: ["FL", "FR", "RL", "RR"].iter().map(|s| s.to_string()).collect(),
-            rear_closure: "trunk_lid".into(),
+            rear_closure: if self.v.tailgate { "tailgate" } else { "trunk_lid" }.into(),
             arches: vec![(zf, yf, self.arch_r), (zr, yr, self.arch_r)],
             front_z: Rc::new(move |x, y| a.front_z(x, y)),
             rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
@@ -675,6 +708,9 @@ impl Sedan {
     }
 
     fn build_tail(&self, cb: &mut CarBody) {
+        if let Some(t) = self.v.tail {
+            return t(self, cb);
+        }
         // tail: bumper cover low, tail panel, wrap-round lamps under the lid
         let it = cb.zi("T");
         let j = cb.jn;
