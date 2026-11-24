@@ -4,6 +4,7 @@
 //! (police, wagon) wraps another design and overrides only what differs;
 //! nothing else (CLI, wasm designer, web build, tests, lab) names a design.
 
+pub mod mach1;
 pub mod police;
 pub mod sedan;
 pub mod wagon;
@@ -39,6 +40,16 @@ fn police_defaults() -> String {
     serde_json::to_string_pretty(&police::livery(sedan::SedanParams::default())).unwrap()
 }
 
+fn mach1_params(json: &str) -> Result<mach1::Mach1Params, String> {
+    let p: mach1::Mach1Params = serde_json::from_str(json).map_err(|e| format!("parameters: {e}"))?;
+    p.validate()?;
+    Ok(p)
+}
+
+fn mach1_defaults() -> String {
+    serde_json::to_string_pretty(&mach1::Mach1Params::default()).unwrap()
+}
+
 pub static REGISTRY: &[Entry] = &[
     Entry {
         name: "sedan",
@@ -57,6 +68,12 @@ pub static REGISTRY: &[Entry] = &[
         title: "Estate wagon (sedan variant)",
         defaults: wagon_defaults,
         build: |j| Ok(Box::new(wagon::Wagon::new(sedan_params(j)?))),
+    },
+    Entry {
+        name: "mach1_1969",
+        title: "1969 fastback Mach 1 (two-door)",
+        defaults: mach1_defaults,
+        build: |j| Ok(Box::new(mach1::Mach1::new(mach1_params(j)?))),
     },
 ];
 
