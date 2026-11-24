@@ -31,14 +31,14 @@ use crate::uvpack::Parts;
 // -- the reference car ---------------------------------------------------------------
 const R_WHEELBASE: f64 = 2.830;
 const R_TRACK: f64 = 1.600;
-const R_TYRE_D: f64 = 0.683;
+pub(crate) const R_TYRE_D: f64 = 0.683;
 const R_FRONT: f64 = 2.385; // ZFRONT
 const R_REAR: f64 = -2.495; // ZREAR
 const R_WIDTH: f64 = 1.860;
-const R_HEIGHT: f64 = 1.450;
-const R_ARCH_R: f64 = 0.398;
+pub(crate) const R_HEIGHT: f64 = 1.450;
+pub(crate) const R_ARCH_R: f64 = 0.398;
 
-fn refdims() -> RefDims {
+pub(crate) fn refdims() -> RefDims {
     RefDims { axle_f: R_WHEELBASE / 2.0, axle_r: -R_WHEELBASE / 2.0, tip: R_FRONT, tail: R_REAR, arch_zone: 0.55 }
 }
 
@@ -95,6 +95,28 @@ impl Default for SedanParams {
     }
 }
 
+/// Each numeric parameter's range (the one list `validate` and the web configurator's
+/// sliders read). Lowering (`ride`) uses up the gap between the tyre and the wheel-well
+/// liner (it grows with the tyre: 33.5 mm at every tyre size; keep 13.5).
+pub const RANGES: &[(&str, f64, f64)] = &[
+    ("wheelbase", 2.2, 3.4),
+    ("front_overhang", 0.70, 1.30),
+    ("rear_overhang", 0.75, 1.40),
+    ("width", 1.55, 2.10),
+    ("track", 1.35, 1.85),
+    ("height", 1.20, 1.80),
+    ("ride", -0.020, 0.20),
+    ("tyre_d", 0.55, 0.85),
+    ("tyre_w", 0.15, 0.35),
+    ("rim_in", 13.0, 22.0),
+    ("rim_w_in", 5.0, 11.0),
+    ("metallic", 0.0, 1.0),
+    ("roughness", 0.0, 1.0),
+];
+
+/// The rim styles the sedan family reads (anything else is the alloy).
+pub const RIM_STYLES: &[&str] = &["alloy", "steel", "magnum"];
+
 impl SedanParams {
     /// Ranges the design holds together in (each wheel arch keeps its
     /// undistorted zone, the cabin keeps its door lines in order).
@@ -106,21 +128,24 @@ impl SedanParams {
                 Err(format!("{name} = {v} is outside {lo}..{hi}"))
             }
         };
-        chk("wheelbase", self.wheelbase, 2.2, 3.4)?;
-        chk("front_overhang", self.front_overhang, 0.70, 1.30)?;
-        chk("rear_overhang", self.rear_overhang, 0.75, 1.40)?;
-        chk("width", self.width, 1.55, 2.10)?;
-        chk("track", self.track, 1.35, 1.85)?;
-        chk("height", self.height, 1.20, 1.80)?;
-        // lowering uses up the gap between the tyre and the wheel-well liner
-        // (it grows with the tyre: 33.5 mm at every tyre size; keep 13.5)
-        chk("ride", self.ride, -0.020, 0.20)?;
-        chk("tyre_d", self.tyre_d, 0.55, 0.85)?;
-        chk("tyre_w", self.tyre_w, 0.15, 0.35)?;
-        chk("rim_in", self.rim_in, 13.0, 22.0)?;
-        chk("rim_w_in", self.rim_w_in, 5.0, 11.0)?;
-        chk("metallic", self.metallic, 0.0, 1.0)?;
-        chk("roughness", self.roughness, 0.0, 1.0)?;
+        let v = |k: &str| match k {
+            "wheelbase" => self.wheelbase,
+            "front_overhang" => self.front_overhang,
+            "rear_overhang" => self.rear_overhang,
+            "width" => self.width,
+            "track" => self.track,
+            "height" => self.height,
+            "ride" => self.ride,
+            "tyre_d" => self.tyre_d,
+            "tyre_w" => self.tyre_w,
+            "rim_in" => self.rim_in,
+            "rim_w_in" => self.rim_w_in,
+            "metallic" => self.metallic,
+            _ => self.roughness,
+        };
+        for &(k, lo, hi) in RANGES {
+            chk(k, v(k), lo, hi)?;
+        }
         if self.rim_in * 0.0254 > self.tyre_d - 0.12 {
             return Err(format!("rim {} in leaves no tyre sidewall on a {} m tyre", self.rim_in, self.tyre_d));
         }
@@ -134,8 +159,30 @@ impl SedanParams {
     }
 }
 
+/// What a variant changes in the sedan (the Rust form of the Python
+/// generator's `derive`): everything left at its default is the sedan.
+#[derive(Clone, Default)]
+pub struct Variant {
+    /// Replacement key lines: (index, x table, y table), reference metres.
+    pub keys: Vec<(usize, Pchip, Pchip)>,
+    /// The tail face in reference coordinates (default: the sedan's).
+    pub rear_ref: Option<fn(f64, f64) -> f64>,
+    /// First say on a panel's name (None: the sedan's rule).
+    pub assign: Option<fn(&str, i64, Side) -> Option<String>>,
+    /// Replaces the tail cap's layout (nose, arches and the tail's end fit
+    /// stay the sedan's).
+    pub tail: Option<fn(&Sedan, &mut CarBody)>,
+    /// A tailgate instead of a boot lid: the rear closure's name and
+    /// the layout without the sedan's back-light / C-pillar stations.
+    pub tailgate: bool,
+    /// The rear screen's top (rear header) and base, reference z, for the
+    /// body-in-white (default: the sedan's -1.00 and -1.70).
+    pub rear_lines: Option<(f64, f64)>,
+}
+
 #[derive(Clone)]
 pub struct Sedan {
+    pub v: Variant,
     pub p: SedanParams,
     pub f: Frame,
     zf_ax: f64,
@@ -146,6 +193,10 @@ pub struct Sedan {
 
 impl Sedan {
     pub fn new(p: SedanParams) -> Sedan {
+        Self::with_variant(p, Variant::default())
+    }
+
+    pub fn with_variant(p: SedanParams, v: Variant) -> Sedan {
         let wheel_y = p.tyre_d / 2.0;
         let dy = p.ride + (wheel_y - R_TYRE_D / 2.0);
         // roof: scale above the shoulder so the top lands at `height` (+ dy)
@@ -166,7 +217,7 @@ impl Sedan {
                 arch_k: arch_r / R_ARCH_R,
             },
         );
-        Sedan { zf_ax: p.wheelbase / 2.0, zr_ax: -p.wheelbase / 2.0, wheel_y, arch_r, f, p }
+        Sedan { v, zf_ax: p.wheelbase / 2.0, zr_ax: -p.wheelbase / 2.0, wheel_y, arch_r, f, p }
     }
 
     fn arch_centres(&self) -> [(f64, f64); 2] {
@@ -196,7 +247,8 @@ impl Sedan {
     }
 
     pub fn rear_z(&self, x: f64, y: f64) -> f64 {
-        self.f.z(Self::rear_z_ref(self.f.xi(x), self.f.yi(y)))
+        let r = self.v.rear_ref.unwrap_or(Self::rear_z_ref);
+        self.f.z(r(self.f.xi(x), self.f.yi(y)))
     }
 
     fn front_fn(&self) -> FaceFn {
@@ -389,7 +441,11 @@ impl Design for Sedan {
 
     fn tube(&self) -> Tube {
         let f = Rc::new(self.f.clone());
-        let keys: Vec<Key> = Self::ref_keys()
+        let mut ref_keys = Self::ref_keys();
+        for (i, px, py) in &self.v.keys {
+            ref_keys[*i] = (px.clone(), py.clone());
+        }
+        let keys: Vec<Key> = ref_keys
             .into_iter()
             .map(|(px, py)| {
                 if f.is_identity() {
@@ -460,6 +516,11 @@ impl Design for Sedan {
         let fdoor = matches!(i, "DF" | "WB" | "WT" | "FG");
         let rdoor = matches!(i, "BP" | "RG" | "RQ");
         let r = |n: String| Some((n, Mat::Paint));
+        if let Some(h) = self.v.assign {
+            if let Some(n) = h(zf, lo as i64, side) {
+                return r(n);
+            }
+        }
         if lo == 0 {
             return if fdoor || rdoor { r("body_shell".into()) } else { None };
         }
@@ -528,12 +589,12 @@ impl Design for Sedan {
 
     fn build_layout(&self, cb: &mut CarBody) {
         // back light, quarter glass and C-pillar
-        let ov: [(&str, &[(usize, f64)]); 4] = [
+        let ov: [(&str, &[(usize, f64)]); 4] = if self.v.tailgate { [("RQ", &[]), ("AR1", &[]), ("AR2", &[]), ("AR3", &[])] } else { [
             ("RQ", &[(11, -1.00), (12, -1.00)]),
             ("AR1", &[(11, -1.20), (12, -1.20)]),
             ("AR2", &[(8, -1.32), (9, -1.22), (10, -1.18), (11, -1.45), (12, -1.45)]),
             ("AR3", &[(8, -1.80), (9, -1.75), (10, -1.70), (11, -1.70), (12, -1.70)]),
-        ];
+        ] };
         for (name, zs) in ov {
             let i = cb.zi(name);
             for &(jl, z) in zs {
@@ -571,10 +632,12 @@ impl Design for Sedan {
             tyre_w: self.p.tyre_w,
             rim_d: self.p.rim_in * 0.0254,
             wheel_y: self.wheel_y,
+            rear_wheel: None,
+            pose: None,
             z_front: self.f.z(R_FRONT),
             z_rear: self.f.z(R_REAR),
             doors: ["FL", "FR", "RL", "RR"].iter().map(|s| s.to_string()).collect(),
-            rear_closure: "trunk_lid".into(),
+            rear_closure: if self.v.tailgate { "tailgate" } else { "trunk_lid" }.into(),
             arches: vec![(zf, yf, self.arch_r), (zr, yr, self.arch_r)],
             front_z: Rc::new(move |x, y| a.front_z(x, y)),
             rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
@@ -606,13 +669,15 @@ impl Sedan {
             z_screen_base: z("WB"),
             z_screen_top: z("WT"),
             z_b: z("BP"),
+            z_seat: z("BP"),
             z_door_rear: z("AR1"),
             // (the back light's top and base on the centre line: `build_layout`)
-            z_rear_top: -1.00,
-            z_rear_base: -1.70,
+            z_rear_top: self.v.rear_lines.map_or(-1.00, |l| l.0),
+            z_rear_base: self.v.rear_lines.map_or(-1.70, |l| l.1),
             well_x: 0.56,
             well_r: 0.375 + self.arch_r - R_ARCH_R,
             wheel_y: self.f.y(R_TYRE_D / 2.0),
+            y_pan: 0.222,
         }
     }
 
@@ -631,8 +696,10 @@ impl Sedan {
             rim_w: self.p.rim_w_in * 0.0254,
             axle_f: R_WHEELBASE / 2.0,
             axle_r: -R_WHEELBASE / 2.0,
+            y_pan: 0.222,
             z_nose: Rc::new(move |x, y| a.front_z(x, y)),
             z_tail: Rc::new(move |x, y| b.rear_z(x, y)),
+            rear: None,
         }
     }
 
@@ -675,6 +742,9 @@ impl Sedan {
     }
 
     fn build_tail(&self, cb: &mut CarBody) {
+        if let Some(t) = self.v.tail {
+            return t(self, cb);
+        }
         // tail: bumper cover low, tail panel, wrap-round lamps under the lid
         let it = cb.zi("T");
         let j = cb.jn;
@@ -1046,122 +1116,11 @@ if !solid {
     }
 }
 
-/// numpy.arange(a, b, step) for floats.
-/// The B-pillar: a closed box section down the body side at z0, from the
-/// sill to the roof rail, behind the doors. Its outer face sits 72 mm in
-/// from the skin (the doors' inner panels are 50 mm deep), reaches out to
-/// the sill's inner face at the foot and stops under the roof rail; each
-/// jamb face has a seal land, a step in 16 mm down; the inner face is
-/// 132 mm in. 72 mm wide: the slot between the door cards.
-fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
-    // (v: 1 the sill, 2 the doors' bottom edge, 7 the roof rail)
-    let (v0, v1) = (1.60, 6.95);
-    let at = |v: f64, dz: f64, depth: f64| {
-        // (in from the skin level with the ground, not along the normal:
-        // a section this deep would fold behind the shoulder's bend)
-        let p = tube.eval(z0 + dz, if side > 0.0 { v } else { tube.vm - v });
-        p - DVec3::X * (side * depth)
-    };
-    // stations every 22 mm up the side
-    let fine: Vec<f64> = linspace(v0, v1, 280);
-    let mut len = vec![0.0];
-    for k in 1..fine.len() {
-        let d = (at(fine[k], 0.0, 0.0) - at(fine[k - 1], 0.0, 0.0)).length();
-        len.push(len[k - 1] + d);
-    }
-    let total = len[len.len() - 1];
-    let ns = (total / 0.022).round() as usize;
-    let vs: Vec<f64> = (0..=ns).map(|i| interp(total * i as f64 / ns as f64, &len, &fine)).collect();
-    // the section: (along the car, below the skin), outer face first
-    let (hw, land, face, step, back) = (0.036, 0.029, 0.072, 0.088, 0.132);
-    let ring = |v: f64| -> Vec<DVec3> {
-        // the outer face meets the sill's inner face
-        let up = smoothstep(1.95, v0, v);
-        let o = face + (0.031 - face) * up;
-        let s = step + (0.047 - step) * up;
-        [
-            (-hw, o),
-            (-0.012, o),
-            (0.012, o),
-            (hw, o),
-            (hw, s),
-            (land, s + 0.002),
-            (land, 0.5 * (s + back)),
-            (land, back),
-            (0.010, back),
-            (-0.010, back),
-            (-land, back),
-            (-land, 0.5 * (s + back)),
-            (-land, s + 0.002),
-            (-hw, s),
-        ]
-        .iter()
-        .map(|&(dz, d)| at(v, dz, d))
-        .collect()
-    };
-    // (the head stops at the doors' top edge, under the roof rail and short
-    // of the headliner)
-    let rings: Vec<Vec<DVec3>> = vs.iter().map(|&v| ring(v)).collect();
-    let nr = rings[0].len();
-    // its own UV island (metres: round the section, up the pillar), the end
-    // caps beside it
-    let mut round = vec![0.0; nr + 1];
-    for j in 0..nr {
-        round[j + 1] = round[j] + (rings[2][(j + 1) % nr] - rings[2][j]).length();
-    }
-    let island = if side > 0.0 { 5_000 } else { 5_010 };
-    let mut m = Mesh::new();
-    for r in &rings {
-        m.v.extend_from_slice(r);
-    }
-    let id = |i: usize, j: usize| (i * nr + j % nr) as u32;
-    for i in 0..rings.len() - 1 {
-        let (v0, v1) = (0.022 * i as f64, 0.022 * (i + 1) as f64);
-        for j in 0..nr {
-            m.q.push([id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)]);
-            m.quv.push([DVec2::new(round[j], v0), DVec2::new(round[j + 1], v0), DVec2::new(round[j + 1], v1), DVec2::new(round[j], v1)]);
-            m.qm.push(Mat::Paint);
-            m.qi.push(island);
-        }
-    }
-    // end caps: the section cut into well shaped cells (the wide part as
-    // three, the stem as two with a triangle each side of its foot)
-    let section: [DVec2; 14] = {
-        let (o, s) = (face, step);
-        [(-hw, o), (-0.012, o), (0.012, o), (hw, o), (hw, s), (land, s + 0.002), (land, 0.5 * (s + back)), (land, back), (0.010, back), (-0.010, back), (-land, back), (-land, 0.5 * (s + back)), (-land, s + 0.002), (-hw, s)].map(|(a, b)| DVec2::new(a, b))
-    };
-    for (e, i) in [0, rings.len() - 1].into_iter().enumerate() {
-        let uv = |j: usize| section[j] + DVec2::new(0.0, 0.1 * e as f64);
-        for f in [[0, 1, 12, 13], [1, 2, 5, 12], [2, 3, 4, 5], [12, 5, 6, 11], [11, 6, 8, 9]] {
-            let (mut q, mut u) = (f.map(|j| id(i, j)), f.map(uv));
-            if i == 0 {
-                q.reverse();
-                u.reverse();
-            }
-            m.q.push(q);
-            m.qm.push(Mat::Paint);
-            m.quv.push(u);
-            m.qi.push(island + 1);
-        }
-        for f in [[6, 7, 8], [11, 9, 10]] {
-            let (mut q, mut u) = (f.map(|j| id(i, j)), f.map(uv));
-            if i == 0 {
-                q.reverse();
-                u.reverse();
-            }
-            m.t.push(q);
-            m.tm.push(Mat::Paint);
-            m.tuv.push(u);
-            m.ti.push(island + 1);
-        }
-    }
-    let mut m = orient_outward(m);
-    // not skin: the rigger and the collision skin leave it alone
-    m.surf = Some(vec![crate::mesh::Surf::Edge; m.v.len()]);
-    m
-}
 
 fn arange(a: f64, b: f64, step: f64) -> Vec<f64> {
     let n = ((b - a) / step).ceil().max(0.0) as usize;
     (0..n).map(|i| a + i as f64 * step).collect()
 }
+
+mod b_pillar;
+pub(crate) use b_pillar::b_pillar;

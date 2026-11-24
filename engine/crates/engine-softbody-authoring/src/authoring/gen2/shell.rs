@@ -247,6 +247,29 @@ pub fn lattice_with(st: &Structure, feel: &CrashFeel) -> Lattice {
     l
 }
 
+/// Torsion bars over the floor's cells: sill to tunnel side, and across the
+/// tunnel, between consecutive rows (the node ids of each cell's four corners).
+fn floor_torsion_cells(at: &dyn Fn(&str) -> usize) -> Vec<[usize; 4]> {
+    let mut torsion = Vec::new();
+    for k in 1..5 {
+        for s in ["l", "r"] {
+            torsion.push([
+                at(&format!("c1_{k}o{s}")),
+                at(&format!("c1_{k}t{s}")),
+                at(&format!("c1_{}t{s}", k + 1)),
+                at(&format!("c1_{}o{s}", k + 1)),
+            ]);
+        }
+        torsion.push([
+            at(&format!("c1_{k}tl")),
+            at(&format!("c1_{k}tr")),
+            at(&format!("c1_{}tr", k + 1)),
+            at(&format!("c1_{}tl", k + 1)),
+        ]);
+    }
+    torsion
+}
+
 fn lattice_defined(st: &Structure) -> Lattice {
     let n = st.nodes.len();
     let id: HashMap<&str, usize> = st
@@ -384,8 +407,14 @@ fn lattice_defined(st: &Structure) -> Lattice {
     // centre, a pillar's middle), it takes a beam along its weakest axis
     // (through the cabin if it must: the study allows six over 0.9 m).
     let mut long = 0usize;
+    // The study's brace lengths (1.25 m longest, 0.9 m before a beam counts
+    // as long) are for a cabin up to 1.07 m from the tunnel to the roof
+    // bow's centre (the estate's: the tallest of the cars they were set
+    // on); a taller cabin (a 4x4's) scales them with that height.
+    let tall = ((pos[at("d4_b")].y - pos[at("c3_3")].y) / 1.07).max(1.0);
+    let (reach_long, reach_cost) = (1.25 * tall, 0.9 * tall);
     let pair_cost = |a: usize, b: usize| {
-        if (pos[a] - pos[b]).length() <= 0.9 {
+        if (pos[a] - pos[b]).length() <= reach_cost {
             0
         } else if mirror[a] == a && mirror[b] == b {
             1
@@ -418,7 +447,7 @@ fn lattice_defined(st: &Structure) -> Lattice {
             // makes the least flat tetrahedron with the fewest long beams.
             let mut best: Option<(f64, usize, usize, usize, usize)> = None;
             let v: Vec<usize> = nb[i].iter().copied().collect();
-            for j in (0..n).filter(|&j| j != i && (pos[j] - pos[i]).length() <= 1.25) {
+            for j in (0..n).filter(|&j| j != i && (pos[j] - pos[i]).length() <= reach_long) {
                 let dj = pos[j] - pos[i];
                 for (x, &k) in v.iter().enumerate() {
                     for &l in &v[x + 1..] {
@@ -434,8 +463,8 @@ fn lattice_defined(st: &Structure) -> Lattice {
                             )
                             .abs();
                         if vol <= 0.12
-                            || (pos[j] - pos[k]).length() > 1.25
-                            || (pos[j] - pos[l]).length() > 1.25
+                            || (pos[j] - pos[k]).length() > reach_long
+                            || (pos[j] - pos[l]).length() > reach_long
                         {
                             continue;
                         }
@@ -537,23 +566,7 @@ fn lattice_defined(st: &Structure) -> Lattice {
     budget(st, &mut beams);
     // Torsion bars over the floor's cells: sill to tunnel side, and across
     // the tunnel, between consecutive rows.
-    let mut torsion = Vec::new();
-    for k in 1..5 {
-        for s in ["l", "r"] {
-            torsion.push([
-                at(&format!("c1_{k}o{s}")),
-                at(&format!("c1_{k}t{s}")),
-                at(&format!("c1_{}t{s}", k + 1)),
-                at(&format!("c1_{}o{s}", k + 1)),
-            ]);
-        }
-        torsion.push([
-            at(&format!("c1_{k}tl")),
-            at(&format!("c1_{k}tr")),
-            at(&format!("c1_{}tr", k + 1)),
-            at(&format!("c1_{}tl", k + 1)),
-        ]);
-    }
+    let torsion = floor_torsion_cells(&at);
     Lattice {
         beams,
         torsion: torsion
