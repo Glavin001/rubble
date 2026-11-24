@@ -33,6 +33,13 @@ pub(crate) fn push_out_rate() -> f32 {
     *R.get_or_init(|| std::env::var("PUSH_OUT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
 }
 
+/// Residual sweeps of vehicle contact per turn (under measurement, `CONTACT_SWEEPS`;
+/// 1: the one residual pass, as before).
+pub(crate) fn contact_sweeps() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("CONTACT_SWEEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
+}
+
 pub(crate) fn speculative() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SPECULATIVE").is_ok_and(|v| v == "1"))
@@ -1227,11 +1234,27 @@ impl ExplicitBeamsWorld {
         if !staged {
             return;
         }
-        let res = if vehicle_residual() {
+        let mut res = if vehicle_residual() {
             self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b)
         } else {
             vec![None; hits.len()]
         };
+        // Iterative contact (under measurement, `CONTACT_SWEEPS`, default 1: as before):
+        // more residual sweeps, each seeing every hit's force so far (the staging sums),
+        // so the turn's contacts are satisfied together; the work guard follows.
+        if vehicle_residual() {
+            for _ in 1..contact_sweeps() {
+                let more = self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b);
+                if more.iter().all(|r| r.is_none()) {
+                    break;
+                }
+                for (r, m) in res.iter_mut().zip(more) {
+                    if let Some(m) = m {
+                        *r = Some(r.unwrap_or(0.0) + m);
+                    }
+                }
+            }
+        }
         let with_res: Vec<Vec3> = hits
             .iter()
             .zip(&first)
