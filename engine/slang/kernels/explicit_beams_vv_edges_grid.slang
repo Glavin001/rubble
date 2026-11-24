@@ -478,14 +478,33 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
     }
     sync();
     uint rebuild = gsUniformLanes;
-    if (rebuild != 0u)
+    // The search, from one place: pass 0 the build (the pairs within reach + 2 skins
+    // collected), pass 1 an overflowed build's step (its pairs by the search itself).
+    uint over = 0u;
+    for (uint pass = 0u; pass < 2u; pass++)
     {
-        float reach = nf(pad + 2.0 * edgeSkin());
-        for (uint a = lane, aStop = EB_END(858, a, k, LANES); a < aStop; a += LANES)
+        bool collect = pass == 0u;
+        if (!collect)
         {
-            uint ca = edgeCandAcc(vvMember(off, a));
-            gAcc[ca].store(0);
-            gAcc[ca + 2u].store(0);
+            if (lane == 0u)
+            {
+                uint o = 0u;
+                for (uint a = 0u, aStop = EB_END(862, a, anyEdge ? k : 0u, 1u); a < aStop; a++) o |= uint(gAcc[edgeCandAcc(vvMember(off, a)) + 2u].load());
+                gsUniformLanes = o;
+            }
+            sync();
+            over = gsUniformLanes;
+        }
+        if ((collect ? rebuild : over) == 0u) continue;
+        float reach = collect ? nf(pad + 2.0 * edgeSkin()) : pad;
+        if (collect)
+        {
+            for (uint a = lane, aStop = EB_END(858, a, k, LANES); a < aStop; a += LANES)
+            {
+                uint ca = edgeCandAcc(vvMember(off, a));
+                gAcc[ca].store(0);
+                gAcc[ca + 2u].store(0);
+            }
         }
         edgeListsSmall(k, off, reach, anyEdge, lane);
         for (uint stage = 0u; stage < 5u; stage++)
@@ -497,10 +516,11 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
             }
             sync();
         }
-        gEdgeCollect = 1u;
+        gEdgeCollect = collect ? 1u : 0u;
         gEdgeCollectReach = reach;
         edgePairsSmall(k, off, 2.0 * reach, reach, anyEdge, lane);
         gEdgeCollect = 0u;
+        if (!collect) continue;
         // The build's positions and signatures (an overflowed list builds again next step).
         for (uint a = 0u, aStop = EB_END(859, a, anyEdge ? k : 0u, 1u); a < aStop; a++)
         {
@@ -521,30 +541,7 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
         }
         sync();
     }
-    // An overflowed build: this step's pairs by the search itself.
-    if (lane == 0u)
-    {
-        uint over = 0u;
-        for (uint a = 0u, aStop = EB_END(862, a, anyEdge ? k : 0u, 1u); a < aStop; a++) over |= uint(gAcc[edgeCandAcc(vvMember(off, a)) + 2u].load());
-        gsUniformLanes = over;
-    }
-    sync();
-    uint over = gsUniformLanes;
-    if (over != 0u)
-    {
-        edgeListsSmall(k, off, pad, anyEdge, lane);
-        for (uint stage = 0u; stage < 5u; stage++)
-        {
-            for (uint a = 0u, aStop = EB_END(863, a, anyEdge ? k : 0u, 1u); a < aStop; a++)
-            {
-                edgeGridStage(vvMember(off, a), 2.0 * pad, pad, stage, lane);
-                edgeWorkStage(vvMember(off, a), 2.0 * pad, stage, lane);
-            }
-            sync();
-        }
-        edgePairsSmall(k, off, 2.0 * pad, pad, anyEdge, lane);
-    }
-    else
+    if (over == 0u)
     {
         // The candidates tested, each owner's on all lanes.
         for (uint a = 0u, aStop = EB_END(864, a, anyEdge ? k : 0u, 1u); a < aStop; a++)

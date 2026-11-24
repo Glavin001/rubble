@@ -445,8 +445,7 @@ contact with a clear error; the lab page's control is off until they ship.
   mask them: fixtures made by a build replay that build's schedule on any other. Earlier
   "7-11 % slower" figures of this day are void for that reason.
 - No matrix row has edge contact on: its cost and CUDA results are unmeasured there.
-- Open: groups over VV_PART (8) have edge contact again (edgePass, an owner at a time; a 12-body test),
-  its module past its inline and duplication lines (to shrink: edgePairHits from one place); compile,
+- Open: groups over VV_PART (8) have edge contact again (edgePass, an owner at a time; a 12-body test); compile,
   inline and duplication ratchet lines raised and to be brought back; a browser frame runs
   without edge contact until its module compiles; paint points are CPU-only (off).
 - Edge turns after the node turns against one shared turn (CPU, the switch is in d38610b2 only), 12
