@@ -29,23 +29,18 @@ pub mod physics;
 pub use assemble::{build, build_with_body, BuildOpts, Built, Design, RigSpec};
 
 /// Build a design by name from JSON parameters (missing fields take the
-/// design's defaults).
+/// design's defaults). The names come from [`designs::REGISTRY`].
 pub fn design_from_json(name: &str, params: &str) -> Result<Box<dyn Design>, String> {
     let params = if params.trim().is_empty() { "{}" } else { params };
-    match name {
-        "sedan" => {
-            let p: designs::sedan::SedanParams = serde_json::from_str(params).map_err(|e| format!("sedan parameters: {e}"))?;
-            p.validate()?;
-            Ok(Box::new(designs::sedan::Sedan::new(p)))
-        }
-        _ => Err(format!("unknown design '{name}' (have: sedan)")),
-    }
+    (designs::find(name)?.build)(params).map_err(|e| format!("{name} {e}"))
 }
 
 /// A design's default parameters as JSON.
 pub fn default_params_json(name: &str) -> Result<String, String> {
-    match name {
-        "sedan" => Ok(serde_json::to_string_pretty(&designs::sedan::SedanParams::default()).unwrap()),
-        _ => Err(format!("unknown design '{name}' (have: sedan)")),
-    }
+    Ok((designs::find(name)?.defaults)())
+}
+
+/// Every registered design's name.
+pub fn design_names() -> Vec<&'static str> {
+    designs::names()
 }
