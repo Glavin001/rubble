@@ -25,9 +25,7 @@
 //!   cB = (1 − t)·b0 + t·b1, B taking f by its weights and A −f by its.
 
 use super::ExplicitBeamsWorld;
-use crate::explicit_beams::{
-    contact_response, shift_depth, ContactSurface, ExplicitBeams, Node, NODE_IMMOVABLE, STEP,
-};
+use crate::explicit_beams::{ExplicitBeams, STEP};
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -56,7 +54,8 @@ const END: f32 = 1e-3;
 const CELL: f32 = 0.3;
 
 /// A live skin edge of one vehicle this step: its nodes, world ends and outward normal.
-struct SkinEdge {
+#[derive(Clone, Debug)]
+pub(super) struct SkinEdge {
     i: u32,
     j: u32,
     p: Vec3,
@@ -140,48 +139,60 @@ struct EdgeHit {
 }
 
 impl ExplicitBeamsWorld {
-    /// The edge pass over every pair of vehicles with edge contact (either of the two)
-    /// and overlapping boxes (after the node pass, from the same positions and the
-    /// pass's starting forces).
-    pub(super) fn edge_pass(&mut self) {
+    /// At the contact pass's start: every vehicle's live skin edges (edge contact on
+    /// for any vehicle; none otherwise).
+    pub(super) fn edge_begin(&mut self) {
         let nv = self.vehicles.len();
+        self.skin.clear();
         if !self.vehicles.iter().any(|v| v.edge_contact) {
             return;
         }
-        let edges: Vec<Option<Vec<SkinEdge>>> = (0..nv)
-            .map(|a| {
-                let skip = self.skip.get(a).copied().unwrap_or(false);
-                (!skip).then(|| skin_edges(&self.vehicles[a]))
-            })
-            .collect();
         for a in 0..nv {
-            for b in a + 1..nv {
-                if !(self.vehicles[a].edge_contact || self.vehicles[b].edge_contact) {
-                    continue;
-                }
-                let (Some(ea), Some(eb)) = (&edges[a], &edges[b]) else {
-                    continue;
-                };
-                let (alo, ahi) = self.boxes[a];
-                let (blo, bhi) = self.boxes[b];
-                if ahi.cmplt(blo).any() || bhi.cmplt(alo).any() {
-                    continue;
-                }
-                let hits = self.edge_hits(a, b, ea, eb);
-                if !hits.is_empty() {
-                    self.edge_apply(a, b, &hits);
-                }
-                if vertex_edge() {
-                    // A node against the other's edge, in its edge's wedge (both ways).
-                    for (o, x, eo) in [(a, b, ea), (b, a, eb)] {
-                        let hits = self.vertex_edge_hits(o, x, eo);
-                        if !hits.is_empty() {
-                            self.edge_apply(o, x, &hits);
-                        }
-                    }
-                }
+            let skip = self.skip.get(a).copied().unwrap_or(false);
+            self.skin.push((!skip).then(|| skin_edges(&self.vehicles[a])));
+        }
+    }
+
+    /// Owner `a`'s turn: its edges against each partner's (edge against edge, each
+    /// unordered pair once, in the lower index's turn) and against each partner's nodes
+    /// (node against edge, `vertex_edge()`), as hits of the owner's list (the contacter
+    /// the partner's edge or node, the owner's edge in `tri` as [i, j, j]).
+    pub(super) fn edge_turn(&mut self, a: usize, partners: &[usize], hits: &mut Vec<super::Hit>) {
+        if self.skin.is_empty() {
+            return;
+        }
+        let skin = std::mem::take(&mut self.skin);
+        for &b in partners {
+            if !(self.vehicles[a].edge_contact || self.vehicles[b].edge_contact) {
+                continue;
+            }
+            let (Some(ea), Some(eb)) = (&skin[a], &skin[b]) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            if a < b {
+                found.extend(self.edge_hits(a, b, ea, eb).into_iter().map(|x| (x, 1u8)));
+            }
+            if vertex_edge() {
+                found.extend(self.vertex_edge_hits(a, b, ea).into_iter().map(|x| (x, 2u8)));
+            }
+            for (x, kind) in found {
+                hits.push(super::Hit {
+                    tri: [x.a[0], x.a[1], x.a[1]],
+                    w: [x.s, 0.0, 1.0 - x.s],
+                    b,
+                    h: x.b[0],
+                    n: x.n,
+                    p: x.p,
+                    spec: x.spec,
+                    behind: x.behind,
+                    h2: x.b[1],
+                    t: x.t,
+                    kind,
+                });
             }
         }
+        self.skin = skin;
     }
 
     fn edge_hits(&mut self, a: usize, b: usize, ea: &[SkinEdge], eb: &[SkinEdge]) -> Vec<EdgeHit> {
@@ -224,7 +235,7 @@ impl ExplicitBeamsWorld {
                 let step = self.steps;
                 // EDGE_TRACE (a measurement): each tested pair's outcome this step, and for
                 // a hit first seen crossed, the pair's outcome the step before.
-                let mut note = |w: &mut Self, code: u8, g: f32| {
+                let note = |w: &mut Self, code: u8, g: f32| {
                     if let Some(tr) = w.edge_trace.as_mut() {
                         if code == 4 && tr.get(&key).is_some_and(|p| p.0 + 1 == step && p.1 == 5) {
                             // A held pair overrun past EDGE_DEPTH this step.
@@ -377,104 +388,5 @@ impl ExplicitBeamsWorld {
             }
         }
         out
-    }
-
-    fn edge_apply(&mut self, a: usize, b: usize, hits: &[EdgeHit]) {
-        let two_body = self.vehicles[a].two_body_contact || self.vehicles[b].two_body_contact;
-        let dissipative = self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
-        // Each node's share of the pass's edge hits (its sub-body count).
-        let mut ka: HashMap<u32, u32> = HashMap::new();
-        let mut kb: HashMap<u32, u32> = HashMap::new();
-        for x in hits {
-            for (i, w) in x.a.iter().zip([1.0 - x.s, x.s]) {
-                if w > 0.0 {
-                    *ka.entry(*i).or_default() += 1;
-                }
-            }
-            for (i, w) in x.b.iter().zip([1.0 - x.t, x.t]) {
-                if w > 0.0 {
-                    *kb.entry(*i).or_default() += 1;
-                }
-            }
-        }
-        let im = |n: &Node, k: u32| if n.has(NODE_IMMOVABLE) { 0.0 } else { k as f32 / n.mass };
-        let acc = |f: Vec3, n: &Node| if n.has(NODE_IMMOVABLE) { Vec3::ZERO } else { f / n.mass };
-        let force = |v: usize, i: u32| -> Vec3 {
-            self.pass_force
-                .get(v)
-                .and_then(|p| p.get(i as usize))
-                .copied()
-                .unwrap_or_else(|| self.vehicles[v].force_now(i as usize))
-        };
-        let mut apply: Vec<(Vec3, Vec3, f32, [f32; 4])> = Vec::with_capacity(hits.len());
-        for x in hits {
-            let (va, vb) = (&self.vehicles[a], &self.vehicles[b]);
-            let na = x.a.map(|i| va.nodes[i as usize]);
-            let nb = x.b.map(|i| vb.nodes[i as usize]);
-            let wa = [1.0 - x.s, x.s];
-            let wb = [1.0 - x.t, x.t];
-            let vel = (nb[0].vel * wb[0] + nb[1].vel * wb[1]) - (na[0].vel * wa[0] + na[1].vel * wa[1]) + x.n * (x.spec / STEP);
-            let ims = if two_body {
-                [
-                    im(&na[0], ka.get(&x.a[0]).copied().unwrap_or(1)),
-                    im(&na[1], ka.get(&x.a[1]).copied().unwrap_or(1)),
-                    im(&nb[0], kb.get(&x.b[0]).copied().unwrap_or(1)),
-                    im(&nb[1], kb.get(&x.b[1]).copied().unwrap_or(1)),
-                ]
-            } else {
-                [im(&na[0], 1), im(&na[1], 1), im(&nb[0], 1), im(&nb[1], 1)]
-            };
-            let inv = wa[0] * wa[0] * ims[0] + wa[1] * wa[1] * ims[1] + wb[0] * wb[0] * ims[2] + wb[1] * wb[1] * ims[3];
-            if inv <= 0.0 {
-                apply.push((Vec3::ZERO, x.n, 0.0, ims));
-                continue;
-            }
-            let m = 1.0 / inv;
-            let rel = (acc(force(b, x.b[0]), &nb[0]) * wb[0] + acc(force(b, x.b[1]), &nb[1]) * wb[1])
-                - (acc(force(a, x.a[0]), &na[0]) * wa[0] + acc(force(a, x.a[1]), &na[1]) * wa[1]);
-            let fh = rel * m;
-            let friction = nb[0].friction.min(nb[1].friction);
-            let (f, budget) = contact_response(
-                fh,
-                vel,
-                m,
-                x.n,
-                STEP,
-                &ContactSurface::BOX.exact_if(vb.exact_friction).dissipative_if(dissipative),
-                x.p,
-                friction,
-            );
-            let mut delta = if f != Vec3::ZERO && dissipative { shift_depth(x.p, budget, fh.dot(x.n)) } else { 0.0 };
-            let rate = crate::explicit_contact::push_out_rate();
-            if rate > 0.0 && x.behind > 0.0 {
-                delta = delta.max((rate * STEP).min(x.behind));
-            }
-            apply.push((f, x.n, delta * m, ims));
-        }
-        for (x, (f, n, q, ims)) in hits.iter().zip(apply) {
-            if f == Vec3::ZERO && q <= 0.0 {
-                continue;
-            }
-            let wa = [1.0 - x.s, x.s];
-            let wb = [1.0 - x.t, x.t];
-            if let Some(l) = self.ledger.as_mut() {
-                let fnorm = n * f.dot(n);
-                let ft = f - fnorm;
-                for (v, i, w) in [(b, x.b[0], wb[0]), (b, x.b[1], wb[1]), (a, x.a[0], -wa[0]), (a, x.a[1], -wa[1])] {
-                    l.vc[v][0][i as usize] += fnorm * w;
-                    l.vc[v][1][i as usize] += ft * w;
-                }
-            }
-            for k in 0..2 {
-                self.vehicles[b].add_contact(x.b[k] as usize, f * wb[k]);
-                self.vehicles[a].add_contact(x.a[k] as usize, -(f * wa[k]));
-            }
-            if q > 0.0 {
-                for k in 0..2 {
-                    self.vehicles[b].add_shift(x.b[k] as usize, n * (q * wb[k] * ims[2 + k]));
-                    self.vehicles[a].add_shift(x.a[k] as usize, n * -(q * wa[k] * ims[k]));
-                }
-            }
-        }
     }
 }

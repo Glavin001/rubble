@@ -142,3 +142,30 @@ load) on top of edge + node–edge + look-ahead: 1 m/s 60 + 60 4/7 nodes, 33/28 
 9/8, 49/61; little change, and at 3 m/s no better. With the outward side as well it fuses the
 cars again (parted 0.01 m of 4.6) and edges through rise to 133–521. Not adopted; re-measure
 after the fix above.
+
+### One hit list (2026-11-24)
+
+Edge-against-edge and node-against-edge hits now join the owner's node hits in one list
+(`Hit` with a second contacter node `h2` at weight `t`, `kind`): one sub-body splitting, the
+residual pass, the work guards, staging and the ledger. Defaults unchanged bit for bit (the
+head-on probe's whole log identical; the 46 contact unit tests pass).
+
+Energy (`pair_crashes_create_no_energy`, bound 0.5 % of the start) now passes with node–edge
+on: 60 + 60 rises 2.0 kJ (bound 2.1) with edge + node–edge, 1.6 kJ with look-ahead as well;
+edge alone still fails the 60 + 60 (2.6 kJ). But with the splitting shared, each contact
+pushes less, and the overlap the separate pass had reached was partly its excess:
+
+| Worst moment, edge + node–edge + look-ahead | Separate pass (created energy) | One list |
+|---|---|---|
+| 60 + 60 nodes / edges | 4/5, 23/17 | 9/13, 77/84 |
+| 100 into 10 | 8/5, 8/12 | 5/7, 56/47 |
+| 0.8 m offset | 8/8, 7/17 | 8/11, 39/52 |
+| 100 + 100 | 12/15, 75/80 | 22/14, 128/143 |
+
+Not fused in every variant with node–edge; push-out (1 m/s) changes little. **What this says:**
+one pass of per-hit responses, each with its share of a node's mass, cannot hold many
+simultaneous contacts on the same nodes under crash loads without either overshooting
+(energy) or giving way (overlap). The candidate next step is an iterative contact projection
+over the turn's hits (a few Gauss–Seidel sweeps of the dissipative law, each hit seeing the
+others' impulses, as rigid solvers do), which satisfies all contacts together with no positive
+work. That is a change of the contact algorithm (the owner's decision).

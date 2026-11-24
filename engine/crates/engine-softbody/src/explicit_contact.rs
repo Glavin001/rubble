@@ -357,6 +357,8 @@ pub struct ExplicitBeamsWorld {
     /// `collision_range`, as before). Self contact keeps each vehicle's own. Under
     /// measurement (`VV_RANGE`).
     pub vv_range: Option<f32>,
+    /// Scratch: each vehicle's live skin edges this contact pass (edge contact on).
+    skin: Vec<Option<Vec<edge::SkinEdge>>>,
 }
 
 /// A dissipative two-body hit as the contact pass staged it: node `h` of
@@ -366,6 +368,9 @@ struct StagedHit {
     a: usize,
     b: usize,
     h: u32,
+    /// A second contacter node and its weight (edge hits; t = 0: h alone).
+    h2: u32,
+    t: f32,
     tri: [u32; 3],
     w: [f32; 3],
     n: Vec3,
@@ -406,6 +411,7 @@ impl ExplicitBeamsWorld {
             edge_trace: std::env::var("EDGE_TRACE").is_ok_and(|v| v == "1").then(Default::default),
             edge_first: [0; 7],
             vv_range: std::env::var("VV_RANGE").ok().and_then(|v| v.parse().ok()),
+            skin: Vec::new(),
         }
     }
 
@@ -747,6 +753,7 @@ impl ExplicitBeamsWorld {
             self.boxes
                 .push((lo - Vec3::splat(BOX_MARGIN), hi + Vec3::splat(BOX_MARGIN)));
         }
+        self.edge_begin();
         let mut stats = ContactStats::default();
         let mut partners: Vec<usize> = Vec::new();
         for a in 0..nv {
@@ -793,8 +800,6 @@ impl ExplicitBeamsWorld {
                 self.triangle_loop(a, &partners, &mut stats);
             }
         }
-        // Edge against edge (`ExplicitBeams::edge_contact`; off: nothing).
-        self.edge_pass();
         if stats.hits > 0 && self.first_hit_step.is_none() {
             self.first_hit_step = Some(self.steps);
         }
@@ -994,16 +999,7 @@ impl ExplicitBeamsWorld {
                         }
                         stats.hits += 1;
                         cwait = 0;
-                        hits.push(Hit {
-                            tri: [i0, i1, i2],
-                            w: c.w,
-                            b,
-                            h,
-                            n: frame.n * c.side,
-                            p,
-                            spec,
-                            behind,
-                        });
+                        hits.push(Hit::node([i0, i1, i2], c.w, b, h, frame.n * c.side, p, spec, behind));
                         continue;
                     }
                     if !(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && delta.abs() <= r) {
@@ -1028,20 +1024,14 @@ impl ExplicitBeamsWorld {
                     } else {
                         (frame.n, delta)
                     };
-                    hits.push(Hit {
-                        tri: [i0, i1, i2],
-                        w: [alpha, beta, gamma],
-                        b,
-                        h,
-                        n,
-                        p: r - delta,
-                        spec: 0.0,
-                        behind: (-delta).max(0.0),
-                    });
+                    hits.push(Hit::node([i0, i1, i2], [alpha, beta, gamma], b, h, n, r - delta, 0.0, (-delta).max(0.0)));
                 }
             }
             self.vehicles[a].contact_throttle[t] = [cwait.min(cap), cidle];
         }
+        // Edge against edge and node against edge (`edge_contact`), in this owner's turn
+        // and its list: one splitting, the same guards (contact design, step 4's fix).
+        self.edge_turn(a, partners, &mut hits);
         if hits.is_empty() {
             return;
         }
@@ -1055,13 +1045,22 @@ impl ExplicitBeamsWorld {
         if hits.iter().any(|x| two_body(x.b)) {
             split_a = vec![0; self.vehicles[a].nodes.len()];
             for x in hits.iter().filter(|x| two_body(x.b)) {
-                for &i in &x.tri {
-                    split_a[i as usize] += 1;
+                if x.kind == 0 {
+                    for &i in &x.tri {
+                        split_a[i as usize] += 1;
+                    }
+                } else {
+                    for (i, _) in x.owner_nodes() {
+                        split_a[i as usize] += 1;
+                    }
                 }
                 if split_b[x.b].is_empty() {
                     split_b[x.b] = vec![0; self.vehicles[x.b].nodes.len()];
                 }
                 split_b[x.b][x.h as usize] += 1;
+                if x.t > 0.0 {
+                    split_b[x.b][x.h2 as usize] += 1;
+                }
             }
         }
         // §37.1: the dissipative two-body hits' sums are a staging the residual
@@ -1093,13 +1092,15 @@ impl ExplicitBeamsWorld {
             let [i0, i1, i2] = x.tri;
             let [alpha, beta, gamma] = x.w;
             let node = self.vehicles[b].nodes[h as usize];
+            let node2 = self.vehicles[b].nodes[x.h2 as usize];
             let va = &self.vehicles[a];
             let (n0, n1, n2) = (
                 va.nodes[i0 as usize],
                 va.nodes[i1 as usize],
                 va.nodes[i2 as usize],
             );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
+            let cvel = if x.t > 0.0 { node.vel * (1.0 - x.t) + node2.vel * x.t } else { node.vel };
+            let v = cvel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
             let dissipative =
                 self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
             // (§37's position step shares: the sub-bodies' inverse masses; none
@@ -1126,24 +1127,35 @@ impl ExplicitBeamsWorld {
                 };
                 let k = |i: u32| split_a[i as usize] as f32;
                 let imh = im(&node, split_b[b][h as usize] as f32);
+                let imh2 = im(&node2, split_b[b][x.h2 as usize] as f32);
                 let imt = two_body_inverse_mass(
                     [im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))],
                     [alpha, beta, gamma],
                 );
-                let inv = imh + imt;
+                let inv = if x.t > 0.0 {
+                    ((1.0 - x.t) * (1.0 - x.t) * imh + x.t * x.t * imh2) + imt
+                } else {
+                    imh + imt
+                };
                 let m = if inv > 0.0 { 1.0 / inv } else { 0.0 };
                 let pf = &self.pass_force[a];
                 let at = acc(pf[i1 as usize], &n1) * alpha
                     + acc(pf[i2 as usize], &n2) * beta
                     + acc(pf[i0 as usize], &n0) * gamma;
+                let ac = if x.t > 0.0 {
+                    acc(self.pass_force[b][h as usize], &node) * (1.0 - x.t)
+                        + acc(self.pass_force[b][x.h2 as usize], &node2) * x.t
+                } else {
+                    acc(self.pass_force[b][h as usize], &node)
+                };
                 (
                     m,
-                    (acc(self.pass_force[b][h as usize], &node) - at) * m,
+                    (ac - at) * m,
                     // (§37's position step: the sub-bodies' inverse masses k/m.
                     // Self contact shares by the nodes' own masses; here own masses
                     // let the 80 km/h T-bone leak 15–17 of 1,026 striker nodes, k/m
                     // 6–7.)
-                    Some([imh, im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))]),
+                    Some([imh, im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0)), imh2]),
                 )
             } else {
                 let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
@@ -1163,9 +1175,9 @@ impl ExplicitBeamsWorld {
                     .exact_if(self.vehicles[b].exact_friction)
                     .dissipative_if(dissipative),
                 x.p,
-                node.friction,
+                if x.t > 0.0 { node.friction.min(node2.friction) } else { node.friction },
             );
-            if let (true, Some([imh, im1, im2, im0])) = ((f != Vec3::ZERO && dissipative) || x.behind > 0.0, ims) {
+            if let (true, Some([imh, im1, im2, im0, imh2])) = ((f != Vec3::ZERO && dissipative) || x.behind > 0.0, ims) {
                 // §37: the position step, a position impulse δ·m shared by the
                 // sub-bodies' inverse masses (explicit_beams' self-hit order).
                 let mut delta = if f != Vec3::ZERO && dissipative {
@@ -1182,7 +1194,12 @@ impl ExplicitBeamsWorld {
                 }
                 if delta > 0.0 {
                     let q = delta * m;
-                    self.vehicles[b].add_shift(h as usize, x.n * (q * imh));
+                    if x.t > 0.0 {
+                        self.vehicles[b].add_shift(h as usize, x.n * ((1.0 - x.t) * (q * imh)));
+                        self.vehicles[b].add_shift(x.h2 as usize, x.n * (x.t * (q * imh2)));
+                    } else {
+                        self.vehicles[b].add_shift(h as usize, x.n * (q * imh));
+                    }
                     let va = &mut self.vehicles[a];
                     for (i, w, imk) in [(i1, alpha, im1), (i2, beta, im2), (i0, gamma, im0)] {
                         if w > 0.0 {
@@ -1193,7 +1210,12 @@ impl ExplicitBeamsWorld {
             }
             first.push(f);
             if on[j] {
-                self.vehicles[b].add_contact(h as usize, f);
+                if x.t > 0.0 {
+                    self.vehicles[b].add_contact(h as usize, f * (1.0 - x.t));
+                    self.vehicles[b].add_contact(x.h2 as usize, f * x.t);
+                } else {
+                    self.vehicles[b].add_contact(h as usize, f);
+                }
                 let va = &mut self.vehicles[a];
                 va.add_contact(i1 as usize, -(f * alpha));
                 va.add_contact(i2 as usize, -(f * beta));
@@ -1240,6 +1262,8 @@ impl ExplicitBeamsWorld {
                     a,
                     b: x.b,
                     h: x.h,
+                    h2: x.h2,
+                    t: x.t,
                     tri: x.tri,
                     w: x.w,
                     n: x.n,
@@ -1258,8 +1282,9 @@ impl ExplicitBeamsWorld {
         if let Some(l) = self.ledger.as_mut() {
             let fnorm = x.n * f.dot(x.n);
             let ft = f - fnorm;
+            let (wh, wh2) = if x.t > 0.0 { (-(1.0 - x.t), -x.t) } else { (-1.0f32, 0.0) };
             for (v, i, w) in [
-                (b, h, -1.0f32),
+                (b, h, wh),
                 (a, i1, alpha),
                 (a, i2, beta),
                 (a, i0, gamma),
@@ -1267,8 +1292,17 @@ impl ExplicitBeamsWorld {
                 l.vc[v][0][i as usize] -= fnorm * w;
                 l.vc[v][1][i as usize] -= ft * w;
             }
+            if x.t > 0.0 {
+                l.vc[b][0][x.h2 as usize] -= fnorm * wh2;
+                l.vc[b][1][x.h2 as usize] -= ft * wh2;
+            }
         }
-        self.vehicles[b].add_contact(h as usize, f);
+        if x.t > 0.0 {
+            self.vehicles[b].add_contact(h as usize, f * (1.0 - x.t));
+            self.vehicles[b].add_contact(x.h2 as usize, f * x.t);
+        } else {
+            self.vehicles[b].add_contact(h as usize, f);
+        }
         let va = &mut self.vehicles[a];
         va.add_contact(i1 as usize, -(f * alpha));
         va.add_contact(i2 as usize, -(f * beta));
@@ -1279,7 +1313,12 @@ impl ExplicitBeamsWorld {
             l.add(i0 as usize, f * gamma);
         }
         if let Some(l) = self.vehicles[b].contact_force.as_mut() {
-            l.add(h as usize, f);
+            if x.t > 0.0 {
+                l.add(h as usize, f * (1.0 - x.t));
+                l.add(x.h2 as usize, f * x.t);
+            } else {
+                l.add(h as usize, f);
+            }
         }
     }
 
@@ -1338,10 +1377,18 @@ impl ExplicitBeamsWorld {
                 }
             };
             // The shares each node took: +f on the contacter, −f·w on the triangle.
-            let qb = vb.applied_contact(x.f);
+            let (qb, qb2) = if x.t > 0.0 {
+                (vb.applied_contact(x.f * (1.0 - x.t)), vb.applied_contact(x.f * x.t))
+            } else {
+                (vb.applied_contact(x.f), Vec3::ZERO)
+            };
             let qa = [0, 1, 2].map(|k| va.applied_contact(-(x.f * x.w[k])));
             let mut work = qb.dot(v0[x.b][x.h as usize] + vb.nodes[x.h as usize].vel);
             let mut lose = qb.dot(qb) * im(vb, x.h);
+            if x.t > 0.0 {
+                work += qb2.dot(v0[x.b][x.h2 as usize] + vb.nodes[x.h2 as usize].vel);
+                lose += qb2.dot(qb2) * im(vb, x.h2);
+            }
             for k in 0..3 {
                 let i = x.tri[k] as usize;
                 work += qa[k].dot(v0[x.a][i] + va.nodes[i].vel);
@@ -1357,7 +1404,11 @@ impl ExplicitBeamsWorld {
             // in single precision leaves with a relative error of 10⁻³.
             let r = (work / (h * lose)).min(1.0);
             let dvb = qb * (-r * h * im(vb, x.h));
+            let dvb2 = qb2 * (-r * h * im(vb, x.h2));
             self.vehicles[x.b].nudge(x.h as usize, dvb);
+            if x.t > 0.0 {
+                self.vehicles[x.b].nudge(x.h2 as usize, dvb2);
+            }
             for k in 0..3 {
                 let i = x.tri[k] as usize;
                 let dva = qa[k] * (-r * h * im(&self.vehicles[x.a], x.tri[k]));
@@ -1366,12 +1417,17 @@ impl ExplicitBeamsWorld {
             if let Some((l, before)) = ledger.as_mut() {
                 let fnorm = x.n * x.f.dot(x.n);
                 let ft = x.f - fnorm;
+                let wh = if x.t > 0.0 { -(1.0 - x.t) } else { -1.0f32 };
                 for (v, i, wk) in [
-                    (x.b, x.h, -1.0f32),
+                    (x.b, x.h, wh),
                     (x.a, x.tri[0], x.w[0]),
                     (x.a, x.tri[1], x.w[1]),
                     (x.a, x.tri[2], x.w[2]),
+                    (x.b, x.h2, if x.t > 0.0 { -x.t } else { 0.0 }),
                 ] {
+                    if wk == 0.0 && v == x.b && i == x.h2 && x.t == 0.0 {
+                        continue;
+                    }
                     let i = i as usize;
                     l.vc[v][0][i] += fnorm * (wk * r);
                     l.vc[v][1][i] += ft * (wk * r);
@@ -1419,10 +1475,19 @@ impl ExplicitBeamsWorld {
             }
             let [i0, i1, i2] = x.tri;
             let [alpha, beta, gamma] = x.w;
-            let v = node(x.b, x.h).vel
+            let (cv, ca, ci) = if x.t > 0.0 {
+                (
+                    node(x.b, x.h).vel * (1.0 - x.t) + node(x.b, x.h2).vel * x.t,
+                    acc(x.b, x.h) * (1.0 - x.t) + acc(x.b, x.h2) * x.t,
+                    (1.0 - x.t) * (1.0 - x.t) * im(x.b, x.h) + x.t * x.t * im(x.b, x.h2),
+                )
+            } else {
+                (node(x.b, x.h).vel, acc(x.b, x.h), im(x.b, x.h))
+            };
+            let v = cv
                 - (node(a, i1).vel * alpha + node(a, i2).vel * beta + node(a, i0).vel * gamma);
-            let ac = acc(x.b, x.h) - (acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma);
-            let inv = im(x.b, x.h)
+            let ac = ca - (acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma);
+            let inv = ci
                 + two_body_inverse_mass([im(a, i1), im(a, i2), im(a, i0)], [alpha, beta, gamma]);
             let a_rest = ac - t * inv;
             let aa = t.dot(v + v + a_rest * STEP);
@@ -1472,19 +1537,28 @@ impl ExplicitBeamsWorld {
             let [alpha, beta, gamma] = x.w;
             let va = &self.vehicles[a];
             let node = &self.vehicles[x.b].nodes[x.h as usize];
+            let node2 = &self.vehicles[x.b].nodes[x.h2 as usize];
             let (n0, n1, n2) = (
                 &va.nodes[i0 as usize],
                 &va.nodes[i1 as usize],
                 &va.nodes[i2 as usize],
             );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
+            let cvel = if x.t > 0.0 { node.vel * (1.0 - x.t) + node2.vel * x.t } else { node.vel };
+            let v = cvel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
             let at = acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma;
-            let an = (acc(x.b, x.h) - at).dot(x.n);
+            let cacc = if x.t > 0.0 { acc(x.b, x.h) * (1.0 - x.t) + acc(x.b, x.h2) * x.t } else { acc(x.b, x.h) };
+            let an = (cacc - at).dot(x.n);
             let vn = v.dot(x.n);
             if !(vn < 0.0 && an * STEP + vn < 0.0) {
                 continue;
             }
-            let inv = im(node, split_b[x.b][x.h as usize])
+            let imc = if x.t > 0.0 {
+                (1.0 - x.t) * (1.0 - x.t) * im(node, split_b[x.b][x.h as usize])
+                    + x.t * x.t * im(node2, split_b[x.b][x.h2 as usize])
+            } else {
+                im(node, split_b[x.b][x.h as usize])
+            };
+            let inv = imc
                 + two_body_inverse_mass(
                     [
                         im(n1, split_a[i1 as usize]),
@@ -1507,7 +1581,12 @@ impl ExplicitBeamsWorld {
             let f = x.n * r;
             let [i0, i1, i2] = x.tri;
             let [alpha, beta, gamma] = x.w;
-            self.vehicles[x.b].add_contact(x.h as usize, f);
+            if x.t > 0.0 {
+                self.vehicles[x.b].add_contact(x.h as usize, f * (1.0 - x.t));
+                self.vehicles[x.b].add_contact(x.h2 as usize, f * x.t);
+            } else {
+                self.vehicles[x.b].add_contact(x.h as usize, f);
+            }
             let va = &mut self.vehicles[a];
             va.add_contact(i1 as usize, -(f * alpha));
             va.add_contact(i2 as usize, -(f * beta));
@@ -1832,6 +1911,30 @@ struct Hit {
     spec: f32,
     /// How far behind the surface the contact point is (m; 0 in front).
     behind: f32,
+    /// A second contacter node and its weight (edge against edge: the contacter's
+    /// point is (1 − t)·h + t·h2); t = 0: node h alone (h2 = h), every path as before.
+    h2: u32,
+    t: f32,
+    /// 0 node against face, 1 edge against edge, 2 node against edge (the owner's
+    /// `tri` an edge [i, j, j], weights [s, 0, 1 − s]).
+    kind: u8,
+}
+
+impl Hit {
+    /// A node-against-face hit (one contacter node).
+    fn node(tri: [u32; 3], w: [f32; 3], b: usize, h: u32, n: Vec3, p: f32, spec: f32, behind: f32) -> Self {
+        Hit { tri, w, b, h, n, p, spec, behind, h2: h, t: 0.0, kind: 0 }
+    }
+    /// The owner's nodes with their weights, each once and only with a weight (edge
+    /// kinds; a face's three as they are).
+    fn owner_nodes(&self) -> Vec<(u32, f32)> {
+        let [i0, i1, i2] = self.tri;
+        let [alpha, beta, gamma] = self.w;
+        if self.kind == 0 {
+            return vec![(i1, alpha), (i2, beta), (i0, gamma)];
+        }
+        [(i1, alpha), (i2, beta), (i0, gamma)].into_iter().filter(|x| x.1 > 0.0).collect()
+    }
 }
 
 /// Vehicle contact's residual pass (§37.1; on, `VEHICLE_RESIDUAL=0` a measurement
