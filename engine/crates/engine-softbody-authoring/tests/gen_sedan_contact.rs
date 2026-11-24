@@ -580,25 +580,6 @@ fn pole_own_panels_stay_apart() {
     assert!(pass);
 }
 
-/// The collision skin does not pass through itself at rest (a measurement of the
-/// generated sedan's authoring): its skin edges through its own live triangles at
-/// spawn. Bound: exact (a skin through itself has no outside there).
-/// FAILS today (2026-11-24): 89 at spawn (the rear bumper through the body, the sills'
-/// rows through each other, the fenders' corners through the hood, the rear doors).
-#[test]
-fn collision_skin_does_not_cross_itself_at_rest() {
-    let r = pole(64);
-    let pass = r.crossings_spawn == 0;
-    row(
-        "collision skin does not cross itself at rest",
-        "spawn",
-        format!("{} edges through own triangles; {:?}", r.crossings_spawn, r.spawn_parts),
-        "0".into(),
-        pass,
-    );
-    assert!(pass);
-}
-
 /// A pole crash stays finite and creates no energy: the mechanical energy (kinetic,
 /// gravitational, elastic) never rises past 0.5 % of the start (the symplectic step's
 /// bounded oscillation, `crash_invariants.rs`'s rule) and nothing flies off (the car's

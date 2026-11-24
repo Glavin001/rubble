@@ -28,6 +28,11 @@ pub mod physics;
 
 pub use assemble::{build, build_with_body, BuildOpts, Built, Design, RigSpec};
 
+/// Every design the generator builds, by name: the list the tests lint and crash
+/// (`engine-softbody-authoring/tests/generated_vehicle_lint.rs`). A design added to
+/// [`design_from_json`] goes here too.
+pub const DESIGNS: &[&str] = &["sedan"];
+
 /// Build a design by name from JSON parameters (missing fields take the
 /// design's defaults).
 pub fn design_from_json(name: &str, params: &str) -> Result<Box<dyn Design>, String> {

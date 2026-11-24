@@ -46,15 +46,15 @@ fn cube(k: f32) -> SoftVehicleDesc {
     // Faces: (axis, side) with their four corners.
     for (ax, s) in [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)] {
         let c: Vec<u32> = (0..8u32).filter(|i| (i >> ax) & 1 == s).collect();
-        // c is in bit order: 0,1,2,3 make the face's quad as 0-1-3-2.
-        d.triangles.push(SoftTriangle {
-            nodes: [c[0], c[1], c[3]],
-            ..Default::default()
-        });
-        d.triangles.push(SoftTriangle {
-            nodes: [c[0], c[3], c[2]],
-            ..Default::default()
-        });
+        // c is in bit order: 0,1,2,3 make the face's quad as 0-1-3-2; each triangle
+        // turned to face out of the cube (a sound collision skin, `lint::collision_skin`).
+        for mut t in [[c[0], c[1], c[3]], [c[0], c[3], c[2]]] {
+            let p = t.map(|i| Vec3::from_array(d.nodes[i as usize].position));
+            if (p[1] - p[0]).cross(p[2] - p[0]).dot((p[0] + p[1] + p[2]) / 3.0 - Vec3::splat(0.5)) < 0.0 {
+                t.swap(1, 2);
+            }
+            d.triangles.push(SoftTriangle { nodes: t, ..Default::default() });
+        }
     }
     d.parts.push(SoftPart {
         name: "test_body".into(),
@@ -497,4 +497,113 @@ fn a_node_inside_another_parts_solid_fails_rest_penetration() {
     // solver never collides the pair: reported, not failed.
     let f = rest_penetration(&cube_and_box(0.49));
     assert_eq!(f.level, Level::Warn, "{f:?}");
+}
+
+// --- The collision skin's rules (`lint::collision_skin`) ------------------------------
+
+/// A 0.5 m box whose 12 collision triangles close and face out: the sound skin.
+fn skin_box() -> SoftVehicleDesc {
+    let mut d = SoftVehicleDesc::default();
+    for i in 0..8 {
+        let p = [0.5 * (i & 1) as f32, 0.5 * ((i >> 1) & 1) as f32, 0.5 * ((i >> 2) & 1) as f32];
+        d.nodes.push(SoftNode { name: format!("n{i}"), position: p, mass: 10.0, ..Default::default() });
+    }
+    let centre = Vec3::splat(0.25);
+    for (ax, s) in [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)] {
+        let c: Vec<u32> = (0..8u32).filter(|i| (i >> ax) & 1 == s).collect();
+        for mut t in [[c[0], c[1], c[3]], [c[0], c[3], c[2]]] {
+            let p = t.map(|i| Vec3::from_array(d.nodes[i as usize].position));
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            if n.dot((p[0] + p[1] + p[2]) / 3.0 - centre) < 0.0 {
+                t.swap(1, 2);
+            }
+            d.triangles.push(SoftTriangle { nodes: t, collision: true, ..Default::default() });
+        }
+    }
+    d
+}
+
+fn skin_rule(d: &SoftVehicleDesc, rule: &str) -> Finding {
+    engine_softbody_authoring::authoring::lint::collision_skin(d)
+        .into_iter()
+        .find(|f| f.rule == rule)
+        .unwrap_or_else(|| panic!("no rule {rule}"))
+}
+
+const SKIN_RULES: [&str; 6] =
+    ["skin_winding", "skin_facing", "skin_self_crossing", "skin_holes", "skin_manifold", "skin_slivers"];
+
+#[test]
+fn a_closed_outward_skin_passes_every_skin_rule() {
+    let d = skin_box();
+    for r in SKIN_RULES {
+        let f = skin_rule(&d, r);
+        assert_eq!(f.level, Level::Pass, "{r}: {}", f.value);
+    }
+}
+
+#[test]
+fn a_face_turned_over_fails_winding_and_facing() {
+    let mut d = skin_box();
+    d.triangles[0].nodes.swap(1, 2);
+    assert_eq!(skin_rule(&d, "skin_winding").level, Level::Fail);
+    assert_eq!(skin_rule(&d, "skin_facing").level, Level::Fail);
+    assert_eq!(skin_rule(&d, "skin_holes").level, Level::Pass);
+}
+
+#[test]
+fn a_missing_face_fails_holes() {
+    let mut d = skin_box();
+    d.triangles.remove(5);
+    let f = skin_rule(&d, "skin_holes");
+    assert_eq!(f.level, Level::Fail, "{}", f.value);
+    assert_eq!(skin_rule(&d, "skin_winding").level, Level::Pass);
+}
+
+#[test]
+fn a_second_layer_through_the_skin_fails_self_crossing() {
+    let mut d = skin_box();
+    // A closed patch of its own (a flat face on both sides) poking through the x = 0.5 face.
+    let base = d.nodes.len() as u32;
+    for p in [[0.3, 0.1, 0.1], [0.8, 0.1, 0.25], [0.3, 0.4, 0.4]] {
+        d.nodes.push(SoftNode { name: format!("x{}", d.nodes.len()), position: p, mass: 1.0, ..Default::default() });
+    }
+    d.triangles.push(SoftTriangle { nodes: [base, base + 1, base + 2], collision: true, ..Default::default() });
+    d.triangles.push(SoftTriangle { nodes: [base, base + 2, base + 1], collision: true, ..Default::default() });
+    let f = skin_rule(&d, "skin_self_crossing");
+    assert_eq!(f.level, Level::Fail, "{}", f.value);
+}
+
+#[test]
+fn a_sliver_warns() {
+    let mut d = skin_box();
+    let base = d.nodes.len() as u32;
+    for p in [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.5, 0.01, 0.0]] {
+        d.nodes.push(SoftNode { name: format!("s{}", d.nodes.len()), position: p, mass: 1.0, ..Default::default() });
+    }
+    d.triangles.push(SoftTriangle { nodes: [base, base + 1, base + 2], collision: true, ..Default::default() });
+    assert_eq!(skin_rule(&d, "skin_slivers").level, Level::Warn);
+}
+
+#[test]
+fn a_long_opening_is_not_a_hole() {
+    // A 1.2 m square tube open at both ends: its two 4.8 m rims are openings by design.
+    let mut d = SoftVehicleDesc::default();
+    for i in 0..8 {
+        let p = [1.2 * (i & 1) as f32, 1.2 * ((i >> 1) & 1) as f32, 1.2 * ((i >> 2) & 1) as f32];
+        d.nodes.push(SoftNode { name: format!("t{i}"), position: p, mass: 1.0, ..Default::default() });
+    }
+    let centre = Vec3::splat(0.6);
+    for (ax, s) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let c: Vec<u32> = (0..8u32).filter(|i| (i >> ax) & 1 == s).collect();
+        for mut t in [[c[0], c[1], c[3]], [c[0], c[3], c[2]]] {
+            let p = t.map(|i| Vec3::from_array(d.nodes[i as usize].position));
+            if (p[1] - p[0]).cross(p[2] - p[0]).dot((p[0] + p[1] + p[2]) / 3.0 - centre) < 0.0 {
+                t.swap(1, 2);
+            }
+            d.triangles.push(SoftTriangle { nodes: t, collision: true, ..Default::default() });
+        }
+    }
+    let f = skin_rule(&d, "skin_holes");
+    assert_eq!(f.level, Level::Pass, "{}", f.value);
 }

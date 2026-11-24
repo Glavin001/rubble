@@ -285,6 +285,36 @@ Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
 - **(Fact) The renderer learns "closed solids" from the model, not the page:** the generator writes `_SURFACE` only on solid parts; `beamng-mod.mjs` `closedSolids()` reads it and sets `visual.closedPanels`.
 - **(Process) A picture someone saw depends on the files they ran.** The page's default run rests on its roof, lightly damaged, and shows nothing; the wreck came from a local `__mods/sedan_new` whose body JBeam was two days older than the generator's. Check the mod folder a checkout links to before trying to reproduce.
 
+## 18. The collision skin is checked at build time (2026-11-24, S4)
+
+- **(Process) Defects are detected, not discovered.** The S4 crash study found the
+  generated sedan's collision-skin defects by hand: holes over the lamps, doubled layers
+  at seams, a skin through itself at rest. The vehicle lint (`authoring::lint`) existed
+  but ran only by hand (`vehicle_lint` example), so even its hard `skin_coverage` rule
+  failed unseen (p99 0.149 m against 0.127 m).
+- **(Decision) Every generated design is linted in CI.**
+  `tests/generated_vehicle_lint.rs` rigs each design in `engine_vehiclegen::DESIGNS`
+  and gives every hard rule a test of its own; `every_hard_rule_has_a_test` fails when
+  the lint gains a hard rule with no test. Failing rules sit on
+  `tests-expected-failures.txt` with their measured values (CI fails on a new failure
+  and on a listed one that starts passing). A design added to the generator goes in
+  `DESIGNS` and is linted from then on.
+- **(Rules) The collision skin's own** (`lint::collision_skin`, proven on synthetic
+  boxes in `tests/host/vehicle_lint.rs`: a sound skin passes, each broken one fails its
+  rule): `skin_winding` (outer edges walked oppositely by their two triangles),
+  `skin_facing` (outer triangles face out; one under a second layer within 5 cm is
+  tagged), `skin_self_crossing` (no edge through the skin at rest), `skin_holes` (no
+  loop of open edges under 2.5 m round), and warnings for inner faces' winding,
+  edges on three or more triangles and slivers.
+- **(Process) The rig tool prints the verdict.** `vehicle_gen_rig` ends with the lint's
+  rules that need no render skin on what it wrote, and a warning with the count of hard
+  failures.
+- **(Measurement) The generated sedan today:** coverage p99 0.149 m; 15 outer edges
+  wound the same way and 27 outer faces under a doubled layer (hood–fender and
+  body–rear-bumper seam bridges over the parts' own triangles); 89 crossings at rest
+  (sill and floor faces through the dash, rear bumper through the body); 12 holes under
+  2.5 m round (door edges, the corners over the lamps).
+
 ## Changelog
 
 - 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).
