@@ -406,14 +406,14 @@ pub(super) fn hull_pool(r: &Rig, inp: &dyn RigInput) -> HashMap<Part, Vec<usize>
     pool
 }
 
-/// The underside closed (`RIG_BELLY=1`, under measurement): the downward faces of the
+/// The underside closed (on; `RIG_BELLY=0`: as before): the downward faces of the
 /// convex hull of the low skin nodes (on an outer collision triangle, below `RIG_BELLY_Y`,
 /// default 0.4 m over the lowest), fanned into triangles facing down and out, as outer
 /// skin; none that crosses the skin, doubles one of its triangles or lies on top of it.
 /// The engine bay and the floor were open from below: a partner's nodes slipped under the
 /// bumper's bottom edge into the car.
 pub(super) fn belly_cap(r: &mut Rig) {
-    if std::env::var("RIG_BELLY").map_or(true, |v| v != "1") {
+    if std::env::var("RIG_BELLY").is_ok_and(|v| v == "0") {
         return;
     }
     let mut skin: std::collections::BTreeSet<usize> = Default::default();
