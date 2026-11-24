@@ -42,7 +42,9 @@ CTX = "/ctx/cuda"
 if modal.is_local():
     # (add_python: Modal's own runtime; the image's python3 3.10 stays for the packer.)
     build_image = (modal.Image.from_dockerfile(f"{CTX}/Dockerfile", context_dir=CTX, add_python="3.12")
-                   .apt_install("zstd"))
+                   .apt_install("zstd")
+                   # (The web build, mode "web": wasm32 for the World wasm.)
+                   .run_commands("rustup target add wasm32-unknown-unknown"))
 else:
     build_image = modal.Image.debian_slim()
 
@@ -56,6 +58,8 @@ target_vol = _vol("rubble-rb-target")
 cargo_vol = _vol("rubble-rb-cargo")
 kern_vol = _vol("rubble-rb-kernels")
 archive_vol = modal.Volume.from_name("rubble-gpu-run-archives", create_if_missing=True)
+# The web build's bundles for the Dawn runner (engine/tools/dawn), by content.
+dawn_vol = modal.Volume.from_name("rubble-dawn-bundles", create_if_missing=True)
 # The scenario matrix's saved states by SHA-256 (gpu_run.py's): the module list reads them.
 states_vol = modal.Volume.from_name("rubble-scenario-states", create_if_missing=True)
 
@@ -105,7 +109,8 @@ class _Snap:
 @app.cls(image=build_image, cpu=BUILD_CPUS, memory=MEM_GIB * 1024, timeout=1800, retries=0,
          scaledown_window=WARM_SECS,
          volumes={"/srcvol": src_vol, "/target": target_vol, "/cargo": cargo_vol,
-                  "/kernels": kern_vol, "/archives": archive_vol, "/svol": states_vol})
+                  "/kernels": kern_vol, "/archives": archive_vol, "/svol": states_vol,
+                  "/dawnbundles": dawn_vol})
 class Builder:
     """A build container. Cargo's target snapshot is written when the container stops
     (`flush`), not after each build: the next build on this warm container uses its disk,
@@ -130,6 +135,38 @@ class Builder:
                 print(f"[remote_build] snapshot of {snap.local} not saved: {e}", flush=True)
         if self.dirty:
             target_vol.commit()
+
+
+def _dawn_bundle(web: Path, car: Path) -> str:
+    """The Dawn runner's bundle (engine/tools/dawn/run.sh lays out the same): the World
+    wasm (no Asyncify copy) and the JS it needs, and the car's JBeam and .pc text; tarred
+    in name order without times or owners, so the same build gives the same bundle,
+    stored once by content."""
+    import io
+    import tarfile
+    files = {f"bundle/{n}": web / n for n in ("rubble-world.mjs", "world-loop.mjs", "fracture/gpu-wait.mjs")}
+    for f in sorted((web / "generated/world-wasm").rglob("*")):
+        if f.is_file() and not f.name.endswith(".asyncify.wasm"):
+            files[f"bundle/generated/world-wasm/{f.relative_to(web / 'generated/world-wasm')}"] = f
+    names = json.loads((car / "files.json").read_text())
+    for n in ["files.json", *[n for n in names if n.endswith((".jbeam", ".pc"))]]:
+        files[f"car/{n}"] = car / n
+    buf = io.BytesIO()
+    import gzip
+    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
+        for name in sorted(files):
+            info = tar.gettarinfo(str(files[name]), arcname=name)
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            with open(files[name], "rb") as fh:
+                tar.addfile(info, fh)
+    data = buf.getvalue()
+    name = hashlib.sha256(data).hexdigest()[:24] + ".tar.gz"
+    dest = Path("/dawnbundles") / name
+    if not dest.exists():
+        dest.write_bytes(data)
+    dawn_vol.commit()
+    print(f"[remote_build] Dawn bundle {name} ({len(data) / 1e6:.0f} MB)", flush=True)
+    return name
 
 
 def _build(spec: dict, dirty: dict) -> dict:
@@ -226,9 +263,20 @@ def _build(spec: dict, dirty: dict) -> dict:
     stamp = Path("/tmp/before-build")
     stamp.touch()
     t_setup = time.time() - t0
-    cmd = ["python3", "/repo/engine/tools/modal/gpu_run_pack.py", str(out), *spec.get("pack_opts", []),
-           "--", *spec["selection"]]
-    print(f"[remote_build] {key}: {' '.join(spec['selection'])} on {cores} cores", flush=True)
+    web = spec.get("mode") == "web"
+    if web:
+        # The release web build's kernels and World parts (kernels embedded, as the
+        # pages ship) and the generated sedan from this tree's code (AGENTS.md: the car
+        # for every benchmark), for the Dawn runner.
+        env["RUBBLE_TOOLS"] = "/kernels/rubble-tools"
+        env["RUBBLE_WEB_PARTS"] = "kernels world"
+        cmd = ["bash", "-c", "set -e; bash scripts/build-web.sh; "
+               "cargo run --release -q -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out /tmp/out/car"]
+        print(f"[remote_build] {key}: web build (kernels, world) and the generated sedan on {cores} cores", flush=True)
+    else:
+        cmd = ["python3", "/repo/engine/tools/modal/gpu_run_pack.py", str(out), *spec.get("pack_opts", []),
+               "--", *spec["selection"]]
+        print(f"[remote_build] {key}: {' '.join(spec['selection'])} on {cores} cores", flush=True)
     t = time.time()
     # What compiled, and for how long: a sampler watches the process table for nvcc and
     # slangc (twice a second) and keeps each process's module and run time. Watching from
@@ -272,7 +320,9 @@ def _build(spec: dict, dirty: dict) -> dict:
                       reverse=True)
     slang_new = sum(1 for v in seen.values() if v[0] == "slangc")
     result = {"code": code, "setup_s": t_setup, "build_s": t_build, "cores": cores}
-    if code == 0:
+    if code == 0 and web:
+        result["bundle"] = _dawn_bundle(Path("/repo/engine/crates/engine-webgpu"), out / "car")
+    elif code == 0:
         data = (out / "archive.tar.gz").read_bytes()
         sha = hashlib.sha256(data).hexdigest() + ".tar.gz"
         dest = Path("/archives") / sha
@@ -375,12 +425,16 @@ def main(spec: str) -> None:
         stage = Path(s["stage_dir"])
         s["stage"] = {"/" + str(f.relative_to(stage)): f.read_bytes() for f in sorted(stage.rglob("*")) if f.is_file()}
     t = time.time()
-    r = remote.remote(s)
+    with modal.enable_output():
+        r = remote.remote(s)
     call = time.time() - t
     rate = r.get("cores", BUILD_CPUS) * CPU_PRICE + MEM_GIB * MEM_PRICE
     print(f"[remote_build] build: exit {r['code']}, call {call:.0f} s (container {r['total_s']:.0f} s: setup "
           f"{r['setup_s']:.0f}, cargo+pack {r['build_s']:.0f}, commits {r['commit_s']:.0f}; {r.get('steps')}); "
           f"about ${r['total_s'] * rate:.4f} plus up to {WARM_SECS} s warm (${WARM_SECS * rate:.4f})", flush=True)
+    if r.get("bundle"):
+        print(f"[remote_build] Dawn bundle {r['bundle']} in rubble-dawn-bundles", flush=True)
+        Path(s["result"]).write_text(json.dumps(r))
     if r.get("archive"):
         print(f"[remote_build] archive {r['archive']} ({r['archive_mb']:.0f} MB) in rubble-gpu-run-archives", flush=True)
         Path(s["result"]).write_text(json.dumps(r))
