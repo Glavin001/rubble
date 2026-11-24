@@ -315,6 +315,19 @@ Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
   (sill and floor faces through the dash, rear bumper through the body); 12 holes under
   2.5 m round (door edges, the corners over the lamps).
 
+- **(Fix, 2026-11-24) The lint's first findings, fixed in the rigger** (`gen2/rig.rs`):
+  seam bridges and zipper triangles may not fold over the triangle they share an edge
+  with or cross the skin (`RIG_BRIDGE_OVERLAP=1`: as before); a body-shell triangle
+  crossing another part's goes (`RIG_HULL_KEEP_CROSSING=1`); `fill_holes` closes holes up
+  to 2.5 m round, split where a loop meets itself, each patch running against its rim
+  (on by default; `RIG_FILL_HOLES_M=0`); interior solids are placed before the shell's
+  faces and a shell face takes a diagonal that does not cross. Outer winding 15 → 0,
+  facing 27 → 2, holes 12 → 1, closed interior solids 5 → 8; crossings at rest 89 → 60
+  (dropping the crossing sill faces took them to 6 but let the T-bone's door pierce the
+  sill, `sedan_parts_collide`: they stay). Every other authoring and generator test as
+  before. Six runs of the 60 + 60 head-on: node-only contact 71 → 66 nodes inside,
+  191 → 145 L; with edge contact 26 → 33, 49 → 55 L (within the spread).
+
 ## Changelog
 
 - 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).

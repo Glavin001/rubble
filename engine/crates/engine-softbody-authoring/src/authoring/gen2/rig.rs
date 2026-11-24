@@ -862,6 +862,53 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
             });
         }
     }
+    // Parts through each other: where a body-shell triangle and another part's cross (one's
+    // edge through the other), the body's goes; the part that moves (a door at the
+    // C-pillar) keeps its skin (the lint's skin_self_crossing). `RIG_HULL_KEEP_CROSSING=1`:
+    // as before.
+    if std::env::var("RIG_HULL_KEEP_CROSSING").map_or(true, |v| v != "1") {
+        let through = |p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3| -> bool {
+            let d = q - p;
+            let (e1, e2) = (b - a, c - a);
+            let h = d.cross(e2);
+            let det = e1.dot(h);
+            if det.abs() < 1e-12 {
+                return false;
+            }
+            let f = 1.0 / det;
+            let s = p - a;
+            let u = f * s.dot(h);
+            if !(0.0..=1.0).contains(&u) {
+                return false;
+            }
+            let qv = s.cross(e1);
+            let v = f * d.dot(qv);
+            if v < 0.0 || u + v > 1.0 {
+                return false;
+            }
+            let t = f * e2.dot(qv);
+            (0.0..=1.0).contains(&t)
+        };
+        let crosses = |x: &Tri, y: &Tri| {
+            (0..3).any(|e| {
+                let (u, v) = (x.n[e], x.n[(e + 1) % 3]);
+                !y.n.contains(&u) && !y.n.contains(&v) && through(r.g(u), r.g(v), r.g(y.n[0]), r.g(y.n[1]), r.g(y.n[2]))
+            })
+        };
+        let drop: std::collections::HashSet<usize> = (0..tris.len())
+            .filter(|&i| tris[i].part == Part::Body)
+            .filter(|&i| {
+                tris.iter().any(|y| y.part != Part::Body && (crosses(&tris[i], y) || crosses(y, &tris[i])))
+            })
+            .collect();
+        if !drop.is_empty() {
+            let mut k = 0;
+            tris.retain(|_| {
+                k += 1;
+                !drop.contains(&(k - 1))
+            });
+        }
+    }
     if std::env::var("RIG_HULL_NOBRIDGE").is_err() {
         let n = bridge_seams(r, inp, &pool, &mut tris);
         if std::env::var("RIG_HULL_DEBUG").is_ok() {
@@ -1187,6 +1234,56 @@ fn bridge_seams(
             else {
                 return false;
             };
+            // No fold and no crossing (`RIG_BRIDGE_OVERLAP=1`: as before): the bridge,
+            // as it will face, walks each edge it shares with a triangle the other way
+            // (one walking it the same way lies on top of it: a doubled layer, the lint's
+            // skin_winding and skin_facing), and it neither passes through a triangle of
+            // the skin nor has one of the skin's edges through it (skin_self_crossing).
+            if std::env::var("RIG_BRIDGE_OVERLAP").map_or(true, |v| v != "1") {
+                let o = if nn.dot(nr) < 0.0 { [t[0], t[2], t[1]] } else { t };
+                for e in 0..3 {
+                    let (u, v) = (o[e], o[(e + 1) % 3]);
+                    if tris.iter().any(|x| (0..3).any(|k| x.n[k] == u && x.n[(k + 1) % 3] == v)) {
+                        return false;
+                    }
+                }
+                let through = |p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3| -> bool {
+                    let d = q - p;
+                    let (e1, e2) = (b - a, c - a);
+                    let h = d.cross(e2);
+                    let det = e1.dot(h);
+                    if det.abs() < 1e-12 {
+                        return false;
+                    }
+                    let f = 1.0 / det;
+                    let s = p - a;
+                    let uu = f * s.dot(h);
+                    if !(0.0..=1.0).contains(&uu) {
+                        return false;
+                    }
+                    let qv = s.cross(e1);
+                    let vv = f * d.dot(qv);
+                    if vv < 0.0 || uu + vv > 1.0 {
+                        return false;
+                    }
+                    let tt = f * e2.dot(qv);
+                    (0.0..=1.0).contains(&tt)
+                };
+                for x in tris.iter() {
+                    let shares = |i: usize| x.n.contains(&i);
+                    let [xa, xb, xc] = x.n.map(|i| r.g(i));
+                    for e in 0..3 {
+                        let (u, v) = (t[e], t[(e + 1) % 3]);
+                        if !shares(u) && !shares(v) && through(r.g(u), r.g(v), xa, xb, xc) {
+                            return false;
+                        }
+                        let (u, v) = (x.n[e], x.n[(e + 1) % 3]);
+                        if !t.contains(&u) && !t.contains(&v) && through(r.g(u), r.g(v), qa, qb, qc) {
+                            return false;
+                        }
+                    }
+                }
+            }
             for e in edges {
                 *uses.entry(e).or_default() += 1;
             }
@@ -4798,15 +4895,69 @@ fn interior_skins(r: &mut Rig) {
         .collect();
     let mut add: Vec<Tri> = Vec::new();
     let pos: Vec<Vec3> = (0..r.car.nodes.len()).map(|i| r.g(i)).collect();
+    // The skin so far (the outer skin, then each face added), for the shell faces' choice
+    // of diagonal below (the lint's skin_self_crossing). `RIG_INNER_CROSSING=1`: as before.
+    let check = std::env::var("RIG_INNER_CROSSING").map_or(true, |v| v != "1");
+    let mut placed: Vec<[usize; 3]> = r.car.tris.iter().map(|t| t.n).collect();
+    let through = |p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3| -> bool {
+        let d = q - p;
+        let (e1, e2) = (b - a, c - a);
+        let h = d.cross(e2);
+        let det = e1.dot(h);
+        if det.abs() < 1e-12 {
+            return false;
+        }
+        let f = 1.0 / det;
+        let s = p - a;
+        let u = f * s.dot(h);
+        if !(0.0..=1.0).contains(&u) {
+            return false;
+        }
+        let qv = s.cross(e1);
+        let v = f * d.dot(qv);
+        if v < 0.0 || u + v > 1.0 {
+            return false;
+        }
+        let t = f * e2.dot(qv);
+        (0.0..=1.0).contains(&t)
+    };
     let mut poly = |ids: &[usize], part: Part, sub: Option<&str>| {
-        for k in 1..ids.len().saturating_sub(1) {
-            let n = [ids[0], ids[k], ids[k + 1]];
+        // A face's triangles (a fan); a shell face that would cross the skin so far tries
+        // its other fans (a quad's other diagonal), and when every fan crosses it is kept
+        // whole all the same (`RIG_INNER_CROSSING=1`: the first fan, unchecked): a sill's or
+        // floor's face stops a door pushed in, which matters more than its crossing at rest
+        // (the lint's skin_self_crossing reports what is left).
+        let fan = |start: usize| -> Vec<[usize; 3]> {
+            let m = ids.len();
+            (1..m.saturating_sub(1)).map(|k| [ids[start], ids[(start + k) % m], ids[(start + k + 1) % m]]).collect()
+        };
+        let crosses = |n: [usize; 3], placed: &Vec<[usize; 3]>| {
+            placed.iter().any(|x| {
+                (0..3).any(|e| {
+                    let (u, v) = (n[e], n[(e + 1) % 3]);
+                    let (xu, xv) = (x[e], x[(e + 1) % 3]);
+                    (!x.contains(&u) && !x.contains(&v) && through(pos[u], pos[v], pos[x[0]], pos[x[1]], pos[x[2]]))
+                        || (!n.contains(&xu) && !n.contains(&xv) && through(pos[xu], pos[xv], pos[n[0]], pos[n[1]], pos[n[2]]))
+                })
+            })
+        };
+        let tris: Vec<[usize; 3]> = if check && sub.is_none() && ids.len() > 3 {
+            (0..ids.len())
+                .map(fan)
+                .find(|f| !f.iter().any(|&n| crosses(n, &placed)))
+                .unwrap_or_else(|| fan(0))
+        } else {
+            fan(0)
+        };
+        for n in tris {
             let area = (pos[n[1]] - pos[n[0]]).cross(pos[n[2]] - pos[n[0]]).length();
             let mut key = n;
             key.sort_unstable();
-            if area < 1e-5 || !have.insert(key) {
+            if area < 1e-5 || have.contains(&key) {
                 continue;
             }
+            have.insert(key);
+            placed.push(n);
             add.push(Tri {
                 n,
                 part,
@@ -4819,6 +4970,21 @@ fn interior_skins(r: &mut Rig) {
     let named = |names: &[String]| -> Option<Vec<usize>> {
         names.iter().map(|n| ix.get(n).copied()).collect()
     };
+    // The parts that are solids of their own, first: a closed solid takes precedence over
+    // the shell's faces it would cross (those duplicate the outer skin or meet the solid).
+    for sub in HULL_PARTS {
+        let ids: Vec<usize> = (0..r.car.nodes.len())
+            .filter(|&i| r.car.nodes[i].sub.as_deref() == Some(sub))
+            .collect();
+        if ids.len() < 3 {
+            continue;
+        }
+        let pts: Vec<Vec3> = ids.iter().map(|&i| pos[i]).collect();
+        for face in hull_faces(&pts) {
+            let f: Vec<usize> = face.iter().map(|&k| ids[k]).collect();
+            poly(&f, Part::Engine, Some(sub));
+        }
+    }
     // The shell.
     for s in ["l", "r"] {
         for row in 1..=4 {
@@ -4871,31 +5037,40 @@ fn interior_skins(r: &mut Rig) {
             }
         }
     }
-    // The parts that are solids of their own.
-    for sub in HULL_PARTS {
-        let ids: Vec<usize> = (0..r.car.nodes.len())
-            .filter(|&i| r.car.nodes[i].sub.as_deref() == Some(sub))
-            .collect();
-        if ids.len() < 3 {
-            continue;
-        }
-        let pts: Vec<Vec3> = ids.iter().map(|&i| pos[i]).collect();
-        for face in hull_faces(&pts) {
-            let f: Vec<usize> = face.iter().map(|&k| ids[k]).collect();
-            poly(&f, Part::Engine, Some(sub));
-        }
-    }
     r.car.tris.extend(add);
+}
+
+/// Whether segment p→q passes through triangle (a, b, c) (Möller–Trumbore, ends included).
+fn seg_tri_cross(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+    let d = q - p;
+    let (e1, e2) = (b - a, c - a);
+    let h = d.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() < 1e-12 {
+        return false;
+    }
+    let f = 1.0 / det;
+    let s = p - a;
+    let u = f * s.dot(h);
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let qv = s.cross(e1);
+    let v = f * d.dot(qv);
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    let t = f * e2.dot(qv);
+    (0.0..=1.0).contains(&t)
 }
 
 /// The longest hole (its rim's length, m) [`fill_holes`] closes. **Choice**: past the
 /// corners over the lamps (2.2 m round, between the hood's side edge and the fender's top),
 /// short of the doors' and the trunk lid's outlines (3.0–4.5 m) and the underside's
-/// opening; `RIG_FILL_HOLES_M` sets it (2.5 m measured). **Off by default (0):** measured
-/// over six runs of the 60 + 60 head-on it cuts node-only contact's overlap (nodes inside
-/// 71 → 60, 191 → 166 L) but not edge contact's (26 → 30, 49 → 58 L, within the spread),
-/// and the right lamp corner stays open where the skin has doubled layers at its seams.
-pub const FILL_HOLES_M: f32 = 0.0;
+/// opening; `RIG_FILL_HOLES_M` sets it, 0 none. On (2.5 m) since the seam bridges no
+/// longer lay doubled layers (2026-11-24): a skin with no holes under that is the lint's
+/// skin_holes rule (measured before: node-only contact's head-on overlap 191 → 166 L).
+pub const FILL_HOLES_M: f32 = 2.5;
 
 /// Closes the collision skin's small holes (known-bugs S4: the corners over the lamps let a
 /// partner's nodes into the engine bay). A hole is a loop of open edges (on one triangle
@@ -5017,15 +5192,45 @@ fn fill_holes(r: &mut Rig) {
             loops.push((lp, k0));
         }
     }
-    for (lp, k0) in loops {
+    // A loop through one node twice is two holes touching there: split at it.
+    let mut simple: Vec<(Vec<usize>, usize)> = Vec::new();
+    let mut work = loops;
+    while let Some((lp, k0)) = work.pop() {
+        let dup = (0..lp.len()).find_map(|i| (i + 1..lp.len()).find(|&j| lp[j] == lp[i]).map(|j| (i, j)));
+        match dup {
+            Some((i, j)) => {
+                let a: Vec<usize> = lp[i..j].to_vec();
+                let b: Vec<usize> = lp[j..].iter().chain(lp[..i].iter()).copied().collect();
+                for x in [a, b] {
+                    if x.len() >= 3 {
+                        work.push((x, k0));
+                    }
+                }
+            }
+            None => simple.push((lp, k0)),
+        }
+    }
+    for (lp, k0) in simple {
         let pts: Vec<Vec3> = lp.iter().map(|&i| r.g(i)).collect();
         let len: f32 = (0..pts.len()).map(|k| pts[k].distance(pts[(k + 1) % pts.len()])).sum();
         if len > max {
             continue;
         }
-        // The cap runs against the rim: the loop reversed, ear-clipped in its plane
-        // (Newell's normal of the reversed loop).
-        let mut ring: Vec<usize> = (0..lp.len()).rev().collect();
+        // The cap runs against the rim: each loop edge walked the other way from the
+        // triangle already on it (by majority of the rim's edges), ear-clipped in its plane
+        // (Newell's normal of the cap's ring). That is what keeps the skin's winding
+        // consistent, a flat part's back included.
+        let along = (0..lp.len())
+            .filter(|&k| {
+                let (u, v) = (lp[k], lp[(k + 1) % lp.len()]);
+                r.car.tris.iter().any(|t| (0..3).any(|e| t.n[e] == u && t.n[(e + 1) % 3] == v))
+            })
+            .count();
+        let mut ring: Vec<usize> = if 2 * along >= lp.len() {
+            (0..lp.len()).rev().collect()
+        } else {
+            (0..lp.len()).collect()
+        };
         let mut nrm = Vec3::ZERO;
         for k in 0..ring.len() {
             let (p, q) = (pts[ring[k]], pts[ring[(k + 1) % ring.len()]]);
@@ -5037,6 +5242,77 @@ fn fill_holes(r: &mut Rig) {
         }
         let (part, inner) = (r.car.nodes[lp[0]].part, r.car.tris[k0].inner);
         let sub = r.car.tris[k0].sub.clone();
+        // Which way the cap faces: as the skin round the hole does (its rim triangles'
+        // normals), unless the rim's triangles lie inside the loop (a flat part's single
+        // face: the cap is its back, facing the other way).
+        let rim_tris: Vec<usize> = (0..lp.len())
+            .filter_map(|k| {
+                let (u, v) = (lp[k], lp[(k + 1) % lp.len()]);
+                r.car.tris.iter().position(|t| (0..3).any(|e| {
+                    let (a, b) = (t.n[e], t.n[(e + 1) % 3]);
+                    (a == u && b == v) || (a == v && b == u)
+                }))
+            })
+            .collect();
+        let rim_n: Vec3 = rim_tris
+            .iter()
+            .map(|&k| {
+                let [a, b, c] = r.car.tris[k].n.map(|i| r.g(i));
+                (b - a).cross(c - a).normalize_or_zero()
+            })
+            .sum();
+        let (ax_u, ax_v) = (nrm.any_orthonormal_vector(), nrm.cross(nrm.any_orthonormal_vector()));
+        let in_loop = |q: Vec3| {
+            let to2 = |p: Vec3| (p.dot(ax_u), p.dot(ax_v));
+            let (qx, qy) = to2(q);
+            let mut inside = false;
+            for k in 0..pts.len() {
+                let (ax, ay) = to2(pts[k]);
+                let (bx, by) = to2(pts[(k + 1) % pts.len()]);
+                if (ay > qy) != (by > qy) && qx < (bx - ax) * (qy - ay) / (by - ay) + ax {
+                    inside = !inside;
+                }
+            }
+            inside
+        };
+        // A flat part's single face: every rim triangle made of the loop's own nodes.
+        let _ = in_loop;
+        let backs = if rim_tris.iter().all(|&k| r.car.tris[k].n.iter().all(|i| lp.contains(i))) {
+            rim_tris.len()
+        } else {
+            0
+        };
+        let want = if 2 * backs > rim_tris.len() { -rim_n } else { rim_n };
+        let skin_now: Vec<[Vec3; 3]> = r.car.tris.iter().map(|t| t.n.map(|i| r.g(i))).collect();
+        let crosses_skin = |n: [usize; 3]| {
+            let q = n.map(|i| r.g(i));
+            skin_now.iter().zip(&r.car.tris).any(|(x, xt)| {
+                (0..3).any(|e| {
+                    let (u, v) = (n[e], n[(e + 1) % 3]);
+                    let (xu, xv) = (xt.n[e], xt.n[(e + 1) % 3]);
+                    (!xt.n.contains(&u) && !xt.n.contains(&v) && seg_tri_cross(r.g(u), r.g(v), x[0], x[1], x[2]))
+                        || (!n.contains(&xu) && !n.contains(&xv) && seg_tri_cross(r.g(xu), r.g(xv), q[0], q[1], q[2]))
+                })
+            })
+        };
+        let _ = want;
+        // (A slit closes with a thin triangle: slivers are taken, crossings are not.)
+        let mut push = |add: &mut Vec<Tri>, n: [usize; 3]| {
+            let [a, b, c] = n.map(|i| r.g(i));
+            if (b - a).cross(c - a).length() < 1e-7 || crosses_skin(n) {
+                return;
+            }
+            add.push(Tri { n, part, group: None, sub: sub.clone(), inner });
+        };
+        if std::env::var("RIG_HULL_DEBUG").is_ok() {
+            eprintln!(
+                "fill_holes: loop {:.2} m, {} nodes {:?}{}",
+                len,
+                lp.len(),
+                lp.iter().map(|&i| r.car.nodes[i].name.as_str()).collect::<Vec<_>>(),
+                if 2 * backs > rim_tris.len() { " (a flat part's back)" } else { "" }
+            );
+        }
         let mut guard = 0;
         while ring.len() > 3 && guard < 256 {
             guard += 1;
@@ -5058,13 +5334,18 @@ fn fill_holes(r: &mut Rig) {
                     s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0
                 })
             });
-            let Some(k) = ear else { break };
+            let Some(k) = ear else {
+                if std::env::var("RIG_HULL_DEBUG").is_ok() {
+                    eprintln!("fill_holes:   no ear left with {} nodes", ring.len());
+                }
+                break;
+            };
             let (ia, ib, ic) = (ring[(k + m - 1) % m], ring[k], ring[(k + 1) % m]);
-            add.push(Tri { n: [lp[ia], lp[ib], lp[ic]], part, group: None, sub: sub.clone(), inner });
+            push(&mut add, [lp[ia], lp[ib], lp[ic]]);
             ring.remove(k);
         }
         if ring.len() == 3 {
-            add.push(Tri { n: [lp[ring[0]], lp[ring[1]], lp[ring[2]]], part, group: None, sub: sub.clone(), inner });
+            push(&mut add, [lp[ring[0]], lp[ring[1]], lp[ring[2]]]);
         }
     }
     if std::env::var("RIG_HULL_DEBUG").is_ok() {

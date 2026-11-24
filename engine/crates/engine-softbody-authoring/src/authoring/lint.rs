@@ -1416,10 +1416,12 @@ fn seg_through(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
 ///   centre round its normal cross the rest of the outer skin an even number of times, by
 ///   majority of five); a face that points out but lies under a second layer of skin
 ///   within 5 cm fails too, tagged so (a doubled layer: contact's side there is ambiguous);
+///   slivers are left to `skin_slivers` (their normal is not a direction);
 /// * `skin_self_crossing` (hard): no skin edge passes through a triangle it shares no node
 ///   with (the skin through itself at rest: its two layers have no outside between them);
 /// * `skin_holes` (hard): no hole (a loop of open edges) shorter than [`SKIN_HOLE_MAX`]
-///   round; longer loops are listed as openings (doors, lids, underside);
+///   round; longer loops, and a door's or the lid's own outline or window (glass is
+///   visual only), are listed as openings;
 /// * `skin_manifold` (warn): no edge on more than two triangles;
 /// * `skin_slivers` (warn): no triangle under [`SKIN_SLIVER`] of its longest edge high.
 pub fn collision_skin(d: &SoftVehicleDesc) -> Vec<Finding> {
@@ -1496,6 +1498,11 @@ pub fn collision_skin(d: &SoftVehicleDesc) -> Vec<Finding> {
         if !outer[k] {
             continue;
         }
+        // A sliver's normal is not a direction (it closes a slit; `skin_slivers` lists it).
+        let l = (t[0] - t[1]).length().max((t[1] - t[2]).length()).max((t[2] - t[0]).length());
+        if l <= 0.0 || (t[1] - t[0]).cross(t[2] - t[0]).length() / l < SKIN_SLIVER * l {
+            continue;
+        }
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
         if n == Vec3::ZERO {
             continue;
@@ -1562,12 +1569,34 @@ pub fn collision_skin(d: &SoftVehicleDesc) -> Vec<Finding> {
             }
         }
     }
+    // By the parts involved (node names' prefixes): where to look.
+    let prefix = |n: &str| n.split('_').next().unwrap_or(n).trim_end_matches(|c: char| c.is_ascii_digit()).to_string();
+    let mut by_parts: BTreeMap<String, usize> = BTreeMap::new();
+    for c in &crossing {
+        if let Some((e, t)) = c.split_once(" through ") {
+            let ep: Vec<String> = e.split('-').map(prefix).collect();
+            let tp: Vec<String> = t.split(',').map(prefix).collect();
+            let mut ep = ep;
+            ep.sort();
+            ep.dedup();
+            let mut tp = tp;
+            tp.sort();
+            tp.dedup();
+            *by_parts.entry(format!("{} through {}", ep.join("+"), tp.join("+"))).or_default() += 1;
+        }
+    }
+    let mut by_parts: Vec<(String, usize)> = by_parts.into_iter().collect();
+    by_parts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     out.push(finding(
         "skin_self_crossing",
         true,
         crossing.len(),
         false,
-        format!("{} skin edges through the skin's own triangles at rest", crossing.len()),
+        format!(
+            "{} skin edges through the skin's own triangles at rest ({})",
+            crossing.len(),
+            by_parts.iter().map(|(k, n)| format!("{k}: {n}")).collect::<Vec<_>>().join(", ")
+        ),
         "0",
         crossing,
     ));
@@ -1605,7 +1634,20 @@ pub fn collision_skin(d: &SoftVehicleDesc) -> Vec<Finding> {
         let mut who: Vec<String> = comp.iter().take(6).map(|&i| name(i)).collect();
         who.sort();
         let label = format!("{:.2} m round at ({:.2}, {:.2}, {:.2}): {}", len, c.x, c.y, c.z, who.join(","));
-        if len < SKIN_HOLE_MAX {
+        // A loop whose nodes are all one door's or the lid's is that panel's own outline or
+        // window (glass is visual only): an opening by design, whatever its length.
+        let panel = |i: u32| {
+            let n = &d.nodes[i as usize].name;
+            let mut it = n.split('_');
+            let (a, b) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
+            match a {
+                "door" => Some(format!("door_{b}")),
+                "tk" => Some("tk".to_string()),
+                _ => None,
+            }
+        };
+        let own = panel(comp[0]).is_some_and(|p| comp.iter().all(|&i| panel(i).as_deref() == Some(p.as_str())));
+        if len < SKIN_HOLE_MAX && !own {
             holes.push((len, label));
         } else {
             openings.push((len, label));
