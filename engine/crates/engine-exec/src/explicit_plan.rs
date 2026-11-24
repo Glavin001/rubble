@@ -214,8 +214,11 @@ pub const EDGE_SCRATCH: usize = 5;
 /// gAcc words per vehicle of edge contact: hits, listed edges, listed points, a box (six
 /// keys), its longest live edge (float bits), its long edges, a spare word, then the grid's
 /// cursors and starts for its listed edges and points ([`EDGE_BUCKETS`] each), then the
-/// starts' scan's block sums (32 buckets a block).
-pub const EDGE_ACC: usize = 12 + 4 * EDGE_BUCKETS + 2 * (EDGE_BUCKETS / 32);
+/// starts' scan's block sums (32 buckets a block), then the candidates' count, signature
+/// and overflow.
+pub const EDGE_ACC: usize = 12 + 4 * EDGE_BUCKETS + 2 * (EDGE_BUCKETS / 32) + 4;
+/// Edge contact's frame-coherent candidate pairs a listed edge or point (gNext room).
+pub const EDGE_CAND: usize = 32;
 /// The most grid cells an edge's padded box takes in edge contact's grid (more: the
 /// vehicle's long-edge list, tested against every owner edge).
 pub const EDGE_CELLS_MAX: usize = 64;

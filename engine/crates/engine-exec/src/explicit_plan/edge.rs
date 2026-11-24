@@ -64,10 +64,16 @@ pub(super) fn edge_tables(
         let hits_at = next_init.len() as u32;
         let list_at = hits_at + 2 * room;
         // (The listed edges and points, then the grid's entries: EDGE_CELLS_MAX an edge, 8 a
-        // point; then the long edges' list, the owner work list and its scan's block sums.)
+        // point; then the long edges' list, the owner work list and its scan's block sums, the
+        // frame-coherent candidates.)
         next_init.extend(std::iter::repeat_n(
             0,
-            2 * room as usize + (3 + EDGE_CELLS_MAX) * edges.len() + edges.len() / 32 + 1 + 9 * v.contact_points.len(),
+            2 * room as usize
+                + (3 + EDGE_CELLS_MAX) * edges.len()
+                + edges.len() / 32
+                + 1
+                + 9 * v.contact_points.len()
+                + 2 * EDGE_CAND * (edges.len() + v.contact_points.len()),
         ));
         let counter = acc_init.len() as u32;
         acc_init.extend(std::iter::repeat_n(0, EDGE_ACC));
@@ -77,7 +83,8 @@ pub(super) fn edge_tables(
             edge_recs.push([node_at + e.i, node_at + e.j, lists.len() as u32, e.tris.len() as u32]);
             lists.extend(e.tris.iter().map(|&(t, outer)| t | (outer as u32) << 31));
         }
-        scratch_at += (EDGE_SCRATCH * edges.len() + 2) as u32;
+        // (Then two spare float4 and the nodes at the candidates' last build.)
+        scratch_at += (EDGE_SCRATCH * edges.len() + 2 + v.nodes.len()) as u32;
         node_at += v.nodes.len() as u32;
         tri_at += v.triangles.len() as u32;
     }
