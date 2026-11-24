@@ -24,6 +24,12 @@ use crate::explicit_beams::{
 use glam::Vec3;
 
 mod edge;
+
+/// Speculative look-ahead for vehicle contact (under measurement, `SPECULATIVE=1`).
+pub(crate) fn speculative() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SPECULATIVE").is_ok_and(|v| v == "1"))
+}
 pub use edge::EDGE_DEPTH;
 
 /// Each face of a vehicle's box is moved out by this much (m).
@@ -940,18 +946,41 @@ impl ExplicitBeamsWorld {
                             }
                         };
                         let only = va.tri_anti_only(t);
+                        // Speculative look-ahead (`speculative()`, under measurement): the
+                        // band reaches as far as the pair closes this step (its relative
+                        // speed at the triangle's point along the normal, from the side the
+                        // node is on), as the rigid path's pairReach and closingPoints.
+                        let closing_of = |side: f32| {
+                            let vrel = vb.nodes[h as usize].vel
+                                - (va.nodes[i1 as usize].vel * alpha.clamp(0.0, 1.0)
+                                    + va.nodes[i2 as usize].vel * beta.clamp(0.0, 1.0)
+                                    + va.nodes[i0 as usize].vel * gamma.clamp(0.0, 1.0));
+                            (-(vrel.dot(frame.n)) * side).max(0.0)
+                        };
+                        let spec_on = speculative() && !only;
+                        let r_eff = if spec_on {
+                            r + closing_of(if delta >= 0.0 { 1.0 } else { -1.0 }) * STEP
+                        } else {
+                            r
+                        };
                         let Some(c) =
-                            clip_test((alpha, beta, gamma, delta), held, crossing, r, vote)
+                            clip_test((alpha, beta, gamma, delta), held, crossing, r_eff, vote)
                         else {
                             continue;
                         };
+                        // A speculative pair (beyond the band): it may close to the band's
+                        // edge this step and no further; none if it would not reach it.
+                        let spec = if c.d > r { c.d - r } else { 0.0 };
+                        if spec > 0.0 && spec >= closing_of(c.side) * STEP {
+                            continue;
+                        }
                         clip_record(
                             &mut self.vehicles[b].clip_sides[h as usize],
                             clip_word(a as u32, t as u32, c.side),
                         );
                         // An anti-clip-only triangle (BeamNG NONCOLLIDABLE): no force
                         // in front of its plane; behind it, pushed back to the plane.
-                        let p = clip_depth(only, c.d, r);
+                        let p = if spec > 0.0 { 0.0 } else { clip_depth(only, c.d, r) };
                         if only && c.d >= 0.0 {
                             continue;
                         }
@@ -964,6 +993,7 @@ impl ExplicitBeamsWorld {
                             h,
                             n: frame.n * c.side,
                             p,
+                            spec,
                         });
                         continue;
                     }
@@ -996,6 +1026,7 @@ impl ExplicitBeamsWorld {
                         h,
                         n,
                         p: r - delta,
+                        spec: 0.0,
                     });
                 }
             }
@@ -1058,7 +1089,7 @@ impl ExplicitBeamsWorld {
                 va.nodes[i1 as usize],
                 va.nodes[i2 as usize],
             );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
             let dissipative =
                 self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
             // (§37's position step shares: the sub-bodies' inverse masses; none
@@ -1425,7 +1456,7 @@ impl ExplicitBeamsWorld {
                 &va.nodes[i1 as usize],
                 &va.nodes[i2 as usize],
             );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
             let at = acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma;
             let an = (acc(x.b, x.h) - at).dot(x.n);
             let vn = v.dot(x.n);
@@ -1775,6 +1806,9 @@ struct Hit {
     h: u32,
     n: Vec3,
     p: f32,
+    /// Speculative: the gap past the band this pair may still close this step (m; 0 in
+    /// the band). The response targets the normal velocity −spec/h instead of 0.
+    spec: f32,
 }
 
 /// Vehicle contact's residual pass (§37.1; on, `VEHICLE_RESIDUAL=0` a measurement

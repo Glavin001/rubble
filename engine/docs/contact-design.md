@@ -87,3 +87,31 @@ an exact or sourced bound:
 6. Authoring: the generated sedan's skin crosses itself 89 times at rest and opens at its seams
    under crush; the rigger closes it (independent of the solver work, measured by the same
    tests).
+
+## Progress (2026-11-24, CPU reference, all behind switches, off by default)
+
+Steps 1–3 built: the tests (`gen_sedan_contact.rs`: 100 + 100, 100 into 10, offset failing and
+listed; the slow push and the cannonball passing guards); node against edge in the edge's
+wedge only, convex edges (`EDGE_VERTEX=1`, `explicit_contact/edge.rs`); speculative per-pair
+look-ahead in the node and edge passes (`SPECULATIVE=1`: a pair whose gap would close past
+the band this step gets a contact that lets it close to the band's edge and no further).
+
+Worst moment of each crash, nodes inside the other car past the band / skin edges through it
+(car A / car B):
+
+| Scene | Today | Edge | Edge + node–edge | + look-ahead | Edge, fixed 80 mm band |
+|---|---|---|---|---|---|
+| 60 + 60 | 29/35, 78/88 | 8/12, 46/48 | 6/6, 33/43 | 4/5, 23/17 | 3/4, 0/0 |
+| 100 into 10 | 21/26, 70/67 | 11/5, 32/48 | 10/4, 20/20 | 8/5, 8/12 | – |
+| 0.8 m offset | 17/20, 58/65 | 12/7, 36/28 | 6/6, 20/21 | 8/8, 7/17 | – |
+| 100 + 100 | 26/23, 96/90 | 10/11, 70/61 | 15/12, 85/114 | 12/15, 75/80 | – |
+
+Look-ahead alone (node contact only) is worse (60 + 60: 14/33, 97/96). Not fused, slow push
+touching (14–27 mm), cannonball and pole-energy guards pass in every variant.
+
+What remains, 100 + 100 with everything on (`EDGE_TRACE=1`, probe): only 5 edge pairs first
+seen through by jumping the band (look-ahead works); nodes enter through the skin's holes
+(gap entries 24 / 34, all but one within 20 cm of an open edge), through faces under load
+(20 / 17: step 4, the recovery step, not built), and the tyres have no collision shape (932 /
+278 tyre vertices inside). Next: step 4, step 6 (close the skin), a tyre shape (known-bugs S2
+item 3).

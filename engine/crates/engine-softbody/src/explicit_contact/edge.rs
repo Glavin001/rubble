@@ -38,10 +38,16 @@ pub const EDGE_DEPTH: f32 = crate::explicit_contact::CLIP_DEPTH;
 /// Measurement switches (`EDGE_FACING=0`: no check that B faces A; `EDGE_DEPTH_M`:
 /// the crossing depth still pushed, m).
 fn facing_check() -> bool {
-    !std::env::var("EDGE_FACING").is_ok_and(|v| v == "0")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("EDGE_FACING").is_ok_and(|v| v == "0"))
+}
+fn vertex_edge() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("EDGE_VERTEX").is_ok_and(|v| v == "1"))
 }
 fn edge_depth() -> f32 {
-    std::env::var("EDGE_DEPTH_M").ok().and_then(|v| v.parse().ok()).unwrap_or(EDGE_DEPTH)
+    static D: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("EDGE_DEPTH_M").ok().and_then(|v| v.parse().ok()).unwrap_or(EDGE_DEPTH))
 }
 
 /// Closest points this close to an end (of the segment's parameter) are the node's.
@@ -56,13 +62,19 @@ struct SkinEdge {
     p: Vec3,
     q: Vec3,
     out: Vec3,
+    /// The opposite corners of its live triangles (one on a boundary edge).
+    opp: [Option<Vec3>; 2],
+    /// Convex (or a boundary edge): the skin turns away from outside at it. A concave
+    /// edge's region belongs to its faces (Offset Geometric Contact's edge block is empty
+    /// there).
+    convex: bool,
 }
 
 /// The vehicle's live skin edges with their outward normals (unit sum of the live
 /// triangles' unit normals at each edge).
 fn skin_edges(v: &ExplicitBeams) -> Vec<SkinEdge> {
     let w = |i: u32| v.origin + v.nodes[i as usize].pos;
-    let mut by: HashMap<(u32, u32), Vec3> = HashMap::new();
+    let mut by: HashMap<(u32, u32), (Vec3, Vec<(Vec3, Vec3)>)> = HashMap::new();
     for (t, tri) in v.triangles.iter().enumerate() {
         if v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t) {
             continue;
@@ -73,21 +85,39 @@ fn skin_edges(v: &ExplicitBeams) -> Vec<SkinEdge> {
         }
         let (a, b, c) = (w(n[0]), w(n[1]), w(n[2]));
         let nn = (b - a).cross(c - a).normalize_or_zero();
+        let corner = [a, b, c];
         for k in 0..3 {
             let (x, y) = (n[k], n[(k + 1) % 3]);
-            *by.entry((x.min(y), x.max(y))).or_insert(Vec3::ZERO) += nn;
+            let e = by.entry((x.min(y), x.max(y))).or_insert((Vec3::ZERO, Vec::new()));
+            e.0 += nn;
+            e.1.push((corner[(k + 2) % 3], nn));
         }
     }
     let mut e: Vec<SkinEdge> = by
         .into_iter()
-        .filter_map(|((i, j), s)| {
+        .filter_map(|((i, j), (s, faces))| {
             let out = s.normalize_or_zero();
-            (out != Vec3::ZERO).then(|| SkinEdge { i, j, p: w(i), q: w(j), out })
+            let opp = [faces.first().map(|f| f.0), faces.get(1).map(|f| f.0)];
+            // Convex: each face's opposite corner is behind the other face's plane.
+            let convex = match faces.as_slice() {
+                [(o0, n0), (o1, n1)] => n0.dot(*o1 - w(i)) <= 0.0 && n1.dot(*o0 - w(i)) <= 0.0,
+                _ => true,
+            };
+            (out != Vec3::ZERO).then(|| SkinEdge { i, j, p: w(i), q: w(j), out, opp, convex })
         })
         .collect();
     // (A fixed order: the hits' order sets the sums' order.)
     e.sort_by_key(|x| (x.i, x.j));
     e
+}
+
+/// The speed (m/s) at which the points cA = (1 − s)·a0 + s·a1 of vehicle `va` and
+/// cB = (1 − t)·b0 + t·b1 of `vb` close along n (out of A); 0 when they part.
+fn closing(va: &ExplicitBeams, a: [u32; 2], s: f32, vb: &ExplicitBeams, b: [u32; 2], t: f32, n: Vec3) -> f32 {
+    let v = |x: &ExplicitBeams, i: u32| x.nodes[i as usize].vel;
+    let ua = v(va, a[0]) * (1.0 - s) + v(va, a[1]) * s;
+    let ub = v(vb, b[0]) * (1.0 - t) + v(vb, b[1]) * t;
+    (-(ub - ua).dot(n)).max(0.0)
 }
 
 fn cell(x: Vec3) -> (i32, i32, i32) {
@@ -103,6 +133,8 @@ struct EdgeHit {
     t: f32,
     n: Vec3,
     p: f32,
+    /// Speculative: the gap past the band the pair may still close this step (m).
+    spec: f32,
 }
 
 impl ExplicitBeamsWorld {
@@ -136,6 +168,15 @@ impl ExplicitBeamsWorld {
                 let hits = self.edge_hits(a, b, ea, eb);
                 if !hits.is_empty() {
                     self.edge_apply(a, b, &hits);
+                }
+                if vertex_edge() {
+                    // A node against the other's edge, in its edge's wedge (both ways).
+                    for (o, x, eo) in [(a, b, ea), (b, a, eb)] {
+                        let hits = self.vertex_edge_hits(o, x, eo);
+                        if !hits.is_empty() {
+                            self.edge_apply(o, x, &hits);
+                        }
+                    }
                 }
             }
         }
@@ -227,9 +268,18 @@ impl ExplicitBeamsWorld {
                 let ca = e.p + (e.q - e.p) * s;
                 let cb = f.p + (f.q - f.p) * t;
                 let g = n.dot(cb - ca);
+                let mut spec = 0.0;
                 if g > r {
-                    note(self, 3, g);
-                    continue;
+                    let reach = if crate::explicit_contact::speculative() {
+                        closing(&self.vehicles[a], [e.i, e.j], s, &self.vehicles[b], [f.i, f.j], t, n) * STEP
+                    } else {
+                        0.0
+                    };
+                    if g - r >= reach {
+                        note(self, 3, g);
+                        continue;
+                    }
+                    spec = g - r;
                 }
                 if g < -edge_depth() {
                     self.edge_stats[4] += 1;
@@ -241,7 +291,87 @@ impl ExplicitBeamsWorld {
                 if g < 0.0 {
                     self.edge_stats[6] += 1;
                 }
-                out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p: (r - g).min(r) });
+                out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p: (r - g).max(0.0).min(r), spec });
+            }
+        }
+        out
+    }
+
+    /// Vehicle `x`'s contact nodes against owner `o`'s skin edges, each in its edge's
+    /// region only (Offset Geometric Contact's edge block): the closest point inside the
+    /// edge, the edge convex, the node outside (along the edge's outward normal) and
+    /// beyond the edge in both faces' planes: (p − f)·(f − c) ≥ 0 for each face's
+    /// opposite corner c and its foot f on the edge's line. Over a face the node is the
+    /// face's (the node pass); so no two contacts push the same point two ways.
+    fn vertex_edge_hits(&mut self, o: usize, x: usize, eo: &[SkinEdge]) -> Vec<EdgeHit> {
+        let r = self.vv_range.unwrap_or(self.vehicles[o].collision_range.max(self.vehicles[x].collision_range));
+        let travel = |v: &ExplicitBeams| {
+            if crate::explicit_contact::speculative() {
+                v.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max) * STEP
+            } else {
+                0.0
+            }
+        };
+        let (travel_o, travel_x) = (travel(&self.vehicles[o]), travel(&self.vehicles[x]));
+        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+        for (k, e) in eo.iter().enumerate() {
+            if !e.convex {
+                continue;
+            }
+            let pad = r + travel_o + travel_x;
+            let (lo, hi) = (cell(e.p.min(e.q) - Vec3::splat(pad)), cell(e.p.max(e.q) + Vec3::splat(pad)));
+            for gx in lo.0..=hi.0 {
+                for gy in lo.1..=hi.1 {
+                    for gz in lo.2..=hi.2 {
+                        grid.entry((gx, gy, gz)).or_default().push(k as u32);
+                    }
+                }
+            }
+        }
+        let vx = &self.vehicles[x];
+        let mut out = Vec::new();
+        for &h in &vx.contact_points {
+            if vx.is_retired(h as usize) {
+                continue;
+            }
+            let p = vx.origin + vx.nodes[h as usize].pos;
+            let Some(list) = grid.get(&cell(p)) else { continue };
+            for &k in list {
+                let e = &eo[k as usize];
+                let d = e.q - e.p;
+                let ll = d.dot(d);
+                if ll < 1e-12 {
+                    continue;
+                }
+                let s = (p - e.p).dot(d) / ll;
+                if s <= END || s >= 1.0 - END {
+                    continue;
+                }
+                let c = e.p + d * s;
+                let g = (p - c).length();
+                if g < 1e-6 || g > r + travel_o + travel_x {
+                    continue;
+                }
+                let n = (p - c) / g;
+                if n.dot(e.out) <= 0.0 {
+                    continue;
+                }
+                let mut spec = 0.0;
+                if g > r {
+                    let reach = closing(&self.vehicles[o], [e.i, e.j], s, vx, [h, h], 0.0, n) * STEP;
+                    if g - r >= reach {
+                        continue;
+                    }
+                    spec = g - r;
+                }
+                let beyond = e.opp.iter().flatten().all(|&oc| {
+                    let f = e.p + d * ((oc - e.p).dot(d) / ll);
+                    (p - f).dot(f - oc) >= 0.0
+                });
+                if !beyond {
+                    continue;
+                }
+                out.push(EdgeHit { a: [e.i, e.j], b: [h, h], s, t: 0.0, n, p: (r - g).max(0.0).min(r), spec });
             }
         }
         out
@@ -254,11 +384,15 @@ impl ExplicitBeamsWorld {
         let mut ka: HashMap<u32, u32> = HashMap::new();
         let mut kb: HashMap<u32, u32> = HashMap::new();
         for x in hits {
-            for i in x.a {
-                *ka.entry(i).or_default() += 1;
+            for (i, w) in x.a.iter().zip([1.0 - x.s, x.s]) {
+                if w > 0.0 {
+                    *ka.entry(*i).or_default() += 1;
+                }
             }
-            for i in x.b {
-                *kb.entry(i).or_default() += 1;
+            for (i, w) in x.b.iter().zip([1.0 - x.t, x.t]) {
+                if w > 0.0 {
+                    *kb.entry(*i).or_default() += 1;
+                }
             }
         }
         let im = |n: &Node, k: u32| if n.has(NODE_IMMOVABLE) { 0.0 } else { k as f32 / n.mass };
@@ -277,13 +411,13 @@ impl ExplicitBeamsWorld {
             let nb = x.b.map(|i| vb.nodes[i as usize]);
             let wa = [1.0 - x.s, x.s];
             let wb = [1.0 - x.t, x.t];
-            let vel = (nb[0].vel * wb[0] + nb[1].vel * wb[1]) - (na[0].vel * wa[0] + na[1].vel * wa[1]);
+            let vel = (nb[0].vel * wb[0] + nb[1].vel * wb[1]) - (na[0].vel * wa[0] + na[1].vel * wa[1]) + x.n * (x.spec / STEP);
             let ims = if two_body {
                 [
-                    im(&na[0], ka[&x.a[0]]),
-                    im(&na[1], ka[&x.a[1]]),
-                    im(&nb[0], kb[&x.b[0]]),
-                    im(&nb[1], kb[&x.b[1]]),
+                    im(&na[0], ka.get(&x.a[0]).copied().unwrap_or(1)),
+                    im(&na[1], ka.get(&x.a[1]).copied().unwrap_or(1)),
+                    im(&nb[0], kb.get(&x.b[0]).copied().unwrap_or(1)),
+                    im(&nb[1], kb.get(&x.b[1]).copied().unwrap_or(1)),
                 ]
             } else {
                 [im(&na[0], 1), im(&na[1], 1), im(&nb[0], 1), im(&nb[1], 1)]
