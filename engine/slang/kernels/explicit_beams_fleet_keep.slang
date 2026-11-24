@@ -437,7 +437,10 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
     float3 p1 = nf3(oa + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(oa + gNodes[tn.z * 3u].xyz);
     bool wildTri = fkWild(gBeams[fkRef(tn.x)]) || fkWild(gBeams[fkRef(tn.y)]) || fkWild(gBeams[fkRef(tn.z)]);
-    float base = asfloat(gStatic[va * 4u + 3u].z) + CLIP_DEPTH + (wildTri ? FK_WILD : FK_CALM) + fkBetween();
+    // (Contact offsets: the raw corners' box grown by the vehicle's largest offset covers
+    // its paint corners now and at any later pass, whatever the offsets' directions.)
+    float om = contactOffMax(va);
+    float base = asfloat(gStatic[va * 4u + 3u].z) + CLIP_DEPTH + (wildTri ? FK_WILD : FK_CALM) + fkBetween() + om;
     float3 tlo = min(min(p0, p1), p2);
     float3 thi = max(max(p0, p1), p2);
     float padW = base + FK_WILD;
@@ -463,7 +466,7 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
         float travel = gP.clipMem != 0u ? smul(clipTriSpeed(tn), STEP) : 0.0;
         float3 m3 = max(abs(tlo), abs(thi));
         pad = asfloat(gStatic[va * 4u + 3u].z) + nf(nf(travel + smul(vmax, STEP)) + CLIP_DEPTH) + 0.002
-              + 4.0e-6 * max(m3.x, max(m3.y, m3.z));
+              + 4.0e-6 * max(m3.x, max(m3.y, m3.z)) + om;
     }
     // (A build that skips its listing, fkAccCtl(2) 2: none.)
     else if (gAcc[fkAccCtl(2u)].load() >= 2) return;

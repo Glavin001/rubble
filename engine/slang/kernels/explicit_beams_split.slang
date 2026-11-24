@@ -749,6 +749,13 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
     if (rest) memberRestEnd(vid.x, lid.x);
 #endif
     if ((how & MT_STEPPED) != 0u) splitMemberEnd(t, lid.x);
+    // Contact offsets: the vehicle's offset vectors at its step's end, for every contact
+    // path after it (the fleet-wide front reads them; the groups' pass computes the same).
+    if ((how & MT_STEPPED) != 0u && gP.offsetBase != 0u)
+    {
+        sync();
+        contactOffsets(vid.x, lid.x, LANES);
+    }
     ebLoopCapFlush();
 }
 #endif

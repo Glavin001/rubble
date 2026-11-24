@@ -2740,7 +2740,7 @@ impl ExplicitUpload {
             beam_order_base,
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
-        let flags = if any_edge || any_offset { perf_flags_default() & !PERF_FLEET_FAMILY } else { perf_flags_default() };
+        let flags = edge::contact_flags(perf_flags_default(), any_edge, any_offset);
         (words[W_PERF_FLAGS], words[W_BEAM_ORDER + 1]) = (flags & !PERF_FLEET_WALK_BOX, (flags & PERF_FLEET_WALK_BOX) << 1);
         words[W_VV_SCRATCH] = vv_scratch;
         words[W_VV_SCRATCH_OFF] = vv_scratch_off;
@@ -3102,7 +3102,7 @@ impl FramePlanner {
     /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
-        let flags = if self.words[W_EDGE] != 0 || self.words[W_OFFSET] != 0 { flags & !PERF_FLEET_FAMILY } else { flags };
+        let flags = edge::contact_flags(flags, self.words[W_EDGE] != 0, self.words[W_OFFSET] != 0);
         // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
         self.words[W_PERF_FLAGS] = flags & !(PERF_KEEP_TRACK_REST | PERF_FLEET_WALK_BOX);
         self.words[W_BEAM_ORDER + 1] = (self.words[W_BEAM_ORDER + 1] & !(PERF_FLEET_WALK_BOX << 1)) | (flags & PERF_FLEET_WALK_BOX) << 1;

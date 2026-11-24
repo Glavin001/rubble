@@ -297,6 +297,18 @@ fn four_sedans(split: bool) {
 /// node, one driving into the other's rear; GPU == CPU bit for bit, and the offsets acted.
 #[test]
 fn contact_offsets_step_like_the_cpu() {
+    contact_offsets_scene(false);
+}
+
+/// [`contact_offsets_step_like_the_cpu`] on the split group path with the tests across
+/// workgroups: the fleet-wide schedules (their kept candidate lists padded by the
+/// largest offset, the offset vectors from each vehicle's step).
+#[test]
+fn contact_offsets_on_the_fleet_path_step_like_the_cpu() {
+    contact_offsets_scene(true);
+}
+
+fn contact_offsets_scene(split: bool) {
     let text = sedan_text();
     let make = |at: Vec3, v: Vec3, off: f32| {
         let mut s = ExplicitBeams::from_truck(&text, at, v, EXACT).unwrap();
@@ -323,6 +335,10 @@ fn contact_offsets_step_like_the_cpu() {
         return;
     };
     g.set_bit_exact(true);
+    if split {
+        g.set_group_split(true);
+        g.set_group_split_tests(true);
+    }
     let mut w = ExplicitBeamsWorld::new(fleet);
     let mut wo = ExplicitBeamsWorld::new(fleet_with(0.0));
     if std::env::var("OFFSET_DEBUG").is_ok() {
