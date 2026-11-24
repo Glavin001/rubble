@@ -88,7 +88,7 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
         return;
     }
     VvSums S = vvSumsOf(va, vh, h, tn, parity);
-    float rr = vvResOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, a);
+    float rr = vvResOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, a, -1.0);
     if (phase == 0u)
     {
         if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, sscale(kept.nn, rr));

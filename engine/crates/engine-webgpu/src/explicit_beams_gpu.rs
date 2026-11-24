@@ -610,6 +610,7 @@ struct GroupSplit {
     fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 4]>,
     /// The members' wheels on each other, created at first use.
     wheels: std::sync::OnceLock<wgpu::ComputePipeline>,
+    edges: std::sync::OnceLock<wgpu::ComputePipeline>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -706,6 +707,7 @@ impl GroupSplit {
             bind,
             fleet: std::sync::OnceLock::new(),
             wheels: std::sync::OnceLock::new(),
+            edges: std::sync::OnceLock::new(),
             args_layout,
             bind_args,
             bind_first,
@@ -740,6 +742,11 @@ impl GroupSplit {
             let (which, name) = entry.which_entry();
             split_pipe(&self.device, &self.args_layout, self.kind, self.bit_exact, which, name)
         })
+    }
+
+    fn edges(&self) -> &wgpu::ComputePipeline {
+        self.edges
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "edges", plan::SPLIT_EDGE_ENTRY))
     }
 
     fn wheels(&self) -> &wgpu::ComputePipeline {
@@ -1686,11 +1693,6 @@ impl ExplicitBeamsGpu {
         sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
         bit_exact: bool,
     ) -> Self {
-        assert!(
-            !vehicles.iter().any(|v| v.edge_contact) || crate::edge_kernels(),
-            "explicit beams: edge vehicle contact needs the edge kernels, which are not in the shipped \
-             kernels yet: build with RUBBLE_EDGE_KERNELS=1 (native; docs/contact-design.md)"
-        );
         let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
         let layout = upload.layout.clone();
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
@@ -4559,6 +4561,11 @@ impl ExplicitBeamsGpu {
             }
             GroupOp::Wheels { copy } => {
                 pass.set_pipeline(g.wheels());
+                pass.set_bind_group(0, &g.bind, &at(copy));
+                self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
+            }
+            GroupOp::Edge { copy } => {
+                pass.set_pipeline(g.edges());
                 pass.set_bind_group(0, &g.bind, &at(copy));
                 self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
             }

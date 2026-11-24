@@ -52,10 +52,6 @@ fn edge_contact_in_a_large_group_steps_like_the_cpu() {
 }
 
 fn edge_scene(split: bool, large: bool) {
-    if !engine_webgpu::edge_kernels() {
-        eprintln!("edge kernels not built (RUBBLE_EDGE_KERNELS=1): skipped");
-        return;
-    }
     let lower = tetra(
         [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.0, -0.4, 0.4), Vec3::new(0.0, -0.4, -0.4)],
         Vec3::ZERO,
@@ -149,10 +145,6 @@ fn edge_scene(split: bool, large: bool) {
 /// the crash (the edge grid finds the same pairs as testing all of them).
 #[test]
 fn edge_contact_two_sedans_step_like_the_cpu() {
-    if !engine_webgpu::edge_kernels() {
-        eprintln!("edge kernels not built (RUBBLE_EDGE_KERNELS=1): skipped");
-        return;
-    }
     let text = sedan_text();
     let make = |at: Vec3, v: Vec3| {
         let mut s = ExplicitBeams::from_truck(&text, at, v, EXACT).unwrap();
@@ -177,6 +169,45 @@ fn edge_contact_two_sedans_step_like_the_cpu() {
     };
     g.set_bit_exact(true);
     let mut w = ExplicitBeamsWorld::new(fleet);
+    if std::env::var("EDGE_STEP_DEBUG").is_ok() {
+        for step in 0..720 {
+            let hits = w.edge_stats[5];
+            w.frame(1);
+            g.frame(1);
+            let pos = g.positions();
+            let d: Vec<f32> = (0..2).map(|k| rms(&pos[k], &w.vehicles[k].positions())).collect();
+            let dump = std::env::var("EDGE_DUMP_STEP").ok().and_then(|x| x.parse::<usize>().ok()) == Some(step + 1);
+            if dump && d.iter().all(|&x| x == 0.0) {
+                let pt = g.portable(0.0, "");
+                let words: Vec<u32> = bytemuck::cast_slice(&pt.bindings[0]).to_vec();
+                let bm: Vec<f32> = bytemuck::cast_slice(&pt.bindings[4]).to_vec();
+                let snap = words[72] as usize;
+                let n0 = w.vehicles[0].nodes.len();
+                for (lab, gi) in [("v0 14", 14), ("v0 8", 8), ("v1 166", n0 + 166), ("v1 162", n0 + 162)] {
+                    let at = (snap + gi) * 4;
+                    eprintln!("gpu snap {lab} {:?}", &bm[at..at + 3]);
+                }
+            }
+            if d.iter().any(|&x| x != 0.0) {
+                for k in 0..2 {
+                    let cpu = w.vehicles[k].positions();
+                    let mut v: Vec<(f32, usize)> = pos[k].iter().zip(&cpu).enumerate().map(|(i, (a, b))| ((*a - *b).length(), i)).filter(|x| x.0 > 0.0).collect();
+                    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    eprintln!("vehicle {k}: {} nodes differ; top {:?}", v.len(), &v[..v.len().min(6)]);
+                }
+                let pt = g.portable(0.0, "");
+                let words: Vec<u32> = bytemuck::cast_slice(&pt.bindings[0]).to_vec();
+                let bm: Vec<f32> = bytemuck::cast_slice(&pt.bindings[4]).to_vec();
+                let snap = words[72] as usize;
+                let n0 = w.vehicles[0].nodes.len();
+                for (lab, gi) in [("v0 14", 14), ("v0 8", 8), ("v1 166", n0 + 166), ("v1 162", n0 + 162)] {
+                    let at = (snap + gi) * 4;
+                    eprintln!("gpu snap {lab} {:?}", &bm[at..at + 3]);
+                }
+                panic!("first difference at step {step}: {d:?}; edge hits this step {}, total {:?}", w.edge_stats[5] - hits, w.edge_stats);
+            }
+        }
+    }
     for (frames, steps) in [(20, 17), (40, 1), (20, 17)] {
         for _ in 0..frames {
             w.frame(steps);
@@ -209,10 +240,6 @@ fn edge_contact_four_sedans_on_the_split_path_step_like_the_cpu() {
 }
 
 fn four_sedans(split: bool) {
-    if !engine_webgpu::edge_kernels() {
-        eprintln!("edge kernels not built (RUBBLE_EDGE_KERNELS=1): skipped");
-        return;
-    }
     let text = sedan_text();
     let make = |at: Vec3, v: Vec3| {
         let mut s = ExplicitBeams::from_truck(&text, at, v, EXACT).unwrap();

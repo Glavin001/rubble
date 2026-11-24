@@ -40,11 +40,13 @@ fn facing_check() -> bool {
     *ON.get_or_init(|| !std::env::var("EDGE_FACING").is_ok_and(|v| v == "0"))
 }
 /// Node against edge with edge contact (on; `EDGE_VERTEX=0`, a measurement: off).
-/// Contact points at their paint (contact offsets: paint meets paint). On by default;
-/// `RUBBLE_PAINT_POINTS=0` (a measurement): the partner's points at their nodes.
+/// An edge-contact pair's contact points at their paint (contact offsets: paint meets
+/// paint). Under measurement, `RUBBLE_PAINT_POINTS=1`: better with edge contact over six
+/// head-ons (edges through 73 -> 48, overlap 30 -> 25 L); off until the GPU's node turns
+/// place the points so too.
 pub(crate) fn paint_points() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RUBBLE_PAINT_POINTS").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RUBBLE_PAINT_POINTS").is_ok_and(|v| v == "1"))
 }
 
 fn vertex_edge() -> bool {
@@ -180,6 +182,29 @@ impl ExplicitBeamsWorld {
         for a in 0..nv {
             let skip = self.skip.get(a).copied().unwrap_or(false);
             self.skin.push((!skip).then(|| skin_edges(&self.vehicles[a], edge_outer_only())));
+        }
+    }
+
+    /// Every owner's turn of its edge hits, after every owner's node turn, in the same
+    /// order (`turns`: each owner with its partners).
+    pub(super) fn edge_turns(&mut self, edge_turns: Vec<(usize, Vec<usize>)>) {
+        // Edge against edge and node against edge (`edge_contact`): each owner's turn of
+        // its edge hits after every owner's node turn, in the same order (the GPU's edge
+        // pass, a dispatch of its own after the contact pass: contact-design.md).
+        // (The edge turns' first passes start from the forces after every node turn: the
+        // GPU's edge dispatch snapshots them once at its start.)
+        if !edge_turns.is_empty() && self.vehicles.iter().any(|v| v.two_body_contact) {
+            for (pf, v) in self.pass_force.iter_mut().zip(&self.vehicles) {
+                pf.clear();
+                pf.extend(v.forces_now());
+            }
+        }
+        for (a, partners) in edge_turns {
+            let mut hits = Vec::new();
+            self.edge_turn(a, &partners, &mut hits);
+            if !hits.is_empty() {
+                self.turn_hits(a, hits);
+            }
         }
     }
 

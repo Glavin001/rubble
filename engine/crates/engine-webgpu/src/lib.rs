@@ -196,7 +196,11 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, Kernel); 24] = [
 /// explicit_beams_fleet.slang, contact-groups-design.md §8); and the members' raycast
 /// wheels on each other (`explicit_beams_split_wheels`).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 44] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 48] = [
+    ("explicit_beams_split_edges", kernel!("explicit_beams_split_edges")),
+    ("explicit_beams_split_edges_wide", kernel!("explicit_beams_split_edges_wide")),
+    ("explicit_beams_split_edges_aero", kernel!("explicit_beams_split_edges_aero")),
+    ("explicit_beams_split_edges_aero_wide", kernel!("explicit_beams_split_edges_aero_wide")),
     ("explicit_beams_split_groupbegin", kernel!("explicit_beams_split_groupbegin")),
     ("explicit_beams_split_groupbegin_wide", kernel!("explicit_beams_split_groupbegin_wide")),
     ("explicit_beams_split_groupbegin_aero", kernel!("explicit_beams_split_groupbegin_aero")),
@@ -1372,15 +1376,4 @@ mod embedded_is_runtime {
         assert!(n > 500, "{n} modules compared");
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Whether this build's explicit-beams kernels carry edge vehicle contact (`EB_EDGE`):
-/// built with `RUBBLE_EDGE_KERNELS=1`, or compiled at run time with it set (the fast
-/// profile's kernel store). Not in the shipped kernels yet (docs/contact-design.md).
-pub fn edge_kernels() -> bool {
-    #[cfg(kernels_at_runtime)]
-    if engine_slang_build::edge_kernels_requested() {
-        return true;
-    }
-    env!("RUBBLE_EDGE_KERNELS_BUILT") == "1"
 }

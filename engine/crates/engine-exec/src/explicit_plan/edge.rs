@@ -1,6 +1,7 @@
 //! Edge vehicle contact's tables in the upload (`ExplicitBeams::edge_contact`,
 //! explicit_beams_vv_edges.slang; [`super::W_EDGE`]).
 
+use super::schedule::Switches;
 use super::*;
 
 /// The owners' state by vehicle and the schedules built on it: lossless switches that edge
@@ -132,4 +133,23 @@ pub(super) fn offset_tables(
         statics.push([m.to_bits(), 0, 0, 0]);
     }
     base
+}
+
+/// Edge vehicle contact runs only as the split group path's pass: a frame with contact
+/// off that path would drop its edge hits.
+pub(super) fn edge_frame_check(planner: &FramePlanner, group: bool, steps: u32) {
+    assert!(
+        planner.words[W_EDGE] == 0 || group || !planner.contact_active() || steps == 0,
+        "explicit beams: edge vehicle contact needs the split group path (group_split on, not debug)"
+    );
+}
+
+pub(super) fn edge_module_ready(sw: &Switches) -> bool {
+    (sw.ready)(&split_module_name("edges", sw.aero, sw.lanes))
+}
+
+/// Whether the split group path runs edge vehicle contact's pass: the frame's parameters
+/// have edge contact ([`super::schedule::frame`] clears it until the module is compiled).
+pub fn edge_pass_on(planner: &FramePlanner) -> bool {
+    planner.words[W_EDGE] != 0
 }

@@ -5,7 +5,7 @@
 crates/engine-cuda/src/explicit.rs 1092
 crates/engine-cuda/src/lib.rs 1082
 crates/engine-exec/src/explicit_plan.rs 3886
-crates/engine-exec/src/explicit_plan/schedule.rs 1365
+crates/engine-exec/src/explicit_plan/schedule.rs 1401
 crates/engine-exec/src/rigid_plan.rs 2269
 crates/engine-ffi/src/controls.rs 1188
 crates/engine-ffi/src/lib.rs 3650
@@ -42,7 +42,7 @@ crates/engine-softbody-lab/examples/showcase_probe.rs 2724
 crates/engine-softbody-lab/examples/skin_shards_probe.rs 1006
 crates/engine-softbody-lab/examples/vehicle_c2c_overlap.rs 1067
 crates/engine-softbody/src/explicit_beams.rs 5832
-crates/engine-softbody/src/explicit_contact.rs 1763
+crates/engine-softbody/src/explicit_contact.rs 1766
 crates/engine-softbody/src/explicit_drive.rs 1576
 crates/engine-softbody/src/explicit_jbeam_ext.rs 1697
 crates/engine-softbody/src/explicit_ref.rs 1193
@@ -59,7 +59,7 @@ crates/engine-vehiclegen/src/parts.rs 1381
 crates/engine-vehiclegen/src/solid.rs 1707
 crates/engine-webgpu/src/bin/explicit_beams_scaling.rs 2193
 crates/engine-webgpu/src/bin/soft_calibrate.rs 1064
-crates/engine-webgpu/src/explicit_beams_gpu.rs 5105
+crates/engine-webgpu/src/explicit_beams_gpu.rs 5112
 crates/engine-webgpu/src/gpu.rs 4952
 crates/engine-webgpu/src/gpu_tests.rs 5313
 crates/engine-webgpu/src/lib.rs 1386

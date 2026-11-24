@@ -221,23 +221,8 @@ pub(crate) struct Slangc<'a> {
     pub(crate) reflection: Option<&'a Path>,
 }
 
-/// Edge vehicle contact's kernels (`EB_EDGE` in explicit_beams.slang) in this build's
-/// explicit-beams modules: `RUBBLE_EDGE_KERNELS=1` (native development and tests; not in
-/// the shipped kernels yet: docs/contact-design.md).
-pub fn edge_kernels_requested() -> bool {
-    std::env::var("RUBBLE_EDGE_KERNELS").is_ok_and(|v| v == "1")
-}
-
 impl Slangc<'_> {
     pub(crate) fn run(&self) -> Result<()> {
-        if edge_kernels_requested()
-            && self.source.file_name().is_some_and(|n| n == "explicit_beams.slang")
-            && !self.defines.iter().any(|d| d.0 == "EB_EDGE")
-        {
-            let mut defines = self.defines.to_vec();
-            defines.push(("EB_EDGE", "1"));
-            return Slangc { defines: &defines, ..*self }.run();
-        }
         let slangc = find_slangc()?;
         if let Some(parent) = self.out.parent() {
             std::fs::create_dir_all(parent)?;

@@ -505,6 +505,8 @@ float3 vvRel(uint v, uint a) { return nf3(asfloat(gMisc[v].xyz) - asfloat(gMisc[
 // offset along its vertex normal (the unit sum of its live outer triangles' unit
 // normals, explicit_contact/edge.rs contact_offset_vectors), computed at the contact pass's
 // start (contactOffsets) and added to a vehicle's triangles (vvTriangle, vvNearBox).
+// (EB_NO_OFFSETS: a module that runs only with the fleet-wide schedules, which the host
+// leaves off with contact offsets: explicit_plan's PERF_FLEET_FAMILY.)
 float3 contactOff(uint n)
 {
     if (gP.offsetBase == 0u) return float3(0.0, 0.0, 0.0);
@@ -514,7 +516,7 @@ float contactOffMax(uint v) { return gP.offsetBase == 0u ? 0.0 : asfloat(gStatic
 // glam's normalize_or_zero.
 float3 contactNormOrZero(float3 x)
 {
-    float rcp = sdiv(1.0, ssqrt(sdot(x, x)));
+    float rcp = sdiv(1.0, ssqrtCr(sdot(x, x)));
     if (!(rcp > 0.0 && rcp <= 3.4028235e38)) return float3(0.0, 0.0, 0.0);
     return sscale(x, rcp);
 }
@@ -549,12 +551,14 @@ VvTri vvTriangle(uint gt, float3 origin, float r)
     t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
     float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
     float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
+#ifndef EB_NO_OFFSETS
     if (gP.offsetBase != 0u)
     {
         t.p0 = sadd3(t.p0, contactOff(t.tn.x));
         p1 = sadd3(p1, contactOff(t.tn.y));
         p2 = sadd3(p2, contactOff(t.tn.z));
     }
+#endif
     vvFrame(t, p1, p2);
     float3 r3 = float3(r, r, r);
     t.lo = ssub3(min(min(t.p0, p1), p2), r3);

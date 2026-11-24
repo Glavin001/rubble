@@ -21,7 +21,6 @@
 // bit 31 on the outer skin. A hit is two words: the owner's edge index with bit 31 for
 // node against edge, then the partner's (vehicle << 20 | edge index) or its global node.
 
-static const uint FLAG_EDGE = 2097152u; // vehicle flags bit 21 (explicit_plan.rs)
 static const float EDGE_END = 1e-3;
 static const float EDGE_DEPTH_M = 0.1; // CLIP_DEPTH (explicit_contact/edge.rs EDGE_DEPTH)
 static const int FL_ERR_EDGES = 5;
@@ -32,10 +31,11 @@ static const uint EDGE_CAND = 32u; // candidate pairs a listed item (explicit_pl
 static const float EDGE_SKIN = 0.05; // the candidate list's margin (m): rebuilt past it
 // The candidate list's mode (a thread's): edgeTry keeps the pairs within reach + 2 skins
 // instead of testing them.
+// Each member's edge hits this step (edgeTestsSmall).
+groupshared uint gsEdgeHas[VV_PART];
 static uint gEdgeCollect = 0u;
 static float gEdgeCollectReach = 0.0;
 
-bool edgeOn() { return gP.edgeBase != 0u; }
 // Measurement only (`RUBBLE_EDGE_ABLATE`, time; results meaningless): 1 the pair tests, 2 the
 // grids, 4 the edges' step data, 8 the hits (found, not kept) skipped; 16 the candidates
 // found again every step (lossless: a check of the list's margin).
@@ -43,8 +43,6 @@ uint edgeAblate() { return gStatic[gP.edgeBase - 1u].x; }
 float edgeSkin() { float s = asfloat(gStatic[gP.edgeBase - 1u].y); return s > 0.0 ? s : EDGE_SKIN; }
 uint4 edgeV0(uint v) { return gStatic[gP.edgeBase + 2u * v]; }
 uint4 edgeV1(uint v) { return gStatic[gP.edgeBase + 2u * v + 1u]; }
-bool edgeVeh(uint v) { return (gStatic[v * 4u + 3u].x & FLAG_EDGE) != 0u; }
-bool edgePairOn(uint a, uint b) { return edgeOn() && (edgeVeh(a) || edgeVeh(b)); }
 float edgeRange(uint a, uint b) { return max(asfloat(gStatic[a * 4u + 3u].z), asfloat(gStatic[b * 4u + 3u].z)); }
 // A node's world position as the CPU reference takes it (origin + position).
 float3 edgeWorld(uint v, uint gi) { return nf3(asfloat(gMisc[v].xyz) + gNodes[gi * 3u].xyz); }
@@ -54,7 +52,7 @@ float3 edgeSkinAt(uint v, uint gi) { return gP.offsetBase != 0u ? sadd3(edgeWorl
 // glam's normalize_or_zero: v · (1 / |v|) when that reciprocal is finite and positive.
 float3 edgeNormOrZero(float3 x)
 {
-    float rcp = sdiv(1.0, ssqrt(sdot(x, x)));
+    float rcp = sdiv(1.0, ssqrtCr(sdot(x, x)));
     if (!(rcp > 0.0 && rcp <= 3.4028235e38)) return float3(0.0, 0.0, 0.0);
     return sscale(x, rcp);
 }
@@ -597,3 +595,4 @@ void edgeResetPrepare(uint k, uint off, uint lane, bool prepare)
 }
 
 #include "explicit_beams_vv_edges_grid.slang"
+#include "explicit_beams_split_edges.slang"

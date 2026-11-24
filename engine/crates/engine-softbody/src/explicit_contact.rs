@@ -783,16 +783,7 @@ impl ExplicitBeamsWorld {
                 }
             }
         }
-        // Edge against edge and node against edge (`edge_contact`): each owner's turn of
-        // its edge hits after every owner's node turn, in the same order (the GPU's edge
-        // pass, a dispatch of its own after the contact pass: contact-design.md).
-        for (a, partners) in edge_turns {
-            let mut hits = Vec::new();
-            self.edge_turn(a, &partners, &mut hits);
-            if !hits.is_empty() {
-                self.turn_hits(a, hits);
-            }
-        }
+        self.edge_turns(edge_turns);
         if stats.hits > 0 && self.first_hit_step.is_none() {
             self.first_hit_step = Some(self.steps);
         }

@@ -35,6 +35,13 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
                     .into(),
             )
         }
+        6 => {
+            return Err(
+                "a contact group of more than four vehicles has edge contact, which its pass does not \
+                 run yet (explicit_beams_split_edges.slang; its edge hits were not applied)"
+                    .into(),
+            )
+        }
         4 => {
             return Err(format!(
                 "a vehicle had more than {VV_ROOM_MAX} partners with two-body contact at once                  (the two-body point counts hold {VV_ROOM_MAX} owners a node)"

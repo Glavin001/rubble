@@ -532,7 +532,7 @@ void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, ui
         return;
     }
     VvSums S = vvSumsOf(va, vh, h, tn, parity);
-    float rr = vvResOf(h, tn, S, alpha, beta, gamma, nn, v, 0u);
+    float rr = vvResOf(h, tn, S, alpha, beta, gamma, nn, v, 0u, -1.0);
     if (phase == 0u)
     {
         if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));

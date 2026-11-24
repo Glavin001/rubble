@@ -23,10 +23,13 @@ use std::borrow::Cow;
 
 /// The strict helpers this rewrite replaces, as (Slang's WGSL name, the new body from
 /// the parameters' names).
-const REWRITES: [(&str, fn(&[&str]) -> String); 3] = [
+/// (A module without one of them skips it: ssqrtCr, the correctly rounded square root,
+/// is in few modules.)
+const REWRITES: [(&str, fn(&[&str]) -> String); 4] = [
     ("nf_0", |p| format!("return {};", p[0])),
     ("sdiv_0", |p| format!("return {} / {};", p[0], p[1])),
     ("ssqrt_0", |p| format!("return sqrt({});", p[0])),
+    ("ssqrtCr_0", |p| format!("return sqrt({});", p[0])),
 ];
 
 /// `src` (an explicit module's WGSL, before or after the uniform-load rewrite) with the
