@@ -1686,6 +1686,11 @@ impl ExplicitBeamsGpu {
         sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
         bit_exact: bool,
     ) -> Self {
+        assert!(
+            !vehicles.iter().any(|v| v.edge_contact) || crate::edge_kernels(),
+            "explicit beams: edge vehicle contact needs the edge kernels, which are not in the shipped \
+             kernels yet: build with RUBBLE_EDGE_KERNELS=1 (native; docs/contact-design.md)"
+        );
         let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
         let layout = upload.layout.clone();
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);

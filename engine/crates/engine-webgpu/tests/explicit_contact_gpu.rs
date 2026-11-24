@@ -889,6 +889,10 @@ fn edge_contact_in_a_large_group_steps_like_the_cpu() {
 }
 
 fn edge_scene(split: bool, large: bool) {
+    if !engine_webgpu::edge_kernels() {
+        eprintln!("edge kernels not built (RUBBLE_EDGE_KERNELS=1): skipped");
+        return;
+    }
     let lower = tetra(
         [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.0, -0.4, 0.4), Vec3::new(0.0, -0.4, -0.4)],
         Vec3::ZERO,
@@ -982,6 +986,10 @@ fn edge_scene(split: bool, large: bool) {
 /// the crash (the edge grid finds the same pairs as testing all of them).
 #[test]
 fn edge_contact_two_sedans_step_like_the_cpu() {
+    if !engine_webgpu::edge_kernels() {
+        eprintln!("edge kernels not built (RUBBLE_EDGE_KERNELS=1): skipped");
+        return;
+    }
     let text = sedan_text();
     let make = |at: Vec3, v: Vec3| {
         let mut s = ExplicitBeams::from_truck(&text, at, v, EXACT).unwrap();

@@ -469,9 +469,11 @@ void splitGroupStep(uint g, uint lane, uint word)
                 gsUniformOpen = 0u;
             }
             sync();
+#ifdef EB_EDGE
             // Edge vehicle contact's hits (none without it; the fleet-wide schedules are off
             // with it, PERF_FLEET_FAMILY): found here, before the levels apply any hit.
             edgeTestsSmall(k, off, parity, lane);
+#endif
             gVvTag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u;
             vvPassSmallLevels(k, off, runOff, points, parity, lane, (front & 2u) != 0u);
             gVvTag = 0u;

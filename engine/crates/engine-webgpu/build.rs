@@ -37,6 +37,12 @@ fn main() -> Result<()> {
     // kernel edit compiles no Rust. Everything else embeds them (release, the C library,
     // wasm): the same compile, the same bytes.
     println!("cargo:rerun-if-env-changed=RUBBLE_KERNELS");
+    // Edge vehicle contact's kernels (EB_EDGE; engine_slang_build::edge_kernels_requested).
+    println!("cargo:rerun-if-env-changed=RUBBLE_EDGE_KERNELS");
+    println!(
+        "cargo:rustc-env=RUBBLE_EDGE_KERNELS_BUILT={}",
+        engine_slang_build::edge_kernels_requested() as u8
+    );
     let fast = out_dir.components().any(|c| c.as_os_str() == "fast");
     let wasm = env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
     // (On wasm only when asked, RUBBLE_KERNELS=runtime: the fast web build's world wasm,

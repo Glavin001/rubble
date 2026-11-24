@@ -1373,3 +1373,14 @@ mod embedded_is_runtime {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Whether this build's explicit-beams kernels carry edge vehicle contact (`EB_EDGE`):
+/// built with `RUBBLE_EDGE_KERNELS=1`, or compiled at run time with it set (the fast
+/// profile's kernel store). Not in the shipped kernels yet (docs/contact-design.md).
+pub fn edge_kernels() -> bool {
+    #[cfg(kernels_at_runtime)]
+    if engine_slang_build::edge_kernels_requested() {
+        return true;
+    }
+    env!("RUBBLE_EDGE_KERNELS_BUILT") == "1"
+}
