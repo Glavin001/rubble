@@ -169,3 +169,35 @@ simultaneous contacts on the same nodes under crash loads without either oversho
 over the turn's hits (a few Gauss–Seidel sweeps of the dissipative law, each hit seeing the
 others' impulses, as rigid solvers do), which satisfies all contacts together with no positive
 work. That is a change of the contact algorithm (the owner's decision).
+
+### Judged over ensembles (2026-11-24) — supersedes the single-run tables above
+
+The head-on is chaotic: car B moved 1 mm aside changes a single run's skin edges through the
+other car from 51 to 179 (everything on). Single-run comparisons of edge counts above are
+mostly noise. `tools/c2c/ensemble.sh KMH SECONDS N "NAME:VARS" ...` runs each variant N times
+(car B 0..N−1 mm aside) and reports min / median / max of the worst moment (A + B):
+
+| 60 + 60, 6 runs | nodes inside | edges through | overlap L |
+|---|---|---|---|
+| defaults | 53 / 71 / 74 | 170 / 183 / 194 | 152 / 191 / 227 |
+| edge | 22 / 26 / 35 | 62 / 86 / 182 | 26 / 49 / 81 |
+| edge + node–edge | 27 / 29 / 32 | 63 / 102 / 167 | 41 / 53 / 84 |
+| + look-ahead | 27 / 28 / 32 | 48 / 66 / 179 | 29 / 48 / 57 |
+| + 16 sweeps | 22 / 24 / 29 | 30 / 83 / 127 | 37 / 45 / 54 |
+| + push-out 1 m/s | 27 / 29 / 34 | 38 / 98 / 166 | 29 / 54 / 58 |
+| edge, 80 mm car-to-car band | 5 / 7 / 9 | 0 / 20 / 34 | 6 / 12 / 19 |
+
+| 100 + 100, 6 runs | nodes inside | edges through | overlap L |
+|---|---|---|---|
+| defaults | 70 / 78 / 98 | 186 / 204 / 241 | 350 / 402 / 539 |
+| edge | 41 / 49 / 52 | 199 / 232 / 310 | 256 / 304 / 318 |
+| edge + node–edge + look-ahead | 44 / 48 / 51 | 231 / 248 / 277 | 257 / 288 / 332 |
+| edge, 80 mm band | 18 / 22 / 29 | 40 / 167 / 248 | 176 / 213 / 248 |
+| edge + look-ahead, 80 mm band | 17 / 26 / 31 | 72 / 97 / 296 | 226 / 259 / 319 |
+
+**What holds up:** edge contact is the real gain (60 + 60: nodes 71 → 26, overlap 191 → 49 L;
+100 + 100: 78 → 49, 402 → 304 L) and ends the fusing. Node–edge, look-ahead and push-out make
+no difference beyond the spread; 16 sweeps a little. The 80 mm car-to-car band is the strongest
+on overlap but fails the per-step energy test (60 + 60: 3.6 kJ, 100 into 10: 5.9 kJ, bound
+2.1 / 2.9). Per step, edge alone fails the 60 + 60's energy narrowly (2.6 kJ); edge + node–edge
+passes (2.0 kJ). 100 + 100 stays far from clean with every variant.
