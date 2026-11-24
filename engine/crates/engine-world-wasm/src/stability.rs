@@ -79,6 +79,13 @@ pub const GRAVITY: f64 = 9.81;
 pub const BOX_FACTOR: f32 = 10.0;
 pub const BOX_MARGIN: f32 = 50.0;
 pub const BOX_ENERGY_RISE: f64 = 1.5;
+/// The box check's drive credit: a vehicle's centre-of-mass kinetic energy may rise by
+/// `BOX_TRACTION` × its weight times the distance its centre of mass moved since the
+/// low (no car's driven wheels push it at more than 1 g), and by no more than that
+/// energy actually rose, so internal motion (a car flying apart) earns none. (A car
+/// driven on after leaving a torn-off part 140 m behind accelerated at 0.55 g from 24
+/// to 74 kJ inside the window and tripped the check; 2026-11-24.)
+pub const BOX_TRACTION: f64 = 1.0;
 /// Vehicles a page's check reads. With more vehicles than this the energy and box
 /// checks are off (an unread vehicle can hand a read one its energy) and only the
 /// first ones' non-finite check runs.
@@ -102,6 +109,11 @@ pub struct Sample {
 }
 
 impl Sample {
+    /// The kinetic energy of the centre of mass's motion (J): the whole vehicle moving.
+    pub fn com_kinetic(&self) -> f64 {
+        0.5 * self.mass * f64::from(self.speed) * f64::from(self.speed)
+    }
+
     /// From nodes as (position, mass, velocity), positions relative to `origin_y`
     /// in height.
     pub fn from_points(origin_y: f32, points: impl Iterator<Item = ([f32; 3], f32, [f32; 3])>) -> Self {
@@ -221,7 +233,12 @@ struct Track {
     sources_low: f64,
     /// The readbacks of the last `REBOUND_WINDOW` seconds since the last launch: (t,
     /// kinetic energy, height, the fleet's mechanical energy, the inputs counted).
-    recent: std::collections::VecDeque<(f64, f64, f64, f64, f64)>,
+    recent: std::collections::VecDeque<(f64, f64, f64, f64, f64, f64, f64)>,
+    /// The box check's drive credit so far (J: `BOX_TRACTION`), and at the low (with
+    /// the centre-of-mass kinetic energy then).
+    drive: f64,
+    drive_low: f64,
+    com_low: f64,
     damage: Option<(u32, u32, u32)>,
 }
 
@@ -388,6 +405,10 @@ impl StabilityGuard {
                 let before = v.last.map_or(s.speed, |l| l.speed);
                 self.traction += TRACTION_MAX * s.mass * GRAVITY * 0.5 * f64::from(before + s.speed) * dt;
             }
+            for (s, v) in samples.iter().zip(&mut self.vehicles) {
+                let before = v.last.map_or(s.speed, |l| l.speed);
+                v.drive += BOX_TRACTION * s.mass * GRAVITY * 0.5 * f64::from(before + s.speed) * dt;
+            }
         }
         self.last_t = Some(t);
         let fleet_energy: f64 = samples.iter().map(|s| s.kinetic + s.mass * GRAVITY * s.height).sum();
@@ -406,11 +427,13 @@ impl StabilityGuard {
             v.last = Some(*s);
             v.lowest = v.lowest.min(s.height);
             // The low over the last REBOUND_WINDOW seconds (a launch clears the window).
-            v.recent.push_back((t, s.kinetic, s.height, fleet_energy, sources_now));
+            v.recent.push_back((t, s.kinetic, s.height, fleet_energy, sources_now, v.drive, s.com_kinetic()));
             while v.recent.front().is_some_and(|r| r.0 < t - REBOUND_WINDOW) {
                 v.recent.pop_front();
             }
-            if let Some(&(_, k, h, f, src)) = v.recent.iter().min_by(|a, b| a.1.total_cmp(&b.1)) {
+            if let Some(&(_, k, h, f, src, d, c)) = v.recent.iter().min_by(|a, b| a.1.total_cmp(&b.1)) {
+                v.drive_low = d;
+                v.com_low = c;
                 v.kinetic_low = k;
                 v.low_height = h;
                 v.fleet_low = f;
@@ -512,8 +535,14 @@ impl StabilityGuard {
             // together has not risen. Only a rise of that sum past the inputs since
             // the low (and the floor) is energy from nowhere. (One vehicle: its own
             // rise less its fall, as before.)
-            let fleet_rise = fleet_energy - v.fleet_low - (sources_now - v.sources_low);
-            if s.size > limit && s.kinetic > ENERGY_FLOOR && s.kinetic > BOX_ENERGY_RISE * v.kinetic_low + fall && fleet_rise > ENERGY_FLOOR {
+            // The drive credit: what its tyres can have added to its centre's motion.
+            let drive = (v.drive - v.drive_low).min((s.com_kinetic() - v.com_low).max(0.0));
+            let fleet_rise = fleet_energy - v.fleet_low - (sources_now - v.sources_low) - drive;
+            if s.size > limit
+                && s.kinetic > ENERGY_FLOOR
+                && s.kinetic > BOX_ENERGY_RISE * v.kinetic_low + fall + drive
+                && fleet_rise > ENERGY_FLOOR
+            {
                 return self.stop(
                     t,
                     format!(

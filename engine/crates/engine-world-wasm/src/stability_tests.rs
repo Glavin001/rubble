@@ -113,6 +113,58 @@ fn a_part_left_behind_while_driving_on_does_not_trip() {
     }
 }
 
+/// The report of 2026-11-24 at 151 s (vehicle lab, drive, three generated sedans,
+/// `surface=1`): the player's car, 144 m across with a torn-off part left behind,
+/// accelerates at 0.55 g from 21 to 36 km/h (24 to 74 kJ inside the window), its
+/// energy all the whole car's motion. Its tyres did that: not a trip.
+#[test]
+fn accelerating_away_from_a_part_left_behind_does_not_trip() {
+    let mut g = StabilityGuard::new(3);
+    let parked = car(0.0, 0.38, 5.4, 0.0);
+    let mut t = 0.0;
+    let mut speed = 0.0f32;
+    // Driven about at 5 to 10 m/s for two minutes, the part torn off early.
+    for k in 0..(120 * 60) {
+        t = k as f64 / 60.0;
+        speed = 7.5 + 2.5 * (t * 0.3).sin() as f32;
+        let size = if t < 10.0 { 5.4 } else { 104.0 + 40.0 * (t / 120.0) as f32 };
+        assert_eq!(g.observe(t, &[car(speed, 0.48, size, 2.0e3), parked, parked]), None, "t = {t:.3}");
+    }
+    // Slowed to 5.8 m/s, then 0.55 g up to 10.1 m/s, 144 m across.
+    let target = 5.76f32;
+    while speed > target {
+        t += 1.0 / 60.0;
+        speed = (speed - 0.1).max(target);
+        assert_eq!(g.observe(t, &[car(speed, 0.48, 144.0, 2.0e3), parked, parked]), None, "t = {t:.3}");
+    }
+    while speed < 10.1 {
+        t += 1.0 / 60.0;
+        speed += 5.4 / 60.0;
+        assert_eq!(g.observe(t, &[car(speed, 0.48, 144.0, 2.0e3), parked, parked]), None, "t = {t:.3}, {speed} m/s");
+    }
+}
+
+/// The same car, 144 m across, with the rise in its parts' motion instead (the
+/// centre at the same speed, 200 kJ of internal energy from nowhere): that trips.
+#[test]
+fn internal_energy_rising_past_the_box_still_trips() {
+    let mut g = StabilityGuard::new(1);
+    let mut t = 0.0;
+    for k in 0..=60 {
+        t = k as f64 / 60.0;
+        assert_eq!(g.observe(t, &[car(6.0, 0.48, 144.0, 2.0e3)]), None);
+    }
+    let mut tripped = false;
+    for k in 1..=30 {
+        t += 1.0 / 60.0;
+        if g.observe(t, &[car(6.0, 0.48, 144.0, 2.0e3 + 1.0e4 * k as f64)]).is_some() {
+            tripped = true;
+            break;
+        }
+    }
+    assert!(tripped, "no trip");
+}
+
 /// The same drive, but at 66 km/h the car goes from 300 kJ to 2,000 kJ and 104 m
 /// across in one readback: that still trips.
 #[test]
