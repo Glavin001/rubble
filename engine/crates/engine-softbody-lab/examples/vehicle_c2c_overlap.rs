@@ -104,6 +104,7 @@ fn spawn(desc: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> Result<ExplicitBeams, S
     s.surface_contact = std::env::var("SURFACE_CONTACT").map_or(true, |v| v != "0");
     // OUTWARD=1: vehicle contact takes the triangle's outward side (outward_skin).
     s.outward_skin = std::env::var("OUTWARD").is_ok_and(|v| v == "1" || v == "2");
+    s.edge_contact = std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1");
     if std::env::var("OUTWARD").is_ok_and(|v| v == "2") {
         // OUTWARD=2: only the outer skin's triangles (in front of each, 1 cm out,
         // the winding number of the whole collision skin is below 0.5).

@@ -52,6 +52,9 @@ fn spawn(d: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> ExplicitBeams {
     let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(d, at + Vec3::Y * lift, vel, settings())
         .expect("spawn the sedan");
     s.surface_contact = true;
+    // Measurement switches for the fixes under way (off: today's rule).
+    s.edge_contact = std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1");
+    s.outward_skin = std::env::var("OUTWARD").is_ok_and(|v| v == "1");
     s.finish();
     s
 }
@@ -207,11 +210,13 @@ fn row(name: &str, scene: &str, measured: String, bound: String, pass: bool) {
 /// holds two cars that should simply part).
 #[derive(Clone, Debug, Default)]
 struct HeadOn {
-    /// At 0.6 s: per car, its contact nodes inside the other's live hull deeper
-    /// than the contact band, and the deepest (m).
+    /// The most over the crash (sampled every 20 ms to 0.6 s): per car, its contact
+    /// nodes inside the other's live hull deeper than the contact band, and the
+    /// deepest (m).
     inside: [usize; 2],
     deepest: [f32; 2],
-    /// At 0.6 s: per car, its skin edges through the other's live triangles.
+    /// The most over the crash: per car, its skin edges through the other's live
+    /// triangles.
     edges: [usize; 2],
     /// How much further apart the centres get in the second after the push (m): with
     /// vehicle contact, and with it off.
@@ -254,25 +259,31 @@ fn head_on() -> HeadOn {
         let b = spawn(&turned, Vec3::new(0.0, 0.0, 0.025 + zmax), -Vec3::Z * v);
         let mut w = ExplicitBeamsWorld::new(vec![a, b]);
         let crash = (0.6 / STEP).round() as usize;
-        for _ in 0..crash {
-            w.step();
-        }
+        let every = (0.02 / STEP).round() as usize;
         let mut r = HeadOn::default();
-        let hulls = [hull(&w.vehicles[0]), hull(&w.vehicles[1])];
-        for c in 0..2 {
-            let (x, o) = (&w.vehicles[c], &hulls[1 - c]);
-            let band = w.vehicles[1 - c].collision_range;
-            for &i in &x.contact_points {
-                let p = x.origin + x.nodes[i as usize].pos;
-                if winding(p, o) > 0.5 {
-                    let dd = dist(p, o);
-                    if dd > band {
-                        r.inside[c] += 1;
-                    }
-                    r.deepest[c] = r.deepest[c].max(dd);
-                }
+        for k in 1..=crash {
+            w.step();
+            if k % every != 0 {
+                continue;
             }
-            r.edges[c] = edges_through(&w.vehicles[c], &w.vehicles[1 - c]);
+            let hulls = [hull(&w.vehicles[0]), hull(&w.vehicles[1])];
+            for c in 0..2 {
+                let (x, o) = (&w.vehicles[c], &hulls[1 - c]);
+                let band = w.vehicles[1 - c].collision_range;
+                let mut inside = 0;
+                for &i in &x.contact_points {
+                    let p = x.origin + x.nodes[i as usize].pos;
+                    if winding(p, o) > 0.5 {
+                        let dd = dist(p, o);
+                        if dd > band {
+                            inside += 1;
+                        }
+                        r.deepest[c] = r.deepest[c].max(dd);
+                    }
+                }
+                r.inside[c] = r.inside[c].max(inside);
+                r.edges[c] = r.edges[c].max(edges_through(&w.vehicles[c], &w.vehicles[1 - c]));
+            }
         }
         let mut free = w.clone();
         free.contact = false;
@@ -308,18 +319,19 @@ fn head_on_cars_are_not_fused() {
     assert!(pass);
 }
 
-/// No node of one car inside the other at rest: 0.6 s after the head-on, a contact node
-/// inside the other car's live collision hull (winding number) deeper than the contact
-/// band. Bound: exact (two solids share no space; the band is where contact acts).
-/// FAILS today (2026-11-24, S4): 28 / 41 nodes inside, deepest 142 / 241 mm (most entered
-/// through gaps in the collision skin).
+/// No node of one car inside the other: at any sample of the head-on (every 20 ms to
+/// 0.6 s), a contact node inside the other car's live collision hull (winding number)
+/// deeper than the contact band. Bound: exact (two solids share no space; the band is
+/// where contact acts).
+/// FAILS today (2026-11-24, S4): see the printed row (at 0.6 s alone: 23 / 35 nodes,
+/// deepest 142 / 241 mm; most entered through gaps in the collision skin).
 #[test]
 fn head_on_no_node_inside_the_other_car() {
     let r = head_on();
     let pass = r.finite && r.inside == [0, 0];
     row(
         "no node inside the other car",
-        "head on 60 + 60, at 0.6 s",
+        "head on 60 + 60, worst to 0.6 s",
         format!(
             "{} / {} nodes past the band, deepest {:.0} / {:.0} mm",
             r.inside[0],
@@ -333,17 +345,17 @@ fn head_on_no_node_inside_the_other_car() {
     assert!(pass);
 }
 
-/// No panel of one car through the other's: 0.6 s after the head-on, a skin edge of
-/// one car through a live collision triangle of the other. Bound: exact (with node-only
-/// contact an edge can pass between nodes; edge contact is the fix).
-/// FAILS today (2026-11-24, S4): 62 / 54 edges.
+/// No panel of one car through the other's: at any sample of the head-on, a skin edge
+/// of one car through a live collision triangle of the other. Bound: exact (with
+/// node-only contact an edge can pass between nodes; edge contact is the fix).
+/// FAILS today (2026-11-24, S4): see the printed row (at 0.6 s alone: 62 / 54 edges).
 #[test]
 fn head_on_no_edge_through_the_other_car() {
     let r = head_on();
     let pass = r.finite && r.edges == [0, 0];
     row(
         "no skin edge through the other car",
-        "head on 60 + 60, at 0.6 s",
+        "head on 60 + 60, worst to 0.6 s",
         format!("{} / {} edges", r.edges[0], r.edges[1]),
         "0".into(),
         pass,

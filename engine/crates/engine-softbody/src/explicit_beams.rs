@@ -971,6 +971,11 @@ pub struct ExplicitBeams {
     /// whose front faces out of the whole vehicle at rest); the others keep
     /// anti-clip's rule. Empty: every triangle.
     pub outward_tris: Vec<bool>,
+    /// Edge-against-edge vehicle contact (a Rubble setting, off by default;
+    /// `explicit_contact::edge`): with this vehicle in a pair, the two skins' edges are
+    /// kept apart as the nodes are from the triangles, so two skins cannot cross
+    /// between their nodes. CPU reference only so far.
+    pub edge_contact: bool,
     /// Anti-clip's box padding by each contacter's own travel (a Rubble setting, not
     /// in the specification; off by default): a contacter is tested against a triangle
     /// when inside its box padded by r + (the triangle's fastest node's speed + the
@@ -1757,6 +1762,7 @@ impl ExplicitBeams {
             anti_clip: false,
             outward_skin: false,
             outward_tris: Vec::new(),
+            edge_contact: false,
             own_travel_reach: false,
             retired: Vec::new(),
             clip_sides: Vec::new(),

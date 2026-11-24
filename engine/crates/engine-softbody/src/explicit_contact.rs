@@ -23,6 +23,9 @@ use crate::explicit_beams::{
 };
 use glam::Vec3;
 
+mod edge;
+pub use edge::EDGE_DEPTH;
+
 /// Each face of a vehicle's box is moved out by this much (m).
 pub const BOX_MARGIN: f32 = 0.05;
 /// Squared speed difference of two partners' first nodes above which both
@@ -760,6 +763,8 @@ impl ExplicitBeamsWorld {
                 self.triangle_loop(a, &partners, &mut stats);
             }
         }
+        // Edge against edge (`ExplicitBeams::edge_contact`; off: nothing).
+        self.edge_pass();
         if stats.hits > 0 && self.first_hit_step.is_none() {
             self.first_hit_step = Some(self.steps);
         }
