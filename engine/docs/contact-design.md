@@ -433,3 +433,19 @@ contact with a clear error; the lab page's control is off until they ship.
    the edge hits, so edge contact no longer turns the fleet-wide schedules off (+7 ms).
 4. Then the Chrome A/B and the default decision.
 
+
+## Edge pass and offsets on the GPU: measured state (2026-11-24, Modal CUDA, T4)
+
+- Kernels, 88582403 against the head with the same `ssqrt`, fixtures' flags masked to ones
+  both support: 12 rows bit for bit, none slower (pile8 -16.5 %, headon -7.2 %).
+- The fleet-wide schedules with offsets (all but levels-once), on/off in one build: 12 rows
+  bit for bit; pile8 -41.6 %, pile32 -83.2 %, but pile2 +14.4 % and barrier +9.4 %, so the
+  gate fails. Untested hypothesis: the missing levels-once module (EB_NO_OFFSETS).
+- A portable fixture stores its planner words, perf flags included, and `apply` does not
+  mask them: fixtures made by a build replay that build's schedule on any other. Earlier
+  "7-11 % slower" figures of this day are void for that reason.
+- No matrix row has edge contact on: its cost and CUDA results are unmeasured there.
+- Open: groups over VV_PART (8) have no edge contact (regression of 103a8a46, untested);
+  node turns then edge turns was not compared with one turn over the ensemble; compile,
+  inline and duplication ratchet lines raised and to be brought back; a browser frame runs
+  without edge contact until its module compiles; paint points are CPU-only (off).
