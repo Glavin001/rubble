@@ -870,6 +870,18 @@ fn tetra(points: [Vec3; 4], vel: Vec3) -> ExplicitBeams {
 /// edge). One-step frames, then 17-step ones.
 #[test]
 fn edge_contact_steps_like_the_cpu() {
+    edge_scene(false);
+}
+
+/// [`edge_contact_steps_like_the_cpu`] on the split group path (the vehicle lab's: a group's
+/// tests across workgroups, its levels after them; the fleet-wide schedules off with edge
+/// contact, `PERF_FLEET_FAMILY`).
+#[test]
+fn edge_contact_on_the_split_path_steps_like_the_cpu() {
+    edge_scene(true);
+}
+
+fn edge_scene(split: bool) {
     let lower = tetra(
         [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.0, -0.4, 0.4), Vec3::new(0.0, -0.4, -0.4)],
         Vec3::ZERO,
@@ -889,6 +901,10 @@ fn edge_contact_steps_like_the_cpu() {
         return;
     };
     g.set_bit_exact(true);
+    if split {
+        g.set_group_split(true);
+        g.set_group_split_tests(true);
+    }
     let mut off = fleet.clone();
     for v in &mut off {
         v.edge_contact = false;
