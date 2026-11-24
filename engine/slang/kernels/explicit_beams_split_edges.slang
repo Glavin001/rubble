@@ -56,10 +56,24 @@ void edgePass(uint off, uint k, uint s, uint lane)
     }
     gVvTag = 0u;
     sync();
-    // The forces after the node turns (two-body contact's first pass reads them).
-    if (gP.vvSplit != 0u) vvSnapshot(off, k, parity, lane);
-    sync();
+    // (No pair with edge contact: nothing to do. The pairs are workgroup memory, read by
+    // every lane alike.)
+    bool any = false;
+    for (uint p = 0u, pStop = EB_END(885, p, k * k, 1u); p < pStop; p++)
+    {
+        uint a = p / k;
+        uint m = p - a * k;
+        if (gsVvPair[a * VV_PART + m] != 0u && edgePairOn(vvMember(off, a), vvMember(off, m))) any = true;
+    }
+    if (splitUniform(lane, any ? 1u : 0u) == 0u) return;
     edgeTestsSmall(k, off, parity, lane);
+    sync();
+    // The forces after the node turns at the hits' nodes, before any edge hit applies (the
+    // CPU's one snapshot of every node; two-body contact's first pass reads them).
+    if (gP.vvSplit != 0u)
+    {
+        for (uint a = 0u, aStop = EB_END(886, a, k, 1u); a < aStop; a++) edgeSnapOwner(vvMember(off, a), parity, 0u, lane, LANES);
+    }
     sync();
     // The owners by vehicle index, as the CPU's turns (a member keeps its slot).
     for (uint r = 0u, rStop = EB_END_UNIFORM(882, r, k, 1u, VV_PART); r < rStop; r++)

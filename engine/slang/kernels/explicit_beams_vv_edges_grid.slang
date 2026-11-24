@@ -203,9 +203,10 @@ void edgeWorkStage(uint v, float cell, uint stage, uint lane)
         for (uint c = 0u, cStop = EB_END(851, c, blk, 1u); c < cStop; c++) run += gNext[edgeWorkBlocksAt(v) + c];
         for (uint i = i0, iStop = EB_END(852, i, i1, 1u); i < iStop; i++)
         {
-            uint n = gNext[work + i];
+            // (The sum before the store: Slang's CUDA output read the element after it.)
+            uint next = run + gNext[work + i];
             gNext[work + i] = run;
-            run += n;
+            run = next;
         }
         if (blk + 1u == blocks) gAcc[edgeV1(v).x + 11u].store(int(run));
     }
