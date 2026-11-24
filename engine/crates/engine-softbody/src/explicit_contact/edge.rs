@@ -142,7 +142,7 @@ impl ExplicitBeamsWorld {
     }
 
     fn edge_hits(&mut self, a: usize, b: usize, ea: &[SkinEdge], eb: &[SkinEdge]) -> Vec<EdgeHit> {
-        let r = self.vehicles[a].collision_range.max(self.vehicles[b].collision_range);
+        let r = self.vv_range.unwrap_or(self.vehicles[a].collision_range.max(self.vehicles[b].collision_range));
         let travel = |v: &ExplicitBeams| v.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max) * STEP;
         let pad = r + edge_depth() + travel(&self.vehicles[a]) + travel(&self.vehicles[b]);
         // A's edges in the grid, by their padded boxes.
@@ -177,14 +177,37 @@ impl ExplicitBeamsWorld {
                 let e = &ea[k as usize];
                 let (s, t) = engine_schema::feature_query::closest_seg_seg(e.p, e.q, f.p, f.q);
                 self.edge_stats[0] += 1;
-                if s <= END || s >= 1.0 - END || t <= END || t >= 1.0 - END {
+                let key = (a, b, e.i, e.j, f.i, f.j);
+                let step = self.steps;
+                // EDGE_TRACE (a measurement): each tested pair's outcome this step, and for
+                // a hit first seen crossed, the pair's outcome the step before.
+                let mut note = |w: &mut Self, code: u8, g: f32| {
+                    if let Some(tr) = w.edge_trace.as_mut() {
+                        if code == 4 && tr.get(&key).is_some_and(|p| p.0 + 1 == step && p.1 == 5) {
+                            // A held pair overrun past EDGE_DEPTH this step.
+                            w.edge_first[5] += 1;
+                        }
+                        if code == 5 && g < 0.0 {
+                            let prev = tr.get(&key).filter(|p| p.0 + 1 == step).map(|p| p.1);
+                            if prev != Some(5) {
+                                w.edge_first[prev.map_or(6, |c| c as usize)] += 1;
+                            }
+                        }
+                        tr.insert(key, (step, code));
+                    }
+                };
+                let a_end = s <= END || s >= 1.0 - END;
+                let b_end = t <= END || t >= 1.0 - END;
+                if a_end || b_end {
                     self.edge_stats[1] += 1;
+                    note(self, 0, 0.0);
                     continue;
                 }
                 let mut n = (e.q - e.p).cross(f.q - f.p);
                 let len = n.length();
                 if len < 1e-8 {
                     self.edge_stats[2] += 1;
+                    note(self, 1, 0.0);
                     continue;
                 }
                 n /= len;
@@ -198,18 +221,22 @@ impl ExplicitBeamsWorld {
                     if g <= r && g >= -edge_depth() {
                         self.edge_stats[3] += 1;
                     }
+                    note(self, 2, g);
                     continue;
                 }
                 let ca = e.p + (e.q - e.p) * s;
                 let cb = f.p + (f.q - f.p) * t;
                 let g = n.dot(cb - ca);
                 if g > r {
+                    note(self, 3, g);
                     continue;
                 }
                 if g < -edge_depth() {
                     self.edge_stats[4] += 1;
+                    note(self, 4, g);
                     continue;
                 }
+                note(self, 5, g);
                 self.edge_stats[5] += 1;
                 if g < 0.0 {
                     self.edge_stats[6] += 1;

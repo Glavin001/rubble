@@ -105,6 +105,13 @@ fn spawn(desc: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> Result<ExplicitBeams, S
     // OUTWARD=1: vehicle contact takes the triangle's outward side (outward_skin).
     s.outward_skin = std::env::var("OUTWARD").is_ok_and(|v| v == "1" || v == "2");
     s.edge_contact = std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1");
+    // COLLISION_RANGE=m: the contact band (a measurement).
+    if let Some(r) = std::env::var("COLLISION_RANGE").ok().and_then(|v| v.parse().ok()) {
+        s.collision_range = r;
+    }
+    if std::env::var("SHOW_RANGE").is_ok() {
+        eprintln!("collision range {} m", s.collision_range);
+    }
     if std::env::var("OUTWARD").is_ok_and(|v| v == "2") {
         // OUTWARD=2: only the outer skin's triangles (in front of each, 1 cm out,
         // the winding number of the whole collision skin is below 0.5).
@@ -212,6 +219,34 @@ fn seg_tri(p: Vec3, q: Vec3, t: &[Vec3; 3]) -> bool {
     }
     let tt = f * e2.dot(qv);
     (0.0..=1.0).contains(&tt)
+}
+
+/// Closest points' parameters of segments p1–q1 and p2–q2 (Ericson §5.1.9).
+fn seg_seg(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (f32, f32) {
+    let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    if a <= 1e-12 && e <= 1e-12 {
+        return (0.0, 0.0);
+    }
+    if a <= 1e-12 {
+        return (0.0, (f / e).clamp(0.0, 1.0));
+    }
+    let c = d1.dot(r);
+    if e <= 1e-12 {
+        return ((-c / a).clamp(0.0, 1.0), 0.0);
+    }
+    let b = d1.dot(d2);
+    let den = a * e - b * b;
+    let mut s = if den > 1e-12 { ((b * f - c * e) / den).clamp(0.0, 1.0) } else { 0.0 };
+    let mut t = (b * s + f) / e;
+    if t < 0.0 {
+        t = 0.0;
+        s = (-c / a).clamp(0.0, 1.0);
+    } else if t > 1.0 {
+        t = 1.0;
+        s = ((b - c) / a).clamp(0.0, 1.0);
+    }
+    (s, t)
 }
 
 fn aabb(tris: &[[Vec3; 3]]) -> (Vec3, Vec3) {
@@ -709,6 +744,8 @@ fn main() -> Result<(), String> {
             .collect(),
     ];
     let mut worst = [Dir::default(); 2];
+    // Per direction, each gap entry's path distance to the other car's nearest open edge.
+    let mut gap_rim: [Vec<f32>; 2] = Default::default();
     let (mut slab_max, mut slab_vol_max, mut slab_t) = (0.0f32, 0.0f32, 0.0f32);
     let mut entered: [HashMap<String, usize>; 2] = Default::default();
     // REVERSE=s: after the crash, both drivers reverse at full throttle for s
@@ -959,6 +996,25 @@ fn main() -> Result<(), String> {
         for c in 0..2 {
             let o = 1 - c;
             let (x, y) = (&w.vehicles[c], &hulls[o]);
+            // The other car's open skin edges (on one live triangle) now: a hole's rim.
+            let rims: Vec<(Vec3, Vec3)> = {
+                let s = &w.vehicles[o];
+                let mut cnt: HashMap<(u32, u32), usize> = HashMap::new();
+                for t in 0..s.triangles.len() {
+                    if s.tri_dead.get(t).copied().unwrap_or(false) || s.tri_anti_only(t) {
+                        continue;
+                    }
+                    let n = s.triangles[t].nodes;
+                    for k in 0..3 {
+                        let (a, b) = (n[k], n[(k + 1) % 3]);
+                        *cnt.entry((a.min(b), a.max(b))).or_default() += 1;
+                    }
+                }
+                cnt.into_iter()
+                    .filter(|(_, c)| *c == 1)
+                    .map(|((a, b), _)| (s.origin + s.nodes[a as usize].pos, s.origin + s.nodes[b as usize].pos))
+                    .collect()
+            };
             let mut r = Dir::default();
             let mut ins = vec![false; x.nodes.len()];
             for &i in &x.contact_points {
@@ -1000,6 +1056,16 @@ fn main() -> Result<(), String> {
                         r.face += 1;
                     } else {
                         r.gap += 1;
+                        // Its path's nearest approach to a rim (m).
+                        let (q0, p1) = (prev_pos[c][i as usize], p);
+                        let dmin = rims
+                            .iter()
+                            .map(|&(ra, rb)| {
+                                let (s1, t1) = seg_seg(q0, p1, ra, rb);
+                                (q0 + (p1 - q0) * s1).distance(ra + (rb - ra) * t1)
+                            })
+                            .fold(f32::MAX, f32::min);
+                        gap_rim[c].push(dmin);
                     }
                     *entered[c]
                         .entry(l.desc.nodes[i as usize].name.clone())
@@ -1184,6 +1250,10 @@ fn main() -> Result<(), String> {
             );
             if w.edge_stats[0] > 0 {
                 println!("       edge pass so far: tested {} at-end {} parallel {} not-facing {} deeper {} hits {} crossed-hits {}", w.edge_stats[0], w.edge_stats[1], w.edge_stats[2], w.edge_stats[3], w.edge_stats[4], w.edge_stats[5], w.edge_stats[6]);
+                let f = w.edge_first;
+                if f.iter().any(|&x| x > 0) {
+                    println!("       hits first seen crossed, by the step before: at-end {} parallel {} not-facing {} outside-band {} deeper {} untested {}; held pairs overrun past the depth {}", f[0], f[1], f[2], f[3], f[4], f[6], f[5]);
+                }
             }
             if let Some(lg) = w.ledger.as_ref() {
                 // LEDGER=1: vehicle contact's work so far (normal, friction, position
@@ -1245,6 +1315,18 @@ fn main() -> Result<(), String> {
         println!(
             "    nodes that entered: {:?}",
             e.iter().take(40).collect::<Vec<_>>()
+        );
+    }
+    for (c, name) in ["A in B", "B in A"].iter().enumerate() {
+        let v = &gap_rim[c];
+        let within = |d: f32| v.iter().filter(|&&x| x <= d).count();
+        println!(
+            "  {name}: gap entries {} by their path's distance to the other's nearest open skin edge: <= 5 cm {}, <= 10 cm {}, <= 20 cm {}, farther {}",
+            v.len(),
+            within(0.05),
+            within(0.10),
+            within(0.20),
+            v.len() - within(0.20)
         );
     }
     println!(

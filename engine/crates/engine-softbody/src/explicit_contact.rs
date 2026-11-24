@@ -335,6 +335,15 @@ pub struct ExplicitBeamsWorld {
     /// end, parallel, close but not facing, crossed deeper than `EDGE_DEPTH`, hits, hits
     /// crossed (gap below zero).
     pub edge_stats: [u64; 7],
+    /// `EDGE_TRACE=1` (a measurement): each tested edge pair's last outcome, and the
+    /// hits first seen crossed by the pair's outcome the step before (at an end,
+    /// parallel, not facing, outside the band, deeper, a hit, not tested).
+    pub(crate) edge_trace: Option<std::collections::HashMap<(usize, usize, u32, u32, u32, u32), (u64, u8)>>,
+    pub edge_first: [u64; 7],
+    /// Vehicle contact's band between vehicles (m; None: each owner's own
+    /// `collision_range`, as before). Self contact keeps each vehicle's own. Under
+    /// measurement (`VV_RANGE`).
+    pub vv_range: Option<f32>,
 }
 
 /// A dissipative two-body hit as the contact pass staged it: node `h` of
@@ -381,6 +390,9 @@ impl ExplicitBeamsWorld {
             staged_hits: Vec::new(),
             final_guard: std::env::var("FINAL_GUARD").is_ok_and(|v| v == "1"),
             edge_stats: [0; 7],
+            edge_trace: std::env::var("EDGE_TRACE").is_ok_and(|v| v == "1").then(Default::default),
+            edge_first: [0; 7],
+            vv_range: std::env::var("VV_RANGE").ok().and_then(|v| v.parse().ok()),
         }
     }
 
@@ -803,7 +815,7 @@ impl ExplicitBeamsWorld {
     /// order). The walk reads no force, so the two phases are the specification's
     /// single loop.
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
-        let r = self.vehicles[a].collision_range;
+        let r = self.vv_range.unwrap_or(self.vehicles[a].collision_range);
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
         let mut hits: Vec<Hit> = Vec::new();
