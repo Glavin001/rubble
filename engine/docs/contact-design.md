@@ -372,3 +372,27 @@ Measurement-only (`fleet_levels`, `fleetLevelsLat`, `vvwide`) and the frozen ref
 - *Proof*: `explicit_contact_gpu.rs` gains GPU == CPU scenes with edge contact on (the 60 + 60
   head-on, bit for bit); fast-check and the scenario matrix stay bit for bit with it off (no
   kernel word changes there); then a matrix row with it on for its cost.
+
+## The GPU port: done (2026-11-24)
+
+`slang/kernels/explicit_beams_vv_edges.slang`, called from the small contact groups' pass
+(World: `vvPassSmall`; the lab's split path: the edge tests run in the group's levels dispatch,
+before the levels, with the fleet-wide schedules off, `PERF_FLEET_FAMILY`, which are lossless
+switches). Each step: every member's skin edges (outward normal from the live faces, the outer
+skin's when it has any), the edges and contact points within reach of a partner's edges' box
+listed, the edge-edge and node-edge tests of `explicit_contact/edge.rs`, the hits with their
+split counts; then in the levels the snapshot of their nodes, the first pass, the residual
+phases with the accumulated clamp (node hits of an edge-contact pair too) and the clear. An
+owner with edge hits alone gets a level (`gsEdgeHas`). A group of more than four cars with an
+edge-contact member reports FL_ERR_EDGE_GROUP (the big groups' pass has no edge contact yet).
+
+**Proof.**
+- GPU == CPU bit for bit with bit-exact on, both paths: `explicit_contact_gpu.rs`
+  `edge_contact_steps_like_the_cpu`, `edge_contact_on_the_split_path_steps_like_the_cpu`
+  (three tetrahedra: ridges crossing, a corner on a ridge; 162 steps in one- and 17-step
+  frames; with edge contact off the CPU ends 0.057 m away). The 12 other contact tests pass.
+- Off, nothing changes: the scenario matrix on CUDA, the build before the port against this
+  one (`run.sh --cuda --base 56bb2def --head e7af10ae`, strict floats): every row bit for bit,
+  none slower (−1.6 % to +0.1 %).
+- The lab: `{ edge: true }` (page control "edge contact", a build option; `vehicle_lab --edge 1`).
+

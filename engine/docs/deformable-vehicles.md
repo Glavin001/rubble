@@ -117,6 +117,7 @@ Each switch is a separate setting (jbeam-semantics-spec §36).
 | Vehicle against vehicle | Touching vehicles join one **contact group**, stepped together; two-body contact splits the response by the lumped masses so light skin nodes don't get flung |
 | Anti-clip | Each node remembers which side of a triangle it was on, plus a swept crossing test, so fast nodes can't pass through a panel |
 | Surface contact (opt-in) | The vehicle's **triangles and beam edges** against rigid shapes, not just its nodes. This closes the gap where a narrow object slips between nodes (§9) |
+| Edge contact (opt-in, ours) | Between two vehicles, their **skins' edges** against each other's edges and the partner's nodes against the owner's convex edges, in the owner's turn with its node hits (one mass split, the same energy guards); the pair's residual pass may take back force it overshot. Two skins can no longer cross between their nodes (cars fused after a hard head-on). CPU and GPU (bit for bit; contact groups of up to four cars, the lab's split path); `docs/contact-design.md` |
 | World rigid bodies | Through the coupling (§8) |
 
 **Limit to know:** with node-only contact, anything narrower than the node spacing (about 0.3–0.5 m) can slip between nodes: a lamp post, or a brick corner pressed in slowly. BeamNG and Rigs of Rods share this limit. Rubble's surface contact is how we intend to beat it; it isn't on by default yet (cost and calibration, jbeam-semantics-spec §38.7).
@@ -217,7 +218,7 @@ Physical accuracy and mathematical soundness come first; how it looks comes last
 | Node–beam physics at 2 kHz | Yes, our own solver | Done |
 | JBeam beam kinds, groups, parts | Most documented features | Done; gaps in the spec |
 | Flexbody visuals | Three-node frames, plus weighted MLS skins (ours) | Done |
-| Contact | Node and triangle; anti-clip; two-body; surface contact (ours, opt-in) | Surface contact not default yet |
+| Contact | Node and triangle; anti-clip; two-body; surface contact and edge contact (ours, opt-in) | Neither default yet |
 | Tyres | Raycast (driving) and pressure wheels | Converted mods lack tyre content |
 | Powertrain and damage to it | Direct drive only | Gap |
 | Many vehicles on the GPU | Yes | Contact groups on one workgroup |
@@ -239,6 +240,8 @@ Physical accuracy and mathematical soundness come first; how it looks comes last
 - **Profile:** a rule set (Rigs of Rods or BeamNG) for the same solver.
 
 ## Changelog
+
+- 2026-11-24: edge contact between vehicles (`ExplicitBeams::edge_contact`, opt-in), and the generated sedan's collision skin checked by the lint in CI (winding, facing, holes, self-crossing).
 
 - 2026-11-13: node-frame skins for the authored cars (the triangle binding drew shards in crashes).
 - 2026-11-07: first version, written for the PR #105 handoff. Same day: node drag vs triangle aero, and the moving-body penetration bug (from `diag/ring-phase-through`).

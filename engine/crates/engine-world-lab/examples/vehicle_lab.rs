@@ -13,6 +13,7 @@
 //! - `--car showcase` (default: the page's authored sedan, low resolution) | `sedan` (the
 //!   explicit solver's procedural sedan).
 //! - `--surface 0|1`: the car's opt-in surface contact (default: the script's, else off).
+//! - `--edge 0|1`: edge vehicle contact (default off).
 //! - `--secs S`: the run's length (default: the script's duration).
 //! - `--seed N`, `--steepness D`, `--roughness R`, `--terrain ledges|rolling`: the mountain's.
 //! - `--json <file>`: the stats as JSON.
@@ -110,6 +111,10 @@ fn options(script: &Value) -> LabOptions {
     let o = v.as_object_mut().expect("a script object");
     if let Some(s) = arg("--surface") {
         o.insert("surface".into(), json!(s == "1"));
+    }
+    // `--edge 0|1`: edge vehicle contact (`ExplicitBeams::edge_contact`; off by default).
+    if let Some(s) = arg("--edge") {
+        o.insert("edge".into(), json!(s == "1"));
     }
     // `--own-travel 0|1`: anti-clip's padding by each contacter's own travel (on in the lab).
     // `--debris 0|1`, `--debris-ttl S`, `--debris-kg M`, `--debris-nodes N`: the debris time

@@ -90,6 +90,9 @@ pub struct LabOptions {
     pub scene: Scene,
     /// The car's opt-in triangle-against-shape contact (`ExplicitBeams::surface_contact`).
     pub surface_contact: bool,
+    /// Edge vehicle contact (`ExplicitBeams::edge_contact`, off by default): cars' skins
+    /// kept apart between their nodes too (`{ edge: bool }`, a build option).
+    pub edge_contact: bool,
     /// Anti-clip's self-collision box padded by each contacter's own travel, not the
     /// car's fastest node's (`ExplicitBeams::own_travel_reach`; on in the lab: debris
     /// falling off the mountain no longer pads every triangle's box). Live
@@ -182,6 +185,7 @@ impl Default for LabOptions {
         Self {
             scene: Scene::Flat,
             surface_contact: false,
+            edge_contact: false,
             own_travel_reach: true,
             piece_labels: true,
             piece_windows: true,
@@ -335,6 +339,7 @@ impl LabOptions {
                 .get("surface")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.surface_contact),
+            edge_contact: v.get("edge").and_then(Value::as_bool).unwrap_or(d.edge_contact),
             own_travel_reach: v
                 .get("ownTravel")
                 .and_then(Value::as_bool)
@@ -1976,6 +1981,7 @@ impl Bench {
             "t": self.t,
             "scene": self.opts.scene.name(),
             "surfaceContact": self.opts.surface_contact,
+            "edgeContact": self.opts.edge_contact,
             "ownTravel": self.opts.own_travel_reach,
             "wheelsHitBodies": self.opts.wheels_hit_bodies,
             "pieceLabels": self.opts.piece_labels,
@@ -2208,6 +2214,8 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
     }
     car.surface_contact = opts.surface_contact;
     car.own_travel_reach = opts.own_travel_reach;
+    // (Edge contact runs on two-body dissipative contact: the BeamNG profile's.)
+    car.edge_contact = opts.edge_contact && car.two_body_contact && car.dissipative_contact;
     car
 }
 
@@ -2242,6 +2250,7 @@ pub fn lab_structure(
     s.origin = Vec3::ZERO;
     s.surface_contact = opts.surface_contact;
     s.own_travel_reach = opts.own_travel_reach;
+    s.edge_contact = opts.edge_contact && s.two_body_contact && s.dissipative_contact;
     Ok(s)
 }
 
