@@ -3020,6 +3020,10 @@ impl ExplicitBeams {
             })
             .collect();
         s.grid_cell = s.default_grid_cell();
+        // The contact surface's offsets (`rubbleContactOffset`), when the desc has any.
+        if desc.nodes.iter().any(|n| n.contact_offset > 0.0) {
+            s.contact_offset = desc.nodes.iter().map(|n| n.contact_offset).collect();
+        }
         if !desc.node_groups.is_empty() {
             s.self_groups = (0..s.nodes.len())
                 .map(|i| desc.nodes.get(i).map_or(0, |n| n.self_group))

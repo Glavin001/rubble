@@ -1372,6 +1372,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             },
             friction: f.get("frictionCoef").and_then(as_f32).unwrap_or(1.0),
             frame: false,
+            contact_offset: f.get("rubbleContactOffset").and_then(as_f32).unwrap_or(0.0),
         };
         let index = if let Some(&i) = ids.get(&id) {
             // A later part redefines the node (JBeam: last definition wins).

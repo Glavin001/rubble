@@ -704,6 +704,7 @@ pub fn files_with(b: &Built, lite: Option<&(Vec<u8>, Skin)>) -> Vec<(String, Vec
         out.push((format!("{name}/{}", lite_glb_file(&name)), glb.clone()));
         out.push((format!("{name}/{}", lite_skin_file(&name)), skin.encode()));
     }
+    add_contact_offsets(b, &mut out);
     let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
     let index = serde_json::to_string(&list).unwrap();
     out.push(("files.json".into(), index.into_bytes()));
@@ -878,3 +879,79 @@ fn rig_json_of(
         physics: serde_json::to_value(&spec.physics).unwrap(),
     }
 }
+
+/// The most a node's contact surface sits out from it (m): past the generated sedan's
+/// bumpers' and body sides' bulges between nodes (to 0.2 m), short of a part's own depth.
+pub const CONTACT_OFFSET_CAP: f32 = 0.12;
+
+/// Each skin node's contact offset (`authoring::contact_offset`: the contact surface at the
+/// paint, not the straight triangles between the nodes) into its JBeam node row as Rubble's
+/// option `rubbleContactOffset` (`RIG_CONTACT_OFFSET=0`: none, as before). From the car the
+/// files describe and its bound render skin.
+fn add_contact_offsets(b: &Built, out: &mut [(String, Vec<u8>)]) {
+    if std::env::var("RIG_CONTACT_OFFSET").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let refs: Vec<(String, String)> = out
+        .iter()
+        .filter(|(p, _)| p.ends_with(".jbeam"))
+        .map(|(p, x)| (p.clone(), String::from_utf8_lossy(x).into_owned()))
+        .collect();
+    let pc = out.iter().find(|(p, _)| p.ends_with(".pc")).map(|(_, x)| String::from_utf8_lossy(x).into_owned());
+    let r: Vec<(&str, &str)> = refs.iter().map(|(a, x)| (a.as_str(), x.as_str())).collect();
+    let (desc, flex) = match (
+        engine_softbody::jbeam::load_jbeam(&r, pc.as_deref()),
+        engine_softbody::jbeam::assembled_rows(&r, pc.as_deref(), "flexbodies"),
+    ) {
+        (Ok(d), Ok(f)) => (d, f),
+        (d, f) => {
+            eprintln!("contact offsets: the files do not load ({:?} / {:?})", d.err(), f.err());
+            return;
+        }
+    };
+    let Ok((sim, _)) = engine_softbody::explicit_beams::ExplicitBeams::from_desc_jbeam_raycast(
+        &desc,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        crate::vehicle_compare::settings(),
+    ) else {
+        return;
+    };
+    let g = &b.input.glb;
+    let meshes: Vec<_> = g.meshes.iter().map(|m| crate::flexskin::glb_mesh(g, m)).collect();
+    let paint = crate::glb::paint_of(g).unwrap_or([0.5, 0.05, 0.04]);
+    let vis = match crate::flexmesh::jbeam_visual_skinned(&flex, &[], &desc, &sim, &meshes, &Default::default(), paint, Some(&b.skin)) {
+        Ok((v, _)) => v,
+        Err(e) => {
+            eprintln!("contact offsets: no visual ({e})");
+            return;
+        }
+    };
+    let offs = crate::authoring::contact_offset::contact_offsets(&desc, &vis, CONTACT_OFFSET_CAP);
+    let by: std::collections::HashMap<&str, f32> =
+        desc.nodes.iter().zip(&offs).filter(|(_, &o)| o > 5e-4).map(|(n, &o)| (n.name.as_str(), o)).collect();
+    for (p, bytes) in out.iter_mut() {
+        if !p.ends_with(".jbeam") {
+            continue;
+        }
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let mut res = String::with_capacity(text.len() + 1024);
+        for line in text.split_inclusive('\n') {
+            let t = line.trim_start();
+            // A node row: ["name", x, ... {options}].
+            let name = t.strip_prefix("[\"").and_then(|x| x.split('"').next());
+            let after = name.map(|n| &t[n.len() + 4..]);
+            let is_node = after.is_some_and(|a| a.starts_with(|c: char| c == '-' || c.is_ascii_digit()));
+            match (name.and_then(|n| by.get(n)), is_node, line.find(",{")) {
+                (Some(o), true, Some(k)) => {
+                    res.push_str(&line[..k + 2]);
+                    res.push_str(&format!("\"rubbleContactOffset\":{o:.4},"));
+                    res.push_str(&line[k + 2..]);
+                }
+                _ => res.push_str(line),
+            }
+        }
+        *bytes = res.into_bytes();
+    }
+}
+
