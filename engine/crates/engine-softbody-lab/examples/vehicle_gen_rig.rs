@@ -5,6 +5,7 @@
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- <design> [--params FILE] [--in DIR] [--out DIR] [--lite H]
+//! cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- --list | --list-json
 //! ```
 //! A Rust-generator design also gets a lighter render (`<design>.lite.glb` and
 //! `.lite.rskin`: its body meshed at edge `--lite` metres, default
@@ -33,6 +34,26 @@ fn pct(v: &mut [f32], q: f32) -> f32 {
 
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
+    // `--list`: the registry's designs, one name per line. `--list-json`: the index the
+    // web pages read (`__mods/designs.json`: name, title, folder, pc path), in registry order.
+    if a.iter().any(|x| x == "--list") {
+        for n in engine_vehiclegen::design_names() {
+            println!("{n}");
+        }
+        return Ok(());
+    }
+    if a.iter().any(|x| x == "--list-json") {
+        let rows: Vec<String> = engine_vehiclegen::design_titles()
+            .iter()
+            .map(|(n, t)| {
+                format!(
+                    "{{\"name\":\"{n}\",\"title\":\"{t}\",\"folder\":\"{n}_new\",\"pc\":\"{n}/{n}.pc\"}}"
+                )
+            })
+            .collect();
+        println!("[{}]", rows.join(","));
+        return Ok(());
+    }
     let design = a.first().cloned().unwrap_or_else(|| "sedan".into());
     let opt = |k: &str| {
         a.iter()

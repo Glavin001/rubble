@@ -31,7 +31,7 @@ use crate::{
 use engine_schema::convex::{CollisionFilter, ConvexHull};
 use engine_softbody::explicit_beams::{ExplicitBeams, StaticShape, GRAVITY};
 use engine_softbody::explicit_debris::{DebrisTracker, DebrisTtl, Pieces};
-use engine_softbody::explicit_drive::DriveInput;
+use engine_softbody::explicit_drive::{Drive, DriveInput};
 use engine_softbody::explicit_sleep::VehicleSleep;
 use engine_webgpu::{CouplingCapacity, CouplingLayout};
 use glam::{DVec3, Quat, Vec3};
@@ -42,6 +42,9 @@ use settings::{debris_json, surface_fast_from, vehicle_sleep_json, vv_wide_from}
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+mod setup;
+pub use setup::*;
 
 /// The flat scene's ground height.
 pub const GROUND: f32 = 0.0;
@@ -2043,201 +2046,6 @@ impl Bench {
     }
 }
 
-/// The launch direction that carries a projectile of `speed` (m/s), falling under gravity,
-/// from the origin through `to` (the low trajectory), and whether the speed reaches it
-/// (if not: straight at it).
-pub fn ballistic(to: DVec3, speed: f32) -> (Vec3, bool) {
-    let g = f64::from(-GRAVITY);
-    let (dx, dy) = ((to.x * to.x + to.z * to.z).sqrt(), to.y);
-    let v2 = f64::from(speed) * f64::from(speed);
-    let disc = v2 * v2 - g * (g * dx * dx + 2.0 * dy * v2);
-    if dx < 1e-6 || disc < 0.0 || speed <= 0.0 {
-        return (to.as_vec3().normalize_or_zero(), dx < 1e-6 && speed > 0.0);
-    }
-    let tan = (v2 - disc.sqrt()) / (g * dx);
-    let h = DVec3::new(to.x / dx, 0.0, to.z / dx);
-    ((h + DVec3::Y * tan).normalize().as_vec3(), true)
-}
-
-/// The flat arena's fixtures, in the car's own solver (its raycast wheels see them, and
-/// its nodes get the solver's static contact): a ramp to the car's left and a kerb to its
-/// right, 10 m ahead of its start.
-pub fn arena_fixtures() -> Vec<(Vec3, Vec3, Quat)> {
-    let (len, rise) = (6.0f32, 1.0f32);
-    let tilt = Quat::from_rotation_x(-(rise / len).atan());
-    let half = Vec3::new(1.6, 0.2, 0.5 * (len * len + rise * rise).sqrt());
-    let centre = Vec3::new(14.0, GROUND + 0.5 * rise, 12.0 + 0.5 * len) - tilt * Vec3::Y * 0.2;
-    vec![
-        (centre, half, tilt),
-        (
-            Vec3::new(-14.0, GROUND + 0.06, 12.0),
-            Vec3::new(3.0, 0.06, 0.2),
-            Quat::IDENTITY,
-        ),
-    ]
-}
-
-/// The scene's fixtures (in the cars' solver and as World fixture bodies): the flat
-/// arena's ramp and kerb (far overhead on the mountain), or the derby's walls and ramps.
-pub fn scene_fixtures(opts: &LabOptions) -> Vec<(Vec3, Vec3, Quat)> {
-    if opts.scene == Scene::Derby {
-        derby::arena_fixtures(opts.derby.obstacles)
-    } else {
-        arena_fixtures()
-    }
-}
-
-/// Where and how the car starts.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Start {
-    /// Speed along its heading (m/s) and to its left (m/s: a sled's sideways launch).
-    pub speed: f32,
-    pub lateral: f32,
-    /// Its heading, turned about +y from +z (rad).
-    pub yaw: f32,
-    /// Its centre (x, z) and how far above its standing height it starts (m: on a sled
-    /// its wheels do not reach the ground until it has dropped).
-    pub at: [f32; 2],
-    pub lift: f32,
-}
-
-impl Default for Start {
-    fn default() -> Self {
-        Self {
-            speed: 0.0,
-            lateral: 0.0,
-            yaw: 0.0,
-            at: [0.0, 0.0],
-            lift: 0.0,
-        }
-    }
-}
-
-/// The lab's car from `template` for `opts`, started as `start` (none: the scene's own
-/// start: standing on the flat arena, or just off the mountain's lip at its launch
-/// speed): placed, its ground and fixtures set, surface contact as asked. Every lab car
-/// of one template has the same layout (the same static shapes: the arena's fixtures,
-/// far overhead on the mountain), so a restart is `World::reset_explicit_vehicles`.
-pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>) -> ExplicitBeams {
-    let mountain = opts.scene == Scene::Mountain;
-    let ground = if mountain { -1.0e5 } else { GROUND };
-    // Facing +z, standing on y = 0, centred on its node box.
-    let mut car = place_vehicle(template, Vec3::ZERO, 0, 0.0, 0.0);
-    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
-    for n in &car.nodes {
-        lo = lo.min(n.pos);
-        hi = hi.max(n.pos);
-    }
-    let mid = 0.5 * (lo + hi);
-    let mountain_start = Start {
-        speed: opts.mountain.launch,
-        at: [0.0, 0.5 * (hi.z - lo.z) + 0.3],
-        lift: 0.3,
-        ..Start::default()
-    };
-    let start = start.unwrap_or(if mountain {
-        // Just off the lip (its rear clear of it), at the launch speed.
-        Start {
-            speed: opts.mountain.launch,
-            at: [0.0, 0.5 * (hi.z - lo.z) + 0.3],
-            lift: 0.3,
-            ..Start::default()
-        }
-    } else {
-        Start::default()
-    });
-    let turn = Quat::from_rotation_y(start.yaw);
-    let (fwd, left) = (turn * Vec3::Z, turn * Vec3::X);
-    let vel = fwd * start.speed + left * start.lateral;
-    let base = if mountain { 0.0 } else { GROUND };
-    for n in &mut car.nodes {
-        let mut p = n.pos - Vec3::new(mid.x, 0.0, mid.z);
-        if start.yaw != 0.0 {
-            p = turn * p;
-        }
-        n.pos = p + Vec3::new(start.at[0], base + start.lift, start.at[1]);
-        n.vel = vel;
-    }
-    car.origin = Vec3::ZERO;
-    if mountain && opts.mountain.start > 0.0 && start == mountain_start {
-        // A run that starts down the mountain: the car 2 m over the fall line there, its
-        // nodes about its own origin (as the solver's rebase leaves them).
-        car.origin = (opts.mountain.line(f64::from(opts.mountain.start))
-            + DVec3::new(0.0, 2.0, 0.0))
-        .as_vec3();
-    }
-    car.ground = ground;
-    if start.speed != 0.0 && start.lateral == 0.0 {
-        if let Some(d) = car.drive.as_mut() {
-            d.roll(start.speed);
-        }
-    }
-    for (centre, half, rot) in scene_fixtures(opts) {
-        let up = if mountain {
-            Vec3::new(0.0, 1.0e4, 0.0)
-        } else {
-            Vec3::ZERO
-        };
-        car.shapes
-            .push(StaticShape::oriented_box(centre + up, half, rot));
-    }
-    car.surface_contact = opts.surface_contact;
-    car.own_travel_reach = opts.own_travel_reach;
-    car
-}
-
-/// A node-beam structure (`LabOptions::structures`: a `.truck` text of nodes, beams and
-/// `fixes`, no wheels) placed at `start`: its node box centred on `start.at` in x and z,
-/// turned by `start.yaw`, its lowest node `start.lift` over the ground, moving at
-/// `start.speed` along its heading (its anchored nodes still). Nothing about its physics
-/// is changed: the solver steps it as any vehicle without a drive.
-pub fn lab_structure(
-    text: &str,
-    settings: engine_softbody::explicit_beams::ExplicitBeamsSettings,
-    opts: &LabOptions,
-    start: Start,
-) -> anyhow::Result<ExplicitBeams> {
-    let mut s = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings)
-        .map_err(|e| anyhow::anyhow!("vehicle lab: a structure's .truck: {e}"))?;
-    anyhow::ensure!(!s.nodes.is_empty(), "vehicle lab: a structure with no nodes");
-    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
-    for n in &s.nodes {
-        lo = lo.min(n.pos);
-        hi = hi.max(n.pos);
-    }
-    let mid = 0.5 * (lo + hi);
-    let turn = Quat::from_rotation_y(start.yaw);
-    let vel = turn * Vec3::Z * start.speed;
-    let base = if opts.scene == Scene::Mountain { 0.0 } else { GROUND };
-    for n in &mut s.nodes {
-        let p = turn * (n.pos - Vec3::new(mid.x, lo.y, mid.z));
-        n.pos = p + Vec3::new(start.at[0], base + start.lift, start.at[1]);
-        n.vel = if n.has(engine_softbody::explicit_beams::NODE_IMMOVABLE) { Vec3::ZERO } else { vel };
-    }
-    s.origin = Vec3::ZERO;
-    s.surface_contact = opts.surface_contact;
-    s.own_travel_reach = opts.own_travel_reach;
-    Ok(s)
-}
-
-/// The lab's World settings: the brick ring drive's solver (1/60 s steps of 4 iterations,
-/// persistent contacts) for a few thousand bodies.
-pub fn lab_world_def(opts: &LabOptions) -> WorldDef {
-    let mut def = crate::brick_ring_drive::ring_world_def(4096);
-    def.gravity = [0.0, GRAVITY, 0.0];
-    // The mountain run goes down for kilometres.
-    def.kill_bounds = Some(KillBounds::below(-1.0e6));
-    // Eight steps' results may be in flight (3 by default): a page whose frames run
-    // late, or whose readbacks arrive late, can still take every step real time owes.
-    def.readback_frames = 8;
-    let _ = opts;
-    def.contacts = ContactStorage::Persistent;
-    if opts.sleep {
-        def.solver.sleep_time = 0.5;
-    }
-    def
-}
-
 struct WorldRig<'a> {
     world: &'a mut World,
     bodies: &'a mut HashMap<u32, BodyId>,
@@ -2442,6 +2250,26 @@ pub fn coupling_groups(pos: &[Vec3]) -> Vec<u8> {
     of.iter().map(|r| id.get(r).copied().unwrap_or(0)).collect()
 }
 
+/// One vehicle type of a mixed run: its car as placed and its model.
+struct TypeInfo {
+    car: ExplicitBeams,
+    model: CarModel,
+}
+
+/// The car and model of vehicle `v` (cars of type `v % types.len()`; type 0's are the first
+/// car's `car0` and `model0`).
+fn type_of<'a>(
+    types: &'a [TypeInfo],
+    model0: &'a CarModel,
+    car0: &'a ExplicitBeams,
+    v: usize,
+) -> (&'a CarModel, &'a ExplicitBeams) {
+    match v % types.len().max(1) {
+        0 => (model0, car0),
+        t => (&types[t].model, &types[t].car),
+    }
+}
+
 /// One of the other cars' debris state ([`Lab`]'s `fleet`).
 #[derive(Default)]
 struct FleetCar {
@@ -2457,7 +2285,13 @@ pub struct Lab {
     bodies: HashMap<u32, BodyId>,
     /// The scene's own bodies (the flat arena's ground slab and fixtures).
     scene_bodies: Vec<BodyId>,
-    template: ExplicitBeams,
+    /// The vehicle types (one template each; car `k` is of type `k % templates.len()`:
+    /// one template, every car the same).
+    templates: Vec<ExplicitBeams>,
+    /// Each type as placed by [`lab_car`] and what it is made of: what the other cars'
+    /// host-side bookkeeping (debris, piece labels, the derby's damage) reads. Type 0's
+    /// own are the first car's (`car`, `bench.model`).
+    types: Vec<TypeInfo>,
     layout: CouplingLayout,
     plan: ReadPlan,
     /// Restarts since the build.
@@ -2553,16 +2387,17 @@ impl Lab {
         out
     }
 
+    /// The cars of the run: car `k` is of `templates[k % templates.len()]`.
     fn cars(
-        template: &ExplicitBeams,
+        templates: &[ExplicitBeams],
         opts: &LabOptions,
         start: Option<Start>,
     ) -> anyhow::Result<Vec<ExplicitBeams>> {
         if opts.scene == Scene::Derby {
             // Round the arena's edge facing the middle (derby::starts); no parked car.
             let mut cars: Vec<ExplicitBeams> = Vec::new();
-            for (x, z, yaw) in derby::starts(opts.cars.clamp(1, MAX_CARS) as usize) {
-                let mut c = lab_car(template, opts, Some(Start { yaw, at: [x, z], ..Start::default() }));
+            for (k, (x, z, yaw)) in derby::starts(opts.cars.clamp(1, MAX_CARS) as usize).into_iter().enumerate() {
+                let mut c = lab_car(&templates[k % templates.len()], opts, Some(Start { yaw, at: [x, z], ..Start::default() }));
                 if let Some(first) = cars.first() {
                     c.origin = first.origin;
                     c.ground = first.ground;
@@ -2572,6 +2407,7 @@ impl Lab {
             }
             return Ok(cars);
         }
+        let template = &templates[0];
         let car = lab_car(template, opts, start);
         let mut cars = vec![car];
         // The other cars of the multi-car benchmark (`LabOptions::cars`).
@@ -2581,6 +2417,7 @@ impl Lab {
             ..Start::default()
         });
         for k in 1..opts.cars.clamp(1, MAX_CARS) as usize {
+            let template = &templates[k % templates.len()];
             // (to the left m, up m, closing speed to the right m/s) from the first car.
             const FORMATION: [[f32; 3]; 7] = [
                 [2.3, 0.0, 2.0],
@@ -2678,12 +2515,35 @@ impl Lab {
         opts: LabOptions,
         tweak: impl FnOnce(&mut WorldDef),
     ) -> anyhow::Result<(World, Lab)> {
+        Self::build_mixed(gpu, std::slice::from_ref(template), opts, tweak)
+    }
+
+    /// [`Self::build`] with several vehicle types: car `k` of the run is of
+    /// `templates[k % templates.len()]` (the derby's ring, the mountain's formation and the
+    /// flat arena's row all in car order; the parked car and the structures follow the
+    /// first type). One template is `build`, bit for bit.
+    pub fn build_mixed(
+        gpu: GpuContext,
+        templates: &[ExplicitBeams],
+        opts: LabOptions,
+        tweak: impl FnOnce(&mut WorldDef),
+    ) -> anyhow::Result<(World, Lab)> {
+        anyhow::ensure!(!templates.is_empty(), "vehicle lab: no vehicle");
+        let template = &templates[0];
+        let _ = template;
         opts.apply_schedule_settings();
         let mut def = lab_world_def(&opts);
         tweak(&mut def);
         let mut world = World::new(gpu, &def)?;
         let scene_bodies = Self::scene_bodies(&mut world, &opts)?;
-        let cars = Self::cars(template, &opts, None)?;
+        let cars = Self::cars(templates, &opts, None)?;
+        let types: Vec<TypeInfo> = templates
+            .iter()
+            .map(|t| {
+                let car = lab_car(t, &opts, None);
+                TypeInfo { model: CarModel::new(&car, opts.parts.clone()), car }
+            })
+            .collect();
         world.enable_sleep_archive(None)?;
         world.add_explicit_vehicles(
             &cars,
@@ -2714,20 +2574,25 @@ impl Lab {
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
-        // The first car's copies whose beams follow its own, one after another.
-        let fleet_cars = (1..(opts.cars.clamp(1, MAX_CARS) as usize).min(x.vehicle_count()))
+        // The cars whose beams follow the first car's, one after another (each as its own
+        // type's: copies of one template are all as long).
+        let lab_cars = (opts.cars.clamp(1, MAX_CARS) as usize).min(x.vehicle_count());
+        let sp = x.layout().spans.clone();
+        let fleet_cars = (1..lab_cars)
             .take_while(|&k| {
-                let s = x.layout().spans[k];
-                s.beams == span.beams && s.beam_off == span.beam_off + k as u32 * span.beams
+                let (a, b) = (sp[k - 1], sp[k]);
+                b.beams as usize == cars[k].beams.len() && b.beam_off == a.beam_off + a.beams
             })
             .count();
         // (And those whose nodes follow its own the same way.)
-        let fleet_nodes = (1..=fleet_cars)
+        let fleet_nodes = (1..lab_cars)
             .take_while(|&k| {
-                let s = x.layout().spans[k];
-                s.nodes == span.nodes && s.node_off == span.node_off + k as u32 * span.nodes
+                let (a, b) = (sp[k - 1], sp[k]);
+                b.nodes as usize == cars[k].nodes.len() && b.node_off == a.node_off + a.nodes
             })
             .count();
+        let beam_words: u64 = (0..=fleet_cars).map(|k| u64::from(sp[k].beams)).sum();
+        let fleet_node_words: u64 = (1..=fleet_nodes).map(|k| u64::from(sp[k].nodes)).sum();
         let plan = ReadPlan {
             nodes: (u64::from(span.node_off) * 48, u64::from(span.nodes) * 48),
             // (Every vehicle's origin record: the mountain's ground follows them all.)
@@ -2736,10 +2601,10 @@ impl Lab {
                 u64::from(layout.vehicle(0)) * 16,
                 u64::from(layout.recs()) * 16,
             ),
-            // (The first car's beams, then its copies': the copies are laid out after it,
-            // each as long.)
-            beams: (u64::from(span.beam_off) * 32, u64::from(span.beams) * 32 * (1 + fleet_cars as u64)),
-            fleet_nodes: (u64::from(span.node_off + span.nodes) * 48, u64::from(span.nodes) * 48 * fleet_nodes as u64),
+            // (The first car's beams, then the other cars': laid out after it, each its
+            // own type's length.)
+            beams: (u64::from(span.beam_off) * 32, beam_words * 32),
+            fleet_nodes: (u64::from(span.node_off + span.nodes) * 48, fleet_node_words * 48),
         };
         let spans = x
             .layout()
@@ -2753,7 +2618,8 @@ impl Lab {
             bench: Bench::new(opts, &cars[0], dt),
             bodies: HashMap::new(),
             scene_bodies,
-            template: template.clone(),
+            templates: templates.to_vec(),
+            types,
             layout,
             plan,
             restarts: 0,
@@ -2786,7 +2652,15 @@ impl Lab {
         }
         let n = opts.cars.clamp(1, MAX_CARS) as usize;
         let spec = opts.derby;
-        self.derby = Some(derby::DerbyGame::new(spec, n, self.car.drive.as_deref()));
+        // (Each type's wheels: a mixed run's cars decode their own.)
+        let drives: Vec<Drive> = (0..self.types.len())
+            .filter_map(|t| type_of(&self.types, &self.bench.model, &self.car, t).1.drive.as_deref().cloned())
+            .collect();
+        self.derby = Some(if drives.len() == self.types.len() {
+            derby::DerbyGame::new_mixed(spec, n, drives)
+        } else {
+            derby::DerbyGame::new(spec, n, None)
+        });
         if spec.obstacles {
             let mut rig = WorldRig {
                 world,
@@ -2916,7 +2790,7 @@ impl Lab {
                 ),
             });
         }
-        let cars = Self::cars(&self.template, &opts, start)?;
+        let cars = Self::cars(&self.templates, &opts, start)?;
         // The car first: a fleet the World was not built for is refused before anything
         // else changes.
         world.reset_explicit_vehicles(&cars)?;
@@ -3028,7 +2902,7 @@ impl Lab {
     pub fn ingest_follow(&mut self, k: usize, nodes: &[u32], origin: &[u32], taken: f64) -> anyhow::Result<()> {
         anyhow::ensure!(k < self.spans.len() && origin.len() >= 3, "vehicle lab: no car {k} to follow");
         let f = |w: u32| f64::from(f32::from_bits(w));
-        let masses = &self.bench.model.masses;
+        let masses = &type_of(&self.types, &self.bench.model, &self.car, k).0.masses;
         let retired: &[bool] = if k == 0 {
             &self.bench.debris.retired
         } else {
@@ -3292,8 +3166,12 @@ impl Lab {
     /// The other cars' debris state, fresh (a build or a restart).
     fn fleet_reset(&mut self, cars: usize) {
         let ttl = self.bench.debris.ttl;
+        let (types, model0, car0) = (&self.types, &self.bench.model, &self.car);
         self.fleet = (0..cars)
-            .map(|_| FleetCar { debris: DebrisTracker::for_vehicle(ttl, &self.car), ..Default::default() })
+            .map(|k| FleetCar {
+                debris: DebrisTracker::for_vehicle(ttl, type_of(types, model0, car0, k + 1).1),
+                ..Default::default()
+            })
             .collect();
     }
 
@@ -3330,7 +3208,8 @@ impl Lab {
             }
             if let Some(labels) = c.labels_due.take() {
                 if let Some(x) = world.explicit_vehicles_mut() {
-                    let zeros = vec![0u8; self.car.nodes.len()];
+                    let nodes = type_of(&self.types, &self.bench.model, &self.car, v).1.nodes.len();
+                    let zeros = vec![0u8; nodes];
                     x.set_piece_labels(v, if labels.is_empty() { &zeros } else { &labels });
                 }
                 c.labels = labels;
@@ -3415,7 +3294,15 @@ impl Lab {
         );
         // The other cars' nodes (read with the beams): the ground under their parts.
         if let Some(fleet) = fleet_nodes.filter(|w| n > 0 && !w.is_empty()) {
-            for (k, w) in fleet.chunks_exact(12 * n).enumerate() {
+            // (Each car's nodes as long as its own type's.)
+            let mut at_word = 0usize;
+            for k in 0.. {
+                let nn = type_of(&self.types, &self.bench.model, &self.car, k + 1).1.nodes.len();
+                let Some(w) = fleet.get(at_word..at_word + 12 * nn).filter(|_| nn > 0) else {
+                    break;
+                };
+                at_word += 12 * nn;
+                let n = nn;
                 let p: Vec<Vec3> = (0..n).map(|i| Vec3::new(f(w[12 * i]), f(w[12 * i + 1]), f(w[12 * i + 2]))).collect();
                 let at = self.bench.fleet.get(k + 1).copied().unwrap_or(o);
                 let retired: &[bool] = self.fleet.get(k).map_or(&[], |c| &c.debris.retired);
@@ -3440,11 +3327,19 @@ impl Lab {
             let ttl = self.bench.debris.ttl;
             let label = self.bench.opts.piece_labels;
             let mut v_next = 1;
-            for (c, b) in self.fleet.iter_mut().zip(rest.chunks_exact(own)) {
+            let mut at_word = 0usize;
+            for c in self.fleet.iter_mut() {
+                // (Each car's beams as long as its own type's.)
+                let (model, car) = type_of(&self.types, &self.bench.model, &self.car, v_next);
+                let own = 8 * model.beams.len();
+                let Some(b) = rest.get(at_word..at_word + own).filter(|_| own > 0) else {
+                    break;
+                };
+                at_word += own;
                 let broken: Vec<bool> = (0..own / 8).map(|j| f(b[8 * j + 6]) != 0.0).collect();
                 let pieces = Pieces::from_beams(
-                    &self.bench.model.masses,
-                    self.bench.model.beams.iter().zip(&broken).map(|(e, x)| (e[0], e[1], *x)),
+                    &model.masses,
+                    model.beams.iter().zip(&broken).map(|(e, x)| (e[0], e[1], *x)),
                 );
                 c.debris.ttl = ttl;
                 if c.debris.update(&pieces, taken) {
@@ -3453,11 +3348,11 @@ impl Lab {
                 c.debris.take_events();
                 if let Some(g) = self.derby.as_mut() {
                     let read: Vec<(bool, f32)> = (0..own / 8).map(|j| (broken[j], f(b[8 * j]))).collect();
-                    Self::derby_damage(g, &self.bench.model, &self.car, v_next, &read, &pieces);
+                    Self::derby_damage(g, model, car, v_next, &read, &pieces);
                 }
                 v_next += 1;
                 if label {
-                    let labels = if pieces.mass.len() > 1 { piece_labels(&self.car, &pieces, &broken) } else { Vec::new() };
+                    let labels = if pieces.mass.len() > 1 { piece_labels(car, &pieces, &broken) } else { Vec::new() };
                     if labels != c.labels {
                         c.labels_due = Some(labels);
                     }
