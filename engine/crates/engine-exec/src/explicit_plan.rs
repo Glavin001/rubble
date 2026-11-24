@@ -212,9 +212,12 @@ pub const W_EDGE: usize = 106;
 /// and flags, its faces' opposite corners).
 pub const EDGE_SCRATCH: usize = 5;
 /// gAcc words per vehicle of edge contact: hits, listed edges, listed points, a box (six
-/// keys), its longest live edge (float bits), then the grid's counts and cursors for its
-/// listed edges and points ([`EDGE_BUCKETS`] each).
-pub const EDGE_ACC: usize = 10 + 4 * EDGE_BUCKETS;
+/// keys), its longest live edge (float bits), its long edges, a spare word, then the grid's
+/// cursors and starts for its listed edges and points ([`EDGE_BUCKETS`] each).
+pub const EDGE_ACC: usize = 12 + 4 * EDGE_BUCKETS;
+/// The most grid cells an edge's padded box takes in edge contact's grid (more: the
+/// vehicle's long-edge list, tested against every owner edge).
+pub const EDGE_CELLS_MAX: usize = 64;
 /// Hash buckets of edge contact's per-vehicle grid (explicit_beams_vv_edges.slang EDGE_BUCKETS).
 pub const EDGE_BUCKETS: usize = 128;
 

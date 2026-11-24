@@ -603,51 +603,83 @@ void edgeList(uint v, float3 lo, float3 hi, bool points, uint lane)
 }
 
 // --- The listed edges' and points' grid (lossless: the same pairs as testing all) ---
-// Each vehicle's listed edges by midpoint and its listed points, counting-sorted into
-// EDGE_BUCKETS hash buckets of cells of side C ≥ half the longest edge of either car + half
-// its own + the reach (the contact range and the crossing depth): an owner edge and a
-// partner edge (or point) that can be in contact have midpoints within C of each other,
-// so in neighbouring cells; the owner's edge visits its cell's 27 neighbours' buckets, each
-// bucket once. gAcc per vehicle at +10: per kind (0 edges, 1 points) EDGE_BUCKETS counts then
-// EDGE_BUCKETS starts; gNext after its lists: the sorted copies, then each entry's bucket and
-// rank.
+// Each vehicle's listed edges and points in a hash grid of cells of side 2·reach (reach: the
+// contact range and the crossing depth, the farthest two features in contact can be): each
+// entry in every cell its box padded by the reach meets (an edge over more than
+// EDGE_CELLS_MAX cells instead in the vehicle's long list); an owner edge visits the cells of
+// its own box and tests an entry only in the cell holding the low corner of the two boxes'
+// overlap (each pair once, and every pair whose boxes meet: every pair in contact). gAcc per
+// vehicle at +10 the long list's count, at +12 per kind (0 edges, 1 points) EDGE_BUCKETS
+// cursors (the counts, then each bucket's end) and EDGE_BUCKETS starts; gNext after the lists
+// the edges' entries (EDGE_CELLS_MAX a listed edge), the points' (8 a point), the long list.
 
+static const uint EDGE_CELLS_MAX = 64u; // explicit_plan.rs EDGE_CELLS_MAX
 float edgeLmax(uint v) { return asfloat(uint(gAcc[edgeV1(v).x + 9u].load())); }
-float edgeCell(uint v, float lmaxAll, float reach) { return nf(nf(nf(smul(0.5, edgeLmax(v)) + smul(0.5, lmaxAll)) + reach) * 1.01 + 1e-3); }
-uint edgeGridAt(uint v, uint kind) { return edgeV1(v).x + 10u + kind * 2u * EDGE_BUCKETS; }
+uint edgeGridAt(uint v, uint kind) { return edgeV1(v).x + 12u + kind * 2u * EDGE_BUCKETS; }
 uint edgeListsLen(uint v) { return edgeV0(v).y + vvCpCount(v); }
-uint edgeSortedAt(uint v, uint kind) { return edgeV1(v).w + edgeListsLen(v) + (kind == 0u ? 0u : edgeV0(v).y); }
-uint edgeRankAt(uint v, uint kind) { return edgeV1(v).w + 2u * edgeListsLen(v) + (kind == 0u ? 0u : edgeV0(v).y); }
+uint edgeEntriesAt(uint v, uint kind) { return edgeV1(v).w + edgeListsLen(v) + (kind == 0u ? 0u : EDGE_CELLS_MAX * edgeV0(v).y); }
+uint edgeLongAt(uint v) { return edgeEntriesAt(v, 1u) + 8u * vvCpCount(v); }
 uint edgeBucket(int3 c) { return (uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u) & (EDGE_BUCKETS - 1u); }
 int3 edgeCellOf(float3 x, float cell) { return int3(floor(x / cell)); }
-float3 edgeMidOf(uint v, uint e)
-{
-    uint at = edgeV0(v).z + EDGE_SCR * e;
-    return sscale(sadd3(gBeams[at].xyz, gBeams[at + 1u].xyz), 0.5);
-}
 uint edgeListed(uint v, uint kind) { return uint(gAcc[edgeV1(v).x + 1u + kind].load()); }
 uint edgeListAt(uint v, uint kind) { return edgeV1(v).w + (kind == 0u ? 0u : edgeV0(v).y); }
+// An entry's box padded by the reach: an edge's ends, a point.
+void edgeEntryBox(uint v, uint kind, uint x, float reach, out float3 lo, out float3 hi)
+{
+    float3 a;
+    float3 b;
+    if (kind == 0u)
+    {
+        uint at = edgeV0(v).z + EDGE_SCR * x;
+        a = gBeams[at].xyz;
+        b = gBeams[at + 1u].xyz;
+    }
+    else
+    {
+        a = edgeWorld(v, x);
+        b = a;
+    }
+    float3 r3 = float3(reach, reach, reach);
+    lo = min(a, b) - r3;
+    hi = max(a, b) + r3;
+}
+uint edgeCellCount(int3 c0, int3 c1)
+{
+    int3 n = c1 - c0 + int3(1, 1, 1);
+    return (n.x > 4 || n.y > 4 || n.z > 4) ? EDGE_CELLS_MAX + 1u : uint(n.x * n.y * n.z);
+}
+int3 edgeCellAt(int3 c0, int3 c1, uint k)
+{
+    int3 n = c1 - c0 + int3(1, 1, 1);
+    int ki = int(k);
+    return c0 + int3(ki % n.x, (ki / n.x) % n.y, ki / (n.x * n.y));
+}
 
-// Vehicle v's grid, one stage (0 zero the counts, 1 count, 2 starts, 3 scatter); a barrier
+// Vehicle v's grid, one stage (0 zero, 1 count, 2 starts, 3 cursors, 4 scatter); a barrier
 // after each.
-void edgeGridStage(uint v, float cell, uint stage, uint lane)
+void edgeGridStage(uint v, float cell, float reach, uint stage, uint lane)
 {
     if (stage == 0u)
     {
         for (uint b = lane, bStop = EB_END(833, b, 4u * EDGE_BUCKETS, LANES); b < bStop; b += LANES) gAcc[edgeGridAt(v, 0u) + b].store(0);
+        if (lane == 0u) gAcc[edgeV1(v).x + 10u].store(0);
         return;
     }
-    if (stage == 2u)
+    if (stage == 2u || stage == 3u)
     {
-        if (lane < 2u)
+        // Each bucket's start, a lane a bucket (the counts before it); then the cursors.
+        for (uint x = lane, xStop = EB_END(843, x, 2u * EDGE_BUCKETS, LANES); x < xStop; x += LANES)
         {
-            uint g = edgeGridAt(v, lane);
-            int run = 0;
-            for (uint b = 0u; b < EDGE_BUCKETS; b++)
+            uint g = edgeGridAt(v, x / EDGE_BUCKETS);
+            uint b = x % EDGE_BUCKETS;
+            if (stage == 3u)
             {
-                gAcc[g + EDGE_BUCKETS + b].store(run);
-                run += gAcc[g + b].load();
+                gAcc[g + b].store(gAcc[g + EDGE_BUCKETS + b].load());
+                continue;
             }
+            int run = 0;
+            for (uint c = 0u; c < b; c++) run += gAcc[g + c].load();
+            gAcc[g + EDGE_BUCKETS + b].store(run);
         }
         return;
     }
@@ -655,64 +687,96 @@ void edgeGridStage(uint v, float cell, uint stage, uint lane)
     {
         uint n = edgeListed(v, kind);
         uint list = edgeListAt(v, kind);
-        uint rank = edgeRankAt(v, kind);
         uint g = edgeGridAt(v, kind);
+        uint entries = edgeEntriesAt(v, kind);
         for (uint i = lane, iStop = EB_END(834, i, n, LANES); i < iStop; i += LANES)
         {
             uint x = gNext[list + i];
-            if (stage == 1u)
+            float3 lo;
+            float3 hi;
+            edgeEntryBox(v, kind, x, reach, lo, hi);
+            int3 c0 = edgeCellOf(lo, cell);
+            int3 c1 = edgeCellOf(hi, cell);
+            uint cells = edgeCellCount(c0, c1);
+            if (cells > EDGE_CELLS_MAX)
             {
-                float3 at = kind == 0u ? edgeMidOf(v, x) : edgeWorld(v, x);
-                uint b = edgeBucket(edgeCellOf(at, cell));
-                gNext[rank + i] = b | (uint(gAcc[g + b].add(1)) << 8u);
+                if (stage == 1u) gNext[edgeLongAt(v) + uint(gAcc[edgeV1(v).x + 10u].add(1))] = x;
+                continue;
             }
-            else
+            for (uint k = 0u, kStop = EB_END(844, k, cells, 1u); k < kStop; k++)
             {
-                uint br = gNext[rank + i];
-                gNext[edgeSortedAt(v, kind) + uint(gAcc[g + EDGE_BUCKETS + (br & 255u)].load()) + (br >> 8u)] = x;
+                uint b = edgeBucket(edgeCellAt(c0, c1, k));
+                // (Once a bucket: two of its cells may share one.)
+                bool again = false;
+                for (uint u = 0u, uStop = EB_END(846, u, k, 1u); u < uStop; u++) again = again || edgeBucket(edgeCellAt(c0, c1, u)) == b;
+                if (again) continue;
+                if (stage == 1u) gAcc[g + b].add(1);
+                else gNext[entries + uint(gAcc[g + b].add(1))] = x;
             }
         }
     }
 }
 
-// Owner va (member a, two-body slot `slot`) against partner vb, its grid of side `cell`:
-// edge against edge (va < vb) and vb's points against va's edges, each owner edge on a lane.
-void edgePairHits(uint va, uint vb, uint slot, float cell, uint lane)
+// One candidate pair's test into owner va's hits.
+void edgeTry(uint va, uint vb, uint slot, uint kind, uint ea, SkinE e, uint x)
+{
+    EdgeHitG H;
+    if (kind == 0u)
+    {
+        if (edgeEdgeTest(va, vb, e, edgeLoad(vb, x), H)) edgeHitAdd(va, slot, ea, (vb << 20u) | x, H);
+    }
+    else if (edgeVertexTest(va, vb, e, x, edgeWorld(vb, x), H))
+        edgeHitAdd(va, slot, ea | 0x80000000u, x, H);
+}
+
+// Owner va (two-body slot `slot`) against partner vb, its grid of side `cell`: edge against
+// edge (va < vb) and vb's points against va's edges, each owner edge on a lane.
+void edgePairHits(uint va, uint vb, uint slot, float cell, float reach, uint lane)
 {
     uint la = edgeListed(va, 0u);
     uint alist = edgeListAt(va, 0u);
+    uint longs = uint(gAcc[edgeV1(vb).x + 10u].load());
     for (uint i = lane, iStop = EB_END(835, i, la, LANES); i < iStop; i += LANES)
     {
         uint ea = gNext[alist + i];
         SkinE e = edgeLoad(va, ea);
-        int3 c0 = edgeCellOf(sscale(sadd3(e.p, e.q), 0.5), cell);
-        uint seen[27];
-        uint ns = 0u;
-        for (uint d = 0u, dStop = EB_END(836, d, 27u, 1u); d < dStop; d++)
+        float3 loA = min(e.p, e.q);
+        float3 hiA = max(e.p, e.q);
+        int3 c0 = edgeCellOf(loA, cell);
+        int3 c1 = edgeCellOf(hiA, cell);
+        uint cells = edgeCellCount(c0, c1);
+        for (uint kind = 0u; kind < 2u; kind++)
         {
-            uint b = edgeBucket(c0 + int3(int(d % 3u) - 1, int((d / 3u) % 3u) - 1, int(d / 9u) - 1));
-            bool dup = false;
-            for (uint u = 0u, uStop = EB_END(837, u, ns, 1u); u < uStop; u++) dup = dup || seen[u] == b;
-            if (dup) continue;
-            seen[ns] = b;
-            ns++;
-            for (uint kind = 0u; kind < 2u; kind++)
+            if (kind == 0u && !(va < vb)) continue;
+            if (cells > EDGE_CELLS_MAX)
             {
-                if (kind == 0u && !(va < vb)) continue;
-                uint g = edgeGridAt(vb, kind);
-                uint start = uint(gAcc[g + EDGE_BUCKETS + b].load());
-                uint n = uint(gAcc[g + b].load());
-                uint sorted = edgeSortedAt(vb, kind);
-                for (uint j = start, jStop = EB_END(838, j, start + n, 1u); j < jStop; j++)
+                // A long owner edge: every listed entry of the partner.
+                uint n = edgeListed(vb, kind);
+                uint list = edgeListAt(vb, kind);
+                for (uint j = 0u, jStop = EB_END(836, j, n, 1u); j < jStop; j++) edgeTry(va, vb, slot, kind, ea, e, gNext[list + j]);
+                continue;
+            }
+            if (kind == 0u)
+            {
+                // The partner's long edges.
+                for (uint j = 0u, jStop = EB_END(837, j, longs, 1u); j < jStop; j++) edgeTry(va, vb, slot, 0u, ea, e, gNext[edgeLongAt(vb) + j]);
+            }
+            uint g = edgeGridAt(vb, kind);
+            uint entries = edgeEntriesAt(vb, kind);
+            for (uint k = 0u, kStop = EB_END(845, k, cells, 1u); k < kStop; k++)
+            {
+                int3 c = edgeCellAt(c0, c1, k);
+                uint b = edgeBucket(c);
+                uint end = uint(gAcc[g + b].load());
+                for (uint j = uint(gAcc[g + EDGE_BUCKETS + b].load()), jStop = EB_END(838, j, end, 1u); j < jStop; j++)
                 {
-                    uint x = gNext[sorted + j];
-                    EdgeHitG H;
-                    if (kind == 0u)
-                    {
-                        if (edgeEdgeTest(va, vb, e, edgeLoad(vb, x), H)) edgeHitAdd(va, slot, ea, (vb << 20u) | x, H);
-                    }
-                    else if (edgeVertexTest(va, vb, e, x, edgeWorld(vb, x), H))
-                        edgeHitAdd(va, slot, ea | 0x80000000u, x, H);
+                    uint x = gNext[entries + j];
+                    float3 loB;
+                    float3 hiB;
+                    edgeEntryBox(vb, kind, x, reach, loB, hiB);
+                    if (any(hiA < loB) || any(hiB < loA)) continue;
+                    if (any(edgeCellOf(max(loA, loB), cell) != c)) continue;
+                    edgeTry(va, vb, slot, kind, ea, e, x);
                 }
             }
         }
@@ -758,16 +822,13 @@ void edgeOwnerBig(uint a, uint k, uint off, uint lane)
         if (m == a || gNext[vvPartnerAt(off, m)] == 0u || !edgePairOn(va, vb)) continue;
         edgeList(vb, olo - p3, ohi + p3, true, lane);
     }
-    float lall = edgeLmax(va);
-    for (uint m = 0u, mStop = EB_END(839, m, k, 1u); m < mStop; m++)
-        if (m != a && gNext[vvPartnerAt(off, m)] != 0u) lall = max(lall, edgeLmax(vvMember(off, m)));
-    for (uint stage = 0u; stage < 4u; stage++)
+    for (uint stage = 0u; stage < 5u; stage++)
     {
         for (uint m = 0u, mStop = EB_END(840, m, k, 1u); m < mStop; m++)
         {
             uint vb = vvMember(off, m);
             if (m == a || gNext[vvPartnerAt(off, m)] == 0u || !edgePairOn(va, vb)) continue;
-            edgeGridStage(vb, edgeCell(vb, lall, pad), stage, lane);
+            edgeGridStage(vb, 2.0 * pad, pad, stage, lane);
         }
         sync();
     }
@@ -775,7 +836,7 @@ void edgeOwnerBig(uint a, uint k, uint off, uint lane)
     {
         uint vb = vvMember(off, m);
         if (m == a || gNext[vvPartnerAt(off, m)] == 0u || !edgePairOn(va, vb)) continue;
-        edgePairHits(va, vb, 0u, edgeCell(vb, lall, pad), lane);
+        edgePairHits(va, vb, 0u, 2.0 * pad, pad, lane);
     }
     sync();
 }
@@ -839,12 +900,10 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
     sync();
     // Every member's grid (its lists), then the pairs: per owner and partner, edge against
     // edge (the lower vehicle's turn) and the partner's points against the owner's edges.
-    float lall = 0.0;
-    for (uint a = 0u, aStop = EB_END(841, a, k, 1u); a < aStop; a++) lall = max(lall, edgeLmax(vvMember(off, a)));
-    for (uint stage = 0u; stage < 4u; stage++)
+    for (uint stage = 0u; stage < 5u; stage++)
     {
         for (uint a = 0u, aStop = EB_END(842, a, anyEdge ? k : 0u, 1u); a < aStop; a++)
-            edgeGridStage(vvMember(off, a), edgeCell(vvMember(off, a), lall, pad), stage, lane);
+            edgeGridStage(vvMember(off, a), 2.0 * pad, pad, stage, lane);
         sync();
     }
     for (uint a = 0u, aStop = EB_END(819, a, anyEdge ? k : 0u, 1u); a < aStop; a++)
@@ -854,7 +913,7 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
         {
             uint vb = vvMember(off, m);
             if (m == a || (gsVvPair[a * VV_PART + m] & 1u) == 0u || !edgePairOn(va, vb)) continue;
-            edgePairHits(va, vb, a, edgeCell(vb, lall, pad), lane);
+            edgePairHits(va, vb, a, 2.0 * pad, pad, lane);
         }
     }
     sync();
