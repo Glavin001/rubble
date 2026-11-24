@@ -166,5 +166,17 @@ pub fn schema_json(name: &str) -> Result<String, String> {
         };
         rows.push(row);
     }
+    // The order a panel lists them in: the numbers as the range list has them, then the
+    // choices, switches and colours.
+    let rank = |r: &serde_json::Value| {
+        let k = r["key"].as_str().unwrap_or("");
+        match r["kind"].as_str() {
+            Some("number") => e.ranges.iter().position(|x| x.0 == k).unwrap_or(0),
+            Some("choice") => 1000,
+            Some("bool") => 2000,
+            _ => 3000,
+        }
+    };
+    rows.sort_by_key(|r| rank(r));
     serde_json::to_string(&rows).map_err(|x| x.to_string())
 }

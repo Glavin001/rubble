@@ -75,6 +75,36 @@ export async function loadMod(base, { pc = null, detail = 'full' } = {}) {
     modelBytes: (glb?.length ?? 0) + (skin?.length ?? 0) };
 }
 
+/**
+ * `loadMod` for a vehicle folder held in memory: `files` is `[[path, bytes]]` (what the
+ * vehicle rigger returns in the browser: engine-vehiclerig-wasm, vehicle-design-worker.mjs;
+ * `files.json` among them, as `loadMod` reads it). The same result shape as `loadMod`'s,
+ * with `base: null` and `store` (path -> Blob: the model files, read again by `modModels`
+ * for each paint, as `loadMod`'s are fetched again).
+ */
+export function modFromFiles(files, { pc = null, detail = 'full', label = 'custom' } = {}) {
+  const byPath = new Map(files.map(([p, b]) => [p, b]));
+  const index = byPath.get('files.json');
+  const list = index ? JSON.parse(new TextDecoder().decode(index)) : [...byPath.keys()];
+  for (const f of list) if (!byPath.has(f)) throw new Error(`${label}: files.json lists ${f}, which the files do not contain`);
+  const text = (f) => [f, new TextDecoder().decode(byPath.get(f))];
+  const pcName = pc ?? list.find((f) => f.endsWith('.pc'));
+  const names = modModelNames(list, detail);
+  const { skinName, glbName } = names;
+  const store = new Map();
+  for (const f of [glbName, skinName]) if (f) store.set(f, new Blob([byPath.get(f)]));
+  const glb = glbName ? byPath.get(glbName) : null, skin = skinName ? byPath.get(skinName) : null;
+  return { kind: 'jbeam', files: list.filter((f) => f.endsWith('.jbeam')).map(text), pc: pcName && list.includes(pcName) ? text(pcName)[1] : undefined, pcName,
+    meshes: list.filter((f) => f.endsWith('.dae')).map((f) => [f, byPath.get(f)]), materials: list.filter((f) => f.endsWith('.materials.json')).map(text),
+    base: null, store, images: new Map(list.filter((f) => /\.(png|jpe?g|dds|webp)$/i.test(f)).map((f) => [f, byPath.get(f)])), list, label, glb, skin, glbName, skinName, detail: names.detail, hasLite: names.hasLite,
+    modelBytes: (glb?.length ?? 0) + (skin?.length ?? 0) };
+}
+
+/** The model files' sizes of a mod held in memory (`modModelSizes` for a folder at a URL). */
+export function modModelSizesOf(mod) {
+  return { glb: mod.store?.get(mod.glbName)?.size ?? 0, skin: mod.store?.get(mod.skinName)?.size ?? 0, detail: mod.detail, hasLite: mod.hasLite };
+}
+
 // A glTF-skinned vehicle's cost as the vehicle lab measured it
 // (engine/docs/measurements/lab-load-memory.md: the generated sedan, 16 MB glb and
 // 124 MB rskin; the authored sedan for the base): the tab's peak physical footprint
@@ -144,6 +174,11 @@ export function releaseModels(mod) {
 /** The model bytes `releaseModels` dropped, fetched again (nothing when they are held). */
 export async function modModels(mod) {
   if (!mod.skinName || mod.skin) return mod;
+  if (mod.store) {
+    const blob = async (f) => (f ? new Uint8Array(await mod.store.get(f).arrayBuffer()) : null);
+    [mod.glb, mod.skin] = await Promise.all([blob(mod.glbName), blob(mod.skinName)]);
+    return mod;
+  }
   const [glb, skin] = await Promise.all([mod.glbName ? fetchFile(`${mod.base}/${mod.glbName}`) : null, fetchFile(`${mod.base}/${mod.skinName}`)]);
   mod.glb = glb; mod.skin = skin;
   return mod;
@@ -220,6 +255,7 @@ export function modTextures(mod, names, size = 1024) {
   return Promise.all((names ?? []).map(async (t) => {
     const f = mod.list.find((x) => x.split('/').pop().toLowerCase() === t.toLowerCase());
     if (!f) return null;
+    if (mod.images) { try { return decodeTexture(mod.images.get(f), size); } catch { return null; } }
     try { return decodeTexture(new Uint8Array(await (await fetch(`${mod.base}/${f}`)).arrayBuffer()), size); } catch { return null; }
   }));
 }

@@ -102,6 +102,10 @@
         <label class="muted" for="cam">Camera</label><select id="cam" data-opt="live"></select>
         <span id="followRow"><label class="muted" for="follow" title="Which car the camera follows (V cycles). The readouts are the first car's. Applies as it runs.">follows</label><select id="follow" data-opt="live"><option value="0">car 1</option></select></span>
       </div>
+      <details id="designBox" class="mode-any">
+        <summary title="Edit any registered vehicle design's parameters, see it live, then rig it with the soft-body physics and drive that car (the generator and rigger run in this page, as WebAssembly).">Design: edit a vehicle, then drive it</summary>
+        <div id="designRoot"></div>
+      </details>
       <div class="row">
         <span class="muted">Time</span>
         <select id="slow" data-opt="live"><option value="1">×1</option><option value="0.25">×¼ slow motion</option><option value="0.0625">×1⁄16 slow motion</option></select>
@@ -313,7 +317,8 @@
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer, DrawPacer, setStepsInFlight } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { loadMod, modFromFiles, modModelSizesOf, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { createDesignPanel } from './vehicle-design-ui.mjs';
     import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
@@ -344,7 +349,7 @@
     // BeamNG community ETK (a community mod, never shipped: local only), the repo's
     // authored sedan always.
     const MODS = {
-      gen: { base: './__mods/sedan_new', pc: 'sedan/sedan.pc', name: 'Generated sedan', missing: 'not generated: run engine/scripts/build-web.sh' },
+      gen: { base: './__mods/sedan_new', pc: 'sedan/sedan.pc', design: 'sedan', name: 'Generated sedan', missing: 'not generated: run engine/scripts/build-web.sh' },
       etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc', name: 'ETK K-series', missing: 'community mod: local only' },
     };
     // Every generated design this build made (__mods/designs.json, from the registry:
@@ -356,7 +361,7 @@
         const base = `./__mods/${d.folder}`;
         if (base === MODS.gen.base) continue;
         const key = d.name in MODS || d.name === 'sedan' ? `design-${d.name}` : d.name;
-        MODS[key] = { base, pc: d.pc, name: d.title, missing: 'not generated: run engine/scripts/build-web.sh' };
+        MODS[key] = { base, pc: d.pc, design: d.name, name: d.title, missing: 'not generated: run engine/scripts/build-web.sh' };
         GENERATED.push(key);
       }
     } catch { /* an older build: the generated sedan only */ }
@@ -396,7 +401,8 @@
     function syncUrl() {
       const q = new URLSearchParams();
       q.set('mode', mode);
-      for (const c of controls) { const v = get(c.id); if (v !== defaults[c.id] || c.id === 'car' || c.id === 'surface') q.set(c.id, typeof v === 'boolean' ? (v ? '1' : '0') : v ?? ''); }
+      for (const c of controls) { const v = get(c.id); if (c.id === 'car' && v === 'custom') continue; // (a design made on this page: not a link)
+      if (v !== defaults[c.id] || c.id === 'car' || c.id === 'surface') q.set(c.id, typeof v === 'boolean' ? (v ? '1' : '0') : v ?? ''); }
       if (RECORD) q.set('record', '1');
       history.replaceState(null, '', `${location.pathname}?${q}`);
     }
@@ -442,6 +448,7 @@
         showOuts(); shapeUi(); syncUrl();
         if (c.id === 'surface') surfaceChosen = true;
         if (c.id === 'car' && !surfaceChosen) { put('surface', surfaceDefault()); syncUrl(); }
+        if (c.id === 'car' && MODS[get('car')]?.design && MODS[get('car')].design !== 'custom') designPanel?.setDesign(MODS[get('car')].design);
         if (c.id === 'script') { await loadScript(); restart(); return; }
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
@@ -508,6 +515,8 @@
     let smallDevice = '';
     async function detailOf(kind) {
       const m = MODS[kind], want = get('visual');
+      // A design rigged in this page has the lighter render only (the full art's 140 MB are not built in a browser).
+      if (m.memory) return { detail: 'lite', why: '' };
       const full = await modModelSizes(m.base, 'full');
       if (!full.hasLite) return { detail: 'full', why: '' };
       if (want === 'full' || want === 'lite') return { detail: want, why: '' };
@@ -544,17 +553,19 @@
         if (!waived.has(kind)) {
           progress(`checking that the ${m.name} fits this device…`);
           const adapter = await navigator.gpu.requestAdapter().catch(() => null);
-          const check = footprintCheck(modFootprint(await modModelSizes(m.base, chosen.detail)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+          const check = footprintCheck(modFootprint(m.memory ? modModelSizesOf(m.memory) : await modModelSizes(m.base, chosen.detail)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
           if (!check.fits) throw Object.assign(new Error(check.message), { footprint: kind });
         }
-        progress(`downloading the ${m.name}…`);
-        const mod = await loadMod(m.base, { pc: m.pc, detail: chosen.detail });
+        progress(m.memory ? `loading the ${m.name}…` : `downloading the ${m.name}…`);
+        const mod = m.memory ?? await loadMod(m.base, { pc: m.pc, detail: chosen.detail });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
         // The model files (a generated car's glb and rskin, ~140 MB) are dropped once a
         // visual is built and fetched again (the HTTP cache) for another paint.
         // Each visual is built in a worker of its own (modVisualApart): the wasm heap
         // the build grows (~530 MB for the generated sedan) goes with the worker.
+        // (A design of the Design panel is painted its own colour, the first paint.)
         const make = async (paint) => {
+          if (m.paint && paint === PAINTS[0]) paint = m.paint;
           await modModels(mod);
           try { return await modVisualApart(mod, { native: true, raycast: true, paint }); }
           catch (e) { console.warn('the visual\'s worker failed; building it on the page', e); await modModels(mod); return modVisual(mod, { native: true, raycast: true, paint }); }
@@ -1594,6 +1605,31 @@
     // ---------------------------------------------------------------- loops
     const before = () => { runPageEvents(W.lab.time()); applyDrive(); W.lab.beforeStep(W.world); };
     syncUrl();
+    // The Design panel: edit a registered design's parameters, preview it, rig it and drive
+    // it (vehicle-design-ui.mjs). Its car is the type 'custom': the Car select's "Your
+    // design", and one more type in Mixed. Each Apply replaces it.
+    let designPanel = null;
+    try {
+      designPanel = createDesignPanel($('designRoot'), {
+        async onApply({ design, title, params, files, ms, setStatus }) {
+          const mod = modFromFiles(files, { detail: 'lite', label: `${design} (Design panel)` });
+          MODS.custom = { base: null, memory: mod, pc: mod.pcName, design: 'custom', name: `Your ${title}`, paint: params.paint, missing: '' };
+          have.custom = true;
+          if (!GENERATED.includes('custom')) GENERATED.push('custom');
+          let o = [...$('car').options].find((x) => x.value === 'custom');
+          if (!o) { o = new Option('', 'custom'); $('car').add(o); }
+          o.text = `Your ${title} (Design panel)`; o.disabled = false;
+          for (const k of [...carCache.keys()]) if (k.startsWith('custom:')) carCache.delete(k);
+          surfaceChosen = surfaceChosen || false;
+          put('car', 'custom');
+          if (!surfaceChosen) put('surface', surfaceDefault());
+          shapeUi(); syncUrl();
+          setStatus('building the lab with it…');
+          await build();
+          setStatus(`driving: ${(ms / 1000).toFixed(1)} s to rig. Drive with the arrow keys or WASD in Drive, Derby or the mountain.`);
+        },
+      });
+    } catch (e) { console.warn('the Design panel did not start', e); }
     await build();
     canvas.focus();
     if (RECORD) {

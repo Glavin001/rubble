@@ -211,6 +211,9 @@ if part world; then
   # the vehicle generator (engine-vehiclegen) for the vehicle designer page
   wasm-pack build crates/engine-vehiclegen-wasm "${WASM_PACK_PROFILE[@]}" --target web \
     --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
+  # the vehicle rigger (engine-vehiclerig-wasm): the lab's Design panel rigs an edited design
+  wasm-pack build crates/engine-vehiclerig-wasm "${WASM_PACK_PROFILE[@]}" --target web \
+    --out-dir ../engine-webgpu/generated/vehiclerig-wasm --no-typescript
   # (The fast build's world wasm reads its kernels from generated/kernels/ at run time.)
   world_kernels=embed
   [[ "$WEB_PROFILE" == fast ]] && world_kernels=runtime
@@ -284,7 +287,7 @@ fi
 # there (built above, or by the runs that built those parts).
 world_asyncify_file=world-wasm/engine_world_wasm_bg.asyncify.wasm
 [[ "$WEB_PROFILE" == fast ]] && world_asyncify_file=""
-for f in wgsl/manifest.json vehicle_wasm fracture-wasm vehiclegen-wasm \
+for f in wgsl/manifest.json vehicle_wasm fracture-wasm vehiclegen-wasm vehiclerig-wasm \
   "${WORLD_WASM#"$WEB/generated/"}" $world_asyncify_file \
   "${STRESS_WASM#"$WEB/generated/"}" stress-web/stress_web_bg.asyncify.wasm; do
   if [[ ! -e "$WEB/generated/$f" ]]; then
