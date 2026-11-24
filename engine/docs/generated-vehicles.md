@@ -238,7 +238,7 @@ The rigger takes any design through the same input trait. What each needs:
 |---|---|---|
 | sedan (Rust) | rigged, checked, filmed | |
 | police_sedan, wagon (Python) | rig and rest-check (drift 5.2 / 6.1 mm at the rear rail; wagon parked fidelity 1.35 mm); wall 56 in band like the sedan | port to Rust; equipment masses as named masses with positions; the wagon's long roof needs roof stations from its key lines |
-| mach1_1969 | not rigged | two doors: the rigger assumes four (rear doors optional) |
+| mach1_1969 (Rust) | rigged and rest-checked (`tests/every_design.rs`: 478 nodes, 3548 beams, drift 2.6 mm, 0 broken, 0 bent); legacy sheets pinned to the Python build (60 parts, 285,290 triangles) | a two-door car: the door list is the design's (`RigSpec::doors`, `RigInput::doors`), its floor, seat and B-pillar rows come from `structure::Lines` (`y_pan`, `z_seat`, `z_b`). Not done: its physics block is the census car's (kerb 1,450 kg), and the interior's seats and dash sit where the sedan's mechanical definitions put them (derived from the floor rows) |
 | mach1_gasser | not rigged | a posed body (`post` re-poses the parts): the rig data must carry the pose |
 | suv_4x4 | not rigged | the lattice's member stations are sedan heights and stations; they must come from the design's key lines (floor, sill, belt) and wheelbase |
 
