@@ -2,8 +2,8 @@
 //! lab drives, `rig::rig_vehicle("sedan")`, CPU reference, surface contact on as the
 //! lab's `surface=1`). Layer 2 of `engine/docs/vehicle-test-strategy.md`, for the
 //! failures the user saw in the lab (known-bugs S4):
-//! * two cars after a head-on: one's nose inside the other, the pair locked so they
-//!   cannot back apart;
+//! * two cars after a head-on: one's nose inside the other, the pair fused (pushed
+//!   apart, contact holds them);
 //! * one car into a pole: its own panels through each other (a door bent back
 //!   through the door behind it), and a crash that ends in an instability stop.
 //!
@@ -18,7 +18,6 @@
 use engine_softbody::desc::SoftVehicleDesc;
 use engine_softbody::explicit_beams::{ExplicitBeams, StaticShape, STEP};
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
-use engine_softbody::explicit_drive::DriveInput;
 use engine_softbody_authoring::authoring::rig;
 use engine_softbody_authoring::vehicle_compare::settings;
 use glam::Vec3;
@@ -202,8 +201,10 @@ fn row(name: &str, scene: &str, measured: String, bound: String, pass: bool) {
 
 // --- Head on, then backing apart -------------------------------------------------
 
-/// Two generated sedans head on, full overlap, 60 + 60 km/h, 0.6 s; then both drivers
-/// reverse at full throttle for 2 s (the user's "I can't reverse out").
+/// Two generated sedans head on, full overlap, 60 + 60 km/h, 0.6 s. Then, from that one
+/// state, the same push apart twice: with vehicle contact and without it (the user's
+/// "fused together": not whether a crushed car can still drive, but whether contact
+/// holds two cars that should simply part).
 #[derive(Clone, Debug, Default)]
 struct HeadOn {
     /// At 0.6 s: per car, its contact nodes inside the other's live hull deeper
@@ -212,12 +213,31 @@ struct HeadOn {
     deepest: [f32; 2],
     /// At 0.6 s: per car, its skin edges through the other's live triangles.
     edges: [usize; 2],
-    /// The centres' distance at 0.6 s and after the 2 s of reverse (m).
-    gap_crash: f32,
-    gap_end: f32,
-    /// Their separating speed at the end (m/s).
-    separating: f32,
+    /// How much further apart the centres get in the second after the push (m): with
+    /// vehicle contact, and with it off.
+    parted: f32,
+    parted_free: f32,
     finite: bool,
+}
+
+/// Every node of car 0 gets `PUSH` m/s backwards (−z) and car 1's forwards (+z): the
+/// cars move apart at 2·PUSH, as two cars pulled apart by a tow. **Choice**: 3 m/s, a
+/// walking push that a ground's friction (about 0.75 g sliding) stops in 0.4 s.
+const PUSH: f32 = 3.0;
+
+fn parted_after_push(mut w: ExplicitBeamsWorld) -> (f32, bool) {
+    for (c, s) in w.vehicles.iter_mut().enumerate() {
+        let dv = if c == 0 { -Vec3::Z * PUSH } else { Vec3::Z * PUSH };
+        for n in &mut s.nodes {
+            n.vel += dv;
+        }
+    }
+    let gap = |w: &ExplicitBeamsWorld| centre(&w.vehicles[0]).0.distance(centre(&w.vehicles[1]).0);
+    let g0 = gap(&w);
+    for _ in 0..(1.0 / STEP).round() as usize {
+        w.step();
+    }
+    (gap(&w) - g0, w.vehicles.iter().all(finite))
 }
 
 fn head_on() -> HeadOn {
@@ -254,38 +274,35 @@ fn head_on() -> HeadOn {
             }
             r.edges[c] = edges_through(&w.vehicles[c], &w.vehicles[1 - c]);
         }
-        r.gap_crash = centre(&w.vehicles[0]).0.distance(centre(&w.vehicles[1]).0);
-        for s in &mut w.vehicles {
-            s.set_drive_input(DriveInput { forward: -1.0, ..Default::default() });
-        }
-        for _ in 0..(2.0 / STEP).round() as usize {
-            w.step();
-        }
-        let ((ca, va), (cb, vb)) = (centre(&w.vehicles[0]), centre(&w.vehicles[1]));
-        r.gap_end = ca.distance(cb);
-        r.separating = (vb - va).dot((cb - ca).normalize_or_zero());
-        r.finite = w.vehicles.iter().all(finite);
-        println!("head on 60 + 60 km/h, then reverse: {r:?}");
+        let mut free = w.clone();
+        free.contact = false;
+        let (on, f1) = parted_after_push(w);
+        let (off, f2) = parted_after_push(free);
+        r.parted = on;
+        r.parted_free = off;
+        r.finite = f1 && f2;
+        println!("head on 60 + 60 km/h: {r:?}");
         r
     })
     .clone()
 }
 
-/// Two cars that hit each other can back apart: after the head-on both drivers reverse
-/// for 2 s and the centres must move at least 1 m further apart. Bound: **Choice**
-/// (with vehicle contact switched off at the same moment they move 17 m apart, 18 m/s
-/// at the end, so 1 m only asks that contact does not hold them).
-/// FAILS today (2026-11-24, S4): 0.15 m, 0.00 m/s at the end: contact holds them.
+/// Two cars that hit each other are not fused: pushed apart after the head-on, they part
+/// at least 80 % as far as the same two crushed cars with vehicle contact switched off
+/// (the same state and push; only contact differs, so a drivetrain the crash broke does
+/// not enter). Bound: **Choice** (80 %: contact may only slow the parting where crushed
+/// fronts still touch as they slide out, not hold them).
+/// FAILS today (2026-11-24, S4): see the printed row (driven in reverse instead, they
+/// moved 0.14 m in 2 s against 17 m with contact off).
 #[test]
-fn head_on_cars_back_apart() {
+fn head_on_cars_are_not_fused() {
     let r = head_on();
-    let moved = r.gap_end - r.gap_crash;
-    let pass = r.finite && moved >= 1.0;
+    let pass = r.finite && r.parted >= 0.8 * r.parted_free;
     row(
-        "cars back apart after a head-on",
-        "head on 60 + 60, reverse 2 s",
-        format!("{moved:.2} m further apart, separating {:.2} m/s", r.separating),
-        "≥ 1 m".into(),
+        "cars are not fused after a head-on",
+        "head on 60 + 60, pushed apart 2 × 3 m/s",
+        format!("parted {:.2} m in 1 s; {:.2} m with contact off", r.parted, r.parted_free),
+        "≥ 80 % of contact off".into(),
         pass,
     );
     assert!(pass);

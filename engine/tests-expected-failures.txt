@@ -24,7 +24,7 @@ showcase_skin_integrity::grab_rear_and_roof
 
 # Solids sharing space: two generated sedans lock after a head-on, and one car's panels
 # pass through each other at a pole (known-bugs S4; written ahead of the fix, 2026-11-24).
-gen_sedan_contact::head_on_cars_back_apart
+gen_sedan_contact::head_on_cars_are_not_fused
 gen_sedan_contact::head_on_no_node_inside_the_other_car
 gen_sedan_contact::head_on_no_edge_through_the_other_car
 gen_sedan_contact::pole_own_panels_stay_apart
