@@ -98,6 +98,37 @@ pub struct Built {
     pub shell: Vec<usize>,
 }
 
+/// Whether a node hung on spokes to `ids` lies on the one plane they (nearly)
+/// span, with a component of gravity across it: the node swings out of that
+/// plane under its own weight. The plane is the least-squares one (the
+/// covariance C's weakest axis); "nearly" is 27 det(C) / tr(C)³ under
+/// [`MIN_SPREAD`] (1: isotropic, 0: planar), and "on" is within [`ON_PLANE`].
+fn hangs_in_a_plane(r: &Rig, ids: &[usize], hung: Vec3) -> bool {
+    let g: Vec<Vec3> = ids.iter().map(|&i| r.g(i)).collect();
+    let c = g.iter().fold(Vec3::ZERO, |s, &p| s + p) / g.len() as f32;
+    let m = g.iter().fold(glam::Mat3::ZERO, |m, &p| {
+        let d = p - c;
+        m + glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z)
+    }) * (1.0 / g.len() as f32);
+    let tr = m.x_axis.x + m.y_axis.y + m.z_axis.z;
+    if tr <= 0.0 || 27.0 * m.determinant() / (tr * tr * tr) >= MIN_SPREAD {
+        return false;
+    }
+    // the weakest axis: the power iteration of tr·I - C
+    let a = glam::Mat3::from_diagonal(Vec3::splat(tr)) - m;
+    let mut n = Vec3::new(0.3, 0.5, 0.8).normalize();
+    for _ in 0..60 {
+        n = (a * n).normalize_or(Vec3::Y);
+    }
+    // (up is glTF's y)
+    n.y.abs() > 0.25 && n.dot(hung - c).abs() < ON_PLANE
+}
+
+/// A pane's ring is nearly planar below this ([`hangs_in_a_plane`]).
+const MIN_SPREAD: f32 = 0.01;
+/// A pane's centre is on its ring's plane within this (m).
+const ON_PLANE: f32 = 0.10;
+
 fn v3(p: DVec3) -> Vec3 {
     p.as_vec3()
 }
@@ -665,22 +696,34 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
             .iter()
             .min_by(|a, b| a.distance(c).total_cmp(&b.distance(c)))
             .unwrap();
-        let mut ring: Vec<(f32, usize)> = shell_ids
-            .iter()
-            .map(|&i| {
-                let g = r.g(i);
-                let dmin = m
-                    .pos
-                    .iter()
-                    .step_by(7)
-                    .map(|q| q.distance(g))
-                    .fold(f32::MAX, f32::min);
-                (dmin, i)
-            })
-            .filter(|x| x.0 < 0.16)
-            .collect();
-        ring.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let ring: Vec<usize> = ring.into_iter().map(|x| x.1).collect();
+        // (the aperture's nodes within `reach` of the pane; a raked pane's
+        // may all lie in its plane, and its centre node then swings across
+        // it under its weight: the reach grows until they span three dimensions)
+        let ring_within = |reach: f32| -> Vec<usize> {
+            let mut ring: Vec<(f32, usize)> = shell_ids
+                .iter()
+                .map(|&i| {
+                    let g = r.g(i);
+                    let dmin = m
+                        .pos
+                        .iter()
+                        .step_by(7)
+                        .map(|q| q.distance(g))
+                        .fold(f32::MAX, f32::min);
+                    (dmin, i)
+                })
+                .filter(|x| x.0 < reach)
+                .collect();
+            ring.sort_by(|a, b| a.0.total_cmp(&b.0));
+            ring.into_iter().map(|x| x.1).collect()
+        };
+        let mut reach = 0.16f32;
+        let mut ring = ring_within(reach);
+        while ring.len() < 4 || hangs_in_a_plane(r, &ring, c) {
+            reach += 0.02;
+            assert!(reach < 0.5, "{mesh}: its aperture's shell nodes do not span three dimensions");
+            ring = ring_within(reach);
+        }
         if ring.len() < 4 {
             panic!("{mesh}: {} shell nodes round its aperture", ring.len());
         }
@@ -913,6 +956,8 @@ pub fn masses(r: &mut Rig, inp: &dyn RigInput, b: &Built) {
         (part, kg - fixed)
     })
     .filter(|x| x.1 > 0.0)
+    // (a part the car does not have, a two-door car's rear doors, has no mass)
+    .filter(|x| (0..n).any(|i| r.car.nodes[i].part == x.0))
     .collect();
     r.car.omega_limit = Some(super::build::env_f("RIG_OMEGA_H", OMEGA_H));
     r.car.node_budget = shell::NODE_BUDGET as f32;

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 /// Designs the generator builds but the rigger cannot rig yet, and why. An
 /// entry is removed when its design passes (the point of this list is that it
 /// only shrinks; `EVERY_DESIGN=<name>` still runs one).
-const NOT_YET_RIGGED: &[(&str, &str)] = &[("mach1_1969", "two doors: the rigger still assumes four")];
+const NOT_YET_RIGGED: &[(&str, &str)] = &[];
 
 fn designs() -> Vec<&'static str> {
     let only = std::env::var("EVERY_DESIGN").ok();
@@ -89,12 +89,20 @@ fn every_design_rigs_and_rests_within_5_mm() {
         let broken = sim.beams.iter().filter(|b| b.broken).count();
         let bent = sim.beams.iter().filter(|b| b.bent()).count();
         let mut worst = (String::new(), 0.0f32);
+        let detail = std::env::var("EVERY_DETAIL").is_ok();
         for p in &desc.parts {
+            let mut part_worst = (String::new(), 0.0f32);
             for &i in p.nodes.iter().filter(|&&i| (i as usize) < nd && !susp(&desc.nodes[i as usize].name)) {
                 let d = (fit.to_rest(now[i as usize]) - design[i as usize]).length();
                 if d > worst.1 {
                     worst = (format!("{}:{}", p.name, desc.nodes[i as usize].name), d);
                 }
+                if d > part_worst.1 {
+                    part_worst = (desc.nodes[i as usize].name.clone(), d);
+                }
+            }
+            if detail && part_worst.1 > 0.002 {
+                println!("  {}: {:.1} mm at {}", p.name, part_worst.1 * 1e3, part_worst.0);
             }
         }
         println!("{name}: {nd} nodes, {} beams, worst drift {:.1} mm at {}, broken {broken}, bent {bent}", sim.beams.len(), worst.1 * 1e3, worst.0);

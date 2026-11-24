@@ -509,6 +509,9 @@ impl RigInput for VgInput {
     fn rear_closure(&self) -> String {
         self.rig.dims.rear_closure.clone()
     }
+    fn doors(&self) -> Vec<String> {
+        self.rig.dims.doors.clone()
+    }
     fn definitions(&self) -> Option<super::body2::Defs<'_>> {
         self.structure.as_ref().map(|s| super::body2::Defs {
             structure: s,

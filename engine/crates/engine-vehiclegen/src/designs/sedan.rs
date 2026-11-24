@@ -642,6 +642,7 @@ impl Sedan {
             z_screen_base: z("WB"),
             z_screen_top: z("WT"),
             z_b: z("BP"),
+            z_seat: z("BP"),
             z_door_rear: z("AR1"),
             // (the back light's top and base on the centre line: `build_layout`)
             z_rear_top: self.v.rear_lines.map_or(-1.00, |l| l.0),

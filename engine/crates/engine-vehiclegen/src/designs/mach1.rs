@@ -305,6 +305,7 @@ impl Mach1 {
             z_screen_base: z("WB"),
             z_screen_top: z("WT"),
             z_b: z("Q"),
+            z_seat: -0.30,
             z_door_rear: z("AR1"),
             z_rear_top: -0.90,
             z_rear_base: z("AR3"),

@@ -294,6 +294,10 @@ pub struct Lines {
     pub z_screen_top: f64,
     /// the B-pillar
     pub z_b: f64,
+    /// the front seat's front cross member: the floor rows' third (a
+    /// four-door's is its B-pillar's; a two-door's B-pillar stands behind
+    /// the seat)
+    pub z_seat: f64,
     /// the rear door's rear shut line (the C-pillar's foot; the floor pan's
     /// skin runs between the two door lines)
     pub z_door_rear: f64,
@@ -316,7 +320,7 @@ impl Lines {
     /// footwell, the B-pillar, mid rear footwell, the heel kick.
     pub fn rows(&self) -> [f64; 5] {
         let r1 = self.z_door_front - 0.03;
-        let r3 = self.z_b;
+        let r3 = self.z_seat;
         let r5 = self.z_door_rear + 0.035;
         [r1, 0.5 * (r1 + r3), r3, 0.5 * (r3 + r5), r5]
     }

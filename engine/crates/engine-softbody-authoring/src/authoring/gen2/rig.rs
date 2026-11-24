@@ -389,6 +389,11 @@ pub trait RigInput {
     fn rear_closure(&self) -> String {
         "trunk_lid".into()
     }
+    /// The doors the body has, by corner (`FL`, `FR`, `RL`, `RR`): front
+    /// doors only on a two-door car.
+    fn doors(&self) -> Vec<String> {
+        ["FL", "FR", "RL", "RR"].iter().map(|s| s.to_string()).collect()
+    }
     /// The collision skin from the render skin (`skin_hull`) instead of the
     /// panel grids' triangles; gen3's lattice predates it.
     fn hull_triangles(&self) -> bool {
@@ -1406,8 +1411,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let census = std::env::var("RIG_OLD_CENSUS").is_err();
 
     // Part extents from the meshes.
+    let doors = inp.doors();
+    let rear_door = doors.iter().any(|d| d.starts_with('R'));
     let door_f = Skin::of(model, "door_FL");
-    let door_r = Skin::of(model, "door_RL");
+    // (a two-door car has no rear door: its extents stand in for the rear
+    // door's where the rigger's own body reads them, and it has no aperture)
+    let door_r = Skin::of(model, if rear_door { "door_RL" } else { "door_FL" });
     let hood_m = Skin::of(model, "hood");
     let trunk_m = Skin::of(model, &inp.rear_closure());
     let fender_m = Skin::of(model, "fender_FL");
@@ -1443,7 +1452,9 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         .filter(|_| std::env::var("RIG_OLD_BODY").map_or(true, |v| v != "1"));
     let mut named_ids: HashMap<String, usize> = HashMap::new();
     let defined = defs.as_ref().map(|d| super::body2::build(&mut r, inp, d));
-    let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
+    let apertures: Vec<Aperture> = std::iter::once(Aperture::of(&door_f.pos))
+        .chain(rear_door.then(|| Aperture::of(&door_r.pos)))
+        .collect();
     let mut eng: Vec<usize> = Vec::new();
     let old_pt = std::env::var("GEN3_OLD_POWERTRAIN").is_ok();
     let mut pt_z = [0.0f32; 3];
@@ -2241,7 +2252,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let rigid_panels =
         defined.is_some() && std::env::var("RIG_NO_RIGIDIFIER").map_or(true, |v| v != "1");
     let mut door_nodes: HashMap<Part, Vec<usize>> = HashMap::new();
-    for (front, lo, hi, pts) in [(true, df_lo, df_hi, &df), (false, dr_lo, dr_hi, &dr)] {
+    for (front, lo, hi, pts) in [(true, df_lo, df_hi, &df), (false, dr_lo, dr_hi, &dr)]
+        .into_iter()
+        .filter(|d| d.0 || rear_door)
+    {
         for s in [1.0f32, -1.0] {
             let part = Part::door(front, s > 0.0);
             let dn = part.name().trim_start_matches("gen2_").to_string();
@@ -3112,7 +3126,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 | Some(Role::Web)
         )
     };
-    for (front, tagf) in [(true, "F"), (false, "R")] {
+    for (front, tagf) in [(true, "F"), (false, "R")]
+        .into_iter()
+        .filter(|d| d.0 || rear_door)
+    {
         for s in [1.0f32, -1.0] {
             let x = lr(s);
             let part = Part::door(front, s > 0.0);
@@ -3645,6 +3662,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             (Part::Hood, "hinge_hood_L", "hinge_hood_R"),
             (Part::Trunk, "hinge_trunk_L", "hinge_trunk_R"),
         ];
+        let present: Vec<Part> = r.car.nodes[..n0].iter().map(|n| n.part).collect();
         for part in [
             Part::DoorFL,
             Part::DoorFR,
@@ -3656,7 +3674,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             Part::FenderR,
             Part::BumperF,
             Part::BumperR,
-        ] {
+        ]
+        .into_iter()
+        .filter(|&p| present.contains(&p))
+        {
             let own: Vec<usize> = (0..n0)
                 .filter(|&i| {
                     let n = &r.car.nodes[i];
