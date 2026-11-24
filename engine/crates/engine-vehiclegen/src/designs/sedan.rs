@@ -150,6 +150,9 @@ pub struct Variant {
     /// A tailgate instead of a boot lid: the rear closure's name and
     /// the layout without the sedan's back-light / C-pillar stations.
     pub tailgate: bool,
+    /// The rear screen's top (rear header) and base, reference z, for the
+    /// body-in-white (default: the sedan's -1.00 and -1.70).
+    pub rear_lines: Option<(f64, f64)>,
 }
 
 #[derive(Clone)]
@@ -641,8 +644,8 @@ impl Sedan {
             z_b: z("BP"),
             z_door_rear: z("AR1"),
             // (the back light's top and base on the centre line: `build_layout`)
-            z_rear_top: -1.00,
-            z_rear_base: -1.70,
+            z_rear_top: self.v.rear_lines.map_or(-1.00, |l| l.0),
+            z_rear_base: self.v.rear_lines.map_or(-1.70, |l| l.1),
             well_x: 0.56,
             well_r: 0.375 + self.arch_r - R_ARCH_R,
             wheel_y: self.f.y(R_TYRE_D / 2.0),

@@ -19,10 +19,7 @@ use std::path::PathBuf;
 /// Designs the generator builds but the rigger cannot rig yet, and why. An
 /// entry is removed when its design passes (the point of this list is that it
 /// only shrinks; `EVERY_DESIGN=<name>` still runs one).
-const NOT_YET_RIGGED: &[(&str, &str)] = &[(
-    "wagon",
-    "the body-in-white (`structure::unibody`) ends at the sedan's rear (z_rear_base -1.70): no D-pillar or tailgate frame, so glass_rear has no aperture nodes (body2.rs `SCREENS`)",
-)];
+const NOT_YET_RIGGED: &[(&str, &str)] = &[];
 
 fn designs() -> Vec<&'static str> {
     let only = std::env::var("EVERY_DESIGN").ok();

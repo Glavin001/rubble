@@ -139,6 +139,7 @@ fn variant() -> Variant {
         assign: Some(assign),
         tail: Some(build_tail),
         tailgate: true,
+        rear_lines: Some((-2.25, -2.38)),
     }
 }
 
