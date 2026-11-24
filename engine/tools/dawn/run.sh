@@ -58,7 +58,9 @@ python3 - "$out/spec.json" "$name" "$bundle_path" "$@" <<'PY'
 import json, os, sys
 out, name, path, *args = sys.argv[1:]
 json.dump({"bundle": name, "bundle_path": path, "result_path": "/out/last.json", "args": args,
-           "node_flags": os.environ.get("DAWN_NODE_FLAGS", "").split()}, open(out, "w"))
+           "node_flags": os.environ.get("DAWN_NODE_FLAGS", "").split(),
+           # DAWN_CAP: the harness's limit in seconds (default 900; the container's is 1800).
+           "cap": int(os.environ.get("DAWN_CAP", "900"))}, open(out, "w"))
 PY
 docker image inspect rubble-modal-cli:1.6.2 >/dev/null 2>&1 || docker build -q -t rubble-modal-cli:1.6.2 "$engine/tools/modal" >/dev/null
 docker run --rm --name "rubble-dawn-$$" -v "$out:/out" \

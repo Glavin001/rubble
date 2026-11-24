@@ -93,9 +93,14 @@ await stepTo(until);
 await rw.drain(world, () => {});
 lap('stepped');
 if (pending.size) console.log(stamp(), `waiting for ${[...pending].join(', ')} to finish compiling`);
+// (--wait-cap S: how long to let deferred kernels finish, stepping meanwhile; what is still
+// compiling after it is reported, and the frames are timed anyway.)
+const waitCap = Number(arg('--wait-cap', 300)) * 1000;
 const waitStart = performance.now();
-while (pending.size && performance.now() - waitStart < 900_000) await rw.stepFrames(world, 1, () => {}, before);
+while (pending.size && performance.now() - waitStart < waitCap) await rw.stepFrames(world, 1, () => {}, before);
 await rw.drain(world, () => {});
+out.stillCompiling = [...pending];
+if (pending.size) console.log(stamp(), `still compiling after ${waitCap / 1000} s: ${[...pending].join(', ')}`);
 lap('kernels');
 out.simTime = lab.time();
 out.compileTotalMs = Object.values(out.compileMs).reduce((a, b) => a + b, 0);

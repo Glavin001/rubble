@@ -322,6 +322,10 @@ def _build(spec: dict, dirty: dict) -> dict:
     result = {"code": code, "setup_s": t_setup, "build_s": t_build, "cores": cores}
     if code == 0 and web:
         result["bundle"] = _dawn_bundle(Path("/repo/engine/crates/engine-webgpu"), out / "car")
+        keyfile = Path("/dawnbundles/web-keys") / (_web_key(spec) + ".txt")
+        keyfile.parent.mkdir(parents=True, exist_ok=True)
+        keyfile.write_text(result["bundle"])
+        dawn_vol.commit()
     elif code == 0:
         data = (out / "archive.tar.gz").read_bytes()
         sha = hashlib.sha256(data).hexdigest() + ".tar.gz"
@@ -354,6 +358,21 @@ def _build(spec: dict, dirty: dict) -> dict:
     result["slangc_runs"] = slang_new
     result["total_s"] = time.time() - t0
     return result
+
+
+def _web_key(spec: dict) -> str:
+    """The web build's key (mode "web"): every source file's content except the tools and
+    docs no web build reads, and the ENGINE_* settings. The same key, the same bundle:
+    the client reuses it and calls no build (a web build reruns wasm-opt and Asyncify
+    each time, about 6 minutes, even with nothing changed)."""
+    h = hashlib.sha256()
+    for path, digest in sorted(spec.get("manifest", {}).items()):
+        if path.startswith(("engine/tools/", "engine/docs/")) or path.endswith(".md"):
+            continue
+        h.update(f"{path} {digest}\n".encode())
+    for k, v in sorted(spec.get("env", {}).items()):
+        h.update(f"{k}={v}\n".encode())
+    return h.hexdigest()[:32]
 
 
 def _modules_key(spec: dict) -> str:
@@ -424,6 +443,16 @@ def main(spec: str) -> None:
     if s.get("stage_dir"):
         stage = Path(s["stage_dir"])
         s["stage"] = {"/" + str(f.relative_to(stage)): f.read_bytes() for f in sorted(stage.rglob("*")) if f.is_file()}
+    if s.get("mode") == "web":
+        # The same web build's sources and settings as a stored bundle: that bundle, no build.
+        try:
+            name = b"".join(dawn_vol.read_file(f"web-keys/{_web_key(s)}.txt")).decode().strip()
+        except Exception:  # noqa: BLE001 - not built yet
+            name = ""
+        if name:
+            print(f"[remote_build] web build unchanged: Dawn bundle {name} (no build)", flush=True)
+            Path(s["result"]).write_text(json.dumps({"code": 0, "bundle": name, "reused": True}))
+            return
     t = time.time()
     with modal.enable_output():
         r = remote.remote(s)

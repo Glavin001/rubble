@@ -48,6 +48,20 @@ def run(spec: dict) -> dict:
            "__GL_SHADER_DISK_CACHE_SIZE": str(4 << 30)}
     cmd = ["node", *spec.get("node_flags", []), "--import", "./loader.mjs", "world_ab.mjs", *spec["args"]]
     print("[dawn_run] " + " ".join(cmd), flush=True)
+    # The driver's shader cache is committed every minute while the harness runs: a
+    # preempted container (Modal restarts the call from the beginning) or a run that hits
+    # its cap keeps the kernels it finished compiling (one took 766 s cold).
+    import threading
+    done = threading.Event()
+
+    def keep_committing() -> None:
+        while not done.wait(60):
+            try:
+                caches.commit()
+            except Exception as e:  # noqa: BLE001 - the next commit tries again
+                print(f"[dawn_run] cache commit failed: {e}", flush=True)
+
+    threading.Thread(target=keep_committing, daemon=True).start()
     # Every line as it comes (the lab's per-kernel progress included), and kept for the result.
     p = subprocess.Popen(cmd, cwd="/dawn", env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = []
@@ -62,6 +76,7 @@ def run(spec: dict) -> dict:
             print(f"[dawn_run] killed at the {cap} s cap", flush=True)
             break
     p.wait()
+    done.set()
     caches.commit()
     result = next((json.loads(l[7:]) for l in lines if l.startswith("RESULT ")), None)
     return {"code": p.returncode, "secs": time.time() - t0, "result": result}
