@@ -41,6 +41,12 @@ pub(crate) fn contact_sweeps() -> u32 {
     *N.get_or_init(|| std::env::var("CONTACT_SWEEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
 }
 
+/// Vehicle contact's residual sweeps as Gauss–Seidel (under measurement, `CONTACT_GS=1`).
+pub(crate) fn gauss_seidel() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CONTACT_GS").is_ok_and(|v| v == "1"))
+}
+
 pub(crate) fn speculative() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SPECULATIVE").is_ok_and(|v| v == "1"))
@@ -1236,16 +1242,16 @@ impl ExplicitBeamsWorld {
             return;
         }
         let mut res = if vehicle_residual() {
-            self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b)
+            self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b, &first)
         } else {
             vec![None; hits.len()]
         };
         // Iterative contact (under measurement, `CONTACT_SWEEPS`, default 1: as before):
         // more residual sweeps, each seeing every hit's force so far (the staging sums),
         // so the turn's contacts are satisfied together; the work guard follows.
-        if vehicle_residual() {
+        if vehicle_residual() && !gauss_seidel() {
             for _ in 1..contact_sweeps() {
-                let more = self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b);
+                let more = self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b, &first);
                 if more.iter().all(|r| r.is_none()) {
                     break;
                 }
@@ -1529,6 +1535,50 @@ impl ExplicitBeamsWorld {
     /// and still approaching at the forces now (the turn's staging sums with them)
     /// takes a normal force r with the first pass's reduced mass (its counts
     /// `split_a`, `split_b`), into the staging sums; returns each hit's r.
+    /// One hit's Gauss–Seidel residual: the normal force (> 0) that stops its pair's
+    /// approach over the step at the forces now, on the nodes' own masses; None if it is
+    /// not approaching or would not be.
+    fn residual_of(&self, a: usize, x: &Hit) -> Option<f32> {
+        self.residual_signed(a, x).filter(|&r| r > 0.0)
+    }
+
+    /// The normal force change that brings hit `x`'s pair's normal velocity at the end of
+    /// the step to zero, at the forces now (signed: negative takes back an excess).
+    fn residual_signed(&self, a: usize, x: &Hit) -> Option<f32> {
+        let acc = |v: usize, i: u32| {
+            let n = &self.vehicles[v].nodes[i as usize];
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                self.vehicles[v].force_now(i as usize) / n.mass
+            }
+        };
+        let im = |n: &Node| if n.has(NODE_IMMOVABLE) { 0.0 } else { 1.0 / n.mass };
+        let [i0, i1, i2] = x.tri;
+        let [alpha, beta, gamma] = x.w;
+        let va = &self.vehicles[a];
+        let node = &self.vehicles[x.b].nodes[x.h as usize];
+        let node2 = &self.vehicles[x.b].nodes[x.h2 as usize];
+        let (n0, n1, n2) = (&va.nodes[i0 as usize], &va.nodes[i1 as usize], &va.nodes[i2 as usize]);
+        let cvel = if x.t > 0.0 { node.vel * (1.0 - x.t) + node2.vel * x.t } else { node.vel };
+        let v = cvel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma) + x.n * (x.spec / STEP);
+        let at = acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma;
+        let cacc = if x.t > 0.0 { acc(x.b, x.h) * (1.0 - x.t) + acc(x.b, x.h2) * x.t } else { acc(x.b, x.h) };
+        let an = (cacc - at).dot(x.n);
+        let vn = v.dot(x.n);
+        let imc = if x.t > 0.0 {
+            (1.0 - x.t) * (1.0 - x.t) * im(node) + x.t * x.t * im(node2)
+        } else {
+            im(node)
+        };
+        let inv = imc + two_body_inverse_mass([im(n1), im(n2), im(n0)], x.w);
+        if inv <= 0.0 {
+            return None;
+        }
+        let m = 1.0 / inv;
+        Some(-(an * m) - vn * m / STEP)
+    }
+
     fn residual_vehicle_pass(
         &mut self,
         a: usize,
@@ -1536,6 +1586,7 @@ impl ExplicitBeamsWorld {
         on: &[bool],
         split_a: &[u32],
         split_b: &[Vec<u32>],
+        first: &[Vec3],
     ) -> Vec<Option<f32>> {
         let acc = |v: usize, i: u32| {
             let n = &self.vehicles[v].nodes[i as usize];
@@ -1552,6 +1603,42 @@ impl ExplicitBeamsWorld {
                 k as f32 / n.mass
             }
         };
+        if gauss_seidel() {
+            // Gauss–Seidel (`CONTACT_GS=1`, under measurement): each still-approaching hit,
+            // in order, takes the force that stops its pair at the forces now, every hit
+            // before it included, on the nodes' own masses (no split: the others' pushes
+            // are already in the sums), applied at once.
+            // Each hit's normal force so far (the first pass's), which a sweep may raise or
+            // lower but never take below zero (sequential impulses' accumulated clamp: an
+            // excess is taken back, so a pair is not pushed apart to bounce back in).
+            let mut out: Vec<Option<f32>> = vec![None; hits.len()];
+            for j in (0..contact_sweeps() as usize).flat_map(|_| 0..hits.len()) {
+                if !on[j] {
+                    continue;
+                }
+                let x = &hits[j];
+                let lam0 = first.get(j).map_or(0.0, |f| f.dot(x.n)).max(0.0) + out[j].unwrap_or(0.0);
+                let Some(d) = self.residual_signed(a, x) else { continue };
+                let lam = (lam0 + d).max(0.0);
+                let r = lam - lam0;
+                if r == 0.0 {
+                    continue;
+                }
+                out[j] = Some(out[j].unwrap_or(0.0) + r);
+                let f = x.n * r;
+                if x.t > 0.0 {
+                    self.vehicles[x.b].add_contact(x.h as usize, f * (1.0 - x.t));
+                    self.vehicles[x.b].add_contact(x.h2 as usize, f * x.t);
+                } else {
+                    self.vehicles[x.b].add_contact(x.h as usize, f);
+                }
+                let va = &mut self.vehicles[a];
+                va.add_contact(x.tri[1] as usize, -(f * x.w[0]));
+                va.add_contact(x.tri[2] as usize, -(f * x.w[1]));
+                va.add_contact(x.tri[0] as usize, -(f * x.w[2]));
+            }
+            return out;
+        }
         let mut out = vec![None; hits.len()];
         for (j, x) in hits.iter().enumerate() {
             if !on[j] {

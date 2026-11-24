@@ -833,7 +833,10 @@ fn main() -> Result<(), String> {
     // part (rearward push along the car, vertical), its nose-up moment about
     // the car's centre of mass, per 50 ms and integrated (impulse).
     let forces = std::env::var("FORCES").is_ok();
-    if forces || std::env::var("LEDGER").is_ok() {
+    let trace_face = std::env::var("TRACE_FACE").is_ok_and(|v| v == "1");
+    let mut hist: std::collections::VecDeque<(usize, Vec<(Vec<Vec3>, Vec<Vec3>, Vec<Vec3>)>)> = Default::default();
+    let mut traced = 0usize;
+    if forces || std::env::var("LEDGER").is_ok() || trace_face {
         w.enable_ledger();
     }
     let part_of: HashMap<String, String> = l
@@ -922,6 +925,25 @@ fn main() -> Result<(), String> {
                 println!("  ---- {:.0} ms: both reverse ({wheels:?}) ----", k as f32 * 0.5);
             }
             w.step();
+            if trace_face {
+                // TRACE_FACE=1: the last 24 steps' positions, velocities and vehicle-contact
+                // forces of both cars, for the face entries' traces.
+                let snap: Vec<(Vec<Vec3>, Vec<Vec3>, Vec<Vec3>)> = (0..2)
+                    .map(|c| {
+                        let s = &w.vehicles[c];
+                        let lg = w.ledger.as_ref();
+                        (
+                            s.nodes.iter().map(|n| s.origin + n.pos).collect(),
+                            s.nodes.iter().map(|n| n.vel).collect(),
+                            (0..s.nodes.len()).map(|i| lg.map_or(Vec3::ZERO, |l| l.vehicle_contact(c, i))).collect(),
+                        )
+                    })
+                    .collect();
+                hist.push_back((k, snap));
+                if hist.len() > 24 {
+                    hist.pop_front();
+                }
+            }
             if forces {
                 for c in 0..2 {
                     let s = &w.vehicles[c];
@@ -1119,6 +1141,43 @@ fn main() -> Result<(), String> {
                     let q = prev_pos[c][i as usize];
                     if y.iter().any(|t| seg_tri(q, p, t)) {
                         r.face += 1;
+                        if trace_face && traced < 4 {
+                            traced += 1;
+                            let ys = &w.vehicles[o];
+                            let crossed = (0..ys.triangles.len()).find(|&t| {
+                                !ys.tri_dead.get(t).copied().unwrap_or(false)
+                                    && seg_tri(q, p, &ys.triangles[t].nodes.map(|z| ys.origin + ys.nodes[z as usize].pos))
+                            });
+                            if let Some(t) = crossed {
+                                let tn = ys.triangles[t].nodes;
+                                println!(
+                                    "  TRACE {} node {} of car {c} entered car {o} through triangle {t} {:?} by {:.0} ms:",
+                                    if c == 0 { "A" } else { "B" },
+                                    l.desc.nodes[i as usize].name,
+                                    tn.map(|z| l.desc.nodes[z as usize].name.clone()),
+                                    k as f32 * 0.5
+                                );
+                                println!("    step | signed distance (mm, + outside) | approach speed m/s (+ closing) | contact force on node along n (N) | on the triangle's nodes (N)");
+                                for (ks, snap) in &hist {
+                                    let (pa, va, fa) = (&snap[c].0, &snap[c].1, &snap[c].2);
+                                    let (pb, vb, fb) = (&snap[o].0, &snap[o].1, &snap[o].2);
+                                    let [x0, x1, x2] = tn.map(|z| pb[z as usize]);
+                                    let nrm = (x1 - x0).cross(x2 - x0).normalize_or_zero();
+                                    let d = nrm.dot(pa[i as usize] - x0);
+                                    let vt = (vb[tn[0] as usize] + vb[tn[1] as usize] + vb[tn[2] as usize]) / 3.0;
+                                    let vn = -(va[i as usize] - vt).dot(nrm);
+                                    let ft = fb[tn[0] as usize] + fb[tn[1] as usize] + fb[tn[2] as usize];
+                                    println!(
+                                        "    {:5} | {:8.1} | {:7.2} | {:9.0} | {:9.0}",
+                                        ks,
+                                        d * 1e3,
+                                        vn,
+                                        fa[i as usize].dot(nrm),
+                                        ft.dot(nrm)
+                                    );
+                                }
+                            }
+                        }
                     } else {
                         r.gap += 1;
                         // Its path's nearest approach to a rim (m).

@@ -4484,7 +4484,7 @@ impl ExplicitBeams {
             }
         }
         // Edge against edge within the car (`edge_contact`, two-body): into the same hits.
-        if self.edge_contact && two_body {
+        if self.edge_contact && two_body && self_edge_on() {
             let more = crate::explicit_contact::self_edge_hits(self);
             self.last_contacts += more.len() as u32;
             found.extend(more);
@@ -5035,6 +5035,12 @@ impl ExplicitBeams {
 pub fn shift_budget_scale() -> f32 {
     static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *S.get_or_init(|| std::env::var("SHIFT_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0))
+}
+
+/// Self edge contact with `edge_contact` (on; `SELF_EDGE=0`, a measurement switch: off).
+pub fn self_edge_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("SELF_EDGE").is_ok_and(|v| v == "0"))
 }
 
 /// §37.1's friction guard (on; `FRICTION_GUARD=0`, a measurement switch: off).
