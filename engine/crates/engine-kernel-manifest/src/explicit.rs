@@ -283,7 +283,7 @@ pub fn split_modules() -> Vec<SplitModule> {
             }
             // Its node hits' residual clamp (vvResOf's lam0): the groups' module runs a
             // frame's levels whenever edge contact is on (the fleet-wide schedules are off).
-            if which == "group" {
+            if which == "group" || which == "fleetlevels" {
                 d.push(("EB_EDGE_CLAMP", "1"));
             }
             // The levels-once module runs only with the fleet-wide schedules, which an upload

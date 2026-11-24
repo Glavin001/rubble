@@ -154,13 +154,11 @@ pub fn edge_pass_on(planner: &FramePlanner) -> bool {
     planner.words[W_EDGE] != 0
 }
 
-/// The perf flags an upload with edge contact or contact offsets runs: edge contact none of
-/// the fleet-wide schedules (its pass is the split group path's); contact offsets all but
-/// the levels-once module, which has no offsets' code (EB_NO_OFFSETS).
+/// The perf flags an upload with edge contact or contact offsets runs: all but the
+/// levels-once module, which has neither the offsets' code (EB_NO_OFFSETS) nor the edge
+/// pairs' residual clamp (EB_EDGE_CLAMP: the groups' and the fleet levels' modules).
 pub(super) fn contact_flags(flags: u32, edge: bool, offset: bool) -> u32 {
-    if edge {
-        flags & !PERF_FLEET_FAMILY
-    } else if offset {
+    if edge || offset {
         flags & !PERF_LEVELS_ONCE
     } else {
         flags

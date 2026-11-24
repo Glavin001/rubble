@@ -532,14 +532,19 @@ void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, ui
         return;
     }
     VvSums S = vvSumsOf(va, vh, h, tn, parity);
-    float rr = vvResOf(h, tn, S, alpha, beta, gamma, nn, v, 0u, -1.0);
+#ifdef EB_EDGE_CLAMP
+    float lam0 = edgePairOn(va, vh) ? max(sdot(f1, nn), 0.0) : -1.0;
+#else
+    float lam0 = -1.0;
+#endif
+    float rr = vvResOf(h, tn, S, alpha, beta, gamma, nn, v, 0u, lam0);
     if (phase == 0u)
     {
-        if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
+        if (rr != 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
         return;
     }
     float3 total = f1;
-    if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
+    if (rr != 0.0) total = sadd3(total, sscale(nn, rr));
     float3 gg;
     if (vvGuardOf(h, tn, S, alpha, beta, gamma, v, total, gg)) total = sadd3(total, gg);
     resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f1, total);
