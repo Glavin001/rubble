@@ -309,6 +309,9 @@ pub struct Lines {
     pub well_r: f64,
     /// the wheel centre's height (mapped m)
     pub wheel_y: f64,
+    /// the floor pan's height (reference y): a little above the skin's floor
+    /// line at the centre (the sedan's key 0 is 0.195)
+    pub y_pan: f64,
 }
 
 impl Lines {
@@ -577,7 +580,7 @@ const SIDES: [(&str, f64); 2] = [("l", 1.0), ("r", -1.0)];
 ///
 /// Reference dimensions used below (m, before the frame's mapping): the
 /// front rails' lane x 0.43 at bumper height (y 0.44), the rear rails' lane
-/// x 0.49, the floor pan at y 0.222, the firewall at the door's front line
+/// x 0.49, the floor pan at [`Lines::y_pan`], the firewall at the door's front line
 /// + 0.07.
 pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
     let f = &l.f;
@@ -669,7 +672,7 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
     b.node("A3", "dc", r(0.0, y_lc, z_rad) + up * 0.020, m);
 
     // ---- firewall with the toe board, and the cowl box
-    let y_pan = 0.222;
+    let y_pan = l.y_pan;
     let (tun_w, tun_h) = (0.18, 0.16);
     let y_cowl = f.yi(skin.top_y(f.z(z_fw - 0.06), f.x(0.5)) - 0.075);
     let (cowl_h, cowl_d) = (0.100, 0.150);

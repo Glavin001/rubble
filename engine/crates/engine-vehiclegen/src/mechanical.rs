@@ -154,6 +154,8 @@ pub struct Gear {
     /// reference axle z (before the frame's mapping)
     pub axle_f: f64,
     pub axle_r: f64,
+    /// the floor pan's height (reference y)
+    pub y_pan: f64,
     /// the tail and nose faces (as built): z at (x, y)
     pub z_nose: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
     pub z_tail: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
@@ -567,7 +569,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
 
     // ---- interior: seats on four feet, the rear bench, the instrument
     // panel on its cross-car beam, the console
-    let y_pan = 0.222;
+    let y_pan = g.y_pan;
     let rows = {
         // (the floor rows the seat cross members stand on)
         let c3 = st.node("sh_c3_3").unwrap().pos.z;

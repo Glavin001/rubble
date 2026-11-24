@@ -650,6 +650,7 @@ impl Sedan {
             well_x: 0.56,
             well_r: 0.375 + self.arch_r - R_ARCH_R,
             wheel_y: self.f.y(R_TYRE_D / 2.0),
+            y_pan: 0.222,
         }
     }
 
@@ -668,6 +669,7 @@ impl Sedan {
             rim_w: self.p.rim_w_in * 0.0254,
             axle_f: R_WHEELBASE / 2.0,
             axle_r: -R_WHEELBASE / 2.0,
+            y_pan: 0.222,
             z_nose: Rc::new(move |x, y| a.front_z(x, y)),
             z_tail: Rc::new(move |x, y| b.rear_z(x, y)),
         }

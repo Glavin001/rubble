@@ -44,6 +44,8 @@ const ZR_AX: f64 = -WHEELBASE / 2.0;
 const TYRE_D: f64 = 0.662;
 const TYRE_W: f64 = 0.235;
 const WHEEL_Y: f64 = TYRE_D / 2.0;
+/// The floor pan's height: the skin's floor line (0.215) and 27 mm, as the sedan's.
+const Y_PAN: f64 = 0.242;
 const Z_FRONT: f64 = 2.26;
 const Z_REAR: f64 = -2.43;
 
@@ -312,6 +314,7 @@ impl Mach1 {
             well_x: 0.535,
             well_r: 0.366,
             wheel_y: WHEEL_Y,
+            y_pan: Y_PAN,
         }
     }
 
@@ -329,6 +332,7 @@ impl Mach1 {
             rim_w: 7.0 * 0.0254,
             axle_f: ZF_AX,
             axle_r: ZR_AX,
+            y_pan: Y_PAN,
             z_nose: Rc::new(front_z),
             z_tail: Rc::new(rear_z_body),
         }
