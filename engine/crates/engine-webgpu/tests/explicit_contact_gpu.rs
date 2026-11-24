@@ -1031,3 +1031,73 @@ fn edge_contact_two_sedans_step_like_the_cpu() {
         assert_eq!(d, 0.0, "sedan {k}: GPU–CPU {d} m");
     }
 }
+
+/// [`edge_contact_two_sedans_step_like_the_cpu`] with four sedans: two head-on pairs side by
+/// side, overlapping, so the group's candidate lists live long and are rebuilt often.
+#[test]
+fn edge_contact_four_sedans_step_like_the_cpu() {
+    four_sedans(false);
+}
+
+/// [`edge_contact_four_sedans_step_like_the_cpu`] on the split group path (the lab's).
+#[test]
+fn edge_contact_four_sedans_on_the_split_path_step_like_the_cpu() {
+    four_sedans(true);
+}
+
+fn four_sedans(split: bool) {
+    if !engine_webgpu::edge_kernels() {
+        eprintln!("edge kernels not built (RUBBLE_EDGE_KERNELS=1): skipped");
+        return;
+    }
+    let text = sedan_text();
+    let make = |at: Vec3, v: Vec3| {
+        let mut s = ExplicitBeams::from_truck(&text, at, v, EXACT).unwrap();
+        s.roll_tyres(v);
+        s.two_body_contact = true;
+        s.dissipative_contact = true;
+        s.fixed_contact = true;
+        s.anti_clip = true;
+        s.edge_contact = true;
+        s
+    };
+    let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, EXACT).unwrap();
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let (zmin, zmax) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
+    let (xmin, xmax) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.x), b.max(n.pos.x)));
+    let (len, wid) = (zmax - zmin, xmax - xmin);
+    let y = 0.01 - low;
+    let fleet = vec![
+        make(Vec3::new(0.0, y, 0.0), Vec3::new(0.0, 0.0, 12.0)),
+        make(Vec3::new(0.0, y, len + 0.4), Vec3::new(0.0, 0.0, -8.0)),
+        make(Vec3::new(0.7 * wid, y, 0.3), Vec3::new(-1.0, 0.0, 10.0)),
+        make(Vec3::new(0.7 * wid, y, len + 0.6), Vec3::new(1.0, 0.0, -10.0)),
+    ];
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_bit_exact(true);
+    if split {
+        g.set_group_split(true);
+        g.set_group_split_tests(true);
+    }
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    let mut steps = 0;
+    for f in 0..90 {
+        w.frame(17);
+        g.frame(17);
+        steps += 17;
+        if f % 10 == 9 {
+            let pos = g.positions();
+            for k in 0..4 {
+                let d = rms(&pos[k], &w.vehicles[k].positions());
+                assert_eq!(d, 0.0, "sedan {k}: GPU–CPU {d} m after {steps} steps (edge hits {:?})", w.edge_stats);
+            }
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    eprintln!("edge stats {:?} after {steps} steps", w.edge_stats);
+    assert!(w.edge_stats[5] > 100);
+}

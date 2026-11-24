@@ -37,8 +37,10 @@ static float gEdgeCollectReach = 0.0;
 
 bool edgeOn() { return gP.edgeBase != 0u; }
 // Measurement only (`RUBBLE_EDGE_ABLATE`, time; results meaningless): 1 the pair tests, 2 the
-// grids, 4 the edges' step data, 8 the hits (found, not kept) skipped.
+// grids, 4 the edges' step data, 8 the hits (found, not kept) skipped; 16 the candidates
+// found again every step (lossless: a check of the list's margin).
 uint edgeAblate() { return gStatic[gP.edgeBase - 1u].x; }
+float edgeSkin() { float s = asfloat(gStatic[gP.edgeBase - 1u].y); return s > 0.0 ? s : EDGE_SKIN; }
 uint4 edgeV0(uint v) { return gStatic[gP.edgeBase + 2u * v]; }
 uint4 edgeV1(uint v) { return gStatic[gP.edgeBase + 2u * v + 1u]; }
 bool edgeVeh(uint v) { return (gStatic[v * 4u + 3u].x & FLAG_EDGE) != 0u; }
@@ -178,7 +180,10 @@ void edgePrepare(uint v, uint k)
     gBeams[at + 2u] = float4(o, 0.0);
     gBeams[at + 3u] = float4(c0, 0.0);
     gBeams[at + 4u] = float4(c1, 0.0);
-    if (live)
+    // (The box and the lists take every edge with a live face, not only the live ones: an edge
+    // whose faces' normals cancel, a fold, is not live now but may be once it opens, and the
+    // candidate list must hold it from its build on.)
+    if (faces >= 1u)
     {
         float3 lo = min(wi, wj);
         float3 hi = max(wi, wj);
@@ -597,7 +602,7 @@ void edgeList(uint v, float3 lo, float3 hi, bool points, uint lane)
     for (uint e = lane, eStop = EB_END(825, e, v0.y, LANES); e < eStop; e += LANES)
     {
         float4 s0 = gBeams[v0.z + EDGE_SCR * e];
-        if ((asuint(s0.w) & 1u) == 0u) continue;
+        if ((asuint(s0.w) & 8u) == 0u) continue;
         float3 q1 = gBeams[v0.z + EDGE_SCR * e + 1u].xyz;
         if (any(max(s0.xyz, q1) < lo) || any(min(s0.xyz, q1) > hi)) continue;
         gNext[v1.w + uint(gAcc[v1.x + 1u].add(1))] = e;
@@ -1057,16 +1062,17 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
             sig |= 1u;
             uint ca = edgeCandAcc(va);
             if (uint(gAcc[ca + 1u].load()) != sig || gAcc[ca + 2u].load() != 0
-                || asfloat(gAcc[edgeV1(va).x + 9u].load()) > EDGE_SKIN * EDGE_SKIN)
+                || asfloat(gAcc[edgeV1(va).x + 9u].load()) > edgeSkin() * edgeSkin())
                 rebuild = 1u;
         }
+        if ((edgeAblate() & 16u) != 0u) rebuild = 1u;
         gsUniformLanes = rebuild;
     }
     sync();
     uint rebuild = gsUniformLanes;
     if (rebuild != 0u)
     {
-        float reach = nf(pad + 2.0 * EDGE_SKIN);
+        float reach = nf(pad + 2.0 * edgeSkin());
         for (uint a = lane, aStop = EB_END(858, a, k, LANES); a < aStop; a += LANES)
         {
             uint ca = edgeCandAcc(vvMember(off, a));

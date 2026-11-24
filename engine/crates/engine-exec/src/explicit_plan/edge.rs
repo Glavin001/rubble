@@ -53,7 +53,9 @@ pub(super) fn edge_tables(
     // (A measurement switch first, `RUBBLE_EDGE_ABLATE` bits, time only: 1 the pair tests,
     // 2 the grids, 4 the edges' step data skipped; then the vehicles' records.)
     let ablate = std::env::var("RUBBLE_EDGE_ABLATE").ok().and_then(|v| v.parse().ok()).unwrap_or(0u32);
-    statics.push([ablate, 0, 0, 0]);
+    // (`RUBBLE_EDGE_SKIN`, m: the candidate list's margin, a measurement; 0: the kernel's.)
+    let skin = std::env::var("RUBBLE_EDGE_SKIN").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+    statics.push([ablate, skin.to_bits(), 0, 0]);
     let base = statics.len() as u32;
     let recs_at = base + 2 * nv as u32;
     let mut edge_recs: Vec<[u32; 4]> = Vec::new();
