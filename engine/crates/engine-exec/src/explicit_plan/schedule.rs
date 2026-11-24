@@ -476,7 +476,7 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
         binding10: b10,
         binding11: b11,
     };
-    Some(match *op {
+    let mut launch = match *op {
         Op::Cmd(_) => return None,
         Op::SelfOne(SelfDispatch::Step { copy, groups }) => {
             // (Vehicle sleep listed: the awake vehicles only, the awake list's arguments.)
@@ -563,7 +563,13 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
                 Some(at) => l((module.to_string(), entry), copy, Grid::Indirect(ArgBuf::Surf, at), None, None),
             }
         }
-    })
+    };
+    // A wide frame: the dispatches the plan's arguments size launch from the gate's slots
+    // (the plan's counts with a group of two or more members, none without; §8.63).
+    if let (true, Grid::Indirect(ArgBuf::Plan, at)) = (kind.vv_wide, launch.grid) {
+        launch.grid = Grid::Indirect(ArgBuf::Wide, super::vv_wide::gated_slot(at).offset());
+    }
+    Some(launch)
 }
 
 /// The perf flags of a frame on the split group path: vehicle contact's state by owner

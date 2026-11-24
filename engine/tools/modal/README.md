@@ -88,7 +88,7 @@ engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_v
 | `--monitor SECS` | While a process runs, a line of GPU use and the process's CPU use every SECS (default 30; 0 off). GPU 0 % with one core busy is the driver compiling |
 | `--no-shader-cache` | Neither read nor write the shared shader cache |
 | `--data PATH` | An extra repo-relative file or directory to ship (32 MB cap, not counting the generated WGSL) |
-| `--sedan DIR` | The generated sedan's JBeam export (default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`). Shipped only when an argument, `--env` or `--variant` says `@sedan`, which becomes `/scenarios/sedan_new`; only `files.json`, `*.jbeam` and `*.pc` (under 1 MB), never the `.glb`/`.rskin` |
+| `--sedan DIR` | The generated sedan's JBeam export (default `engine/out/gen/sedan_new (the generated sedan from the current code, AGENTS.md)`). Shipped only when an argument, `--env` or `--variant` says `@sedan`, which becomes `/scenarios/sedan_new`; only `files.json`, `*.jbeam` and `*.pc` (under 1 MB), never the `.glb`/`.rskin` |
 | `--fanout` | One container per executable of the selection (each test binary), all at once (see Fan-out) |
 | `--fanout-tests` | One container per test, all at once |
 | `--matrix` | The scenario matrix, one container per row (`tools/scenario-matrix/run.sh` calls it) |
@@ -148,7 +148,7 @@ the ~18-minute warm-up.
 
 The scenario matrix's own pieces: `--matrix` builds `-p engine-world-lab --example
 vehicle_lab`, ships `tools/scenario-matrix` (matrix.py, scenes) and the generated
-sedan (`CAR`, default `~/Development/rubble-artifacts/sedan-live/mods/sedan_new`),
+sedan (`CAR`, default `engine/out/gen/sedan_new (the generated sedan from the current code, AGENTS.md)`),
 forwards `FRAMES ROUNDS RETRIES THRESHOLD NOISE_MS WARM_MS PROFILE_SPLIT`, and gives
 each row `engine/out/scenario-matrix/ROW.fx`, uploaded once by hash to the Volume
 `rubble-scenario-states`. Each container runs matrix.py for its row (both halves, the
@@ -651,6 +651,77 @@ Measured 2026-11-14/15 (M3 Max host, OrbStack Docker with Rosetta, Modal T4):
 | WebGPU, warmed: `vv_grid_gpu` / `explicit_vehicles` | 39 s / 57 s end to end; 13.5 s / 41 s billed |
 | WebGPU, new kernel version: parallel warm-up, 16 cores | 1,103-1,157 s (the contact module alone ~1,024 s), ~$0.45 |
 | `explicit_loop_cap -- a_runaway` (no explicit kernels) | 34 s (5.6 s billed, $0.0013) |
+
+## Building on Modal (`remote_build.sh`; the CUDA matrix's default)
+
+`tools/scenario-matrix/run.sh --cuda ...` builds on Modal's CPUs, so this machine compiles
+nothing: it hashes its source files, sends the ones that changed, and reads the result.
+Many sessions can build and test at once, each in containers of its own. The archive
+never comes back here: the GPU stage reads it from the volume it was written to.
+**Choosing where to compile**, for any `gpu_run.sh` or `run.sh --cuda` run:
+`RUBBLE_BUILD=modal` or `RUBBLE_BUILD=local` (or `gpu_run.sh --build modal|local`;
+`MODAL_OPTS="--build local"` through `run.sh`). Every run then says where it built and
+how long that took (`gpu_run: built on Modal in 36 s` / `built locally in Docker in ...`),
+so the two are easy to compare.
+
+- **Default:** modal for the CUDA matrix, local for other selections.
+- **The two-build A/B** (`--base/--head`) builds its commits here (`build_ref.sh`). An
+  exported `RUBBLE_BUILD=modal` leaves it local with a note; an explicit `--build modal`
+  is refused.
+- `--fanout-tests` builds on Modal too (its test lists come from the remote build).
+- `GPU_RUN_LOCAL_BUILD=1` and `--remote-build` are kept as aliases.
+- `remote_build.sh -- <selection>` only builds.
+
+```bash
+RUBBLE_BUILD=local ENGINE_CUDA_FMAD=0 tools/scenario-matrix/run.sh --cuda perf=0
+```
+
+How it works (`remote_build.py`, a deployed Modal class, redeployed when its code or the
+build image changes):
+
+- **Source.** Each worktree is a tree on Modal, keyed by its path. The Mac sends only the
+  files whose content changed since that tree's last build, inside the call (a typical
+  edit: one file, 40 KB, under a second). The container keeps the tree on its local disk;
+  a cold container restores it from one zstd snapshot.
+  - Not sent: 3D models and Blender files, and anything over 8 MB; no build reads them.
+  - `engine/Cargo.lock` is gitignored in this repo, so the worktree's own lockfile is sent,
+    and the remote build resolves the same crate versions.
+- **Cargo works on local disk.** With its target directory on a Modal Volume, every
+  fingerprint check was a network round trip: nothing changed took 59 s, a Rust edit
+  120 s. Now the target comes in as one zstd snapshot (about 570 MB, 4–15 s) when a
+  container starts cold. It is written back when the container stops, not after each
+  build, so the next build on a warm container restores nothing.
+- **Warm containers.** A container stays up 60 s after a build (at most $0.015 of idle 16
+  cores), so back-to-back builds pay no start-up and no restore.
+- **Kernel caches.** nvcc's fatbins and slangc's outputs are kept on a Volume by content
+  (`rubble-rb-kernels`), shared by every tree and session. An edit recompiles only the
+  modules whose CUDA source changed; an edit undone compiles nothing.
+- **The matrix's module list** (`explicit_replay --modules`) runs on Modal too, in a
+  target directory of its own. The rows' fixtures are uploaded to the states volume by
+  content, once, and the GPU stage finds them there.
+
+Measured 2026-11-23 (16 Modal cores; `explicit_replay` with the matrix's explicit
+modules, SASS for the T4; end to end from the Mac):
+
+| Build | Remote, warm container | Cost | Mac, local Docker (main's figures) |
+|---|---|---|---|
+| Nothing changed | 12 s | $0.0024 | 1 s |
+| A Rust edit in engine-cuda | 22 s | $0.0048 | 4 s |
+| The edit undone | 21 s | $0.0043 | 5 s |
+| A line added to `explicit_beams_fleet_levels.slang` (4 modules recompile) | 197 s | $0.048 | 142 s |
+| That kernel edit undone (from the kernel cache) | 24 s | $0.0046 | 5 s |
+| First build from empty caches | 446 s | $0.11 | 324 s |
+
+- **A cold container adds 15–30 s:** restoring snapshots, plus Modal's start-up (up to
+  about 30 s after a redeploy).
+- **End to end (matrix, two rows):** build 109 s on a cold container after new fixtures,
+  then the GPU stage 8 s and $0.0008. Verdict PASS, bit for bit.
+- **Kernel edits are bounded by one module's nvcc on one core.** Modal's cores are about
+  25 % slower than the M3 Max for it (see Build speed). Spreading modules over more
+  containers would not shorten the slowest one. What would shorten it is a kernel change:
+  stable status codes instead of `__LINE__`, or smaller modules.
+- **Cost model.** About $0.0003 a second for 16 cores and 16 GiB: a Rust-edit verdict is
+  well under a cent, build and GPU together.
 
 ## Build speed (CUDA route)
 

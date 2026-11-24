@@ -73,7 +73,9 @@ REPLAY = os.environ.get("REPLAY_BIN")
 # Two builds (`--two-builds`): the base's explicit_replay, compared with REPLAY_BIN (the
 # head) process by process (gpu_run.sh --base REF builds and ships both).
 BASE = os.environ.get("BASE_BIN")
-CAR = os.environ.get("CAR", os.path.expanduser("~/Development/rubble-artifacts/sedan-live/mods/sedan_new"))
+# The generated sedan from the current code (AGENTS.md: the car every benchmark uses):
+# cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out out/gen/sedan_new
+CAR = os.environ.get("CAR", os.path.join(ENGINE, "out", "gen", "sedan_new"))
 FRAMES = int(os.environ.get("FRAMES", "10"))
 ROUNDS = int(os.environ.get("ROUNDS", "3"))
 # A row past the threshold runs RETRIES more times; the median run decides.
@@ -154,6 +156,11 @@ GOAL = (
                          "events": [{"t": 0, "obstacle": {"kind": "bricks", "ahead": 5, "cols": 6, "rows": 5, "deep": 2}}]},
          [], 0.7, "the bricks row with surface contact on"),
         ("pile8_s", 8, mountain(8), [], 8.0, "8 cars piling up on the mountain's ledges, surface contact on"),
+        # The peaks of whole 20 s runs with the generated sedan (perf doc §8.60): the
+        # saved moment a little before the worst vehicle step, so the timed frames span it.
+        ("derby20_peak", 20, derby(20), [], 13.5, "the derby's worst vehicle step of a 20 s run (t 13.58), 20 cars"),
+        ("mountain20_peak", 20, mountain(20), [], 14.95, "the mountain's worst whole step of a 20 s run (t 15.02), 20 cars"),
+        ("mountain20_t6", 20, mountain(20), [], 6.2, "the mountain's worst vehicle step of a 20 s run (t 6.27), 20 cars"),
     ]
 )
 ROWS_ALL = ROWS + GOAL
@@ -471,6 +478,10 @@ def print_counters(base, head):
               f"{cell('l1tex__t_sector_hit_rate.pct'):>11} {cell('lts__t_sector_hit_rate.pct'):>11}")
 
 
+# explicit_replay --run's peak line (print_peak).
+PEAK = re.compile(r"run peak: worst ([\d.]+) ms")
+
+
 def two_builds(rows):
     """The A/B of two builds (BASE_BIN against REPLAY_BIN; gpu_run.sh --base REF): each row's
     fixture replayed by one build's process, then the other's, PROCS times, the order
@@ -491,6 +502,7 @@ def two_builds(rows):
     for row in rows:
         t0 = time.time()
         times = {"base": [], "head": []}
+        worst = {"base": [], "head": []}
         states = {"base": [], "head": []}
         outs = []
         for i in range(procs):
@@ -500,6 +512,9 @@ def two_builds(rows):
                 outs.append(f"[{side} #{i}] " + out[-600:])
                 if ms is not None:
                     times[side].append(ms)
+                    w = PEAK.search(out)
+                    if w:
+                        worst[side].append(float(w.group(1)))
                 if st:
                     states[side].append(read_state(st))
         secs = time.time() - t0
@@ -528,7 +543,11 @@ def two_builds(rows):
         flag = "SLOWER" if slower else ("faster" if delta < -THRESHOLD and base - head > NOISE_MS else "")
         if slower or (not same and not allow_diff):
             bad.append(row[0])
-        print(f"{row[0]:<8} {bfb:>7} {head:>8.3f} {base:>8.3f} {delta:>+7.1f}%  {flag:<6} {noise:>5.1f}% {secs:>5.1f}  {row[5]}")
+        # WORST=1: each build's worst frame (each frame's best round), its processes' median.
+        peak = ""
+        if os.environ.get("WORST") == "1" and worst["base"] and worst["head"]:
+            peak = f" [worst frame head {med(worst['head']):.3f} / base {med(worst['base']):.3f} ms]"
+        print(f"{row[0]:<8} {bfb:>7} {head:>8.3f} {base:>8.3f} {delta:>+7.1f}%  {flag:<6} {noise:>5.1f}% {secs:>5.1f}  {row[5]}{peak}")
         for n in notes:
             print("    " + n)
         if os.environ.get("COUNTERS") == "1":

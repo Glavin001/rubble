@@ -24,7 +24,7 @@
 here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 profile="${PROFILE:-fast}"
-car="${CAR:-$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new}"
+car="${CAR:-$engine/out/gen/sedan_new}"
 cd "$engine" || exit 1
 if [ -z "$FAST_CHECK_LOCKED" ]; then
   [ "$profile" = release ] && flag="--release" || flag="--profile $profile"

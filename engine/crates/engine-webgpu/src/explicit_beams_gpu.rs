@@ -951,7 +951,7 @@ impl SelfSplit {
     }
 
     fn pipeline(&self, name: &str, entry: &str, layout: &wgpu::PipelineLayout) -> wgpu::ComputePipeline {
-        let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
+            let module = explicit_shader_module(&self.device, wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(host_wgsl(module_wgsl(name), self.bit_exact).into()),
         });
@@ -2328,18 +2328,18 @@ impl ExplicitBeamsGpu {
         crate::explicit_loop_cap_hit(self.layout.loop_cap_flag(w))
     }
 
-    /// The contact groups of the current plan (blocking read; 0 when contact is
-    /// not active).
+    /// The contact groups of two or more vehicles of the current plan (blocking read; 0
+    /// when contact is not active): the plan's indirect-arguments word 15, less one.
     pub fn contact_groups(&self) -> u32 {
         if !self.contact_active() {
             return 0;
         }
         let raw = self.read(&self.contact.args);
-        bytemuck::cast_slice::<u8, u32>(&raw)[4]
+        bytemuck::cast_slice::<u8, u32>(&raw)[15].saturating_sub(1)
     }
 
     /// Diagnostic (blocking): the member count of each contact group of the current
-    /// plan.
+    /// plan but the groups of one (0: past VV_MAX_GROUP members, its vehicles alone).
     #[doc(hidden)]
     pub fn contact_group_sizes(&self) -> Vec<u32> {
         if !self.contact_active() {
@@ -2350,7 +2350,7 @@ impl ExplicitBeamsGpu {
         let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
         let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
         let at = self.planner.words[46] as usize;
-        (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
+        (0..n).map(|g| misc[(at + g) * 4 + 1]).filter(|&m| m != 1).collect()
     }
 
     /// Measurement (a blocking read): per vehicle the self-collision hits of the last
@@ -4567,12 +4567,12 @@ impl ExplicitBeamsGpu {
             GroupOp::Group { copy, tests, args: off, entry, .. } => {
                 pass.set_pipeline(if tests { &g.tests } else { g.group(entry) });
                 pass.set_bind_group(0, if tests { &g.bind } else { &g.bind_args }, &at(copy));
-                pass.dispatch_workgroups_indirect(args, off);
+                self.dispatch_plan_args(pass, off);
             }
             GroupOp::Wheels { copy } => {
                 pass.set_pipeline(g.wheels());
                 pass.set_bind_group(0, &g.bind, &at(copy));
-                pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
+                self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the
@@ -4590,12 +4590,12 @@ impl ExplicitBeamsGpu {
                     _ => &g.bind,
                 };
                 pass.set_bind_group(0, bind, &at(copy));
-                pass.dispatch_workgroups_indirect(if from == 0 { args } else { &g.fleet_args[from as usize - 1] }, off);
+                if from == 0 { self.dispatch_plan_args(pass, off) } else { pass.dispatch_workgroups_indirect(&g.fleet_args[from as usize - 1], off) }
             }
             GroupOp::Member(s) => {
                 pass.set_pipeline(g.member());
                 pass.set_bind_group(0, &g.bind, &at(s));
-                pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+                self.dispatch_plan_args(pass, SPLIT_MEMBER_ARGS);
             }
             GroupOp::SelfMember(s) => {
                 let p = self.self_split_pipes();
@@ -4615,7 +4615,7 @@ impl ExplicitBeamsGpu {
                 let p = self.self_split_pipes();
                 pass.set_pipeline(&p.vv_pipes()[0]);
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
-                pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+                self.dispatch_plan_args(pass, SPLIT_MEMBER_ARGS);
             }
             GroupOp::SoloRest { .. } | GroupOp::Surf { .. } => self.run_surface_op(pass, op),
             GroupOp::Wide(w) => self.run_vv_wide_op(pass, w),

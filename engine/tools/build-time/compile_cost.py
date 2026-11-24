@@ -32,6 +32,9 @@ of a call per case: docs/measurements/kernel-compile-time.md), summed over those
 kernels, with the callers that multiply it. An upper bound per item (items overlap: a
 helper inside another counts in both), for ranking.
 
+--dup-check / --dup-init: the one-call-site rule's ratchet (duplication-allowlist.txt):
+each kernel's statements duplicated by heavy helpers inlined at more than one site.
+
 --check: fails when a kernel is predicted past CAP_SECONDS and is not in
 compile-cost-allowlist.txt, or an allowlisted one is predicted slower than its line
 (the line may only come down: --init rewrites it from today's kernels).
@@ -129,6 +132,65 @@ class Module:
                 walk(c, mult * n)
         walk(root, 1)
         return count
+
+
+# The one-call-site rule (engine/docs/build-architecture.md): a helper of HEAVY or more
+# inlined statements a copy, inlined at more than one site of a kernel, duplicates
+# (copies - 1) x its statements for the compiler. --dup-check holds each kernel's sum to
+# its line in DUP_ALLOW (lines only come down; a kernel not listed may have DUP_FREE).
+HEAVY = 50
+DUP_FREE = 1000
+DUP_ALLOW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duplication-allowlist.txt")
+
+
+def duplicated(m, e):
+    """Statements kernel entry e's heavy helpers duplicate, and the three largest."""
+    rows = []
+    for f, n in m.copies(e).items():
+        if f == e or n < 2:
+            continue
+        sub = m.inlined(f)
+        if sub >= HEAVY:
+            rows.append(((n - 1) * sub, re.sub(r"_\d+$", "", f), n, sub))
+    rows.sort(reverse=True)
+    return sum(r[0] for r in rows), rows[:3]
+
+
+def load_dup():
+    allow = {}
+    if os.path.exists(DUP_ALLOW):
+        for line in open(DUP_ALLOW):
+            line = line.split("#", 1)[0].split()
+            if len(line) == 2:
+                allow[line[0]] = int(line[1])
+    return allow
+
+
+def dup_gate(found, init):
+    dup = {n: duplicated(m, e) for n, (m, e, _) in found.items()}
+    allow = load_dup()
+    if init:
+        with open(DUP_ALLOW, "w") as fh:
+            fh.write(f"# Kernels whose heavy helpers (>= {HEAVY} inlined statements a copy) are inlined at more\n"
+                     "# than one site, each with the duplicated statements it may not exceed\n"
+                     "# (tools/build-time/compile_cost.py --dup-check). Lines only come down: call a heavy\n"
+                     f"# helper from one place (loop over its cases). Unlisted kernels may have {DUP_FREE}.\n")
+            for n in sorted(dup, key=lambda n: -dup[n][0]):
+                if dup[n][0] > DUP_FREE:
+                    fh.write(f"{n} {min(dup[n][0], allow.get(n, dup[n][0]))}\n")
+        print(f"{sum(d[0] > DUP_FREE for d in dup.values())} kernels -> {DUP_ALLOW}")
+        return 0
+    bad = []
+    for n, (d, top) in sorted(dup.items()):
+        line = allow.get(n, DUP_FREE)
+        if d > line:
+            why = ", ".join(f"{f} {k} copies x {sub}" for _, f, k, sub in top)
+            bad.append(f"{n}: heavy helpers inlined at more than one site duplicate {d} statements, "
+                       f"past its {line} ({why}): call each from one place")
+    for b in bad:
+        print(b)
+    print(f"duplication: {len(dup)} kernels, {len(allow)} listed, {len(bad)} failing")
+    return 1 if bad else 0
 
 
 def model():
@@ -238,6 +300,8 @@ def main():
     if times:
         return calibrate(found, times) or 0
     pred = {n: seconds(v[2], kb) for n, v in found.items()}
+    if "--dup-check" in flags or "--dup-init" in flags:
+        return dup_gate(found, "--dup-init" in flags)
     if "--init" in flags:
         # (A line may only come down: an existing line keeps the lower of its value and the
         # new prediction plus headroom.)

@@ -7,7 +7,9 @@ user-invocable: false
 # A/B performance changes on Modal (CUDA)
 
 The default way to tell whether a change makes the GPU frame faster without changing
-results. Kernels are built locally with nvcc (free); Modal only runs the binaries. Each
+results. A switch verdict (`run.sh --cuda SWITCH`) builds on Modal's CPUs too, so the Mac
+compiles nothing (a Rust edit about 20 s, README "Building on Modal"); the two-build A/B
+still builds its commits locally (`build_ref.sh`). Modal runs the binaries. Each
 verdict covers all 12 scenario-matrix rows, takes about 30 s to 2 minutes on Modal, and
 costs half a cent to 2 cents on a T4. There is no GPU lock and no risk to the Mac. Full reference:
 `engine/tools/modal/README.md` ("Two builds, head to head" and "The scenario matrix on

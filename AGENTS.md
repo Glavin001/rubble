@@ -32,8 +32,13 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
-- Modal's GPU target is CUDA (`engine-cuda`): kernels compile to GPU code locally with
-  nvcc (free), and Modal only runs the binary, seconds a container.
+- Modal's GPU target is CUDA (`engine-cuda`). The CUDA matrix (`run.sh --cuda`) builds on
+  Modal's CPUs by default, so this machine compiles nothing: only changed source files
+  leave it (`engine/tools/modal/remote_build.sh`; a Rust edit about 20 s and half a cent,
+  README "Building on Modal"). Choose where any run compiles with `RUBBLE_BUILD=modal` or
+  `RUBBLE_BUILD=local` (`gpu_run.sh --build modal|local`): the default is modal for the
+  CUDA matrix and local for other selections and the two-build A/B. Modal runs the
+  binary, seconds a container.
   `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`
   runs each test binary or each test in a container of its own, all at once (built in
   local Docker). Vulkan on Modal (wgpu, the World, the matrix's `run.sh --modal`) is
@@ -127,10 +132,22 @@
   every configuration the kernels build in (run it after touching the kernel plumbing).
   A kernel's first-load compile in the browser: `tools/build-time/compile_cost.py`
   predicts it from the WGSL (CI caps it at 10 s, `--burndown` lists what to fix first);
-  a heavy helper is called from one place in a kernel, not once per case.
+  a heavy helper is called from one place in a kernel, not once per case. Read the
+  `fast-kernels-and-builds` skill before writing or changing Slang or kernel plumbing.
   The harness is `-p engine-world-lab --example vehicle_lab`. To iterate on pages:
   `RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh`
   (never measure with it).
+- The car for every vehicle benchmark, scenario-matrix row, fixture and demo is the
+  **generated sedan** (Rubble's own, built from code by `engine-vehiclegen`): the best
+  quality vehicle. Do not use the authored sedan (`car=sedan`, "Soft-body sedan
+  (authored)"): it is older, heavier (987 nodes against 548) and messier, and numbers
+  measured on it do not describe what we ship. Make the generated sedan from the current
+  code (the full web build does this for the site):
+  `cd engine && cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out "$PWD/out/gen/sedan_new"`.
+  That folder is the scenario matrix's default `CAR`; on the lab page it is `car=gen`
+  (served from `__mods/sedan_new`, which a local server needs linked to that folder when
+  only the kernels and world parts were built). Regenerate it, and the matrix's states,
+  after a change to the generator, and say which car a number was measured on.
 - Generated vehicles: read `engine/docs/generated-vehicles-lessons.md` first (lessons,
   measurements, decisions; add to it rather than redoing research).
 - Deformable vehicles: `engine/docs/deformable-vehicles.md` explains the model (keep it

@@ -509,3 +509,117 @@ mode (pair reuse, self split, contact, bitwise, group split, drive, coupling sha
 surface proxies, loop caps, fleet contact, vehicle grid: 61 tests), `sleep-check.sh` (21),
 Chrome's validation of all 140 modules. The loop-cap suite also caught an uncapped loop an
 earlier commit here added (the `vvSnapNode` loops): capped now.
+
+### The solo frame: one candidate loop for the first phase's tests too (2026-11-23)
+
+The solo frame's first phase ran its own tests before the second phase's: the testing walk,
+the brute pairs, every candidate and the early pairs, each at a call site of `tryContact`.
+Now the first phase only chooses (the mode, the count, the lanes a triangle) and the
+second phase's one `triangleCandidates` loop runs the walk, the brute pairs and every
+candidate; the early pairs are the first entries of the pair loop (`earlyN`), ahead of a
+list's pairs in the same loop. The walk that only lists pairs (`triangleGridList`) has no
+`tryContact`. `pairReuseNear` and `pairReuseTest` moved to `explicit_beams_tri_cands.slang`.
+
+`explicit_beams_solo_wide_nosurf`, Chrome cold, the fast setting, two runs each: 20.2 and
+20.5 s on main, 14.5 and 14.6 s now. Predicted (`compile_cost.py`): 32.5 -> 27.9 s; the
+allowlist's lines came down for 40 kernels (every solo, frame and contact variant).
+
+Kept apart: the pieces' tests (`piecesTests`). Through the same loop (mode 2, as the
+member step runs them) the frame hung the GPU natively in `explicit_pair_reuse_gpu`
+(`piece_labels_keep_the_list_bit_for_bit`: wgpu's poll waiting, 0 % CPU, past 10 minutes;
+main 15 s), with the loop's logic the member step's. Not found which part of the
+compiled frame loops; the pieces kept their own loop.
+
+Found on the way: a step with early pairs and a reused list (both are possible) would
+have read the early list with the reused list's indices in the first try (fixed: one
+count each); and with `EB_ABLATE` the frame did not compile (an `else` before a
+declaration, on main too).
+
+Checked against main's kernels: fast-check (16 of 17 bit for bit, the known `cars1_t20.0`
+quirk, the same words as main against itself), the scenario matrix (12 rows bit for bit,
+none slower: PASS in 32.9 s), `run.sh --world` (8 rows, PASS), twelve GPU suites in
+bit-exact mode (61 tests), `sleep-check.sh` (21), Chrome's validation of all 158 modules
+in both settings, `cargo check -p engine-metal -p engine-cuda`.
+
+### The predictor, refitted and not adopted (2026-11-23)
+
+A fresh cold compile of the lab's 28 modules (this change; Chrome, the fast setting):
+contact 54.4 s (from 65: it holds the solo frame too), solo 14.2 s, members 9.5 s, levels
+9.2 s, every other module at most 2.4 s. `compile_cost.py --calibrate` on them gives
+K 4.639e-06, B 1.4258: the members' kernel predicted 9.99 s (under the cap by nothing) and
+contact 40.3 s against its measured 54.4 s. Kept the model of 2026-11-22 (B 1.758): it
+over-predicts the large kernels, so it is the stricter gate, and the allowlist's lines
+(which only come down) already stop any kernel from growing. The static count ranks
+kernels well but is off by up to 1.4x on one that had its copies removed, so a kernel
+near the cap is judged by a measured cold compile, not by moving the model.
+
+### The contact groups' module without the solo frame (2026-11-23)
+
+Since every vehicle is a group's member (one without partners a group of its own), the
+contact module's first `nv` workgroups only read a flag and returned: its copy of the solo
+frame ran for no vehicle but those of a group past VV_MAX_GROUP members (reported as an
+error). `kernel_profile.py` showed that copy to be most of the module: `selfApply`, the
+drive (`driveWheelsSplit`, `drvTyre`), `beamUpdate` and the node update each twice, once
+in the solo frame and once in `contactGroup`. Now the module's entry steps the groups
+alone (`EB_VV_SOLO && EB_VV_GROUPS` without the split or step defines: the contact
+modules and the test kernels' `explicit_det_`/`explicit_ablate_` ones), with the same
+dispatch words as before (vehicles + groups, the vehicles' workgroups returning), and the
+vehicles of a group over the limit run in the solo module's dispatch (word 0 when one
+does; word 19 keeps it for the awake list's rewrite). Every other module's text is
+unchanged.
+
+`explicit_beams_contact_wide_nosurf`, Chrome cold, the fast setting, two runs: 54.4 s ->
+25.5 and 25.9 s (the larger groups' module, the same entry without the small groups'
+path, 12.7-13.1 s). Predicted 91.8 -> 23.8 s; the allowlist down for 12 contact kernels.
+
+The first version gave the groups' module only the groups' workgroups (word 4 the groups
+alone): it failed `explicit_beams_bitwise`, whose frames switch kernel variants and reuse
+the dispatch words the frozen kernels' plan wrote (vehicles + groups), so workgroups past
+the groups read stale records. Kept the words as they were.
+
+`a_group_over_the_limit_runs_alone_and_is_reported` now also checks that each vehicle of
+a group past the limit is stepped on the contact path (it falls); with the solo dispatch's
+word broken it fails ("vehicle 0 ... was not stepped").
+
+Fixed with it: `contact_groups()` and `contact_group_sizes()` counted the groups of one
+since every vehicle became a member, so `explicit_jbeam_gpu`'s "vehicles 10 m apart were
+grouped" and `sleep_fast_gpu`'s "cars 0 and 1 are one contact group" failed on main. Both
+count the groups of two or more again.
+
+Checked: fast-check against main (16 of 17, the known quirk) and `groupsplit` (17 of 17:
+the contact path against the split path), the scenario matrix (12 rows bit for bit, none
+slower), `run.sh --world`, fifteen GPU suites in bit-exact mode and engine-world's
+`explicit_vehicles`, `sleep-check.sh` (21), Chrome's validation of all 158 modules in both
+settings.
+
+### The contact groups' members: one candidate loop (2026-11-23)
+
+The members' step of the contact module (`contactMembersStepAt`) had four call sites of
+`tryContact`: the early pairs, the grid's walk at the member's offsets (`triangleGridAt`),
+the brute pairs and every candidate. Now one `triangleCandidatesFrom` loop runs them
+(`offBase`: the walk's bucket offsets in gNext and the triangle's own geometry, as
+`triangleGridAt`; an early pair is its triangle against its one candidate). An early pair
+spends one loop-budget pass more (the candidate loop's), which matters only past the cap.
+`explicit_beams_contact_wide_nosurf`, Chrome cold: 25.5 -> 19.0 s (19.1, 18.9).
+
+What is left in it (74,500 instructions offline, against the larger groups' module's
+74,000 at 12.6 s): the small groups' passes (`vvPassSmallLevels` and `vvPassSmallTests`:
+`vvTry` twice, `vvClip` ten times, `vvTriangleCandsSmall` three times), and `beamUpdate`
+twice (the deferred breaks, one lane, and the beam phase: different points of the step, so
+not one loop without moving one). Each further merge is a few per cent.
+
+Tried and dropped: the solo frame's wheels at one call site (`frameDrive`: driveStep's
+rays, bars and tyres, or the ahead schedule's tyres, after the coupling's first phase; one
+copy of drvTyre and of drvRays). Chrome cold 14.6 -> 13.5 s and the drive suite bit for bit
+against the CPU on both schedules, but `explicit_pair_reuse_gpu` (a vehicle without a
+drive: the reused list against the walk, 9,886 words apart) and two `self_split_gpu` tests
+failed natively, with the change's logic the same as before for a vehicle without a drive:
+a second sign, after the pieces' loop above, that this frame's native compile does not
+take every merge. The suite added for it stays: `driving_on_the_solo_frame_bitwise`, the
+solo frame's wheels on both schedules against the CPU (it fails when either path's wheels
+are broken).
+
+Tried and dropped: one call site of `vvTriangleCandsSmall` in the small groups' tests loop
+(`vvTriangleCandsGridOr` returning the fallback to its caller): bit for bit, predicted
+18.6 -> 18.1 s, Chrome cold 19.0 -> 19.2 s (noise). At this size a copy of 850 instructions
+does not move Chrome's compile; the contact module's remaining cost is not in its copies.

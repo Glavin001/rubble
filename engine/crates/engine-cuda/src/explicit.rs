@@ -1014,10 +1014,10 @@ impl CudaExplicitBeams {
     pub fn wait(&mut self) -> Result<(), ExecError> {
         self.bind_ctx()?;
         unsafe { result::stream::synchronize(self.stream) }.map_err(backend)?;
-        // (The contact plan's group count, for FramePlanner::set_vv_wide_seen: the stream
-        // is idle here.)
+        // (The contact plan's groups of two or more members, for
+        // FramePlanner::set_vv_wide_seen: the stream is idle here.)
         if self.planner.vv_wide() {
-            let groups = self.download::<u32>(BIND_ARGS)?.get(3).copied();
+            let groups = plan::vv_wide::plan_groups_of_two(&self.download::<u32>(BIND_ARGS)?);
             self.planner.set_vv_wide_seen(groups);
         }
         if std::mem::take(&mut self.status_due) {

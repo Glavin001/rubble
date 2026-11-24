@@ -6988,3 +6988,115 @@ and 4); engine-metal's parity suite (its host is unchanged); `explicit_beams_bit
 and the World's suites (`explicit_vehicles`, `vehicle_lab_reset`); the T4's rows with
 wgpu through Vulkan. The Mac's timings are from a GPU other sessions were using through
 the lock: deltas within one process are paired, the two baseline runs are not.
+
+### 8.60 The generated sedan from the current code: the matrix and whole runs again (2026-11-22)
+
+From here every benchmark uses the generated sedan made from the current code
+(`cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out
+engine/out/gen/sedan_new`; AGENTS.md). In the solver it has 548 nodes, 4,251 beams and
+528 collision triangles (the generator's own report counts 3,546 defined beams and 540
+triangles before the JBeam loader's additions). The car of §8.52–§8.57 was a copy of the
+same generator from 2026-11-14 (`~/Development/rubble-artifacts/sedan-live`), with the
+same counts in the solver; its JBeam files differ in their values, and the new export
+also has a lighter render mesh. Every row's state was
+saved again with it (`out/scenario-matrix`; the old states are kept as
+`out/scenario-matrix-sedan-nov14`). The code is f8cf855d, bit-exact, and each host's
+default schedules apply.
+
+ms a frame of 34 steps, mean (worst frame). Mac: M3 Max, Metal. T4: Modal, CUDA,
+`ENGINE_CUDA_FMAD=0`. "Old car" is §8.54–§8.57's Mac figure at the same code, where one
+exists.
+
+| row | old car, Mac | generated sedan, Mac | generated sedan, T4 |
+|---|---|---|---|
+| drive | 3.14 | 3.14 (3.35) | 3.92 (5.39) |
+| wall | 4.17 | 3.84 (4.26) | 4.32 (5.67) |
+| headon | 12.23 | 11.81 (12.18) | 17.71 (19.56) |
+| pile8 | 13.13 | 12.32 (12.94) | 21.11 (21.70) |
+| pile32 | 36.15 | 41.12 (45.60) | 80.14 (90.77) |
+| apart1 (surface contact) | 5.7 | 5.72 (5.97) | 7.40 (7.46) |
+| apart8 | 11.4 | 10.88 (12.42) | 18.20 (20.22) |
+| apart20 | 14.2 | 14.60 (15.80) | 25.94 (28.39) |
+| clash20 | 25.4 | 21.37 (23.32) | 37.99 (41.96) |
+| mountain20_t12 | 34.3 | 37.67 (38.48) | 73.85 (77.31) |
+| mountain20_t20 | 42.7 | 43.82 (44.91) | 85.52 (87.19) |
+| derby20_t5 | 29.7 | 26.96 (28.97) | 53.47 (58.41) |
+| derby20_t10 | — | 28.77 (31.79) | 48.24 (53.55) |
+| pole | 16.0 | 15.71 (27.80) | 22.50 (51.72) |
+| pile8_s | 25.07 | 21.94 (22.81) | 29.32 (30.56) |
+
+The other rows are in `out/logs/gen-mac-baseline.log` and `gen-t4-baseline.log`. The
+two cars' rows are not the same moments: each state was saved from its own car's run.
+Read the comparison as sizes, not as a change.
+
+Whole 20 s runs on the Mac, 20 cars, surface contact on, GPU ms a World step from
+t 0.5 s:
+
+| scene, setting | vehicles: median / p95 / worst | whole step: median / p95 / worst |
+|---|---|---|
+| derby, bit-exact | 27.0 / 52.3 / 155.4 (t 13.58) | 30.3 / 54.1 / **776.9 (t 1.95)** |
+| derby, fast (the default) | 25.3 / 29.2 / 77.7 (t 18.98) | 28.4 / 34.0 / **379.6 (t 1.95)** |
+| mountain ledges, bit-exact | 38.5 / 43.4 / 53.9 (t 6.27) | 40.9 / 47.2 / 118.5 (t 15.02) |
+
+The derby's worst whole step is at t 1.95 in every run, with either car, and the
+vehicles' own time is normal there. That is the first-contact spike §8.52 names, and it
+is still not explained by a measurement. Two vehicle peaks also stand out: 155 ms in the
+derby at t 13.58 and 118 ms of whole step on the mountain at t 15.02. They are the moments
+to save as fixtures next, so that the matrix times the peaks themselves.
+
+### 8.63 The frames without a group again: groups of one do not count (2026-11-23)
+
+§8.57's schedule (`vvwide`) runs a frame whose contact plan holds no group on the wide
+passes. Merging `main` brought e8a7ac15 (kernel-compile-time.md, "Every vehicle a group
+member"): with vehicle contact on, the grouping pass (`explicit_beams_vv_group`) now makes
+each vehicle without partners a group of its own, so the members' module has no solo step
+and Chrome's cold compile of `explicit_beams_selfsplit_member_vv_wide` fell from 115 s to
+15 s. Both of §8.57's tests for "no group" read the plan's group count (`vvArgs` word 3):
+the gate (`explicit_vv_gate`) and the host's read-back (`FramePlanner::set_vv_wide_seen`).
+Groups of one made that count at least the number of cars, so the wide passes never ran,
+and cars that touch nothing stepped a workgroup a car a substep again. T4, 7019b028
+against f8ad9c77: apart2 +26 %, apart4 +21 %, apart8 +16 %, apart16 +10 %, apart20 +9 %,
+apart32 +11 %, every row bit for bit.
+
+**The fix (b0ec31a7).** "No group" means no group of two or more members again. The
+grouping pass counts them (a group's member count is 1, or 0 past `VV_MAX_GROUP`) and
+`vvArgs` writes that count plus one to word 15. Word 15 was free, and a plan saved
+before this change holds 0 there; the gate and the host then use word 3, as before. The
+gate and both hosts' read-back (`plan_groups_of_two`; WebGPU now copies words 3 and 15)
+go by this count. The plan still makes the groups of one, so the path without the wide
+schedule is unchanged. In a wide frame, the split group path's dispatches that the
+plan's arguments size (the groups', the members', the tests', and the fleet's scans,
+first plan and larger groups: words 16, 20, 24, 32, 36, 44) launch from six new gate
+slots. These hold the plan's own counts when a group of two or more exists, and 0
+otherwise, so a group of one is not also stepped by its member passes. The fleet's
+second-level arguments are zero after every step's groups (`flArgsZero`), so those
+dispatches get no workgroups either. The plan's arguments are never rewritten, so either
+schedule stays right for either plan, as §8.57 requires. The gate's buffer grows from 10
+to 16 slots. It is not state and no fixture holds it, so the fixtures' layout is
+unchanged. Exactness: a group of one's member step is the solo frame's bit for bit
+(e8a7ac15), and §8.57 proved the wide passes bit for bit against the solo frame.
+
+**T4** (Modal, `ENGINE_CUDA_FMAD=0`, two builds, 3 processes each; ms a frame of 34
+steps, mean, with the worst frame in brackets):
+
+| row | 7019b028 (before) | b0ec31a7 (after) | delta | f8ad9c77 (before main) |
+|---|---|---|---|---|
+| apart2 | 13.66 (14.89) | 10.55 (10.76) | −22.8 % | 10.71 (10.82) |
+| apart4 | 19.10 (21.00) | 15.65 (17.68) | −18.1 % | 15.92 (17.94) |
+| apart8 | 21.23 (23.12) | 18.10 (20.12) | −14.7 % | 18.24 (20.27) |
+| apart16 | 25.57 (27.30) | 23.09 (25.05) | −9.7 % | 23.27 (25.21) |
+| apart20 | 28.43 (30.06) | 26.02 (27.85) | −8.5 % | 25.88 (27.54) |
+| apart32 | 37.20 (39.56) | 33.37 (35.95) | −10.3 % | 33.44 (35.80) |
+
+The last column comes from its own run, head against f8ad9c77: head is 0.3–1.2 % faster
+and bit for bit on all six rows. Against 7019b028, all 37 rows with fixtures pass: every
+row is bit for bit and none is slower. The rows with contact are within ±0.3 %, so they
+keep the 1–5 % that main brought. Logs: `out/vvwide-singletons/`.
+
+The CPU gates pass: `cargo test -p engine-exec`, Chrome's validation of all 158 modules in
+both settings, `tools/build-time/check.py`, and `compile_cost.py --check`
+(`explicit_beams_selfsplit_member_vv_wide` is still 14.9 s predicted, the gate 0.0 s).
+`inline_budget.py` passes after the gate's budget was raised from 128 to 167 inlined
+lines: the gate is now 152, still a 0.0 s compile. Not run: the Mac matrix and the Chrome
+page. On the Mac `vvwide` is on by default for fleets of at most eight, so the same
+recovery is expected there.
