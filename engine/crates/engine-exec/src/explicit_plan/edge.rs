@@ -59,7 +59,9 @@ pub(super) fn edge_tables(
         let room = (edges.len() + v.contact_points.len()) as u32;
         let hits_at = next_init.len() as u32;
         let list_at = hits_at + 2 * room;
-        next_init.extend(std::iter::repeat_n(0, 2 * room as usize + edges.len() + v.contact_points.len()));
+        // (The listed edges and points, then their grid-sorted copies, then each entry's
+        // bucket and rank.)
+        next_init.extend(std::iter::repeat_n(0, 2 * room as usize + 3 * (edges.len() + v.contact_points.len())));
         let counter = acc_init.len() as u32;
         acc_init.extend(std::iter::repeat_n(0, EDGE_ACC));
         statics.push([recs_at + edge_recs.len() as u32, edges.len() as u32, scratch_at, hits_at]);

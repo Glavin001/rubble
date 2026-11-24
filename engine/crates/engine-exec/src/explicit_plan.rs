@@ -211,8 +211,12 @@ pub const W_EDGE: usize = 106;
 /// gBeams float4 per skin edge of edge contact's step scratch (its ends, outward normal
 /// and flags, its faces' opposite corners).
 pub const EDGE_SCRATCH: usize = 5;
-/// gAcc words per vehicle of edge contact (hits, listed edges, listed points, a box).
-pub const EDGE_ACC: usize = 9;
+/// gAcc words per vehicle of edge contact: hits, listed edges, listed points, a box (six
+/// keys), its longest live edge (float bits), then the grid's counts and cursors for its
+/// listed edges and points ([`EDGE_BUCKETS`] each).
+pub const EDGE_ACC: usize = 10 + 4 * EDGE_BUCKETS;
+/// Hash buckets of edge contact's per-vehicle grid (explicit_beams_vv_edges.slang EDGE_BUCKETS).
+pub const EDGE_BUCKETS: usize = 128;
 
 /// Surface contact's segment records (`ExplicitUpload::with_sleep`'s surf_seg): per
 /// vehicle (start in gLists, count, its first segment's mask, its first node's mask), the

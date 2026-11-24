@@ -975,3 +975,51 @@ fn edge_scene(split: bool, large: bool) {
     eprintln!("with edge contact off the CPU ends {moved:.3} m away");
     assert!(moved > 1e-3, "edge contact made no difference ({moved} m)");
 }
+
+/// Edge contact between two whole cars (the procedural sedan, exact settings, the BeamNG
+/// profile's contact: two-body, dissipative, fixed-point sums, anti-clip): one drives into
+/// the other's rear at 15 m/s, the other backing at 5 m/s; GPU == CPU bit for bit through
+/// the crash (the edge grid finds the same pairs as testing all of them).
+#[test]
+fn edge_contact_two_sedans_step_like_the_cpu() {
+    let text = sedan_text();
+    let make = |at: Vec3, v: Vec3| {
+        let mut s = ExplicitBeams::from_truck(&text, at, v, EXACT).unwrap();
+        s.roll_tyres(v);
+        s.two_body_contact = true;
+        s.dissipative_contact = true;
+        s.fixed_contact = true;
+        s.anti_clip = true;
+        s.edge_contact = true;
+        s
+    };
+    let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, EXACT).unwrap();
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let (zmin, zmax) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
+    let fleet = vec![
+        make(Vec3::new(0.0, 0.01 - low, zmax - zmin + 0.3), Vec3::new(0.0, 0.0, -5.0)),
+        make(Vec3::new(0.0, 0.01 - low, 0.0), Vec3::new(0.0, 0.0, 15.0)),
+    ];
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_bit_exact(true);
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    for (frames, steps) in [(20, 17), (40, 1), (20, 17)] {
+        for _ in 0..frames {
+            w.frame(steps);
+            g.frame(steps);
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    eprintln!("edge pass stats (tested, end, parallel, facing, deep, hits, crossed): {:?}; node hits {}", w.edge_stats, w.total.hits);
+    assert!(w.edge_stats[5] > 100, "edge hits {:?}", w.edge_stats);
+    let pos = g.positions();
+    for k in 0..2 {
+        let d = rms(&pos[k], &w.vehicles[k].positions());
+        eprintln!("sedan {k}: GPU–CPU {d:.2e} m after {} steps", w.steps);
+        assert_eq!(d, 0.0, "sedan {k}: GPU–CPU {d} m");
+    }
+}
