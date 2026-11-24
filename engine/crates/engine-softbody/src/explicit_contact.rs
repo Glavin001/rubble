@@ -778,7 +778,7 @@ impl ExplicitBeamsWorld {
             if offered > 0 {
                 self.owner_frame(a, &partners);
                 self.triangle_loop(a, &partners, &mut stats);
-                if !self.skin.is_empty() {
+                if !self.skin.is_empty() && !edge::same_turn() {
                     edge_turns.push((a, partners.clone()));
                 }
             }
@@ -1022,6 +1022,10 @@ impl ExplicitBeamsWorld {
                 }
             }
             self.vehicles[a].contact_throttle[t] = [cwait.min(cap), cidle];
+        }
+        // (Measurement, RUBBLE_EDGE_SAME_TURN=1: the edge hits in the node hits' turn.)
+        if edge::same_turn() {
+            self.edge_turn(a, partners, &mut hits);
         }
         if hits.is_empty() {
             return;

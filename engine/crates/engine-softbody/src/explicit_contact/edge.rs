@@ -49,6 +49,13 @@ pub(crate) fn paint_points() -> bool {
     *ON.get_or_init(|| std::env::var("RUBBLE_PAINT_POINTS").is_ok_and(|v| v == "1"))
 }
 
+/// Measurement (`RUBBLE_EDGE_SAME_TURN=1`): the edge hits solved in their owner's node
+/// hits' turn, one splitting (the order before 8ac742b7); the GPU's pass has no such mode.
+pub(super) fn same_turn() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RUBBLE_EDGE_SAME_TURN").is_ok_and(|v| v == "1"))
+}
+
 fn vertex_edge() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| !std::env::var("EDGE_VERTEX").is_ok_and(|v| v == "0"))
