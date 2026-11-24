@@ -26,9 +26,13 @@ static const float EDGE_END = 1e-3;
 static const float EDGE_DEPTH_M = 0.1; // CLIP_DEPTH (explicit_contact/edge.rs EDGE_DEPTH)
 static const int FL_ERR_EDGES = 5;
 static const uint EDGE_SCR = 5u;
-static const uint EDGE_BUCKETS = 128u; // explicit_plan.rs EDGE_BUCKETS
+static const uint EDGE_BUCKETS = 2048u; // explicit_plan.rs EDGE_BUCKETS
+static const uint EDGE_BLOCK = 32u; // buckets a block of the starts' scan
 
 bool edgeOn() { return gP.edgeBase != 0u; }
+// Measurement only (`RUBBLE_EDGE_ABLATE`, time; results meaningless): 1 the pair tests, 2 the
+// grids, 4 the edges' step data skipped.
+uint edgeAblate() { return gStatic[gP.edgeBase - 1u].x; }
 uint4 edgeV0(uint v) { return gStatic[gP.edgeBase + 2u * v]; }
 uint4 edgeV1(uint v) { return gStatic[gP.edgeBase + 2u * v + 1u]; }
 bool edgeVeh(uint v) { return (gStatic[v * 4u + 3u].x & FLAG_EDGE) != 0u; }
@@ -111,6 +115,7 @@ SkinE edgeLoad(uint v, uint k)
 // its scratch, its ends into the vehicle's box when live.
 void edgePrepare(uint v, uint k)
 {
+    if ((edgeAblate() & 4u) != 0u) return;
     uint4 v0 = edgeV0(v);
     uint4 v1 = edgeV1(v);
     uint4 rec = gStatic[v0.x + k];
@@ -610,16 +615,21 @@ void edgeList(uint v, float3 lo, float3 hi, bool points, uint lane)
 // its own box and tests an entry only in the cell holding the low corner of the two boxes'
 // overlap (each pair once, and every pair whose boxes meet: every pair in contact). gAcc per
 // vehicle at +10 the long list's count, at +12 per kind (0 edges, 1 points) EDGE_BUCKETS
-// cursors (the counts, then each bucket's end) and EDGE_BUCKETS starts; gNext after the lists
+// cursors (the counts, then each bucket's end) and EDGE_BUCKETS starts, then per kind the
+// blocks' sums (EDGE_BUCKETS / EDGE_BLOCK); gNext after the lists
 // the edges' entries (EDGE_CELLS_MAX a listed edge), the points' (8 a point), the long list.
 
 static const uint EDGE_CELLS_MAX = 64u; // explicit_plan.rs EDGE_CELLS_MAX
 float edgeLmax(uint v) { return asfloat(uint(gAcc[edgeV1(v).x + 9u].load())); }
 uint edgeGridAt(uint v, uint kind) { return edgeV1(v).x + 12u + kind * 2u * EDGE_BUCKETS; }
+uint edgeBlocksAt(uint v, uint kind) { return edgeV1(v).x + 12u + 4u * EDGE_BUCKETS + kind * (EDGE_BUCKETS / EDGE_BLOCK); }
 uint edgeListsLen(uint v) { return edgeV0(v).y + vvCpCount(v); }
 uint edgeEntriesAt(uint v, uint kind) { return edgeV1(v).w + edgeListsLen(v) + (kind == 0u ? 0u : EDGE_CELLS_MAX * edgeV0(v).y); }
 uint edgeLongAt(uint v) { return edgeEntriesAt(v, 1u) + 8u * vvCpCount(v); }
-uint edgeBucket(int3 c) { return (uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u) & (EDGE_BUCKETS - 1u); }
+// A cell's bucket: its coordinates modulo 16, 16 and 8 (EDGE_BUCKETS = 2048): the cells of
+// one box (at most 4 a side, edgeCellCount) are in distinct buckets, so an entry is in a
+// bucket once and an owner edge visits a bucket once.
+uint edgeBucket(int3 c) { return (uint(c.x) & 15u) | ((uint(c.y) & 15u) << 4u) | ((uint(c.z) & 7u) << 8u); }
 int3 edgeCellOf(float3 x, float cell) { return int3(floor(x / cell)); }
 uint edgeListed(uint v, uint kind) { return uint(gAcc[edgeV1(v).x + 1u + kind].load()); }
 uint edgeListAt(uint v, uint kind) { return edgeV1(v).w + (kind == 0u ? 0u : edgeV0(v).y); }
@@ -655,31 +665,46 @@ int3 edgeCellAt(int3 c0, int3 c1, uint k)
     return c0 + int3(ki % n.x, (ki / n.x) % n.y, ki / (n.x * n.y));
 }
 
-// Vehicle v's grid, one stage (0 zero, 1 count, 2 starts, 3 cursors, 4 scatter); a barrier
-// after each.
+// Vehicle v's grid, one stage (0 zero, 1 count, 2 the blocks' sums, 3 the starts and the
+// cursors, 4 scatter); a barrier after each.
 void edgeGridStage(uint v, float cell, float reach, uint stage, uint lane)
 {
+    if ((edgeAblate() & 2u) != 0u) return;
+    uint blocks = EDGE_BUCKETS / EDGE_BLOCK;
     if (stage == 0u)
     {
-        for (uint b = lane, bStop = EB_END(833, b, 4u * EDGE_BUCKETS, LANES); b < bStop; b += LANES) gAcc[edgeGridAt(v, 0u) + b].store(0);
+        for (uint x = lane, xStop = EB_END(833, x, 2u * EDGE_BUCKETS, LANES); x < xStop; x += LANES)
+            gAcc[edgeGridAt(v, x / EDGE_BUCKETS) + x % EDGE_BUCKETS].store(0);
         if (lane == 0u) gAcc[edgeV1(v).x + 10u].store(0);
         return;
     }
     if (stage == 2u || stage == 3u)
     {
-        // Each bucket's start, a lane a bucket (the counts before it); then the cursors.
-        for (uint x = lane, xStop = EB_END(843, x, 2u * EDGE_BUCKETS, LANES); x < xStop; x += LANES)
+        // A lane a block of EDGE_BLOCK buckets: its sum; then its start (the blocks before it)
+        // and its buckets' starts, each bucket's cursor at its start.
+        for (uint x = lane, xStop = EB_END(843, x, 2u * blocks, LANES); x < xStop; x += LANES)
         {
-            uint g = edgeGridAt(v, x / EDGE_BUCKETS);
-            uint b = x % EDGE_BUCKETS;
-            if (stage == 3u)
+            uint kind = x / blocks;
+            uint blk = x % blocks;
+            uint g = edgeGridAt(v, kind);
+            uint sums = edgeBlocksAt(v, kind);
+            if (stage == 2u)
             {
-                gAcc[g + b].store(gAcc[g + EDGE_BUCKETS + b].load());
+                int sum = 0;
+                for (uint c = 0u; c < EDGE_BLOCK; c++) sum += gAcc[g + blk * EDGE_BLOCK + c].load();
+                gAcc[sums + blk].store(sum);
                 continue;
             }
             int run = 0;
-            for (uint c = 0u; c < b; c++) run += gAcc[g + c].load();
-            gAcc[g + EDGE_BUCKETS + b].store(run);
+            for (uint c = 0u, cStop = EB_END(847, c, blk, 1u); c < cStop; c++) run += gAcc[sums + c].load();
+            for (uint c = 0u; c < EDGE_BLOCK; c++)
+            {
+                uint b = blk * EDGE_BLOCK + c;
+                int n = gAcc[g + b].load();
+                gAcc[g + EDGE_BUCKETS + b].store(run);
+                gAcc[g + b].store(run);
+                run += n;
+            }
         }
         return;
     }
@@ -706,10 +731,6 @@ void edgeGridStage(uint v, float cell, float reach, uint stage, uint lane)
             for (uint k = 0u, kStop = EB_END(844, k, cells, 1u); k < kStop; k++)
             {
                 uint b = edgeBucket(edgeCellAt(c0, c1, k));
-                // (Once a bucket: two of its cells may share one.)
-                bool again = false;
-                for (uint u = 0u, uStop = EB_END(846, u, k, 1u); u < uStop; u++) again = again || edgeBucket(edgeCellAt(c0, c1, u)) == b;
-                if (again) continue;
                 if (stage == 1u) gAcc[g + b].add(1);
                 else gNext[entries + uint(gAcc[g + b].add(1))] = x;
             }
@@ -733,6 +754,7 @@ void edgeTry(uint va, uint vb, uint slot, uint kind, uint ea, SkinE e, uint x)
 // edge (va < vb) and vb's points against va's edges, each owner edge on a lane.
 void edgePairHits(uint va, uint vb, uint slot, float cell, float reach, uint lane)
 {
+    if ((edgeAblate() & 1u) != 0u) return;
     uint la = edgeListed(va, 0u);
     uint alist = edgeListAt(va, 0u);
     uint longs = uint(gAcc[edgeV1(vb).x + 10u].load());

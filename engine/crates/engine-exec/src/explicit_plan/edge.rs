@@ -50,6 +50,10 @@ pub(super) fn edge_tables(
     let nv = vehicles.len();
     let topo: Vec<Vec<engine_softbody::explicit_contact::EdgeTopology>> =
         vehicles.iter().map(engine_softbody::explicit_contact::skin_edge_topology).collect();
+    // (A measurement switch first, `RUBBLE_EDGE_ABLATE` bits, time only: 1 the pair tests,
+    // 2 the grids, 4 the edges' step data skipped; then the vehicles' records.)
+    let ablate = std::env::var("RUBBLE_EDGE_ABLATE").ok().and_then(|v| v.parse().ok()).unwrap_or(0u32);
+    statics.push([ablate, 0, 0, 0]);
     let base = statics.len() as u32;
     let recs_at = base + 2 * nv as u32;
     let mut edge_recs: Vec<[u32; 4]> = Vec::new();
