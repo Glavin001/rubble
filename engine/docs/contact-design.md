@@ -465,3 +465,12 @@ contact with a clear error; the lab page's control is off until they ship.
   14/54/30, edge contact off 33/126/39; 100 km/h 24/75/113, 24/57/110, 38/154/173. The two orders
   are inside each other's spread (at 60 km/h the separate turn's worst overlap is larger, 48 against
   36 L); no energy rise; the same host tests pass and fail. Neither comes near zero overlap.
+- The belly cap with the small holes filled after it (the fills ran before it and could not see
+  its gaps), 12 head-ons each, edge contact on, median nodes inside / edges through / overlap L:
+  60 km/h no cap 22/72/30, cap 14/54/30, cap and fill 10/58/31; 100 km/h 36/70/222, 24/57/110,
+  14/61/116. Edge contact off: 60 km/h cap 33/126/39, cap and fill 20/116/33; 100 km/h 38/154/173,
+  34/154/185 (inside the spread). The cap alone raised the lint's small holes 1 -> 4, with the fill
+  3. Filling the 3.5 to 5 m outlines (doors, lid): no gain, 16 to 21 faces inward: not holes to
+  patch, panels to author closed.
+- The edge pass's time (8-car pile, CUDA, 175 ms at a 5 cm skin): hits not kept -8, then no pair
+  tests -108, then no grids -9: the pair search, not the owners one after another. Skin 12 cm: 99.

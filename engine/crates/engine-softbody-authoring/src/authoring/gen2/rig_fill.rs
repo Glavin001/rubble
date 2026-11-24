@@ -413,6 +413,14 @@ pub(super) fn hull_pool(r: &Rig, inp: &dyn RigInput) -> HashMap<Part, Vec<usize>
 /// The engine bay and the floor were open from below: a partner's nodes slipped under the
 /// bumper's bottom edge into the car.
 pub(super) fn belly_cap(r: &mut Rig) {
+    belly_faces(r);
+    // (The cap's own gaps: the fills before it could not see them. `RIG_BELLY_FILL=0`: not.)
+    if std::env::var("RIG_BELLY_FILL").map_or(true, |v| v != "0") {
+        fill_holes(r);
+    }
+}
+
+fn belly_faces(r: &mut Rig) {
     if std::env::var("RIG_BELLY").is_ok_and(|v| v == "0") {
         return;
     }
