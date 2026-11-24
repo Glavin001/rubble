@@ -2330,8 +2330,14 @@ impl World {
     /// Advance one fixed step (queued commands first). Never waits on a
     /// readback unless every readback slot is in flight and
     /// `Backpressure::Block`; collect results with [`World::poll`].
+    // (`part` is a span guard: each reassignment ends the previous part.)
+    #[allow(unused_assignments)]
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
+        // Host spans (`engine_webgpu::host_profile`, the profilers): the step and its parts.
+        use engine_webgpu::host_profile::span;
+        let _whole = span("world.step");
+        let mut part = span("world.prep");
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
             .is_ok()
             .then(web_time::Instant::now);
@@ -2409,6 +2415,7 @@ impl World {
         }
         // The terrain's substeps go first: the rigid step applies their reactions.
         lap("before terrain");
+        part = span("world.terrain");
         self.terrain_open_strike()?;
         let terrain = self.terrain_encode(&mut enc)?;
         #[cfg(feature = "stress")]
@@ -2420,7 +2427,9 @@ impl World {
             self.encode_fracture_begin(&mut enc);
         }
         // Explicit vehicles: the last window's impulses, applied by the rigid step.
+        part = span("world.explicit_before");
         self.explicit_before_step(&mut enc)?;
+        part = span("world.rigid_encode");
         #[cfg(feature = "stress")]
         let in_step = fracture && self.fracture_in_step();
         #[cfg(not(feature = "stress"))]
@@ -2439,11 +2448,13 @@ impl World {
         if let (Some(m), true) = (&marks, ran && self.explicit.is_some()) {
             m.mark(&mut enc, "rigid step end");
         }
+        part = span("world.explicit_after");
         let explicit_read = if ran { self.explicit_after_step(&mut enc)? } else { None };
         if let (Some(m), Some(_)) = (&marks, explicit_read) {
             m.mark(&mut enc, "vehicle coupling loads");
         }
         lap("rigid encoded");
+        part = span("world.fracture_readback_encode");
         if let Some(m) = &marks {
             m.mark(&mut enc, "rigid tail");
         }
@@ -2587,6 +2598,7 @@ impl World {
             let staging = m.resolve(self.sim.device(), &mut enc);
             (m, staging)
         });
+        part = span("world.submit");
         let cmd = enc.finish();
         self.last_submit = Some(web_time::Instant::now());
         self.sim.queue().submit([cmd]);
@@ -2611,6 +2623,7 @@ impl World {
             }
         }
         lap("submitted");
+        part = span("world.map_poll");
         if let Some(slot) = mapped {
             if let Some((_, size)) = &timed {
                 let mut late = self
@@ -2633,6 +2646,7 @@ impl World {
             self.tick_gpu_ms = Some(ms);
         }
         lap("mapped + polled");
+        drop(part);
         self.step += 1;
         Ok(())
     }
@@ -2690,7 +2704,11 @@ impl World {
     /// The frames of every step whose results are ready, oldest first. Never
     /// blocks. A capacity overflow in any step is an error.
     pub fn poll(&mut self) -> anyhow::Result<Vec<Frame>> {
-        let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        let _span = engine_webgpu::host_profile::span("world.poll");
+        {
+            let _s = engine_webgpu::host_profile::span("world.poll.device");
+            let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        }
         self.collect(false)
     }
 

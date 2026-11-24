@@ -322,6 +322,7 @@
     import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
+    import { attachProfiler } from './profiler.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
 
     const qs = new URLSearchParams(location.search);
@@ -596,6 +597,8 @@
       drawPacer.setAutoScale((get('renderScale') ?? 'auto') === 'auto');
     };
     const renderScale = () => { const v = $('renderScale')?.value ?? 'auto'; return v === 'auto' ? (drawPacer ? drawPacer.scale() : 1) : Number(v); };
+    // The profiler panel (a toggle beside "Copy perf report"): frame breakdown, GPU per step, kernel replay.
+    const prof = attachProfiler(() => W?.world, { parent: document.getElementById('perfCopy').parentElement });
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0, buildGen = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : mode === 'derby' ? 'derby' : 'flat');
     // The derby's settings (rubble::vehicle_lab::derby::DerbySpec).
@@ -1710,7 +1713,7 @@
           let drew = drawPacer.frame(now / 1000, taken, refused, scale > 0, drawBusy);
           if (window.__drawOff) drew = false;
           if (drawScale !== renderScale()) configure();
-          if (drew) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          if (drew) prof.span('page.draw', () => draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0));
           // A frame not drawn still reads back what its steps left (the lab's
           // measurements and the derby's AI): the lab's inputs do not follow the drawing.
           else if (taken > 0) {
