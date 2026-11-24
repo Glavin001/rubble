@@ -384,6 +384,13 @@ void surfPairFind(uint v, uint p, float3 origin, float r, uint4 r0, uint4 r1, ui
     float3 w2;
     float3 q2;
     if (!surfPairContact(v, code, origin, r, tn, j, w, nn, g, q, two, w2, q2)) return;
+    surfPairKeep(v, code, tn, j, w, nn, g, q, two, w2, q2);
+}
+
+// A pair's hit counted (as the loops count it) and kept.
+void surfPairKeep(uint v, uint code, uint4 tn, uint j, float3 w, float3 nn, float g, float3 q, bool two, float3 w2,
+                  float3 q2)
+{
     uint kind = code >> 30;
     if (kind == SURF_TRI)
     {
