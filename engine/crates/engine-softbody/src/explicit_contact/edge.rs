@@ -39,9 +39,16 @@ fn facing_check() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| !std::env::var("EDGE_FACING").is_ok_and(|v| v == "0"))
 }
+/// Node against edge with edge contact (on; `EDGE_VERTEX=0`, a measurement: off).
 fn vertex_edge() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("EDGE_VERTEX").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| !std::env::var("EDGE_VERTEX").is_ok_and(|v| v == "0"))
+}
+/// Car-to-car edge contact over the outer skin's edges only (`EDGE_OUTER_ONLY=1`, a
+/// measurement; default: every edge, an inside face's taking its side from the partner).
+fn edge_outer_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("EDGE_OUTER_ONLY").is_ok_and(|v| v == "1"))
 }
 fn edge_depth() -> f32 {
     static D: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
@@ -67,19 +74,22 @@ pub(super) struct SkinEdge {
     /// edge's region belongs to its faces (Offset Geometric Contact's edge block is empty
     /// there).
     convex: bool,
+    /// `out` is from the outer skin (its winding is checked); false: an edge of faces inside
+    /// the car only, whose side the partner's edge decides.
+    outer: bool,
 }
 
 /// The vehicle's live skin edges with their outward normals (unit sum of the live
 /// triangles' unit normals at each edge).
-fn skin_edges(v: &ExplicitBeams) -> Vec<SkinEdge> {
+fn skin_edges(v: &ExplicitBeams, outer_only: bool) -> Vec<SkinEdge> {
     let w = |i: u32| v.origin + v.nodes[i as usize].pos;
-    let mut by: HashMap<(u32, u32), (Vec3, Vec<(Vec3, Vec3)>)> = HashMap::new();
+    let mut by: HashMap<(u32, u32), (Vec3, Vec<(Vec3, Vec3)>, bool)> = HashMap::new();
     for (t, tri) in v.triangles.iter().enumerate() {
         if v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t) {
             continue;
         }
-        // The outer skin's (a face inside the car is not part of its outside).
-        if !v.tri_outer.get(t).copied().unwrap_or(true) {
+        let outer = v.tri_outer.get(t).copied().unwrap_or(true);
+        if outer_only && !outer {
             continue;
         }
         let n = tri.nodes;
@@ -91,14 +101,22 @@ fn skin_edges(v: &ExplicitBeams) -> Vec<SkinEdge> {
         let corner = [a, b, c];
         for k in 0..3 {
             let (x, y) = (n[k], n[(k + 1) % 3]);
-            let e = by.entry((x.min(y), x.max(y))).or_insert((Vec3::ZERO, Vec::new()));
-            e.0 += nn;
-            e.1.push((corner[(k + 2) % 3], nn));
+            let e = by.entry((x.min(y), x.max(y))).or_insert((Vec3::ZERO, Vec::new(), false));
+            // The outward normal from the outer skin's faces when the edge has any.
+            if outer && !e.2 {
+                e.0 = Vec3::ZERO;
+                e.1.clear();
+                e.2 = true;
+            }
+            if outer == e.2 {
+                e.0 += nn;
+                e.1.push((corner[(k + 2) % 3], nn));
+            }
         }
     }
     let mut e: Vec<SkinEdge> = by
         .into_iter()
-        .filter_map(|((i, j), (s, faces))| {
+        .filter_map(|((i, j), (s, faces, outer))| {
             let out = s.normalize_or_zero();
             let opp = [faces.first().map(|f| f.0), faces.get(1).map(|f| f.0)];
             // Convex: each face's opposite corner is behind the other face's plane.
@@ -106,7 +124,7 @@ fn skin_edges(v: &ExplicitBeams) -> Vec<SkinEdge> {
                 [(o0, n0), (o1, n1)] => n0.dot(*o1 - w(i)) <= 0.0 && n1.dot(*o0 - w(i)) <= 0.0,
                 _ => true,
             };
-            (out != Vec3::ZERO).then(|| SkinEdge { i, j, p: w(i), q: w(j), out, opp, convex })
+            (out != Vec3::ZERO).then(|| SkinEdge { i, j, p: w(i), q: w(j), out, opp, convex, outer })
         })
         .collect();
     // (A fixed order: the hits' order sets the sums' order.)
@@ -153,7 +171,7 @@ impl ExplicitBeamsWorld {
         }
         for a in 0..nv {
             let skip = self.skip.get(a).copied().unwrap_or(false);
-            self.skin.push((!skip).then(|| skin_edges(&self.vehicles[a])));
+            self.skin.push((!skip).then(|| skin_edges(&self.vehicles[a], edge_outer_only())));
         }
     }
 
@@ -269,11 +287,23 @@ impl ExplicitBeamsWorld {
                     continue;
                 }
                 n /= len;
-                if n.dot(e.out) < 0.0 {
-                    n = -n;
+                // The side from A's outer edge, or from B's when A's is an inside face's
+                // (neither outer: no side, no contact).
+                match (e.outer, f.outer) {
+                    (false, false) => continue,
+                    (false, true) => {
+                        if n.dot(f.out) > 0.0 {
+                            n = -n;
+                        }
+                    }
+                    _ => {
+                        if n.dot(e.out) < 0.0 {
+                            n = -n;
+                        }
+                    }
                 }
                 // B's skin must face A here (B's outward against n), else no contact.
-                if facing_check() && n.dot(f.out) >= 0.0 {
+                if facing_check() && e.outer && f.outer && n.dot(f.out) >= 0.0 {
                     // (Counted only when close: the pairs the check turns away.)
                     let g = n.dot((f.p + (f.q - f.p) * t) - (e.p + (e.q - e.p) * s));
                     if g <= r && g >= -edge_depth() {
@@ -332,7 +362,7 @@ impl ExplicitBeamsWorld {
         let (travel_o, travel_x) = (travel(&self.vehicles[o]), travel(&self.vehicles[x]));
         let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
         for (k, e) in eo.iter().enumerate() {
-            if !e.convex {
+            if !e.convex || !e.outer {
                 continue;
             }
             let pad = r + travel_o + travel_x;
@@ -401,7 +431,7 @@ impl ExplicitBeamsWorld {
 /// car-to-car rule (closest points inside both, normal e × f out of the first edge's side
 /// and into the second's, gap −EDGE_DEPTH..r). Each pair once, as hits of the self pass.
 pub(crate) fn self_edge_hits(v: &mut ExplicitBeams) -> Vec<crate::explicit_beams::SelfHit> {
-    let edges = skin_edges(v);
+    let edges = skin_edges(v, true);
     let r = v.collision_range;
     let group = |i: u32| v.self_groups.get(i as usize).copied().unwrap_or(0);
     let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();

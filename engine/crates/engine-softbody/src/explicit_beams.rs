@@ -971,10 +971,14 @@ pub struct ExplicitBeams {
     /// whose front faces out of the whole vehicle at rest); the others keep
     /// anti-clip's rule. Empty: every triangle.
     pub outward_tris: Vec<bool>,
-    /// Edge-against-edge vehicle contact (a Rubble setting, off by default;
-    /// `explicit_contact::edge`): with this vehicle in a pair, the two skins' edges are
-    /// kept apart as the nodes are from the triangles, so two skins cannot cross
-    /// between their nodes. CPU reference only so far.
+    /// Edge vehicle contact (a Rubble setting, off by default; `explicit_contact::edge`,
+    /// `docs/contact-design.md`): with this vehicle in a pair, (1) the two skins' edges are
+    /// kept apart as the nodes are from the triangles (edge against edge), (2) the
+    /// partner's nodes are kept off this skin's convex edges (node against edge, in each
+    /// edge's wedge), so two skins cannot cross between their nodes, and (3) the pair's
+    /// residual pass may take back force (the accumulated clamp: a hit's normal force is
+    /// moved toward the stop at the forces now, never below zero), which halves the
+    /// edges' energy rise. CPU reference; the GPU's kernels next.
     pub edge_contact: bool,
     /// Per collision triangle: on the outer skin (air on it, `dragCoef` > 0) or a face
     /// inside the car (a floor pan, a seat's solid). Edge contact takes the outer skin's
@@ -5037,10 +5041,12 @@ pub fn shift_budget_scale() -> f32 {
     *S.get_or_init(|| std::env::var("SHIFT_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0))
 }
 
-/// Self edge contact with `edge_contact` (on; `SELF_EDGE=0`, a measurement switch: off).
+/// Self edge contact with `edge_contact` (a measurement, off; `SELF_EDGE=1`: on). Off
+/// because self and vehicle contact are separate passes over shared nodes: with it the
+/// head-on's edges through the other car rise 99 → ~170 (`docs/contact-design.md`).
 pub fn self_edge_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !std::env::var("SELF_EDGE").is_ok_and(|v| v == "0"))
+    *ON.get_or_init(|| std::env::var("SELF_EDGE").is_ok_and(|v| v == "1"))
 }
 
 /// §37.1's friction guard (on; `FRICTION_GUARD=0`, a measurement switch: off).

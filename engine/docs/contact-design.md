@@ -308,6 +308,16 @@ Both pass every guard (not fused: parted 9.0 / 6.0 m against the same with conta
 push 25 mm; cannonball; pole energy). Chosen for the GPU: **edge + node–edge + split Jacobi, one
 sweep**: it is the GPU's existing pass shape, and it halves the edge contact's energy rise.
 
+### One setting (2026-11-24)
+
+`ExplicitBeams::edge_contact` is now the whole fix: edge against edge, node against edge (on
+with it; `EDGE_VERTEX=0` a measurement), and the accumulated clamp in the residual pass for
+every hit with either vehicle's `edge_contact` (the existing split, one pass: split Jacobi, one
+sweep). Self edge contact is off (`SELF_EDGE=1`, a measurement). `EDGE_CONTACT=1` alone, six runs
+of 60 + 60: nodes inside 27 / **32** / 38, edges through 64 / 86 / 148, overlap 33 / **60** / 69 L;
+every guard passes (not fused: 6.00 m against 6.00 m; 60 + 60 rise 1394 J of 413 kJ, bound
+2065 J). Off, every step is as before (196 + 63 softbody host tests pass).
+
 ## What the GPU port carries (the candidate default)
 
 1. **Edge hits in the owner's turn** (`explicit_contact/edge.rs`): edge against edge between

@@ -1711,7 +1711,12 @@ impl ExplicitBeamsWorld {
             let cacc = if x.t > 0.0 { acc(x.b, x.h) * (1.0 - x.t) + acc(x.b, x.h2) * x.t } else { acc(x.b, x.h) };
             let an = (cacc - at).dot(x.n);
             let vn = v.dot(x.n);
-            if !(vn < 0.0 && an * STEP + vn < 0.0) {
+            // Edge contact's pairs (either vehicle's `edge_contact`): the accumulated clamp,
+            // the hit's normal force (the first pass's) moved toward the stop, never below
+            // zero; else only an approaching pair still approaching gets more.
+            let clamp = self.vehicles[a].edge_contact || self.vehicles[x.b].edge_contact;
+            let lam0 = if clamp { first.get(j).map_or(0.0, |f| f.dot(x.n)).max(0.0) } else { 0.0 };
+            if !clamp && !(vn < 0.0 && an * STEP + vn < 0.0) {
                 continue;
             }
             let imc = if x.t > 0.0 {
@@ -1734,7 +1739,12 @@ impl ExplicitBeamsWorld {
             }
             let m = 1.0 / inv;
             let r = -(an * m) - vn * m / STEP;
-            if r > 0.0 {
+            if clamp {
+                let r = (lam0 + r).max(0.0) - lam0;
+                if r != 0.0 {
+                    out[j] = Some(r);
+                }
+            } else if r > 0.0 {
                 out[j] = Some(r);
             }
         }
