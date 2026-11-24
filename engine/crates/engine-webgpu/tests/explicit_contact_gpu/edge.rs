@@ -67,7 +67,9 @@ fn edge_scene(split: bool, large: bool) {
     );
     let mut fleet = vec![lower, upper, corner];
     if large {
-        for (x, z) in [(-0.3f32, 0.02f32), (-0.15, -0.03)] {
+        // (Past the kernels' VV_PART, 8 members: twelve bodies over one ridge.)
+        for i in 0..9 {
+            let (x, z) = (-0.4 + 0.07 * i as f32, if i % 2 == 0 { 0.02f32 } else { -0.03 });
             fleet.push(tetra(
                 [Vec3::new(x, 0.03, z), Vec3::new(x - 0.2, 0.5, z + 0.2), Vec3::new(x + 0.1, 0.5, z + 0.25), Vec3::new(x + 0.05, 0.5, z - 0.25)],
                 Vec3::new(0.0, -1.2, 0.0),
@@ -118,6 +120,7 @@ fn edge_scene(split: bool, large: bool) {
     g.contact_status().unwrap();
     if large {
         assert!(g.contact_groups() >= 1, "contact groups {}", g.contact_groups());
+        assert!(w.vehicles.len() > 8, "a group past VV_PART");
     }
     eprintln!("edge pass stats (tested, end, parallel, facing, deep, hits, crossed): {:?}", w.edge_stats);
     assert!(w.edge_stats[5] > 10, "edge hits {:?}", w.edge_stats);

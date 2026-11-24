@@ -445,11 +445,11 @@ contact with a clear error; the lab page's control is off until they ship.
   mask them: fixtures made by a build replay that build's schedule on any other. Earlier
   "7-11 % slower" figures of this day are void for that reason.
 - No matrix row has edge contact on: its cost and CUDA results are unmeasured there.
-- Open: groups over VV_PART (8) have no edge contact (regression of 103a8a46, untested);
-  compile,
+- Open: groups over VV_PART (8) have edge contact again (edgePass, an owner at a time; a 12-body test),
+  its module past its inline and duplication lines (to shrink: edgePairHits from one place); compile,
   inline and duplication ratchet lines raised and to be brought back; a browser frame runs
   without edge contact until its module compiles; paint points are CPU-only (off).
-- Edge turns after the node turns against one shared turn (`RUBBLE_EDGE_SAME_TURN=1`, CPU), 12
+- Edge turns after the node turns against one shared turn (CPU, the switch is in d38610b2 only), 12
   head-ons each, median nodes inside / edges through / overlap L: 60 km/h shared 16/60/26, after
   14/54/30, edge contact off 33/126/39; 100 km/h 24/75/113, 24/57/110, 38/154/173. The two orders
   are inside each other's spread (at 60 km/h the separate turn's worst overlap is larger, 48 against
