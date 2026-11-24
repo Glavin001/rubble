@@ -115,3 +115,30 @@ seen through by jumping the band (look-ahead works); nodes enter through the ski
 (20 / 17: step 4, the recovery step, not built), and the tyres have no collision shape (932 /
 278 tyre vertices inside). Next: step 4, step 6 (close the skin), a tyre shape (known-bugs S2
 item 3).
+
+### Step 4 measured, and an energy bug in the edge pass (2026-11-24)
+
+`pair_crashes_create_no_energy` (new, every step through the ledger; passes with the defaults)
+found that the edge pass creates energy: the mechanical energy's peak over the start, head on
+60 + 60 / 100 + 100 / 100 into 10 / offset (bound 0.5 % of the start: 2.1 / 5.6 / 2.9 / 2.1 kJ):
+
+| Switches | Rise (kJ) |
+|---|---|
+| none (today) | 0.01 / 0.00 / 0.25 / 0.15 |
+| look-ahead alone | 0.01 / 0.00 / 0.05 / 0.07 |
+| edge | 7.4 / 8.0 / 3.2 / 1.9 |
+| edge + node–edge | 14.2 / 7.6 / 8.9 / 3.3 |
+| edge + node–edge + look-ahead | 17.5 / 7.0 / 9.1 / 2.3 |
+
+(Earlier in S4 "energy only falls" with edge contact was read from the probe every 20 ms; the
+ledger every step shows these rises.) Cause, by construction: the edge pass runs after the
+node pass with its own mass splitting and both cancel the same nodes' forces from the pass's
+start, and its hits skip the node pass's work guards (`guard_vehicle_pass`, `guard_final`,
+the residual pass). **Fix first:** edge and node–edge hits in the node pass's hit list (a
+four-node hit), one splitting, the same guards.
+
+Push-out (`PUSH_OUT` m/s, both passes, a pair behind its surface moves out at that rate under
+load) on top of edge + node–edge + look-ahead: 1 m/s 60 + 60 4/7 nodes, 33/28 edges; 100 + 100
+9/8, 49/61; little change, and at 3 m/s no better. With the outward side as well it fuses the
+cars again (parted 0.01 m of 4.6) and edges through rise to 133–521. Not adopted; re-measure
+after the fix above.

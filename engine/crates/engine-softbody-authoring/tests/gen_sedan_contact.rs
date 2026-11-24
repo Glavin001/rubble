@@ -227,6 +227,11 @@ struct HeadOn {
     parted_free: f32,
     /// At the end: per car, its nearest contact node outside the other's hull (m).
     gap_end: [f32; 2],
+    /// The ledger: the mechanical energy's largest rise over the start, the start (J),
+    /// and vehicle contact's position steps' energy at the end (J).
+    rise: f64,
+    start: f64,
+    steps_energy: f64,
     finite: bool,
 }
 
@@ -285,8 +290,15 @@ fn pair_crash(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool) -> He
     let steps = (ms as f32 * 1e-3 / STEP).round() as usize;
     let every = (0.02 / STEP).round() as usize;
     let mut r = HeadOn::default();
+    w.enable_ledger();
+    r.start = w.ledger.as_ref().unwrap().start;
     for k in 1..=steps {
         w.step();
+        {
+            let l = w.ledger.as_ref().unwrap();
+            r.rise = r.rise.max(l.mechanical() - r.start);
+            r.steps_energy = l.w_contact_shift;
+        }
         if k % every != 0 && k != steps {
             continue;
         }
@@ -316,6 +328,7 @@ fn pair_crash(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool) -> He
         }
     }
     r.finite = w.vehicles.iter().all(finite);
+    w.ledger = None;
     if push {
         let mut free = w.clone();
         free.contact = false;
@@ -715,6 +728,28 @@ fn cannonball_never_inside_the_car() {
             &format!("steel ball r 0.1 m at {speed} m/s into the front door"),
             format!("{} nodes inside it past the band (deepest {:.0} mm), {} steps through a live panel", r.inside, r.deepest * 1e3, r.crossed),
             "0, 0".into(),
+            pass,
+        );
+        ok &= pass;
+    }
+    assert!(ok);
+}
+
+/// Car-to-car crashes create no energy: in every pair scene the mechanical energy
+/// (kinetic, gravitational, elastic) never rises past 0.5 % of the start
+/// (`crash_invariants.rs`'s rule; drive work excluded: only the slow push drives, and its
+/// rise is checked against its start too, a bound its 0.3 throttle stays well inside).
+#[test]
+fn pair_crashes_create_no_energy() {
+    let mut ok = true;
+    for (a, b, off, ms) in [(60, 60, 0, 600), (100, 100, 0, 600), (100, 10, 0, 600), (60, 60, 800, 600)] {
+        let r = pair_crash(a, b, off, ms, a == 60 && off == 0);
+        let pass = r.finite && r.rise <= 5e-3 * r.start;
+        row(
+            "car-to-car crash creates no energy",
+            &format!("head on {a} + {b}, offset {off} mm"),
+            format!("rise {:.1} J of {:.0} kJ; contact position steps {:.1} kJ", r.rise, r.start * 1e-3, r.steps_energy * 1e-3),
+            "≤ 0.5 % of start".into(),
             pass,
         );
         ok &= pass;

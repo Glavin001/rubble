@@ -135,6 +135,8 @@ struct EdgeHit {
     p: f32,
     /// Speculative: the gap past the band the pair may still close this step (m).
     spec: f32,
+    /// How far the pair has crossed (m; 0 not crossed).
+    behind: f32,
 }
 
 impl ExplicitBeamsWorld {
@@ -291,7 +293,7 @@ impl ExplicitBeamsWorld {
                 if g < 0.0 {
                     self.edge_stats[6] += 1;
                 }
-                out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p: (r - g).max(0.0).min(r), spec });
+                out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p: (r - g).max(0.0).min(r), spec, behind: (-g).max(0.0) });
             }
         }
         out
@@ -371,7 +373,7 @@ impl ExplicitBeamsWorld {
                 if !beyond {
                     continue;
                 }
-                out.push(EdgeHit { a: [e.i, e.j], b: [h, h], s, t: 0.0, n, p: (r - g).max(0.0).min(r), spec });
+                out.push(EdgeHit { a: [e.i, e.j], b: [h, h], s, t: 0.0, n, p: (r - g).max(0.0).min(r), spec, behind: 0.0 });
             }
         }
         out
@@ -442,11 +444,15 @@ impl ExplicitBeamsWorld {
                 x.p,
                 friction,
             );
-            let delta = if f != Vec3::ZERO && dissipative { shift_depth(x.p, budget, fh.dot(x.n)) } else { 0.0 };
+            let mut delta = if f != Vec3::ZERO && dissipative { shift_depth(x.p, budget, fh.dot(x.n)) } else { 0.0 };
+            let rate = crate::explicit_contact::push_out_rate();
+            if rate > 0.0 && x.behind > 0.0 {
+                delta = delta.max((rate * STEP).min(x.behind));
+            }
             apply.push((f, x.n, delta * m, ims));
         }
         for (x, (f, n, q, ims)) in hits.iter().zip(apply) {
-            if f == Vec3::ZERO {
+            if f == Vec3::ZERO && q <= 0.0 {
                 continue;
             }
             let wa = [1.0 - x.s, x.s];

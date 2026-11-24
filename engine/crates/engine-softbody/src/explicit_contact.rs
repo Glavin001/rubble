@@ -26,6 +26,13 @@ use glam::Vec3;
 mod edge;
 
 /// Speculative look-ahead for vehicle contact (under measurement, `SPECULATIVE=1`).
+/// The push-out rate (m/s) of a pair already behind the surface (under measurement,
+/// `PUSH_OUT`; 0: none, as before).
+pub(crate) fn push_out_rate() -> f32 {
+    static R: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *R.get_or_init(|| std::env::var("PUSH_OUT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
+}
+
 pub(crate) fn speculative() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SPECULATIVE").is_ok_and(|v| v == "1"))
@@ -981,6 +988,7 @@ impl ExplicitBeamsWorld {
                         // An anti-clip-only triangle (BeamNG NONCOLLIDABLE): no force
                         // in front of its plane; behind it, pushed back to the plane.
                         let p = if spec > 0.0 { 0.0 } else { clip_depth(only, c.d, r) };
+                        let behind = if only { 0.0 } else { (-c.d).max(0.0) };
                         if only && c.d >= 0.0 {
                             continue;
                         }
@@ -994,6 +1002,7 @@ impl ExplicitBeamsWorld {
                             n: frame.n * c.side,
                             p,
                             spec,
+                            behind,
                         });
                         continue;
                     }
@@ -1027,6 +1036,7 @@ impl ExplicitBeamsWorld {
                         n,
                         p: r - delta,
                         spec: 0.0,
+                        behind: (-delta).max(0.0),
                     });
                 }
             }
@@ -1155,10 +1165,21 @@ impl ExplicitBeamsWorld {
                 x.p,
                 node.friction,
             );
-            if let (true, Some([imh, im1, im2, im0])) = (f != Vec3::ZERO && dissipative, ims) {
+            if let (true, Some([imh, im1, im2, im0])) = ((f != Vec3::ZERO && dissipative) || x.behind > 0.0, ims) {
                 // §37: the position step, a position impulse δ·m shared by the
                 // sub-bodies' inverse masses (explicit_beams' self-hit order).
-                let delta = shift_depth(x.p, budget, fh.dot(x.n));
+                let mut delta = if f != Vec3::ZERO && dissipative {
+                    shift_depth(x.p, budget, fh.dot(x.n))
+                } else {
+                    0.0
+                };
+                // Push-out (contact design step 4, `push_out_rate()`): a pair already behind
+                // the surface moves out at that rate even under load (the §37 step gives a
+                // loaded pair none), the energy it stores in the ledger's position steps.
+                let rate = push_out_rate();
+                if rate > 0.0 && x.behind > 0.0 {
+                    delta = delta.max((rate * STEP).min(x.behind));
+                }
                 if delta > 0.0 {
                     let q = delta * m;
                     self.vehicles[b].add_shift(h as usize, x.n * (q * imh));
@@ -1809,6 +1830,8 @@ struct Hit {
     /// Speculative: the gap past the band this pair may still close this step (m; 0 in
     /// the band). The response targets the normal velocity −spec/h instead of 0.
     spec: f32,
+    /// How far behind the surface the contact point is (m; 0 in front).
+    behind: f32,
 }
 
 /// Vehicle contact's residual pass (§37.1; on, `VEHICLE_RESIDUAL=0` a measurement
