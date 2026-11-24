@@ -405,3 +405,79 @@ pub(super) fn hull_pool(r: &Rig, inp: &dyn RigInput) -> HashMap<Part, Vec<usize>
     }
     pool
 }
+
+/// The underside closed (`RIG_BELLY=1`, under measurement): the downward faces of the
+/// convex hull of the low skin nodes (on an outer collision triangle, below `RIG_BELLY_Y`,
+/// default 0.4 m over the lowest), fanned into triangles facing down and out, as outer
+/// skin; none that crosses the skin, doubles one of its triangles or lies on top of it.
+/// The engine bay and the floor were open from below: a partner's nodes slipped under the
+/// bumper's bottom edge into the car.
+pub(super) fn belly_cap(r: &mut Rig) {
+    if std::env::var("RIG_BELLY").map_or(true, |v| v != "1") {
+        return;
+    }
+    let mut skin: std::collections::BTreeSet<usize> = Default::default();
+    for t in &r.car.tris {
+        if !t.inner {
+            skin.extend(t.n);
+        }
+    }
+    let low = skin.iter().map(|&i| r.g(i).y).fold(f32::MAX, f32::min);
+    let cut = low + std::env::var("RIG_BELLY_Y").ok().and_then(|v| v.parse().ok()).unwrap_or(0.4f32);
+    let ids: Vec<usize> = skin.into_iter().filter(|&i| r.g(i).y < cut).collect();
+    let pts: Vec<Vec3> = ids.iter().map(|&i| r.g(i)).collect();
+    if pts.len() < 4 {
+        return;
+    }
+    let cen = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+    let have: std::collections::HashSet<[usize; 3]> = r
+        .car
+        .tris
+        .iter()
+        .map(|t| {
+            let mut k = t.n;
+            k.sort_unstable();
+            k
+        })
+        .collect();
+    let skin_now: Vec<[usize; 3]> = r.car.tris.iter().map(|t| t.n).collect();
+    let pos: Vec<Vec3> = (0..r.car.nodes.len()).map(|i| r.g(i)).collect();
+    let mut add: Vec<Tri> = Vec::new();
+    for face in super::hull_faces(&pts) {
+        for k in 1..face.len().saturating_sub(1) {
+            let mut n = [ids[face[0]], ids[face[k]], ids[face[k + 1]]];
+            let [a, b, c] = n.map(|i| pos[i]);
+            let mut nn = (b - a).cross(c - a);
+            if nn.length() < 1e-6 {
+                continue;
+            }
+            if nn.dot((a + b + c) / 3.0 - cen) < 0.0 {
+                n = [n[0], n[2], n[1]];
+                nn = -nn;
+            }
+            if nn.normalize().y > -0.6 {
+                continue;
+            }
+            let mut key = n;
+            key.sort_unstable();
+            if have.contains(&key) || tri_crosses(&pos, n, &skin_now) {
+                continue;
+            }
+            // Not on top of the skin already there (a doubled layer): its centre clear of
+            // every skin triangle by 3 cm.
+            let mid = (a + b + c) / 3.0;
+            let near = r.car.tris.iter().any(|t| {
+                let [x, y, z] = t.n.map(|i| pos[i]);
+                crate::authoring::lint::tri_dist_pub(mid, x, y, z) < 0.03
+            });
+            if near {
+                continue;
+            }
+            add.push(Tri { n, part: Part::Body, group: None, sub: None, inner: false });
+        }
+    }
+    if std::env::var("RIG_HULL_DEBUG").is_ok() {
+        eprintln!("belly_cap: {} triangles under the car ({} low skin nodes)", add.len(), ids.len());
+    }
+    r.car.tris.extend(add);
+}

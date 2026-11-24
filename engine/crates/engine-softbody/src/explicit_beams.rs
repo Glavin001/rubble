@@ -984,6 +984,12 @@ pub struct ExplicitBeams {
     /// moved toward the stop at the forces now, never below zero), which halves the
     /// edges' energy rise. CPU reference; the GPU's kernels next.
     pub edge_contact: bool,
+    /// Per node, its outward contact offset (m; empty: none): in vehicle contact this
+    /// vehicle's triangles and skin edges are at the nodes pushed out along their vertex
+    /// normals (the outer skin's live triangles) by this much, so the contact surface is its
+    /// paint, which bulges past the straight triangles between the nodes (authored from the
+    /// render skin: `authoring::contact_offset`). A partner's nodes stay where they are.
+    pub contact_offset: Vec<f32>,
     /// Per collision triangle: on the outer skin (air on it, `dragCoef` > 0) or a face
     /// inside the car (a floor pan, a seat's solid). Edge contact takes the outer skin's
     /// edges (its winding is the lint's `skin_winding`; inner faces' is not checked).
@@ -1779,6 +1785,7 @@ impl ExplicitBeams {
             outward_skin: false,
             outward_tris: Vec::new(),
             edge_contact: false,
+            contact_offset: Vec::new(),
             tri_outer: Vec::new(),
             self_edge_excl: None,
             own_travel_reach: false,

@@ -355,6 +355,17 @@ fn main() -> Result<(), String> {
     cover_report(d, &sa, &vis)?;
     tyre_report(d, &sa, &vis)?;
 
+    // CONTACT_OFFSET=cap (m): the contact surface at the paint
+    // (`engine_softbody_authoring::authoring::contact_offset`), on both cars.
+    let (mut sa, mut sb) = (sa, sb);
+    if let Some(cap) = std::env::var("CONTACT_OFFSET").ok().and_then(|v| v.parse::<f32>().ok()) {
+        let offs = engine_softbody_authoring::authoring::contact_offset::contact_offsets(d, &vis[0], cap);
+        let mut o = offs.clone();
+        o.sort_by(f32::total_cmp);
+        println!("contact offsets: p50 {:.3} p90 {:.3} max {:.3} m", o[o.len() / 2], o[o.len() * 9 / 10], o[o.len() - 1]);
+        sa.contact_offset = offs.clone();
+        sb.contact_offset = offs;
+    }
     let mut w = ExplicitBeamsWorld::new(vec![sa, sb]);
     // NO_THROTTLE=1: vehicle contact tests every triangle every step (a measurement).
     if std::env::var("NO_THROTTLE").is_ok_and(|v| v == "1") {

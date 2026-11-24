@@ -82,7 +82,8 @@ pub(super) struct SkinEdge {
 /// The vehicle's live skin edges with their outward normals (unit sum of the live
 /// triangles' unit normals at each edge).
 fn skin_edges(v: &ExplicitBeams, outer_only: bool) -> Vec<SkinEdge> {
-    let w = |i: u32| v.origin + v.nodes[i as usize].pos;
+    let off = contact_offset_vectors(v);
+    let w = |i: u32| v.origin + v.nodes[i as usize].pos + off.get(i as usize).copied().unwrap_or(Vec3::ZERO);
     let mut by: HashMap<(u32, u32), (Vec3, Vec<(Vec3, Vec3)>, bool)> = HashMap::new();
     for (t, tri) in v.triangles.iter().enumerate() {
         if v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t) {
@@ -546,4 +547,28 @@ pub fn skin_edge_topology(v: &ExplicitBeams) -> Vec<EdgeTopology> {
         }
     }
     by.into_iter().map(|((i, j), tris)| EdgeTopology { i, j, tris }).collect()
+}
+
+/// Vehicle `v`'s contact offsets as vectors (`ExplicitBeams::contact_offset` along each
+/// node's vertex normal: the unit sum of its live outer triangles' unit normals); empty
+/// without offsets.
+pub(crate) fn contact_offset_vectors(v: &ExplicitBeams) -> Vec<Vec3> {
+    if v.contact_offset.is_empty() {
+        return Vec::new();
+    }
+    let mut n = vec![Vec3::ZERO; v.nodes.len()];
+    for (t, tri) in v.triangles.iter().enumerate() {
+        if v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t) || !v.tri_outer.get(t).copied().unwrap_or(true) {
+            continue;
+        }
+        let [a, b, c] = tri.nodes.map(|i| v.nodes[i as usize].pos);
+        let nn = (b - a).cross(c - a).normalize_or_zero();
+        for &i in &tri.nodes {
+            n[i as usize] += nn;
+        }
+    }
+    n.iter()
+        .enumerate()
+        .map(|(i, s)| s.normalize_or_zero() * v.contact_offset.get(i).copied().unwrap_or(0.0))
+        .collect()
 }

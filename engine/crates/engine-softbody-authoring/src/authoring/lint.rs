@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 mod skin_rules;
 pub use skin_rules::{collision_skin, SKIN_HOLE_MAX, SKIN_SLIVER};
 use skin_rules::tri_dist;
+pub(crate) use skin_rules::tri_dist as tri_dist_pub;
 
 /// A collision skin hole: an outer vertex this far from every collision
 /// triangle fails (half the FMVSS 214 pole's 254 mm); past [`COVER_WARN`] warns.

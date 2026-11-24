@@ -809,6 +809,7 @@ impl ExplicitBeamsWorld {
     /// order). The walk reads no force, so the two phases are the specification's
     /// single loop.
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
+        let offs = edge::contact_offset_vectors(&self.vehicles[a]);
         let r = self.vv_range.unwrap_or(self.vehicles[a].collision_range);
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
@@ -834,7 +835,11 @@ impl ExplicitBeamsWorld {
             stats.triangles_tested += 1;
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
             let wa = &self.frame[a];
-            let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
+            let (mut p0, mut p1, mut p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
+            // Contact offsets: the owner's triangle at its nodes pushed out (its paint).
+            if !offs.is_empty() {
+                (p0, p1, p2) = (p0 + offs[i0 as usize], p1 + offs[i1 as usize], p2 + offs[i2 as usize]);
+            }
             // A broken triangle, or an anti-clip-only one while its vehicle's
             // anti-clip is off: no candidates.
             let dead = self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false)
