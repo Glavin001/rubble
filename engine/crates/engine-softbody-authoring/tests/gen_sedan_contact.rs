@@ -77,6 +77,13 @@ fn hull(s: &ExplicitBeams) -> Vec<[Vec3; 3]> {
         .collect()
 }
 
+/// The live skin as vehicle contact sees it: each node pushed out by its contact
+/// offset (the paint; the nodes themselves without offsets).
+fn paint_hull(s: &ExplicitBeams) -> Vec<[Vec3; 3]> {
+    let p = engine_softbody::explicit_contact::contact_surface_positions(s);
+    live(s).into_iter().map(|t| s.triangles[t].nodes.map(|i| s.origin + p[i as usize])).collect()
+}
+
 fn live(s: &ExplicitBeams) -> Vec<usize> {
     (0..s.triangles.len())
         .filter(|&t| !s.tri_dead.get(t).copied().unwrap_or(false) && !s.tri_anti_only(t))
@@ -314,6 +321,9 @@ fn pair_crash_with(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool, 
             continue;
         }
         let hulls = [hull(&w.vehicles[0]), hull(&w.vehicles[1])];
+        // The gap at the end: paint to paint (each contact point at its paint, as contact
+        // sees it).
+        let paints = if k == steps { [paint_hull(&w.vehicles[0]), paint_hull(&w.vehicles[1])] } else { [Vec::new(), Vec::new()] };
         for c in 0..2 {
             let (x, o) = (&w.vehicles[c], &hulls[1 - c]);
             let band = w.vehicles[1 - c].collision_range;
@@ -334,7 +344,9 @@ fn pair_crash_with(kmh_a: u32, kmh_b: u32, offset_mm: i32, ms: u32, push: bool, 
             r.inside[c] = r.inside[c].max(inside);
             r.edges[c] = r.edges[c].max(edges_through(&w.vehicles[c], &w.vehicles[1 - c]));
             if k == steps {
-                r.gap_end[c] = nearest;
+                let paint = &paints[1 - c];
+                let own = engine_softbody::explicit_contact::contact_surface_positions(x);
+                r.gap_end[c] = x.contact_points.iter().map(|&i| x.origin + own[i as usize]).filter(|&p| winding(p, paint) <= 0.5).map(|p| dist(p, paint)).fold(f32::MAX, f32::min);
             }
         }
     }
@@ -412,7 +424,7 @@ fn slow_push_ends_touching() {
     row(
         "a slow push ends touching",
         "car at 4 km/h into a parked car, 2 s",
-        format!("nearest node {:.0} mm from the other's skin; {} / {} inside", gap * 1e3, r.inside[0], r.inside[1]),
+        format!("nearest paint point {:.0} mm from the other's paint; {} / {} inside", gap * 1e3, r.inside[0], r.inside[1]),
         "≤ band + 10 mm, 0 inside".into(),
         pass,
     );
@@ -424,8 +436,9 @@ fn slow_push_ends_touching() {
 /// (the same state and push; only contact differs, so a drivetrain the crash broke does
 /// not enter). Bound: **Choice** (80 %: contact may only slow the parting where crushed
 /// fronts still touch as they slide out, not hold them).
-/// FAILS today (2026-11-24, S4): see the printed row (driven in reverse instead, they
-/// moved 0.14 m in 2 s against 17 m with contact off).
+/// Failed until the belly cap and contact offsets (2026-11-24, S4: driven in reverse,
+/// they moved 0.14 m in 2 s against 17 m with contact off); now they part as far as with
+/// contact off.
 #[test]
 fn head_on_cars_are_not_fused() {
     let r = head_on();
@@ -798,7 +811,7 @@ fn edge_contact_slow_push_ends_touching() {
     row(
         "edge contact: a slow push ends touching",
         "car at 4 km/h into a parked car, 2 s",
-        format!("nearest node {:.0} mm from the other's skin; {} / {} inside", gap * 1e3, r.inside[0], r.inside[1]),
+        format!("nearest paint point {:.0} mm from the other's paint; {} / {} inside", gap * 1e3, r.inside[0], r.inside[1]),
         "≤ band + 10 mm, 0 inside".into(),
         pass,
     );

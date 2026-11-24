@@ -29,7 +29,7 @@ use residual::*;
 pub(crate) use edge::self_edge_hits;
 
 /// Speculative look-ahead for vehicle contact (under measurement, `SPECULATIVE=1`).
-pub use edge::{skin_edge_topology, EdgeTopology, EDGE_DEPTH};
+pub use edge::{contact_surface_positions, skin_edge_topology, EdgeTopology, EDGE_DEPTH};
 
 /// Each face of a vehicle's box is moved out by this much (m).
 pub const BOX_MARGIN: f32 = 0.05;
@@ -735,6 +735,7 @@ impl ExplicitBeamsWorld {
         self.edge_begin();
         let mut stats = ContactStats::default();
         let mut partners: Vec<usize> = Vec::new();
+        let mut edge_turns: Vec<(usize, Vec<usize>)> = Vec::new();
         for a in 0..nv {
             partners.clear();
             if self.skip.get(a).copied().unwrap_or(false) {
@@ -777,6 +778,19 @@ impl ExplicitBeamsWorld {
             if offered > 0 {
                 self.owner_frame(a, &partners);
                 self.triangle_loop(a, &partners, &mut stats);
+                if !self.skin.is_empty() {
+                    edge_turns.push((a, partners.clone()));
+                }
+            }
+        }
+        // Edge against edge and node against edge (`edge_contact`): each owner's turn of
+        // its edge hits after every owner's node turn, in the same order (the GPU's edge
+        // pass, a dispatch of its own after the contact pass: contact-design.md).
+        for (a, partners) in edge_turns {
+            let mut hits = Vec::new();
+            self.edge_turn(a, &partners, &mut hits);
+            if !hits.is_empty() {
+                self.turn_hits(a, hits);
             }
         }
         if stats.hits > 0 && self.first_hit_step.is_none() {
@@ -797,12 +811,22 @@ impl ExplicitBeamsWorld {
         let nv = self.vehicles.len();
         self.frame.resize(nv, Vec::new());
         let oa = self.vehicles[a].origin;
+        let edge_a = self.vehicles[a].edge_contact;
         for &x in std::iter::once(&a).chain(partners) {
             let v = &self.vehicles[x];
             let rel = v.origin - oa;
             let f = &mut self.frame[x];
             f.clear();
-            f.extend(v.nodes.iter().map(|n| rel + n.pos));
+            // With contact offsets each node at its paint: the triangles' corners, and with
+            // edge contact on the pair the contact points too (paint meets paint, as the
+            // skins' edges; without edge contact the points at their nodes did better: 38
+            // against 65 L of overlap over six head-ons, contact-design.md).
+            let off = edge::contact_offset_vectors(v);
+            if off.is_empty() || (x != a && !(edge::paint_points() && (edge_a || v.edge_contact))) {
+                f.extend(v.nodes.iter().map(|n| rel + n.pos));
+            } else {
+                f.extend(v.nodes.iter().zip(&off).map(|(n, o)| rel + n.pos + *o));
+            }
         }
     }
 
@@ -812,7 +836,6 @@ impl ExplicitBeamsWorld {
     /// order). The walk reads no force, so the two phases are the specification's
     /// single loop.
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
-        let offs = edge::contact_offset_vectors(&self.vehicles[a]);
         let r = self.vv_range.unwrap_or(self.vehicles[a].collision_range);
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
@@ -837,7 +860,8 @@ impl ExplicitBeamsWorld {
             }
             stats.triangles_tested += 1;
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
-            let [p0, p1, p2] = owner_corners(&self.frame[a], &offs, [i0, i1, i2]);
+            let wa = &self.frame[a];
+            let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
             // A broken triangle, or an anti-clip-only one while its vehicle's
             // anti-clip is off: no candidates.
             let dead = self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false)
@@ -1008,9 +1032,6 @@ impl ExplicitBeamsWorld {
             }
             self.vehicles[a].contact_throttle[t] = [cwait.min(cap), cidle];
         }
-        // Edge against edge and node against edge (`edge_contact`), in this owner's turn
-        // and its list: one splitting, the same guards (contact design, step 4's fix).
-        self.edge_turn(a, partners, &mut hits);
         if hits.is_empty() {
             return;
         }
@@ -1751,13 +1772,4 @@ fn gas_energy(v: &ExplicitBeams, j: usize) -> f64 {
         };
     }
     sign * u
-}
-
-/// An owner triangle's corners in the contact frame, each pushed out by its node's
-/// contact offset when the vehicle has them (the paint: `contact_offset_vectors`).
-fn owner_corners(frame: &[Vec3], offs: &[Vec3], nodes: [u32; 3]) -> [Vec3; 3] {
-    if offs.is_empty() {
-        return nodes.map(|i| frame[i as usize]);
-    }
-    nodes.map(|i| frame[i as usize] + offs[i as usize])
 }

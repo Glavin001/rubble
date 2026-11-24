@@ -40,6 +40,13 @@ fn facing_check() -> bool {
     *ON.get_or_init(|| !std::env::var("EDGE_FACING").is_ok_and(|v| v == "0"))
 }
 /// Node against edge with edge contact (on; `EDGE_VERTEX=0`, a measurement: off).
+/// Contact points at their paint (contact offsets: paint meets paint). On by default;
+/// `RUBBLE_PAINT_POINTS=0` (a measurement): the partner's points at their nodes.
+pub(crate) fn paint_points() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RUBBLE_PAINT_POINTS").map_or(true, |v| v != "0"))
+}
+
 fn vertex_edge() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| !std::env::var("EDGE_VERTEX").is_ok_and(|v| v == "0"))
@@ -377,12 +384,14 @@ impl ExplicitBeamsWorld {
             }
         }
         let vx = &self.vehicles[x];
+        let offx = contact_offset_vectors(vx);
         let mut out = Vec::new();
         for &h in &vx.contact_points {
             if vx.is_retired(h as usize) {
                 continue;
             }
-            let p = vx.origin + vx.nodes[h as usize].pos;
+            // (At its paint, as the skins' edges.)
+            let p = vx.origin + vx.nodes[h as usize].pos + if paint_points() { offx.get(h as usize).copied().unwrap_or(Vec3::ZERO) } else { Vec3::ZERO };
             let Some(list) = grid.get(&cell(p)) else { continue };
             for &k in list {
                 let e = &eo[k as usize];
@@ -552,6 +561,13 @@ pub fn skin_edge_topology(v: &ExplicitBeams) -> Vec<EdgeTopology> {
 /// Vehicle `v`'s contact offsets as vectors (`ExplicitBeams::contact_offset` along each
 /// node's vertex normal: the unit sum of its live outer triangles' unit normals); empty
 /// without offsets.
+/// Each node's position on the contact surface vehicle contact sees (relative to the
+/// origin): the node pushed out by its contact offset (the paint), or the node itself.
+pub fn contact_surface_positions(v: &ExplicitBeams) -> Vec<Vec3> {
+    let off = contact_offset_vectors(v);
+    v.nodes.iter().enumerate().map(|(i, n)| n.pos + off.get(i).copied().unwrap_or(Vec3::ZERO)).collect()
+}
+
 pub(crate) fn contact_offset_vectors(v: &ExplicitBeams) -> Vec<Vec3> {
     if v.contact_offset.is_empty() {
         return Vec::new();
