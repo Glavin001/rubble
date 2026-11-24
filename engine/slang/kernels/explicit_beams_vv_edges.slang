@@ -31,7 +31,7 @@ static const uint EDGE_BLOCK = 32u; // buckets a block of the starts' scan
 
 bool edgeOn() { return gP.edgeBase != 0u; }
 // Measurement only (`RUBBLE_EDGE_ABLATE`, time; results meaningless): 1 the pair tests, 2 the
-// grids, 4 the edges' step data skipped.
+// grids, 4 the edges' step data, 8 the hits (found, not kept) skipped.
 uint edgeAblate() { return gStatic[gP.edgeBase - 1u].x; }
 uint4 edgeV0(uint v) { return gStatic[gP.edgeBase + 2u * v]; }
 uint4 edgeV1(uint v) { return gStatic[gP.edgeBase + 2u * v + 1u]; }
@@ -313,6 +313,7 @@ bool edgeHitAt(uint va, uint at, out EdgeHitG H)
 // edge's two nodes, the contacter's one or two, in the owner's slot).
 void edgeHitAdd(uint va, uint slot, uint w0, uint w1, EdgeHitG H)
 {
+    if ((edgeAblate() & 8u) != 0u) return;
     uint4 v1 = edgeV1(va);
     uint n = uint(gAcc[v1.x].add(1));
     if (n >= v1.y)
