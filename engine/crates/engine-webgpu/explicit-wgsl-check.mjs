@@ -136,16 +136,28 @@ const chrome = spawn(CHROME, [
   // would still hit the driver's shader cache: keep the names (EXPLICIT_WGSL_COLD).
   ...(DUMP ? ['--enable-dawn-features=disable_symbol_renaming,dump_shaders', '--enable-logging=stderr', '--v=0']
     : process.env.EXPLICIT_WGSL_COLD === '1' ? ['--enable-dawn-features=disable_symbol_renaming'] : []), '--no-default-browser-check', 'about:blank',
-], { stdio: DUMP ? ['ignore', 'ignore', openSync(DUMP, 'w')] : 'ignore' });
+], { stdio: DUMP ? ['ignore', 'ignore', openSync(DUMP, 'w')] : ['ignore', 'ignore', 'pipe'] });
+// Chrome's last words, for a launch that never comes up (CI: a slow or failed start).
+let chromeErr = '';
+let chromeExit = null;
+chrome.stderr?.on('data', (d) => { chromeErr = (chromeErr + d).slice(-4000); });
+chrome.on('exit', (code, signal) => { chromeExit = code ?? signal; });
+chrome.on('error', (e) => { chromeExit = `not started (${e.message})`; });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} server.close(); };
 process.on('exit', cleanup);
 // A kill timer's signal (perl -e 'alarm N; exec ...' sends SIGALRM) or a TERM: close
 // Chrome too, or its GPU process is left compiling.
 for (const sig of ['SIGALRM', 'SIGTERM', 'SIGINT']) process.on(sig, () => { console.log(`${sig}: stopping`); process.exit(3); });
+// Up to 60 s for the first page (a cold Chrome on a busy CI runner takes more than 10).
 let targets = [];
-for (let i = 0; i < 100 && !targets.length; i++) {
+for (let i = 0; i < 600 && !targets.length && chromeExit === null; i++) {
   try { targets = (await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).filter((t) => t.type === 'page'); } catch {}
   if (!targets.length) await new Promise((r) => setTimeout(r, 100));
+}
+if (!targets.length) {
+  console.error(`Chrome did not come up (${chromeExit === null ? 'no page in 60 s' : 'exited: ' + chromeExit}); ${CHROME}`);
+  if (chromeErr) console.error(chromeErr);
+  process.exit(2);
 }
 const ws = new WebSocket(targets[0].webSocketDebuggerUrl);
 await new Promise((r) => ws.addEventListener('open', r));
