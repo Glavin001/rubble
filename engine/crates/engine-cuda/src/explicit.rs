@@ -265,6 +265,10 @@ impl CudaExplicitBeams {
         for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
             out.push(Key::Split(plan::split_module_name(which, aero, lanes)));
         }
+        // (Edge vehicle contact's pass.)
+        if layout.words[plan::W_EDGE] != 0 {
+            out.push(Key::Split(plan::split_module_name("edges", aero, lanes)));
+        }
         for vv in [false, true] {
             out.extend(plan::self_split_module_names(aero, lanes, vv).into_iter().map(|(m, _, _)| Key::Split(m)));
         }

@@ -451,7 +451,12 @@ contact with a clear error; the lab page's control is off until they ship.
 - A portable fixture stores its planner words, perf flags included, and `apply` does not
   mask them: fixtures made by a build replay that build's schedule on any other. Earlier
   "7-11 % slower" figures of this day are void for that reason.
-- No matrix row has edge contact on: its cost and CUDA results are unmeasured there.
+- Edge contact's rows (headon_e, side_e, pile8_e; `run.sh SWITCH headon_e ...`, not in the default
+  gate), CUDA T4, first run ever there (its module was not in the replay's module list). ms a frame,
+  without / with edge contact: headon 13.2 / 13.7, side 15.7 / 18.5, pile8 21.4 / 176. The saved
+  states differ (each row ran its own way to its moment), so this is a size, not an A/B; pile8's
+  factor of 8 is the pass: one workgroup a group, its owners one after another. Fleet schedules
+  on/off with edges: bit for bit on the three rows. CUDA against the CPU is not tested with edges.
 - Open: groups over VV_PART (8) have edge contact again (edgePass, an owner at a time; a 12-body test); compile,
   inline and duplication ratchet lines raised and to be brought back; a browser frame runs
   without edge contact until its module compiles; paint points are CPU-only (off).
