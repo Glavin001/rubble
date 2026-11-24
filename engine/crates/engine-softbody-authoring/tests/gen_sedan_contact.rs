@@ -818,3 +818,61 @@ fn edge_contact_slow_push_ends_touching() {
     assert!(pass);
 }
 
+
+/// A car driving along a parked one, drifting into its side: (travel along the parked car
+/// in 1.5 s with vehicle contact, the same with it off, finite).
+fn side_scrape(edge: bool) -> (f32, f32, bool) {
+    let d = desc();
+    let (xmin, xmax) = d.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.position[0]), b.max(n.position[0])));
+    let run = |contact: bool| {
+        let lat: f32 = std::env::var("SCRAPE_LAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let fwd: f32 = std::env::var("SCRAPE_KMH").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+        let a = spawn_with(d, Vec3::ZERO, Vec3::new(lat, 0.0, fwd / 3.6), edge);
+        let b = spawn_with(d, Vec3::new(xmax - xmin + 0.05, 0.0, 0.0), Vec3::ZERO, edge);
+        let mut w = ExplicitBeamsWorld::new(vec![a, b]);
+        w.contact = contact;
+        w.vehicles[0].set_drive_input(DriveInput { forward: 0.5, ..Default::default() });
+        w.vehicles[1].set_drive_input(DriveInput { brake: 1.0, handbrake: 1.0, ..Default::default() });
+        let z0 = centre(&w.vehicles[0]).0.z - centre(&w.vehicles[1]).0.z;
+        for _ in 0..(1.5 / STEP).round() as usize {
+            w.step();
+        }
+        let z1 = centre(&w.vehicles[0]).0.z - centre(&w.vehicles[1]).0.z;
+        (z1 - z0, w.vehicles.iter().all(finite))
+    };
+    let (on, f1) = run(true);
+    let (off, f2) = run(false);
+    (on, off, f1 && f2)
+}
+
+/// Cars that scrape side by side slide past each other: a car at 30 km/h drifting 1 m/s
+/// into a parked car's side (handbrake on), at a light throttle, gets at least half as
+/// far along it in 1.5 s as with vehicle contact off. Bound: **Choice** (50 %: scraping
+/// paint and bent panels may slow a car, not lock it to the other; 2026-11-24 user report:
+/// side by side, friction and lodged pieces held the cars).
+#[test]
+fn side_scrape_slides_past() {
+    side_scrape_check(false);
+}
+
+/// [`side_scrape_slides_past`] with edge contact on.
+#[test]
+fn edge_contact_side_scrape_slides_past() {
+    side_scrape_check(true);
+}
+
+fn side_scrape_check(edge: bool) {
+    let (on, off, finite) = side_scrape(edge);
+    let pass = finite && on >= 0.5 * off;
+    // (SCRAPE_KMH and SCRAPE_LAT: other speeds, a measurement.)
+    let lat = std::env::var("SCRAPE_LAT").unwrap_or("1".into());
+    let kmh = std::env::var("SCRAPE_KMH").unwrap_or("30".into());
+    row(
+        if edge { "edge contact: cars scraping side by side slide past" } else { "cars scraping side by side slide past" },
+        &format!("{kmh} km/h, drifting {lat} m/s into a parked car's side, 1.5 s"),
+        format!("{on:.2} m along it; {off:.2} m with contact off"),
+        "≥ 50 % of contact off".into(),
+        pass,
+    );
+    assert!(pass);
+}
