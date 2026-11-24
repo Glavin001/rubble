@@ -644,6 +644,8 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
                                 asfloat(gStatic[va * 4u + 3u].z));
         }
     }
+    // Edge vehicle contact's hits (explicit_beams_vv_edges.slang; none without it).
+    edgeTestsSmall(k, off, parity, lane);
 }
 
 // Node n's force at the pass's start into the snapshot; with a tag, its beams' sum kept

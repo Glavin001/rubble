@@ -519,3 +519,31 @@ pub(crate) fn self_edge_hits(v: &mut ExplicitBeams) -> Vec<crate::explicit_beams
     v.self_edge_excl = Some(excl);
     out
 }
+
+/// One skin edge's topology for the GPU's table: its nodes (i < j, the vehicle's own
+/// indices) and its triangles in the triangles' order, each with whether it is on the
+/// outer skin (anti-clip-only triangles left out, as `skin_edges` leaves them; which
+/// triangles are live, which nodes retired and the normals are the step's).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgeTopology {
+    pub i: u32,
+    pub j: u32,
+    pub tris: Vec<(u32, bool)>,
+}
+
+/// Every skin edge of `v` in `skin_edges`' order (by (i, j)).
+pub fn skin_edge_topology(v: &ExplicitBeams) -> Vec<EdgeTopology> {
+    let mut by: std::collections::BTreeMap<(u32, u32), Vec<(u32, bool)>> = Default::default();
+    for (t, tri) in v.triangles.iter().enumerate() {
+        if v.tri_anti_only(t) {
+            continue;
+        }
+        let outer = v.tri_outer.get(t).copied().unwrap_or(true);
+        let n = tri.nodes;
+        for k in 0..3 {
+            let (x, y) = (n[k], n[(k + 1) % 3]);
+            by.entry((x.min(y), x.max(y))).or_default().push((t as u32, outer));
+        }
+    }
+    by.into_iter().map(|((i, j), tris)| EdgeTopology { i, j, tris }).collect()
+}

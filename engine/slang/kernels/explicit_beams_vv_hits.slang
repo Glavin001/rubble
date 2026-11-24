@@ -371,6 +371,30 @@ float vvResOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, 
     return r > 0.0 ? r : 0.0;
 }
 
+// vvResOf for an edge-contact pair (explicit_beams_vv_edges.slang): the accumulated
+// clamp, the change toward the stop at A, never below zero with the first pass's normal
+// force f1 · nn (explicit_contact.rs residual_vehicle_pass, `clamp`).
+bool edgePairOn(uint a, uint b);
+float edgeClampRes(float lam0, float r);
+float vvResOfClamp(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, float3 nn, float3 v, uint slot,
+                   float3 f1)
+{
+    float3 at = sadd3(sadd3(sscale(vvResAcc(tn.y, S.y, false), alpha),
+                            sscale(vvResAcc(tn.z, S.z, false), beta)),
+                      sscale(vvResAcc(tn.x, S.x, false), gamma));
+    float an = sdot(ssub3(vvResAcc(h, S.h, false), at), nn);
+    float vn = sdot(v, nn);
+    float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), gNodes[h * 3u].w);
+    float i1 = (alpha > 0.0 && !vvImmovable(tn.y)) ? smul(smul(alpha, alpha), sdiv(vvSplitK(vvSplitTri(tn.y)), gNodes[tn.y * 3u].w)) : 0.0;
+    float i2 = (beta > 0.0 && !vvImmovable(tn.z)) ? smul(smul(beta, beta), sdiv(vvSplitK(vvSplitTri(tn.z)), gNodes[tn.z * 3u].w)) : 0.0;
+    float i0 = (gamma > 0.0 && !vvImmovable(tn.x)) ? smul(smul(gamma, gamma), sdiv(vvSplitK(vvSplitTri(tn.x)), gNodes[tn.x * 3u].w)) : 0.0;
+    float inv = nf(imh + nf(nf(i1 + i2) + i0));
+    if (!(inv > 0.0)) return 0.0;
+    float m = sdiv(1.0, inv);
+    float r = nf(-smul(an, m) - sdiv(smul(vn, m), STEP));
+    return edgeClampRes(max(sdot(f1, nn), 0.0), r);
+}
+
 // The guard of the staged hit's force t at A + B (explicit_contact.rs
 // guard_vehicle_pass).
 bool vvGuardOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, float3 v, float3 t, out float3 g)
@@ -420,14 +444,15 @@ void vvResidualPhase(uint va, uint base, uint n, float r, uint parity, uint lane
             continue;
         }
         VvSums S = vvSumsOf(va, vh, h, t.tn, parity);
-        float rr = vvResOf(h, t.tn, S, alpha, beta, gamma, nn, v, slot);
+        float rr = edgePairOn(va, vh) ? vvResOfClamp(h, t.tn, S, alpha, beta, gamma, nn, v, slot, f1)
+                                      : vvResOf(h, t.tn, S, alpha, beta, gamma, nn, v, slot);
         if (phase == 0u)
         {
-            if (rr > 0.0) resStage(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, sscale(nn, rr));
+            if (rr != 0.0) resStage(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, sscale(nn, rr));
             continue;
         }
         float3 total = f1;
-        if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
+        if (rr != 0.0) total = sadd3(total, sscale(nn, rr));
         float3 g;
         if (vvGuardOf(h, t.tn, S, alpha, beta, gamma, v, total, g)) total = sadd3(total, g);
         resFinal(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, f1, total);

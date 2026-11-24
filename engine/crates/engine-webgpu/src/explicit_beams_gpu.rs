@@ -4190,6 +4190,11 @@ impl ExplicitBeamsGpu {
     /// diagnostic pipelines (those frames keep the groups' workgroup). With vehicle sleep
     /// the same rule as the groups' workgroup, bit for bit ([`Self::set_sleep`]).
     pub fn set_group_split(&mut self, on: bool) {
+        // (Edge vehicle contact runs in the groups' own pass only so far.)
+        assert!(
+            !(on && self.planner.words[plan::W_EDGE] != 0),
+            "explicit beams: edge vehicle contact does not run on the split group path yet (set_group_split(false))"
+        );
         self.group_split = on;
     }
 

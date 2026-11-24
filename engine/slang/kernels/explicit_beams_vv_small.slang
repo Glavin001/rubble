@@ -4,9 +4,13 @@
 // P: contact throttle resets, the owner's throttle step listing its tested
 // triangles, and its candidates compacted; phase T: tested triangles against the
 // candidates.
+void edgeBigGroup(uint k, uint off, uint lane);
 void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
+    // (Edge vehicle contact runs in the small groups' pass only so far: a larger group
+    // with an edge-contact member reports it, FL_ERR_EDGE_GROUP.)
+    edgeBigGroup(k, off, lane);
     if (gP.vvSplit != 0u)
     {
         vvSnapshot(off, k, parity, lane);
@@ -233,6 +237,9 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 // does not matter. An owner whose hits overflow its list re-walks its triangles at
 // its level, applying directly (vvPass's overflow path).
 groupshared uint gsVvPair[VV_PART * VV_PART];
+// Edge vehicle contact: the member listed edge hits this step (explicit_beams_vv_edges.slang
+// edgeTestsSmall; read with gP.edgeBase only).
+groupshared uint gsEdgeHas[VV_PART];
 groupshared Atomic<uint> gsVvOff4[VV_PART];
 groupshared Atomic<uint> gsVvList4[VV_PART];
 groupshared Atomic<uint> gsVvCand4[VV_PART];
@@ -385,7 +392,7 @@ void vvLevelsSet(uint k, uint lane)
     for (uint b = 0u, bStop = EB_END(211, b, k, 1u); b < bStop; b++)
     {
         uint l = 0u;
-        if (gsVvHit4[b].load() != 0u)
+        if (gsVvHit4[b].load() != 0u || (gP.edgeBase != 0u && gsEdgeHas[b] != 0u))
         {
             l = 1u;
             for (uint c = 0u, cStop = EB_END(212, c, b, 1u); c < cStop; c++)

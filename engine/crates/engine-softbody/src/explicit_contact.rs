@@ -64,7 +64,7 @@ pub(crate) fn speculative() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SPECULATIVE").is_ok_and(|v| v == "1"))
 }
-pub use edge::EDGE_DEPTH;
+pub use edge::{skin_edge_topology, EdgeTopology, EDGE_DEPTH};
 
 /// Each face of a vehicle's box is moved out by this much (m).
 pub const BOX_MARGIN: f32 = 0.05;

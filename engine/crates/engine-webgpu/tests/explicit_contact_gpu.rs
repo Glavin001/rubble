@@ -839,3 +839,104 @@ fn anti_clip_scene_with(extra: usize, dissipative: bool, own_travel: bool) {
         pos[2][7].y
     );
 }
+
+/// A free tetrahedron (no beams: four contact points) with its faces wound outward.
+fn tetra(points: [Vec3; 4], vel: Vec3) -> ExplicitBeams {
+    let mut s = vehicle(&points);
+    let c = (points[0] + points[1] + points[2] + points[3]) / 4.0;
+    for f in [[0u32, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]] {
+        let [a, b, d] = f.map(|i| points[i as usize]);
+        let n = (b - a).cross(d - a);
+        let nodes = if n.dot((a + b + d) / 3.0 - c) < 0.0 { [f[0], f[2], f[1]] } else { f };
+        s.triangles.push(Triangle { nodes, wait: 0, idle: 0 });
+    }
+    for n in &mut s.nodes {
+        n.vel = vel;
+        n.flags |= NODE_NO_GROUND | NODE_CONTACTER;
+    }
+    s.settings.triangle_throttle = false;
+    s.finish();
+    s.fixed_contact = true;
+    s.two_body_contact = true;
+    s.dissipative_contact = true;
+    s.edge_contact = true;
+    s
+}
+
+/// Edge vehicle contact (`ExplicitBeams::edge_contact`, explicit_beams_vv_edges.slang) on
+/// the GPU as on the CPU, bit for bit with bit-exact results on: two tetrahedra whose
+/// ridges cross (edge against edge, no node over a face at first), the upper one falling
+/// onto the lower; then a third whose corner comes down onto the lower ridge (node against
+/// edge). One-step frames, then 17-step ones.
+#[test]
+fn edge_contact_steps_like_the_cpu() {
+    let lower = tetra(
+        [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.0, -0.4, 0.4), Vec3::new(0.0, -0.4, -0.4)],
+        Vec3::ZERO,
+    );
+    let upper = tetra(
+        [Vec3::new(0.01, 0.02, -0.5), Vec3::new(-0.01, 0.02, 0.5), Vec3::new(0.4, 0.42, 0.0), Vec3::new(-0.4, 0.42, 0.0)],
+        Vec3::new(0.0, -2.0, 0.0),
+    );
+    // A corner over the lower ridge's far part (x 0.35), outside both of its faces' prisms.
+    let corner = tetra(
+        [Vec3::new(0.35, 0.03, 0.0), Vec3::new(0.55, 0.5, 0.2), Vec3::new(0.25, 0.5, 0.25), Vec3::new(0.3, 0.5, -0.25)],
+        Vec3::new(0.0, -1.5, 0.0),
+    );
+    let fleet = vec![lower, upper, corner];
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_bit_exact(true);
+    let mut off = fleet.clone();
+    for v in &mut off {
+        v.edge_contact = false;
+    }
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    // (EDGE_DEBUG=1: one-step frames against the CPU with and without edge contact, to the
+    // first step that differs.)
+    if std::env::var("EDGE_DEBUG").is_ok() {
+        let mut wo = ExplicitBeamsWorld::new(off);
+        for step in 0..60 {
+            w.frame(1);
+            wo.frame(1);
+            g.frame(1);
+            let pos = g.positions();
+            let d: Vec<f32> = (0..3).map(|k| rms(&pos[k], &w.vehicles[k].positions())).collect();
+            let doff: Vec<f32> = (0..3).map(|k| rms(&pos[k], &wo.vehicles[k].positions())).collect();
+            let cpu: Vec<f32> = (0..3).map(|k| rms(&wo.vehicles[k].positions(), &w.vehicles[k].positions())).collect();
+            eprintln!("step {step}: GPU-CPU {d:?}  GPU-CPU(off) {doff:?} CPU on-off {cpu:?} edge hits {}", w.edge_stats[5]);
+            if d.iter().any(|&x| x != 0.0) {
+                break;
+            }
+        }
+        panic!("EDGE_DEBUG: stepped to the first difference");
+    }
+    for (frames, steps) in [(60, 1), (6, 17)] {
+        for _ in 0..frames {
+            w.frame(steps);
+            g.frame(steps);
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    eprintln!("edge pass stats (tested, end, parallel, facing, deep, hits, crossed): {:?}", w.edge_stats);
+    assert!(w.edge_stats[5] > 10, "edge hits {:?}", w.edge_stats);
+    let pos = g.positions();
+    for k in 0..w.vehicles.len() {
+        let d = rms(&pos[k], &w.vehicles[k].positions());
+        eprintln!("vehicle {k}: GPU–CPU {d:.2e} m after {} steps", w.steps);
+        assert_eq!(d, 0.0, "vehicle {k}: GPU–CPU {d} m");
+    }
+    // And edge contact acted: the CPU with it off ends elsewhere.
+    let mut wo = ExplicitBeamsWorld::new(off);
+    for (frames, steps) in [(60, 1), (6, 17)] {
+        for _ in 0..frames {
+            wo.frame(steps);
+        }
+    }
+    let moved = (0..wo.vehicles.len()).map(|k| rms(&wo.vehicles[k].positions(), &pos[k])).fold(0.0f32, f32::max);
+    eprintln!("with edge contact off the CPU ends {moved:.3} m away");
+    assert!(moved > 1e-3, "edge contact made no difference ({moved} m)");
+}

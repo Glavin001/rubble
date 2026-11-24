@@ -307,6 +307,9 @@ struct Params
     // their ranks hold this many times the fleet's contact points, and a node's two-body
     // point counts this many owners (0: VV_PART, a layout before the word).
     uint vvRoom;
+    // Edge vehicle contact's tables (explicit_plan's W_EDGE; 0: none;
+    // explicit_beams_vv_edges.slang).
+    uint edgeBase;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -478,4 +481,5 @@ Surface contactSurfaceV(uint v, uint w)
 #include "explicit_beams_vv_hits.slang"
 #include "explicit_beams_vv_small.slang"
 #include "explicit_beams_vv_big.slang"
+#include "explicit_beams_vv_edges.slang"
 #include "explicit_beams_vv_levels.slang"

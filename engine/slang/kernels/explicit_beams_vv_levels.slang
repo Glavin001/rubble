@@ -38,6 +38,11 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                                    q < 3u ? tn.w : gStatic[gP.nodeInfoBase + h].w, parity, tag);
                 }
             }
+            if (edgeOn())
+            {
+                for (uint a = 0u, aStop = EB_END(821, a, k, 1u); a < aStop; a++)
+                    edgeSnapOwner(vvMember(off, a), parity, tag, lane, LANES);
+            }
         }
         sync();
         if (!every) gVvTag = tag;
@@ -106,6 +111,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                                          gsVvCand4[a].load(), range, parity, a);
                 }
             }
+            if (edgeOn()) edgeApplyOwner(va, a, lane, LANES);
         }
         sync();
         // §37.1: this level's owners' residual pass and work guard (listed hits).
@@ -117,8 +123,9 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 {
                     if (vvLv(a) != l) continue;
                     uint hits = gsVvHit4[a].load();
-                    if (hits > vvHitRoom(a, points)) continue;
                     uint va = vvMember(off, a);
+                    if (edgeOn()) edgeResidualPhase(va, a, parity, lane, LANES, ph);
+                    if (hits > vvHitRoom(a, points)) continue;
                     vvResidualPhase(va, vvHitSmall(runOff, points, a, 0u), hits, asfloat(gStatic[va * 4u + 3u].z),
                                     parity, lane, LANES, a, ph);
                 }
@@ -152,6 +159,10 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 gAcc[vvSplitPoint(a, gNext[base + 2u * i + 1u])].store(0);
             }
         }
+    }
+    if (edgeOn())
+    {
+        for (uint a = 0u, aStop = EB_END(822, a, k, 1u); a < aStop; a++) edgeClearOwner(vvMember(off, a), a, lane, LANES);
     }
 }
 
