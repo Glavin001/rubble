@@ -42,6 +42,11 @@ pub(crate) fn contact_sweeps() -> u32 {
 }
 
 /// Vehicle contact's residual sweeps as Gauss–Seidel (under measurement, `CONTACT_GS=1`).
+pub(crate) fn contact_jacobi() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CONTACT_JACOBI").is_ok_and(|v| v == "1"))
+}
+
 pub(crate) fn gauss_seidel() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("CONTACT_GS").is_ok_and(|v| v == "1"))
@@ -1612,6 +1617,41 @@ impl ExplicitBeamsWorld {
             // lower but never take below zero (sequential impulses' accumulated clamp: an
             // excess is taken back, so a pair is not pushed apart to bounce back in).
             let mut out: Vec<Option<f32>> = vec![None; hits.len()];
+            if contact_jacobi() {
+                // Jacobi (`CONTACT_JACOBI=1`): every hit's change from the same sums, then
+                // all applied; the same accumulated clamp. (The GPU's parallel form.)
+                for _ in 0..contact_sweeps() {
+                    let deltas: Vec<Option<f32>> = (0..hits.len())
+                        .map(|j| {
+                            if !on[j] {
+                                return None;
+                            }
+                            let x = &hits[j];
+                            let lam0 = first.get(j).map_or(0.0, |f| f.dot(x.n)).max(0.0) + out[j].unwrap_or(0.0);
+                            let d = self.residual_signed(a, x)?;
+                            let r = (lam0 + d).max(0.0) - lam0;
+                            (r != 0.0).then_some(r)
+                        })
+                        .collect();
+                    for (j, d) in deltas.into_iter().enumerate() {
+                        let Some(r) = d else { continue };
+                        out[j] = Some(out[j].unwrap_or(0.0) + r);
+                        let x = &hits[j];
+                        let f = x.n * r;
+                        if x.t > 0.0 {
+                            self.vehicles[x.b].add_contact(x.h as usize, f * (1.0 - x.t));
+                            self.vehicles[x.b].add_contact(x.h2 as usize, f * x.t);
+                        } else {
+                            self.vehicles[x.b].add_contact(x.h as usize, f);
+                        }
+                        let va = &mut self.vehicles[a];
+                        va.add_contact(x.tri[1] as usize, -(f * x.w[0]));
+                        va.add_contact(x.tri[2] as usize, -(f * x.w[1]));
+                        va.add_contact(x.tri[0] as usize, -(f * x.w[2]));
+                    }
+                }
+                return out;
+            }
             for j in (0..contact_sweeps() as usize).flat_map(|_| 0..hits.len()) {
                 if !on[j] {
                     continue;

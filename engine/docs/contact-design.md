@@ -240,3 +240,45 @@ edge + node–edge contact: 33 nodes, 57 L (was 29, 53 L: within the spread).
 * The candidate default (edge + node–edge, both cars and within one): every guard passes
   (not fused, slow push touching, energy in every crash with 60 + 60 at 2.04 of 2.07 kJ,
   cannonball, pole); overlap remains (60 + 60: 11 / 12 nodes, 62 / 65 edges at the worst).
+
+### The fix that holds: accumulated-impulse sweeps (2026-11-24)
+
+**Trace** (`TRACE_FACE=1`, probe): the first node to enter the other car through a face (a
+front apron node into the bumper cover, 60 + 60) was in contact for ten steps, pushed out at
+9–16 kN every step, and still closed at 8–15 m/s: the per-hit response with each node's mass
+split among its hits undershoots where many hits load a light panel (the cover's nodes carried
+35–50 kN of other hits). Sweeps that only add force overshoot instead: the node separates at
+2–4 m/s, the no-positive-work rule then gives it nothing while its beams drive it in at about
+35,000 m/s², and it comes back at 13–17 m/s: a ratchet at the band's edge.
+
+**Fix** (`CONTACT_GS=1`, `CONTACT_SWEEPS=n`; off by default): after the first pass, sweeps
+over the owner's hits keep each hit's normal force (the first pass's plus its changes) and
+change it toward the force that brings the pair's normal velocity at the step's end to zero, at
+the forces now, on the nodes' own masses, clamped at zero (sequential impulses' accumulated
+clamp: an excess is taken back). Gauss–Seidel applies each change at once.
+
+| 60 + 60, median of 6 | nodes inside | overlap | energy rise, per step |
+|---|---|---|---|
+| node only | 66 | 145 L | 0.01 kJ |
+| node only + 8 sweeps | 37 | 94 L | |
+| edge + node–edge | 32 | 60 L | 2.04 kJ (bound 2.07) |
+| edge + node–edge + 1 sweep | **28** | **38 L** | **0.13 kJ** |
+
+Every guard passes with edge + node–edge + 1 sweep (not fused, slow push 23 mm, cannonball,
+pole energy, every crash's energy). Self edge contact is left off (`SELF_EDGE=0`): with it the
+head-on's edges through rise 99 → ~170 (self and vehicle contact are separate passes over
+shared nodes); it stays a measured option for the pole case (47 → 30 new crossings).
+
+## What the GPU port carries (the candidate default)
+
+1. **Edge hits in the owner's turn** (`explicit_contact/edge.rs`): edge against edge between
+   two cars (each pair once, the lower index's turn; every live edge, its outward normal from
+   the outer skin's faces, an inside face's side taken from the partner's outer edge), node
+   against an outer convex edge in its wedge; as `Hit`s with a second contacter node (`h2`,
+   weight `t`) and the owner's edge as `[i, j, j]`, weights `[s, 0, 1 − s]`.
+2. **One splitting and the same guards** for every hit of the turn (first pass, staging, work
+   guard, ledger, contact-force log), zero-weight nodes not counted for edge kinds.
+3. **Accumulated-impulse sweeps** replacing the residual pass for vehicle hits (one sweep;
+   the Jacobi form for the GPU if it measures as well, else coloured Gauss–Seidel).
+4. Settings and flag bits for each (vehicle flags word bits 21+), GPU == CPU bit for bit with
+   bit-exact on, every backend; the scenario matrix and the Chrome lab as `AGENTS.md`'s ladder.
