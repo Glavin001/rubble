@@ -231,8 +231,53 @@ impl ExplicitBeamsGpu {
         match name {
             "surffast" => Some("surface contact on the fast schedules"),
             "vvwide" => Some("vehicle contact's frames without a group on the wide passes"),
+            "surffast_wide" => Some("surface contact on the fast schedules, a wide frame's part alone"),
+            "surffast_contact" => Some("surface contact on the fast schedules, its vehicle-contact part (the wide part on)"),
             _ => None,
         }
+    }
+
+    /// A browser's A/B of a host switch (`WebWorld.explicitAbSwitch`): `surffast` (both
+    /// parts of [`Self::set_surface_fast`]), `surffast_wide` (its wide frames' part alone
+    /// against neither), `surffast_contact` (its vehicle-contact part, the wide part on
+    /// either side), `vvwide`, on or off. False for a name that is none. Put back with
+    /// [`Self::reset_schedule_switches`].
+    #[doc(hidden)]
+    pub fn set_ab_switch(&mut self, name: &str, on: bool) -> bool {
+        match name {
+            "surffast_wide" => {
+                self.planner.set_surface_fast(on);
+                self.planner.set_surface_fast_contact(false);
+            }
+            "surffast_contact" => {
+                self.planner.set_surface_fast(true);
+                self.planner.set_surface_fast_contact(on);
+            }
+            _ => return self.set_named_switch(name, on),
+        }
+        true
+    }
+
+    /// The schedule switches as this host starts them
+    /// ([`plan::schedule::host_setting`] and the defaults [`Self::with_coupling`]
+    /// applies): after an A/B of [`Self::set_ab_switch`], or once a host setting has
+    /// changed.
+    pub fn reset_schedule_switches(&mut self) {
+        self.planner.set_surface_fast(plan::schedule::surface_fast_default());
+        self.planner.set_surface_fast_contact(plan::schedule::surface_fast_contact_default(false));
+        let n = self.layout.spans.len();
+        self.planner.set_vv_wide(plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(n)));
+    }
+
+    /// Whether a browser host compiled the modules the schedule switches take as the
+    /// host settings now say ([`Self::reset_schedule_switches`]): false when a switch is
+    /// on now that was off when this host's modules were listed
+    /// ([`Self::compute_specs_for`]), so the page builds again to compile them. Always
+    /// true without the pipeline gate (native hosts create pipelines at first use).
+    pub fn schedule_modules_listed(&self) -> bool {
+        let n = self.layout.spans.len();
+        let now = (plan::schedule::surface_fast_default(), plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(n)));
+        !crate::pipeline_gated() || ((!now.0 || self.schedule_listed.0) && (!now.1 || self.schedule_listed.1))
     }
 
     /// The fast schedules' surface launches ([`GroupOp::SoloRest`], [`GroupOp::Surf`]).

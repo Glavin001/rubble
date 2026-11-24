@@ -175,6 +175,60 @@ pub struct LabOptions {
     /// default): the cars' wheels drive on crates, bricks, blocks and ramps that are World
     /// bodies and push them. Live (`{ wheelsHitBodies: bool }`).
     pub wheels_hit_bodies: bool,
+    /// Surface contact on the fast schedules (`ExplicitBeamsGpu::set_surface_fast`, the
+    /// same results bit for bit): `Some(0)` off, `Some(1)` a wide frame's part alone,
+    /// `Some(2)` with its vehicle-contact part too; `None` the host's default
+    /// (`explicit_plan::schedule::surface_fast_default`). What `RUBBLE_SURFACE_FAST` says
+    /// natively, set for the process before the World is built
+    /// (`schedule::host_setting`). Live (`{ surfaceFast }`: `default`, `off`, `wide`,
+    /// `all`; a browser builds again when a part turns on whose modules it did not
+    /// compile). JSON `surfaceFast`.
+    pub surface_fast: Option<u8>,
+    /// Vehicle contact's frames without a group of two or more on the wide passes
+    /// (`ExplicitBeamsGpu::set_vv_wide`, the same results bit for bit); `None` the host's
+    /// default (`explicit_plan::vv_wide::vv_wide_default`). As [`Self::surface_fast`]
+    /// for `RUBBLE_VV_WIDE`. Live (`{ vvWide }`: `default`, `on`, `off`). JSON `vvWide`.
+    pub vv_wide: Option<bool>,
+}
+
+/// `default` (or null) as `None`, `off`/`0` as 0, `wide`/`1` as 1, `all`/`2` as 2: the
+/// lab's `surfaceFast`.
+fn surface_fast_from(x: Option<&Value>) -> Option<u8> {
+    match x? {
+        Value::String(t) => match t.as_str() {
+            "off" | "0" => Some(0),
+            "wide" | "1" => Some(1),
+            "all" | "on" | "2" => Some(2),
+            _ => None,
+        },
+        Value::Number(n) => n.as_u64().map(|n| n.min(2) as u8),
+        Value::Bool(b) => Some(if *b { 2 } else { 0 }),
+        _ => None,
+    }
+}
+
+/// `default` (or null) as `None`, `on`/`off` (or a bool): the lab's `vvWide`.
+fn vv_wide_from(x: Option<&Value>) -> Option<bool> {
+    match x? {
+        Value::String(t) => match t.as_str() {
+            "on" | "1" => Some(true),
+            "off" | "0" => Some(false),
+            _ => None,
+        },
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+impl LabOptions {
+    /// The schedule settings ([`Self::surface_fast`], [`Self::vv_wide`]) for this process
+    /// (`engine_exec::explicit_plan::schedule::host_setting`): before a browser lists
+    /// the kernels to compile and before the World is built.
+    pub fn apply_schedule_settings(&self) {
+        use engine_exec::explicit_plan::schedule::host_setting;
+        host_setting::set_surface_fast(self.surface_fast);
+        host_setting::set_vv_wide(self.vv_wide);
+    }
 }
 
 impl Default for LabOptions {
@@ -209,6 +263,8 @@ impl Default for LabOptions {
             structures: Vec::new(),
             // Off by default (explicit-vehicles-in-world.md §13, "Open: Chrome").
             wheels_hit_bodies: false,
+            surface_fast: None,
+            vv_wide: None,
         }
     }
 }
@@ -356,6 +412,8 @@ impl LabOptions {
             wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
             group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
             wheels_hit_bodies: v.get("wheelsHitBodies").and_then(Value::as_bool).unwrap_or(d.wheels_hit_bodies),
+            surface_fast: surface_fast_from(v.get("surfaceFast")).or(d.surface_fast),
+            vv_wide: vv_wide_from(v.get("vvWide")).or(d.vv_wide),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2703,6 +2761,7 @@ impl Lab {
         opts: LabOptions,
         tweak: impl FnOnce(&mut WorldDef),
     ) -> anyhow::Result<(World, Lab)> {
+        opts.apply_schedule_settings();
         let mut def = lab_world_def(&opts);
         tweak(&mut def);
         let mut world = World::new(gpu, &def)?;
@@ -3202,6 +3261,25 @@ impl Lab {
             world.set_explicit_bit_exact(on)?;
             self.bench.opts.bit_exact = on;
             return Ok(json!({ "bitExact": on }));
+        }
+        // { surfaceFast, vvWide }: the schedule switches (LabOptions::surface_fast,
+        // vv_wide; the same results bit for bit), from the next frame, kept for the
+        // process (schedule::host_setting) so a rebuild keeps them. `rebuild`: a browser
+        // host did not compile the modules a switch now on takes (the page builds again).
+        if cmd.get("surfaceFast").is_some() || cmd.get("vvWide").is_some() {
+            if let Some(x) = cmd.get("surfaceFast") {
+                self.bench.opts.surface_fast = surface_fast_from(Some(x));
+            }
+            if let Some(x) = cmd.get("vvWide") {
+                self.bench.opts.vv_wide = vv_wide_from(Some(x));
+            }
+            self.bench.opts.apply_schedule_settings();
+            let mut rebuild = false;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.reset_schedule_switches();
+                rebuild = !x.schedule_modules_listed();
+            }
+            return Ok(json!({ "surfaceFast": self.bench.opts.surface_fast, "vvWide": self.bench.opts.vv_wide, "rebuild": rebuild }));
         }
         // { wheelsHitBodies: bool }: raycast wheels on World bodies
         // (LabOptions::wheels_hit_bodies), from the next step and after a restart.

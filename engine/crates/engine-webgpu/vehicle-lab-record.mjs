@@ -12,6 +12,8 @@
 //     then the lab's table; console errors fail the run.
 //   node vehicle-lab-record.mjs --probe --ab MASK [--abFrames 20] [--abSteps 34] [--abEvery 1]
 //       [--abUntil 40] [--abOut dir] name:query
+//     (MASK: a perf flag mask, or a host switch's name: surffast, surffast_wide, vvwide;
+//     WebWorld.explicitAbSwitch; the page's query must compile its modules, e.g. surfaceFast=2.)
 //     Chrome's bit-for-bit A/B of perf flag MASK on the page's own run (the flag's
 //     `vehicle_lab --ab-switch perf=MASK` in the browser; WebWorld.explicitAb): every
 //     --abEvery simulated seconds the World is held, the vehicles run --abFrames frames of
@@ -35,13 +37,14 @@ import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+const START = Date.now();
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const OUT = opt('--out', join(homedir(), 'Development', 'rubble-artifacts', 'vehicle-lab'));
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
 const PROBE = args.includes('--probe'), RESTARTS = args.includes('--restarts');
 const EXTRA = opt('--query', '');
-const FLAGS = ['--probe', '--restarts', '--segments', '--locked', '--uncapped'];
+const FLAGS = ['--probe', '--restarts', '--segments', '--locked', '--uncapped', '--kernelLog'];
 const runs = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsWith('--') || FLAGS.includes(args[i - 1])));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -82,7 +85,11 @@ const chrome = spawn(CHROME, [
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
   // (--uncapped: frames as fast as Chrome makes them, not headless's 60 a second: a display
   // faster than the World, as a 120 Hz one is.)
-  ...(args.includes('--uncapped') ? ['--disable-frame-rate-limit', '--disable-gpu-vsync'] : []), 'about:blank',
+  ...(args.includes('--uncapped') ? ['--disable-frame-rate-limit', '--disable-gpu-vsync'] : []),
+  // (CHROME_FLAGS: more of Chrome's flags, space separated, for a diagnosis, e.g.
+  // `--enable-dawn-features=disable_robustness`: what Dawn's bounds checks cost. Never
+  // for a measurement of the page.)
+  ...(process.env.CHROME_FLAGS || '').split(/\s+/).filter(Boolean), 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
 process.on('exit', cleanup);
@@ -104,6 +111,12 @@ ws.addEventListener('message', (e) => {
   if (m.method === 'Page.frameNavigated' && !m.params.frame.parentId) navigations++;
   if (m.method === 'Runtime.exceptionThrown') pageErrors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
   if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') pageErrors.push(m.params.args.map((a) => a.value ?? a.description).join(' '));
+  // (--kernelLog: the page's kernel compiles as they finish, deferred ones included: when
+  // a path that waits for its modules could first be taken.)
+  if (args.includes('--kernelLog') && m.method === 'Runtime.consoleAPICalled') {
+    const text = m.params.args.map((a) => a.value ?? a.description).join(' ');
+    if (text.startsWith('[loading]') && / (compiled|failed) /.test(text)) console.log(`  kernel ${text.slice(9).trim()} (at ${((Date.now() - START) / 1000).toFixed(0)} s)`);
+  }
 });
 const send = (method, params = {}) => new Promise((r) => { const id = ++nextId; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
 const evaluate = async (expression) => {
@@ -203,23 +216,28 @@ if (PROBE && AB != null) {
         bad = 1;
         break;
       }
-      const r = await evaluate(`(async () => {
-        {
-          const t = window.__lab.time();
-          const diff = ${Number(AB)} ? await window.__world.explicitAb(${Number(AB)}, ${frames}, ${steps}) : [];
-          let file = null;
-          if ((diff.length && ${saved === null}) || ${SAVE_ALL}) {
-            file = 'cars' + window.__lab.vehicleCount() + '_t' + t.toFixed(2) + ${JSON.stringify(TAG)} + '.fx';
-            await fetch('/__ab/' + file, { method: 'POST', body: await window.__lab.fixture(window.__world) });
+      // (--ab A,B,...: each switch's A/B in turn from the same held state; the state is
+      // put back after each.)
+      for (const sw of AB.split(',')) {
+        const r = await evaluate(`(async () => {
+          {
+            const t = window.__lab.time();
+            const diff = ${isNaN(Number(sw))} ? await window.__world.explicitAbSwitch(${JSON.stringify(sw)}, ${frames}, ${steps})
+              : ${Number(sw) || 0} ? await window.__world.explicitAb(${Number(sw) || 0}, ${frames}, ${steps}) : [];
+            let file = null;
+            if ((diff.length && ${saved === null}) || ${SAVE_ALL}) {
+              file = 'cars' + window.__lab.vehicleCount() + '_t' + t.toFixed(2) + ${JSON.stringify(TAG)} + '.fx';
+              await fetch('/__ab/' + file, { method: 'POST', body: await window.__lab.fixture(window.__world) });
+            }
+            return { t, diff, file, errors: window.__world.explicitErrors(), sched: Array.from(window.__world.explicitScheduleState()) };
           }
-          return { t, diff, file, errors: window.__world.explicitErrors() };
-        }
-      })()`);
-      samples++;
-      if (r.file && r.diff.length && saved === null) saved = r.file;
-      if (r.diff.length) differ++;
-      console.log(`  t ${r.t.toFixed(2)}: ${r.diff.length ? `DIFFER (${r.diff.length} runs)` : 'bit for bit'}${r.file ? `; state saved: ${join(AB_OUT, r.file)}` : ''}${r.errors.length ? `; errors ${r.errors.join('; ')}` : ''}`);
-      for (const l of r.diff.slice(0, 8)) console.log(`     ${l}`);
+        })()`);
+        samples++;
+        if (r.file && r.diff.length && saved === null) saved = r.file;
+        if (r.diff.length) differ++;
+        console.log(`  t ${r.t.toFixed(2)} ${sw}: ${r.diff.length ? `DIFFER (${r.diff.length} runs)` : 'bit for bit'}; surface piped ${r.sched[0]}, vv wide used ${r.sched[1]}, wide ${r.sched[2]}${r.file ? `; state saved: ${join(AB_OUT, r.file)}` : ''}${r.errors.length ? `; errors ${r.errors.join('; ')}` : ''}`);
+        for (const l of r.diff.slice(0, 8)) console.log(`     ${l}`);
+      }
     }
     if (!locked) await evaluate('window.__hold(false)');
     const pose = await evaluate('Array.from(window.__lab.pose())');
@@ -234,9 +252,13 @@ if (PROBE) {
   for (const run of runs.length ? runs : ['shoot-sphere']) {
     const { name, query } = parse(run);
     const built = await open(`${query}&timing=phases`);
-    console.log(`${name}: ready in ${built.toFixed(1)} s`);
+    console.log(`${name}: ready in ${built.toFixed(1)} s; ${await evaluate('window.__lab.vehicleCount()')} vehicles; ${await evaluate('document.getElementById("status")?.textContent || ""')}`);
     if (opt('--eval', null)) console.log(await evaluate(readFileSync(opt('--eval'), 'utf8')));
+    // (--simSecs T: the run ends once the lab's time has reached T, within --secs wall
+    // seconds: runs of several builds over the same simulated span, whatever their speed.)
+    const simSecs = Number(opt('--simSecs', '0')), wall0 = Date.now(), sim0 = await evaluate('window.__lab.time()');
     for (let s = 1; s <= Number(opt('--secs', '10')); s++) {
+      if (simSecs && await evaluate('window.__lab.time()') >= simSecs) break;
       await new Promise((r) => setTimeout(r, 1000));
       try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, camAge, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
         camAge: camAge && { p50: +camAge.p50.toFixed(3), max: +camAge.max.toFixed(3) },
@@ -246,6 +268,10 @@ if (PROBE) {
     await grabTo(join(OUT, 'stills', `probe-${name}.jpg`), 85);
     if (opt('--eval', null)) console.log(await evaluate('(window.__abLog || []).join("\\n")'));
     console.log(`  gpu run (t >= 0.5 s): ${await evaluate('JSON.stringify(window.__gpuRun(0.5), (k, v) => typeof v === "number" ? +v.toFixed(3) : v)')}`);
+    {
+      const sim = await evaluate('window.__lab.time()') - sim0, wall = (Date.now() - wall0) / 1000, rate = await evaluate('window.__lab ? 1 / window.__world.solver().dt : 60');
+      console.log(`  whole run: ${sim.toFixed(2)} s simulated in ${wall.toFixed(1)} s (${(100 * sim / wall).toFixed(0)} % of real time, ${(sim * rate / wall).toFixed(1)} World steps a second)${simSecs && sim0 + sim < simSecs ? `; did NOT reach ${simSecs} s` : ''}; errors ${JSON.stringify(await evaluate('window.__world.explicitErrors()'))}`);
+    }
     console.log(await evaluate('window.__table()'));
     failOnErrors(name);
   }

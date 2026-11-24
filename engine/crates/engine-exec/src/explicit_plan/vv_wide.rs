@@ -196,14 +196,11 @@ impl FramePlanner {
     }
 }
 
-/// [`FramePlanner::set_vv_wide`]'s default: `RUBBLE_VV_WIDE=1` on, `0` off; otherwise the
-/// host's own (`host`).
+/// [`FramePlanner::set_vv_wide`]'s default: `RUBBLE_VV_WIDE=1` on, `0` off
+/// ([`super::schedule::host_setting`]: as the host asked); otherwise the host's own
+/// (`host`).
 pub fn vv_wide_default(host: bool) -> bool {
-    match std::env::var("RUBBLE_VV_WIDE").as_deref() {
-        Ok("1") => true,
-        Ok("0") => false,
-        _ => host,
-    }
+    super::schedule::host_setting::vv_wide().unwrap_or(host)
 }
 
 /// The modules this schedule launches beside the split group path's own.
