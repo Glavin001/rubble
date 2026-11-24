@@ -102,6 +102,25 @@ fn spawn(desc: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> Result<ExplicitBeams, S
     let (mut s, _) =
         ExplicitBeams::from_desc_jbeam_raycast(desc, at + Vec3::Y * lift, vel, settings())?;
     s.surface_contact = std::env::var("SURFACE_CONTACT").map_or(true, |v| v != "0");
+    // OUTWARD=1: vehicle contact takes the triangle's outward side (outward_skin).
+    s.outward_skin = std::env::var("OUTWARD").is_ok_and(|v| v == "1" || v == "2");
+    if std::env::var("OUTWARD").is_ok_and(|v| v == "2") {
+        // OUTWARD=2: only the outer skin's triangles (in front of each, 1 cm out,
+        // the winding number of the whole collision skin is below 0.5).
+        let h = hull(&s);
+        s.outward_tris = (0..s.triangles.len())
+            .map(|t| {
+                let [a, b, c] = s.triangles[t].nodes.map(|i| s.origin + s.nodes[i as usize].pos);
+                let n = (b - a).cross(c - a).normalize_or_zero();
+                winding((a + b + c) / 3.0 + n * 0.01, &h) < 0.5
+            })
+            .collect();
+        eprintln!(
+            "  outer-skin triangles: {} of {}",
+            s.outward_tris.iter().filter(|&&x| x).count(),
+            s.triangles.len()
+        );
+    }
     s.finish();
     Ok(s)
 }
@@ -230,6 +249,12 @@ struct Dir {
     tyre: usize,
     tyre_depth: f32,
     edges: usize,
+    /// The inside nodes by their anti-clip memory for the other car's triangles
+    /// (LOCK): holding a side they are on (held inside: the lock), holding a side
+    /// they are behind (pushed back out), or no memory of the other car (free).
+    held_in: usize,
+    push_out: usize,
+    free: usize,
 }
 
 fn main() -> Result<(), String> {
@@ -250,7 +275,9 @@ fn main() -> Result<(), String> {
         n.position = [-n.position[0], n.position[1], -n.position[2]];
     }
     let sa = spawn(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * v)?;
-    let sb = spawn(&tb, Vec3::new(0.0, 0.0, 0.025 + zmax), -Vec3::Z * v)?;
+    // OFFSET=m: car B moved sideways (an offset hit; 0 full overlap).
+    let offset: f32 = std::env::var("OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let sb = spawn(&tb, Vec3::new(offset, 0.0, 0.025 + zmax), -Vec3::Z * v)?;
     let vis: Vec<ShowcaseVisual> = [d, &tb]
         .iter()
         .map(|dd| {
@@ -374,6 +401,58 @@ fn main() -> Result<(), String> {
             .iter()
             .filter(|(x, y)| pos(*x).z.max(pos(*y).z) > front)
             .collect();
+        {
+            // Winding consistency: an edge two triangles share should be walked in
+            // opposite directions; the signed volume's sign says which way the
+            // normals ((p1 − p0) × (p2 − p0)) face (> 0 outward).
+            let mut dir: HashMap<(u32, u32), Vec<bool>> = HashMap::new();
+            let mut vol = 0.0f64;
+            for &t in &live {
+                let n = s.triangles[t].nodes;
+                for k in 0..3 {
+                    let (x, y) = (n[k], n[(k + 1) % 3]);
+                    dir.entry((x.min(y), x.max(y))).or_default().push(x < y);
+                }
+                let (p0, p1, p2) = (pos(n[0]), pos(n[1]), pos(n[2]));
+                vol += (p0.dot(p1.cross(p2)) / 6.0) as f64;
+            }
+            let same = dir.values().filter(|v| v.len() == 2 && v[0] == v[1]).count();
+            let pairs = dir.values().filter(|v| v.len() == 2).count();
+            // Per triangle: the normal at its centre against the outward test (the
+            // winding just in front of and behind it).
+            let h = hull(s);
+            let mut inward = 0;
+            for &t in &live {
+                let n = s.triangles[t].nodes;
+                let (p0, p1, p2) = (pos(n[0]), pos(n[1]), pos(n[2]));
+                let c = (p0 + p1 + p2) / 3.0;
+                let nn = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+                if winding(c + nn * 0.01, &h) > winding(c - nn * 0.01, &h) + 0.2 {
+                    inward += 1;
+                }
+            }
+            println!(
+                "  winding: {same} of {pairs} shared edges walked the same way by both triangles; signed volume {vol:.3} m^3; triangles facing in (winding higher in front) {inward} of {}",
+                live.len()
+            );
+        }
+        if std::env::var("OPEN").is_ok() {
+            // OPEN=1: the front metre's open edges by node name (where the hull has holes).
+            let mut v: Vec<String> = open_front
+                .iter()
+                .map(|(x, y)| {
+                    format!(
+                        "{}-{} ({:.2} m, y {:.2})",
+                        d.nodes[*x as usize].name,
+                        d.nodes[*y as usize].name,
+                        pos(*x).distance(pos(*y)),
+                        0.5 * (pos(*x).y + pos(*y).y)
+                    )
+                })
+                .collect();
+            v.sort();
+            println!("  front metre's open edges: {v:?}");
+        }
         let open_len: f32 = open.iter().map(|(x, y)| pos(*x).distance(pos(*y))).sum();
         let open_front_len: f32 = open_front
             .iter()
@@ -631,14 +710,27 @@ fn main() -> Result<(), String> {
     let mut worst = [Dir::default(); 2];
     let (mut slab_max, mut slab_vol_max, mut slab_t) = (0.0f32, 0.0f32, 0.0f32);
     let mut entered: [HashMap<String, usize>; 2] = Default::default();
-    let steps = (secs / 0.0005).round() as usize;
+    // REVERSE=s: after the crash, both drivers reverse at full throttle for s
+    // seconds (backing apart); the cars' separation speed shows a lock.
+    let reverse: f32 = std::env::var("REVERSE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let crash_steps = (secs / 0.0005).round() as usize;
+    let steps = ((secs + reverse) / 0.0005).round() as usize;
+    let com = |s: &ExplicitBeams| {
+        let (mut c, mut m, mut v) = (Vec3::ZERO, 0.0f32, Vec3::ZERO);
+        for n in &s.nodes {
+            c += n.pos * n.mass;
+            v += n.vel * n.mass;
+            m += n.mass;
+        }
+        (s.origin + c / m, v / m)
+    };
     let every = 8; // 4 ms
     println!("  t ms | A in B: nodes (deepest mm) face/gap, paint n p99/max mm, tyre n max, edges | B in A: same | slab max mm, volume L | dead tris A/B");
     // FORCES=1: the vehicle-contact force on each car by height band and by
     // part (rearward push along the car, vertical), its nose-up moment about
     // the car's centre of mass, per 50 ms and integrated (impulse).
     let forces = std::env::var("FORCES").is_ok();
-    if forces {
+    if forces || std::env::var("LEDGER").is_ok() {
         w.enable_ledger();
     }
     let part_of: HashMap<String, String> = l
@@ -703,6 +795,29 @@ fn main() -> Result<(), String> {
     }
     for k in 0..=steps {
         if k > 0 {
+            if k == crash_steps + 1 && reverse > 0.0 {
+                for s in &mut w.vehicles {
+                    s.set_drive_input(engine_softbody::explicit_drive::DriveInput {
+                        forward: -1.0,
+                        ..Default::default()
+                    });
+                }
+                // UNCONTACT=1: vehicle contact off from here (the control: do
+                // the cars back apart when nothing holds them?).
+                if std::env::var("UNCONTACT").is_ok() {
+                    w.contact = false;
+                }
+                let wheels: Vec<String> = w
+                    .vehicles
+                    .iter()
+                    .map(|s| {
+                        s.drive.as_ref().map_or("no drive".into(), |d| {
+                            format!("{} of {} wheels on the ground", d.wheels.iter().filter(|x| x.contact).count(), d.wheels.len())
+                        })
+                    })
+                    .collect();
+                println!("  ---- {:.0} ms: both reverse ({wheels:?}) ----", k as f32 * 0.5);
+            }
             w.step();
             if forces {
                 for c in 0..2 {
@@ -851,6 +966,31 @@ fn main() -> Result<(), String> {
                     continue;
                 }
                 ins[i as usize] = true;
+                {
+                    // LOCK: this node's held sides for the other car's triangles.
+                    let ys = &w.vehicles[o];
+                    let mut kind = 0; // 0 free, 1 pushed out, 2 held inside
+                    if let Some(cw) = x.clip_sides.get(i as usize) {
+                        for &word in &cw[..2] {
+                            if word == engine_softbody::explicit_contact::CLIP_EMPTY
+                                || word >> 21 != o as u32
+                            {
+                                continue;
+                            }
+                            let t = ((word >> 1) & engine_softbody::explicit_contact::CLIP_MAX_TRIANGLES) as usize;
+                            let side = if word & 1 != 0 { 1.0 } else { -1.0 };
+                            let [i0, i1, i2] = ys.triangles[t].nodes.map(|q| ys.origin + ys.nodes[q as usize].pos);
+                            let fr = engine_softbody::explicit_contact::ContactFrame::new(i0, i1, i2);
+                            let (_, _, _, delta) = fr.local(p);
+                            kind = kind.max(if side * delta >= 0.0 { 2 } else { 1 });
+                        }
+                    }
+                    match kind {
+                        2 => r.held_in += 1,
+                        1 => r.push_out += 1,
+                        _ => r.free += 1,
+                    }
+                }
                 r.nodes += 1;
                 r.node_depth = r.node_depth.max(dist(p, y));
                 if !prev_in[c][i as usize] {
@@ -911,6 +1051,9 @@ fn main() -> Result<(), String> {
             wv.tyre = wv.tyre.max(r.tyre);
             wv.tyre_depth = wv.tyre_depth.max(r.tyre_depth);
             wv.edges = wv.edges.max(r.edges);
+            wv.held_in = wv.held_in.max(r.held_in);
+            wv.push_out = wv.push_out.max(r.push_out);
+            wv.free = wv.free.max(r.free);
         }
         let (mut smax, mut svol) = (0.0f32, 0.0f32);
         if full {
@@ -1008,11 +1151,14 @@ fn main() -> Result<(), String> {
         if full {
             let f = |r: &Dir| {
                 format!(
-                    "{:3} ({:4.0}) {:2}/{:2}, {:5} {:4.0}/{:4.0}, {:4} {:4.0}, {:3}",
+                    "{:3} ({:4.0}) {:2}/{:2} in/out/free {:3}/{:3}/{:3}, {:5} {:4.0}/{:4.0}, {:4} {:4.0}, {:3}",
                     r.nodes,
                     r.node_depth * 1e3,
                     r.face,
                     r.gap,
+                    r.held_in,
+                    r.push_out,
+                    r.free,
                     r.paint,
                     r.paint_p99 * 1e3,
                     r.paint_depth * 1e3,
@@ -1021,6 +1167,33 @@ fn main() -> Result<(), String> {
                     r.edges
                 )
             };
+            let ((ca, va), (cb, vb)) = (com(&w.vehicles[0]), com(&w.vehicles[1]));
+            let ax = (cb - ca).normalize_or_zero();
+            let ke: f32 = w
+                .vehicles
+                .iter()
+                .flat_map(|s| s.nodes.iter())
+                .map(|n| 0.5 * n.mass * n.vel.length_squared())
+                .sum();
+            println!(
+                "       centres {:.3} m apart, separating at {:.2} m/s; kinetic energy {:.1} kJ",
+                ca.distance(cb),
+                (vb - va).dot(ax),
+                ke * 1e-3
+            );
+            if let Some(lg) = w.ledger.as_ref() {
+                // LEDGER=1: vehicle contact's work so far (normal, friction, position
+                // steps) and self contact's, kJ; contacts must not do positive work.
+                println!(
+                    "       ledger kJ: vehicle contact normal {:.2} friction {:.2} steps {:.2}; self contact {:.2}; mechanical {:.1} (start {:.1})",
+                    lg.w_contact_normal * 1e-3,
+                    lg.w_contact_friction * 1e-3,
+                    lg.w_contact_shift * 1e-3,
+                    lg.w_self_contact * 1e-3,
+                    lg.mechanical() * 1e-3,
+                    lg.start * 1e-3
+                );
+            }
             println!(
                 "  {:4.0} | {} | {} | {:4.0}, {:5.1} | {}/{}",
                 k as f32 * 0.5,
@@ -1048,11 +1221,14 @@ fn main() -> Result<(), String> {
     for (c, name) in ["A in B", "B in A"].iter().enumerate() {
         let r = worst[c];
         println!(
-            "  worst {name}: nodes {} (deepest {:.0} mm; entries through a face {}, through a gap {}), paint vertices {} (p99 {:.0}, deepest {:.0} mm), tyre vertices {} (deepest {:.0} mm), skin edges through triangles {}",
+            "  worst {name}: nodes {} (deepest {:.0} mm; entries through a face {}, through a gap {}; held inside {}, pushed out {}, free {}), paint vertices {} (p99 {:.0}, deepest {:.0} mm), tyre vertices {} (deepest {:.0} mm), skin edges through triangles {}",
             r.nodes,
             r.node_depth * 1e3,
             r.face,
             r.gap,
+            r.held_in,
+            r.push_out,
+            r.free,
             r.paint,
             r.paint_p99 * 1e3,
             r.paint_depth * 1e3,

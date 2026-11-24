@@ -957,6 +957,20 @@ pub struct ExplicitBeams {
     /// triangle, is caught from the side it came from (a swept test, whatever its
     /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
     pub anti_clip: bool,
+    /// Outward skin (a Rubble setting, off by default): this vehicle's collision
+    /// triangles face out of the solids they bound (checked by the authoring), so
+    /// another vehicle's node always belongs on a triangle's normal side. With it,
+    /// vehicle contact against this vehicle's triangles takes that side for every
+    /// partner node, in place of anti-clip's memory, swept crossing and side vote:
+    /// a node that got inside (through a hole, an edge or past CLIP_DEPTH) is never
+    /// held there, and one leaving from inside is not caught as having come from
+    /// the inside (the lock of two cars that cannot back apart). Self contact keeps
+    /// anti-clip's rule.
+    pub outward_skin: bool,
+    /// With [`Self::outward_skin`]: the triangles it applies to (the outer skin's,
+    /// whose front faces out of the whole vehicle at rest); the others keep
+    /// anti-clip's rule. Empty: every triangle.
+    pub outward_tris: Vec<bool>,
     /// Anti-clip's box padding by each contacter's own travel (a Rubble setting, not
     /// in the specification; off by default): a contacter is tested against a triangle
     /// when inside its box padded by r + (the triangle's fastest node's speed + the
@@ -1741,6 +1755,8 @@ impl ExplicitBeams {
             rest_pose: None,
             two_body_contact: false,
             anti_clip: false,
+            outward_skin: false,
+            outward_tris: Vec::new(),
             own_travel_reach: false,
             retired: Vec::new(),
             clip_sides: Vec::new(),

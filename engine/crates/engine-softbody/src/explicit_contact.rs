@@ -882,8 +882,15 @@ impl ExplicitBeamsWorld {
                             let n = self.vehicles[b].nodes.len();
                             self.vehicles[b].clip_sides = vec![[CLIP_EMPTY; 4]; n];
                         }
-                        let held =
-                            clip_side(&self.vehicles[b].clip_sides[h as usize], a as u32, t as u32);
+                        // Outward skin: the partner's node belongs on the normal side,
+                        // whatever it held or crossed.
+                        let held = if self.vehicles[a].outward_skin
+                            && self.vehicles[a].outward_tris.get(t).copied().unwrap_or(true)
+                        {
+                            Some(1.0)
+                        } else {
+                            clip_side(&self.vehicles[b].clip_sides[h as usize], a as u32, t as u32)
+                        };
                         let va = &self.vehicles[a];
                         let vb = &self.vehicles[b];
                         let wb = &self.frame[b];

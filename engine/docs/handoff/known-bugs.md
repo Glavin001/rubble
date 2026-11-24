@@ -123,6 +123,23 @@ The BeamNG mod's shared tyre content isn't converted. On pressure wheels it ride
   - *Still open:* the front hubs still leave the ground (+19 cm). Weaker upper structure trades against overlap (upper band × 0.2: 117 L); a stiffer cross-section lifts more (× 6: 0.96 m). What is left is the floor striking the ground and the contact's height, which the node-only vehicle contact (item 1 above) sets as much as the lattice does.
 - **Not measured:** the ETK pair and the old sedan1 head on (hypothesis 5).
 
+### S4. Two cars lock together after a hard hit and cannot back apart (Confirmed, CPU, 2026-11-24)
+- **Seen (user, lab, Chrome):** `vehicle-lab.html?mode=drive&car=gen&cars=4&surface=1`. After high-speed hits one car's hood sits inside another's, and reversing does not pull them apart. `surface=1` does not help: surface contact is triangles against rigid shapes only (§38). Car-to-car and self contact stay node against triangle.
+- **Measured** (`vehicle_c2c_overlap sedan 60 0.6` with `REVERSE=2.0`: the generated sedan, 60 + 60 km/h, then both drivers at full reverse for 2 s; `OFFSET=0.8` for 0.8 m offset; `UNCONTACT=1` switches vehicle contact off when the reverse starts; logs in `~/Development/rubble-artifacts/c2c-fuse/`):
+  - *The lock is contact.* Head on, the cars' centres move 0.15 m apart in the 2 s of reverse and stop (0.00 m/s). With vehicle contact switched off at the same moment they back apart at 18 m/s. Offset: 0.00 m/s, although each car has only 1 of 4 wheels on the ground there.
+  - *How nodes get in:* through gaps in the other car's collision skin far more than through its faces (head on 101 / 41 and 86 / 14 entries, offset 71 / 14 and 58 / 16). The skin has 222 open edges (79 m; at the nose: the bumper's top edge at 0.51 m (the grille band, 0.66 m long), its bottom edge, the hood–fender seams). Head-on rays: skin more than 15 cm behind the paint over 22 % of the front, none at all over 12 % (S2 measured 8 % after its fix: the generator has changed since).
+  - *What holds them:* at the worst sample 10–13 of the inside nodes hold anti-clip memory that keeps them *inside* (`LOCK` columns: held inside / pushed out / free). A node inside the other car that moves back out crosses that car's skin from the inside, and anti-clip catches it as having come from the inside. Most of the rest (17–36) have no memory of the other car at all, and nothing pushes them out.
+- **Tried: the outward side** (`ExplicitBeams::outward_skin`, CPU only, off by default; probe `OUTWARD=1`). Another car's node always belongs on a triangle's normal side; the generated sedan's 528 triangles all face out. Head on at 600 ms: inside nodes 28 / 41 → 6 / 8, held inside 0, overlap 94 → 68 L. **But not adopted:**
+  - skin edges through the other car's triangles double (85 / 88 → 158 / 161): nodes stay out, the panels cross between them;
+  - the cars still don't back apart (0.38 m in 2 s, then 0 m/s);
+  - offset, the overlap grows (195 → 375 L);
+  - contact turns into a standing fight: vehicle contact's position steps +867 kJ against the normal force's −640 kJ by 600 ms (baseline +79 / −87), still climbing at rest, against a crash of 413 kJ. Outer-skin triangles only (`OUTWARD=2`, 451 of 528) gives the same numbers, so the cars' internal faces are not the cause.
+- **What it points to:** the root is node-only contact between two crushed skins. With nodes kept out, the panels interlock at their edges (S2 item 1), and memory or side rules alone can't fix that. The order now:
+  1. **Edge-against-triangle contact between vehicles** (§38.1's beam-edge narrow phase against the partner's live triangles);
+  2. **close the generated sedan's skin** (authoring);
+  3. **the outward side again** once nothing hooks between nodes.
+- **Not yet measured:** panels into the car's own seats (self contact). Interior parts with collision faces should show up as own nodes inside own part hulls; seats skinned to nodes without faces would only overlap visually.
+
 ### L1. A small projectile passes through a car with node-only contact (Confirmed, CPU and GPU World)
 - **Measured** (`vehicle_lab --measure spheres`, [vehicle-lab.md](../vehicle-lab.md)): a 0.1 m steel sphere (32.9 kg) into the authored sedan's side passes through at 20, 40 and 60 m/s with surface contact off, giving 5–45 % of its momentum. With surface contact on it is stopped or bounces at every speed, never inside the hull.
 - **This is B1's second mechanism** (node-only contact) for projectiles. Not tunnelling: the result is the same at 20 m/s.
