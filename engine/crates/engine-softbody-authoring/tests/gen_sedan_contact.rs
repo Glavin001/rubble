@@ -526,7 +526,7 @@ fn pole(kmh: u32) -> Pole {
     }
     let d = desc();
     let zmax = d.nodes.iter().map(|n| n.position[2]).fold(f32::MIN, f32::max);
-    let mut s = spawn(d, Vec3::ZERO, Vec3::Z * (kmh as f32 / 3.6));
+    let mut s = spawn_with(d, Vec3::ZERO, Vec3::Z * (kmh as f32 / 3.6), std::env::var("EDGE_CONTACT").is_ok_and(|v| v == "1"));
     // The car's left is +x (its forward +z, up +y).
     s.shapes.push(StaticShape::cylinder(Vec3::new(0.45, 2.0, zmax + 0.3 + 0.15), 0.15, 2.0));
     let ext0 = extent(&s);
