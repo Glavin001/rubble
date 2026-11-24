@@ -198,7 +198,9 @@ jobs:
             node crates/engine-webgpu/explicit-wgsl-check.mjs
           # Each Slang file's fan-out (the kernel compiles an edit of it reruns) within its
           # line (tools/build-time/fanout-allowlist.txt, lines only come down). Every compile
-          # comes from the per-compile cache the build above filled.
+          # comes from the per-compile cache the build above filled (slangc: the one
+          # build-web.sh downloaded, on $SLANGC for this step too).
+          TOOLS="$HOME/.cache/rubble-tools" . scripts/slangc.sh
           cargo run -q --release -p engine-webgpu --no-default-features --bin kernels -- --closures "$RUNNER_TEMP/closures.txt"
           python3 tools/build-time/fanout.py "$RUNNER_TEMP/closures.txt" --check
       - name: Upload the part
