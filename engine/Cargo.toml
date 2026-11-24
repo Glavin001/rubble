@@ -27,6 +27,7 @@ members = [
     "crates/engine-ffi",
     "crates/engine-vehiclegen",
     "crates/engine-vehiclegen-wasm",
+    "crates/engine-vehiclerig-wasm",
     "crates/engine-world-wasm",
     "experiments/gpu-floor",
 ]

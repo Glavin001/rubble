@@ -95,6 +95,28 @@ impl Default for SedanParams {
     }
 }
 
+/// Each numeric parameter's range (the one list `validate` and the web configurator's
+/// sliders read). Lowering (`ride`) uses up the gap between the tyre and the wheel-well
+/// liner (it grows with the tyre: 33.5 mm at every tyre size; keep 13.5).
+pub const RANGES: &[(&str, f64, f64)] = &[
+    ("wheelbase", 2.2, 3.4),
+    ("front_overhang", 0.70, 1.30),
+    ("rear_overhang", 0.75, 1.40),
+    ("width", 1.55, 2.10),
+    ("track", 1.35, 1.85),
+    ("height", 1.20, 1.80),
+    ("ride", -0.020, 0.20),
+    ("tyre_d", 0.55, 0.85),
+    ("tyre_w", 0.15, 0.35),
+    ("rim_in", 13.0, 22.0),
+    ("rim_w_in", 5.0, 11.0),
+    ("metallic", 0.0, 1.0),
+    ("roughness", 0.0, 1.0),
+];
+
+/// The rim styles the sedan family reads (anything else is the alloy).
+pub const RIM_STYLES: &[&str] = &["alloy", "steel", "magnum"];
+
 impl SedanParams {
     /// Ranges the design holds together in (each wheel arch keeps its
     /// undistorted zone, the cabin keeps its door lines in order).
@@ -106,21 +128,24 @@ impl SedanParams {
                 Err(format!("{name} = {v} is outside {lo}..{hi}"))
             }
         };
-        chk("wheelbase", self.wheelbase, 2.2, 3.4)?;
-        chk("front_overhang", self.front_overhang, 0.70, 1.30)?;
-        chk("rear_overhang", self.rear_overhang, 0.75, 1.40)?;
-        chk("width", self.width, 1.55, 2.10)?;
-        chk("track", self.track, 1.35, 1.85)?;
-        chk("height", self.height, 1.20, 1.80)?;
-        // lowering uses up the gap between the tyre and the wheel-well liner
-        // (it grows with the tyre: 33.5 mm at every tyre size; keep 13.5)
-        chk("ride", self.ride, -0.020, 0.20)?;
-        chk("tyre_d", self.tyre_d, 0.55, 0.85)?;
-        chk("tyre_w", self.tyre_w, 0.15, 0.35)?;
-        chk("rim_in", self.rim_in, 13.0, 22.0)?;
-        chk("rim_w_in", self.rim_w_in, 5.0, 11.0)?;
-        chk("metallic", self.metallic, 0.0, 1.0)?;
-        chk("roughness", self.roughness, 0.0, 1.0)?;
+        let v = |k: &str| match k {
+            "wheelbase" => self.wheelbase,
+            "front_overhang" => self.front_overhang,
+            "rear_overhang" => self.rear_overhang,
+            "width" => self.width,
+            "track" => self.track,
+            "height" => self.height,
+            "ride" => self.ride,
+            "tyre_d" => self.tyre_d,
+            "tyre_w" => self.tyre_w,
+            "rim_in" => self.rim_in,
+            "rim_w_in" => self.rim_w_in,
+            "metallic" => self.metallic,
+            _ => self.roughness,
+        };
+        for &(k, lo, hi) in RANGES {
+            chk(k, v(k), lo, hi)?;
+        }
         if self.rim_in * 0.0254 > self.tyre_d - 0.12 {
             return Err(format!("rim {} in leaves no tyre sidewall on a {} m tyre", self.rim_in, self.tyre_d));
         }

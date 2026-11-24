@@ -634,7 +634,14 @@ pub struct Built {
 
 /// Rig a design and bind its art `.glb` to the lattice.
 pub fn build(input: VgInput) -> Result<Built, String> {
-    let mut rig = rig::rig_with(&input);
+    let rig = rig_only(&input);
+    let skin = bind_art(&input, &rig, &input.glb)?;
+    Ok(Built { input, rig, skin })
+}
+
+/// The lattice alone (the physics): `build` less the binding of the art's skins.
+pub fn rig_only(input: &VgInput) -> Rig {
+    let mut rig = rig::rig_with(input);
     // (A posed design is rigged in its body frame and put in the world.)
     if let Some(ps) = input.rig.dims.pose {
         rig.transform(|g| {
@@ -642,8 +649,7 @@ pub fn build(input: VgInput) -> Result<Built, String> {
             Vec3::new(q.x as f32, q.y as f32, q.z as f32)
         });
     }
-    let skin = bind_art(&input, &rig, &input.glb)?;
-    Ok(Built { input, rig, skin })
+    rig
 }
 
 /// An art `.glb`'s weighted skins on `rig`'s lattice (the design's own art, or a
@@ -676,8 +682,18 @@ pub const LITE_EDGE: f64 = 0.035;
 /// full art (a phone's GPU memory); the page picks it only there.
 /// Returns the `.glb` bytes and its skins.
 pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), String> {
+    lite_art_of(&b.input, &b.rig, params, h)
+}
+
+/// [`lite_art`] from the design's input and its lattice (no art skins needed).
+pub fn lite_art_of(
+    input: &VgInput,
+    rig: &Rig,
+    params: &str,
+    h: f64,
+) -> Result<(Vec<u8>, Skin), String> {
     use engine_vehiclegen::export::{glb, render_parts};
-    let name = b.input.design();
+    let name = input.design();
     let d = engine_vehiclegen::design_from_json(name, params)?;
     let opts = engine_vehiclegen::BuildOpts {
         h,
@@ -694,7 +710,7 @@ pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), Stri
     let lite = crate::glb::read(&bytes)?;
     // The same meshes, by name and order: the JBeam's flexbody rows name them.
     let names = |g: &Glb| g.meshes.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
-    let (lo, art) = (names(&lite), names(&b.input.glb));
+    let (lo, art) = (names(&lite), names(&input.glb));
     if lo != art {
         let only = |a: &[String], b: &[String]| {
             a.iter()
@@ -711,7 +727,7 @@ pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), Stri
             art.len()
         ));
     }
-    let skin = bind_art(&b.input, &b.rig, &lite)?;
+    let skin = bind_art(input, rig, &lite)?;
     Ok((bytes, skin))
 }
 
@@ -952,4 +968,34 @@ fn rig_json_of(
         markers: mk,
         physics: serde_json::to_value(&spec.physics).unwrap(),
     }
+}
+
+/// The files a browser needs to drive a Rust-generator design from its parameters: the
+/// physics (JBeam parts, `.pc`) and the lighter render ([`lite_art_of`], body edge `h`)
+/// bound to the lattice, with `files.json` listing them. The same bytes as the CLI's
+/// `<design>.lite.*` and physics files (`files_with`), without the full art and its
+/// skins (140 MB the page would not draw). `params` is the JSON `VgInput::from_rust` takes.
+pub fn web_files(design: &str, params: &str, h: f64) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let input = VgInput::from_rust(design, params)?;
+    let rig = rig_only(&input);
+    let lite = lite_art_of(&input, &rig, params, h)?;
+    let name = input.design().to_string();
+    let mut out = physics_files(&input, &rig);
+    // (`physics_files` lists a part's path twice where two parts share a name: a folder
+    // on disk keeps the later file, so the later one is the part. Same here.)
+    let mut last: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, (p, _)) in out.iter().enumerate() {
+        last.insert(p.clone(), i);
+    }
+    let mut i = 0;
+    out.retain(|(p, _)| {
+        i += 1;
+        last[p] == i - 1
+    });
+    out.push((format!("{name}/{}", lite_glb_file(&name)), lite.0));
+    out.push((format!("{name}/{}", lite_skin_file(&name)), lite.1.encode()));
+    let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
+    let index = serde_json::to_string(&list).unwrap();
+    out.push(("files.json".into(), index.into_bytes()));
+    Ok(out)
 }

@@ -49,3 +49,14 @@ pub fn design_names() -> Vec<&'static str> {
 pub fn design_titles() -> Vec<(&'static str, &'static str)> {
     designs::REGISTRY.iter().map(|e| (e.name, e.title)).collect()
 }
+
+/// The configurator's controls for a design (numbers with their validated ranges, choices,
+/// switches, colours) as JSON; see [`designs::schema_json`].
+pub fn param_schema_json(name: &str) -> Result<String, String> {
+    designs::schema_json(name)
+}
+
+/// Check a design's parameters (the `validate()` of its parameter struct) without building it.
+pub fn validate_params(name: &str, params: &str) -> Result<(), String> {
+    design_from_json(name, params).map(|_| ())
+}

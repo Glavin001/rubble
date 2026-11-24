@@ -90,6 +90,12 @@ impl Default for Suv4x4Params {
     }
 }
 
+/// Each numeric parameter's range (for the web configurator; paint channels are 0..1).
+pub const RANGES: &[(&str, f64, f64)] = &[("paint", 0.0, 1.0), ("metallic", 0.0, 1.0), ("roughness", 0.0, 1.0)];
+
+/// The rim styles this design accepts.
+pub const RIM_STYLES: &[&str] = &["magnum", "alloy", "steel"];
+
 impl Suv4x4Params {
     pub fn validate(&self) -> Result<(), String> {
         let chk = |name: &str, v: f64| if v.is_finite() && (0.0..=1.0).contains(&v) { Ok(()) } else { Err(format!("{name} = {v} is outside 0..1")) };

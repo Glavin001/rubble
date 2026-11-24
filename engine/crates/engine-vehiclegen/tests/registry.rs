@@ -50,3 +50,36 @@ fn variants_keep_their_base_parts_and_add_their_own() {
         assert!(police.parts.get(extra).is_some(), "police has no {extra}");
     }
 }
+
+/// The configurator's controls come from the registry: every design has a schema whose
+/// numbers hold their defaults inside the range `validate()` enforces, and a value just
+/// outside a range is the validator's error (the range list is the validator's own).
+#[test]
+fn every_designs_schema_matches_its_validator() {
+    for (name, _) in engine_vehiclegen::design_titles() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&engine_vehiclegen::param_schema_json(name).unwrap()).unwrap();
+        let rows = schema.as_array().unwrap();
+        assert!(!rows.is_empty(), "{name}");
+        let defaults: serde_json::Value =
+            serde_json::from_str(&engine_vehiclegen::default_params_json(name).unwrap()).unwrap();
+        for r in rows {
+            let k = r["key"].as_str().unwrap();
+            assert_eq!(r["value"], defaults[k], "{name}.{k}");
+            if r["kind"] == "number" {
+                let (v, lo, hi) = (r["value"].as_f64().unwrap(), r["min"].as_f64().unwrap(), r["max"].as_f64().unwrap());
+                assert!(lo <= v && v <= hi, "{name}.{k} = {v} not in {lo}..{hi}");
+                assert!(r["step"].as_f64().unwrap() > 0.0);
+                // The validator refuses a value past the top of the range it is built from.
+                let mut bad = defaults.clone();
+                bad[k] = serde_json::json!(hi + 0.5);
+                let err = engine_vehiclegen::validate_params(name, &bad.to_string());
+                assert!(err.is_err(), "{name}: {k} = {} should be refused", hi + 0.5);
+            }
+            if r["kind"] == "choice" {
+                assert!(r["options"].as_array().unwrap().contains(&defaults[k]), "{name}.{k}");
+            }
+        }
+        engine_vehiclegen::validate_params(name, "{}").unwrap();
+    }
+}
