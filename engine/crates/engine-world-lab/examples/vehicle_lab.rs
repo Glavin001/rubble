@@ -284,7 +284,9 @@ fn run(
                         h = (h ^ u64::from(*w)).wrapping_mul(0x100000001b3);
                         all = (all ^ u64::from(*w)).wrapping_mul(0x100000001b3);
                     }
-                    println!("state-hash car {k}: {} nodes {h:016x}", words.len() / 12);
+                    let bad = words.chunks_exact(12).filter(|n| n[..3].iter().any(|w| !f32::from_bits(*w).is_finite())).count();
+                    println!("state-hash car {k}: {} nodes {h:016x} ({bad} non-finite)", words.len() / 12);
+                    anyhow::ensure!(bad == 0, "car {k}: {bad} nodes with a non-finite position");
                 }
                 println!("state-hash all: {all:016x}");
             }
