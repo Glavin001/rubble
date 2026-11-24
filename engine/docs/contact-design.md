@@ -396,3 +396,40 @@ edge-contact member reports FL_ERR_EDGE_GROUP (the big groups' pass has no edge 
   none slower (−1.6 % to +0.1 %).
 - The lab: `{ edge: true }` (page control "edge contact", a build option; `vehicle_lab --edge 1`).
 
+### The GPU port's cost, and why its kernels are not shipped yet (2026-11-24)
+
+Native, Metal (M3 Max), the lab's 4-car mountain run (`vehicle_lab --measure mountain-perf
+--cars 4 --edge 1`, generated sedan), the explicit frame's GPU ms a World step (34 substeps):
+
+| | median | p95 (the pile) |
+|---|---|---|
+| edge contact off | 12.9 | 14.6 |
+| on: the fleet-wide schedules off alone (`PERF_FLEET_FAMILY`, edge off) | 20.8 (40 s run) | |
+| on: all pairs of the listed edges | 62 (40 s run) | 136 |
+| on: midpoint grid, 128 buckets | 24.5 | 117 |
+| on: cells 2 × reach, 2,048 buckets, no dedupe, (edge, cell) work items | **25.1** | **79** |
+
+Attribution (`RUBBLE_EDGE_ABLATE`, time only): the edges' step data and lists about +3 ms; the
+grid build +5 ms median, +9 p95; the pair tests about +32 ms at p95. Every variant is the same
+physics (the final energies agree to the joule) and GPU == CPU bit for bit, two procedural sedans
+crashing included (5,678 edge hits).
+
+Inlined into the contact modules the edge code also put 28 shipped kernels past their
+compile-cost lines (`compile_cost.py --check`) and Chrome's Metal compile of
+`explicit_beams_contact` failed (an internal compiler error after 180 s). So the edge kernels are
+behind `EB_EDGE`: built only with `RUBBLE_EDGE_KERNELS=1` (native development, tests, the native
+lab with `--edge 1`); the shipped kernels are as before the port (no edge code in their WGSL; the
+compile-cost, inline-budget and duplication checks pass); a host without them refuses edge
+contact with a clear error; the lab page's control is off until they ship.
+
+**Next (to ship it and make it cheap):**
+1. Edge contact as passes of its own (small modules of their own, dispatched beside the contact
+   groups' levels on the split path), not inlined into the contact modules.
+2. Frame-coherent pair lists: the grid and the pair tests once a frame with a travel margin (each
+   pair's nodes' travel over the frame), the 34 substeps retesting only the listed pairs (the
+   node contact's kept pairs, `PERF_FLEET_KEEP`, do this). Lossless; the pair tests are most of
+   the cost.
+3. The fleet-wide levels (`fleetLevelsOnceTry`, `fleetLevelsAny`, `fleetGroupLevels`) with
+   the edge hits, so edge contact no longer turns the fleet-wide schedules off (+7 ms).
+4. Then the Chrome A/B and the default decision.
+
