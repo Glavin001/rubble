@@ -65,9 +65,8 @@ pub struct ExplicitBeamsGpu {
     split: std::sync::OnceLock<Split>,
     vv_wide: std::sync::OnceLock<vv_wide_gpu::VvWide>,
     vv_seen: vv_wide_gpu::Seen,
-    /// The schedule switches' modules a browser host listed for this fleet
-    /// ([`Self::compute_specs_for`], by the defaults as this host was built): surface
-    /// contact on the fast schedules, vehicle contact's wide frames.
+    /// The schedule switches' modules listed for this fleet (surface contact on the
+    /// fast schedules, vehicle contact's wide frames; [`Self::schedule_modules_listed`]).
     schedule_listed: (bool, bool),
     split_module: &'static str,
     /// Bit-exact results ([`Self::set_bit_exact`]): the kernels' strict arithmetic as
@@ -1597,20 +1596,7 @@ impl ExplicitBeamsGpu {
                 deferred: true,
             });
         }
-        // Vehicle contact's frames without a group on the wide passes
-        // (FramePlanner::set_vv_wide) where the host starts with them: the gate and the
-        // two passes with the bounds check (VvWide::new's descriptors), deferred: the
-        // schedule waits for every module it launches (plan::vv_wide's gate on them).
-        let wide_listed = specs.iter().any(|s| s.module == plan::WIDE_PASSES[0]);
-        if vehicles.len() > 1 && wide_listed && plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(vehicles.len())) {
-            for ((module, entry), layout) in [
-                (plan::VV_GATE, fleet_args_entries()),
-                (plan::VV_WIDE_NODES, wide_entries()),
-                (plan::VV_WIDE_CLOSE, wide_entries()),
-            ] {
-                specs.push(crate::ComputeSpec { label: entry, module, wgsl: u(module_wgsl(module)), entry, layout: Some(layout), deferred: true });
-            }
-        }
+        vv_wide_gpu::push_specs(&mut specs, vehicles.len(), &u);
         specs.sort_by(|a, b| b.wgsl.len().cmp(&a.wgsl.len()));
         // The split group path's member module is the largest by far (209 s cold in
         // Chrome on Metal) and runs only with self-collision split off: where the self
@@ -1803,7 +1789,7 @@ impl ExplicitBeamsGpu {
             split: std::sync::OnceLock::new(),
             vv_wide: std::sync::OnceLock::new(),
             vv_seen: Default::default(),
-            schedule_listed: (plan::schedule::surface_fast_default(), plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(vehicles.len()))),
+            schedule_listed: surface_gpu::schedule_defaults(vehicles.len()),
             split_module: Kernel::FrameSeg.module(aero, lanes),
             bit_exact,
             params,
@@ -2341,31 +2327,6 @@ impl ExplicitBeamsGpu {
         let raw = self.read(&self.contact.acc);
         let w: &[i32] = bytemuck::cast_slice(&raw);
         crate::explicit_loop_cap_hit(self.layout.loop_cap_flag(w))
-    }
-
-    /// The contact groups of two or more vehicles of the current plan (blocking read; 0
-    /// when contact is not active): the plan's indirect-arguments word 15, less one.
-    pub fn contact_groups(&self) -> u32 {
-        if !self.contact_active() {
-            return 0;
-        }
-        let raw = self.read(&self.contact.args);
-        bytemuck::cast_slice::<u8, u32>(&raw)[15].saturating_sub(1)
-    }
-
-    /// Diagnostic (blocking): the member count of each contact group of the current
-    /// plan but the groups of one (0: past VV_MAX_GROUP members, its vehicles alone).
-    #[doc(hidden)]
-    pub fn contact_group_sizes(&self) -> Vec<u32> {
-        if !self.contact_active() {
-            return Vec::new();
-        }
-        // The plan's group count (indirect-arguments word 3; word 4 is the frame's
-        // workgroups, vehicles + groups).
-        let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
-        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
-        let at = self.planner.words[46] as usize;
-        (0..n).map(|g| misc[(at + g) * 4 + 1]).filter(|&m| m != 1).collect()
     }
 
     /// Measurement (a blocking read): per vehicle the self-collision hits of the last

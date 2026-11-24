@@ -116,6 +116,7 @@ ws.addEventListener('message', (e) => {
   if (args.includes('--kernelLog') && m.method === 'Runtime.consoleAPICalled') {
     const text = m.params.args.map((a) => a.value ?? a.description).join(' ');
     if (text.startsWith('[loading]') && / (compiled|failed) /.test(text)) console.log(`  kernel ${text.slice(9).trim()} (at ${((Date.now() - START) / 1000).toFixed(0)} s)`);
+    if (text.startsWith('[sync-pipe]')) console.log(`  ${text} (at ${((Date.now() - START) / 1000).toFixed(0)} s)`);
   }
 });
 const send = (method, params = {}) => new Promise((r) => { const id = ++nextId; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });

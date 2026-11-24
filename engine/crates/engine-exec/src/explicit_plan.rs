@@ -514,7 +514,7 @@ pub fn perf_flags_default() -> u32 {
             | PERF_WHEELS_APART
             | PERF_FLEET_KEEP
             | PERF_HIT_SLOT_MAP
-            | if cfg!(target_arch = "wasm32") { 0 } else { PERF_FLEET_WALK_BOX },
+            | PERF_FLEET_WALK_BOX,
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.

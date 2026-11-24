@@ -198,7 +198,7 @@ impl ExplicitBeamsGpu {
     /// pass as its own pipelines after each step's self-collision hits; or (off) a
     /// workgroup a vehicle or a group with the pass inside it, or the frame in segments.
     /// The same results bit for bit (`--ab-switch surffast`;
-    /// vehicle-perf-first-principles.md §8.53). By default natively a wide frame's
+    /// vehicle-perf-first-principles.md §8.53). By default natively and in a browser a wide frame's
     /// alone ([`plan::schedule::surface_fast_default`],
     /// [`plan::schedule::surface_fast_contact_default`]; `RUBBLE_SURFACE_FAST=1` both
     /// parts, 0 neither); this sets both. No effect without surface contact.
@@ -275,8 +275,7 @@ impl ExplicitBeamsGpu {
     /// ([`Self::compute_specs_for`]), so the page builds again to compile them. Always
     /// true without the pipeline gate (native hosts create pipelines at first use).
     pub fn schedule_modules_listed(&self) -> bool {
-        let n = self.layout.spans.len();
-        let now = (plan::schedule::surface_fast_default(), plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(n)));
+        let now = schedule_defaults(self.layout.spans.len());
         !crate::pipeline_gated() || ((!now.0 || self.schedule_listed.0) && (!now.1 || self.schedule_listed.1))
     }
 
@@ -321,6 +320,12 @@ impl ExplicitBeamsGpu {
 /// WGSL of a module): the pass's pipelines and, with vehicle contact (`several`), the
 /// solo vehicles' rest. Deferred: frames keep the pass in the kernels until they are
 /// compiled.
+/// The schedule switches' defaults as the host settings say now, for a fleet of
+/// `vehicles`: (surface contact on the fast schedules, vehicle contact's wide frames).
+pub(super) fn schedule_defaults(vehicles: usize) -> (bool, bool) {
+    (plan::schedule::surface_fast_default(), plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(vehicles)))
+}
+
 pub(super) fn fast_specs(specs: &mut Vec<crate::ComputeSpec>, aero: bool, lanes: u32, several: bool, u: &dyn Fn(&str) -> String) {
     {
         let rest: &'static str = crate::EXPLICIT_BEAMS_SELF_SPLIT

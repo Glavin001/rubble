@@ -21,6 +21,7 @@ pub mod cpu;
 pub mod derby;
 pub mod monitor;
 pub mod mountain;
+pub mod settings;
 
 use crate::explicit_scene::place_vehicle;
 use crate::{
@@ -36,6 +37,8 @@ use engine_webgpu::{CouplingCapacity, CouplingLayout};
 use glam::{DVec3, Quat, Vec3};
 use monitor::{CarModel, CarRead, CarStats, ProxyFrame};
 use mountain::{MountainSpec, RockGeom, Terrain};
+pub use settings::{debris_ttl_from, vehicle_sleep_from};
+use settings::{debris_json, surface_fast_from, vehicle_sleep_json, vv_wide_from};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -175,60 +178,10 @@ pub struct LabOptions {
     /// default): the cars' wheels drive on crates, bricks, blocks and ramps that are World
     /// bodies and push them. Live (`{ wheelsHitBodies: bool }`).
     pub wheels_hit_bodies: bool,
-    /// Surface contact on the fast schedules (`ExplicitBeamsGpu::set_surface_fast`, the
-    /// same results bit for bit): `Some(0)` off, `Some(1)` a wide frame's part alone,
-    /// `Some(2)` with its vehicle-contact part too; `None` the host's default
-    /// (`explicit_plan::schedule::surface_fast_default`). What `RUBBLE_SURFACE_FAST` says
-    /// natively, set for the process before the World is built
-    /// (`schedule::host_setting`). Live (`{ surfaceFast }`: `default`, `off`, `wide`,
-    /// `all`; a browser builds again when a part turns on whose modules it did not
-    /// compile). JSON `surfaceFast`.
+    /// Surface contact on the fast schedules and vehicle contact's wide frames, as the
+    /// page asks (`None`: the host's default; [`settings`]). Live (`{ surfaceFast, vvWide }`).
     pub surface_fast: Option<u8>,
-    /// Vehicle contact's frames without a group of two or more on the wide passes
-    /// (`ExplicitBeamsGpu::set_vv_wide`, the same results bit for bit); `None` the host's
-    /// default (`explicit_plan::vv_wide::vv_wide_default`). As [`Self::surface_fast`]
-    /// for `RUBBLE_VV_WIDE`. Live (`{ vvWide }`: `default`, `on`, `off`). JSON `vvWide`.
     pub vv_wide: Option<bool>,
-}
-
-/// `default` (or null) as `None`, `off`/`0` as 0, `wide`/`1` as 1, `all`/`2` as 2: the
-/// lab's `surfaceFast`.
-fn surface_fast_from(x: Option<&Value>) -> Option<u8> {
-    match x? {
-        Value::String(t) => match t.as_str() {
-            "off" | "0" => Some(0),
-            "wide" | "1" => Some(1),
-            "all" | "on" | "2" => Some(2),
-            _ => None,
-        },
-        Value::Number(n) => n.as_u64().map(|n| n.min(2) as u8),
-        Value::Bool(b) => Some(if *b { 2 } else { 0 }),
-        _ => None,
-    }
-}
-
-/// `default` (or null) as `None`, `on`/`off` (or a bool): the lab's `vvWide`.
-fn vv_wide_from(x: Option<&Value>) -> Option<bool> {
-    match x? {
-        Value::String(t) => match t.as_str() {
-            "on" | "1" => Some(true),
-            "off" | "0" => Some(false),
-            _ => None,
-        },
-        Value::Bool(b) => Some(*b),
-        _ => None,
-    }
-}
-
-impl LabOptions {
-    /// The schedule settings ([`Self::surface_fast`], [`Self::vv_wide`]) for this process
-    /// (`engine_exec::explicit_plan::schedule::host_setting`): before a browser lists
-    /// the kernels to compile and before the World is built.
-    pub fn apply_schedule_settings(&self) {
-        use engine_exec::explicit_plan::schedule::host_setting;
-        host_setting::set_surface_fast(self.surface_fast);
-        host_setting::set_vv_wide(self.vv_wide);
-    }
 }
 
 impl Default for LabOptions {
@@ -269,25 +222,6 @@ impl Default for LabOptions {
     }
 }
 
-/// `{ on, speed, reachMm, dwell }` (missing: `d`'s) as the vehicle sleep setting: on or
-/// off, and the thresholds (speed m/s, reach mm, dwell in 0.5 ms steps).
-pub fn vehicle_sleep_from(x: &Value, d: (bool, VehicleSleep)) -> (bool, VehicleSleep) {
-    let on = match x {
-        Value::Bool(b) => *b,
-        _ => x.get("on").and_then(Value::as_bool).unwrap_or(d.0),
-    };
-    let cfg = VehicleSleep {
-        speed: (num(x, "speed", f64::from(d.1.speed)) as f32).max(0.0),
-        reach: (num(x, "reachMm", f64::from(d.1.reach) * 1e3) as f32 * 1e-3).max(0.0),
-        dwell: num(x, "dwell", f64::from(d.1.dwell)).clamp(1.0, 1.0e9) as u32,
-    };
-    (on, cfg)
-}
-
-fn vehicle_sleep_json(on: bool, c: VehicleSleep) -> Value {
-    json!({ "on": on, "speed": c.speed, "reachMm": f64::from(c.reach) * 1e3, "dwell": c.dwell })
-}
-
 /// The lab's debris time to live (`LabOptions::debris_ttl`).
 /// Measured on the mountain (lab-mountain-perf.md §6): its fragments weigh 0.3 to 5.6 kg
 /// (2 to 12 nodes); the next pieces up are a 12 kg panel, the 19 kg wheels, 30 and 45 kg
@@ -296,23 +230,6 @@ fn vehicle_sleep_json(on: bool, c: VehicleSleep) -> Value {
 pub const MAX_CARS: u32 = 32;
 
 pub const LAB_DEBRIS_TTL: DebrisTtl = DebrisTtl { max_mass_kg: 10.0, max_nodes: 40, seconds: 5.0 };
-
-/// `{ on, seconds, maxKg, maxNodes }` (missing: the lab's default) as a time to live.
-pub fn debris_ttl_from(x: &Value) -> Option<DebrisTtl> {
-    let d = LAB_DEBRIS_TTL;
-    x.get("on").and_then(Value::as_bool).unwrap_or(true).then(|| DebrisTtl {
-        max_mass_kg: (num(x, "maxKg", f64::from(d.max_mass_kg)) as f32).max(0.0),
-        max_nodes: (num(x, "maxNodes", f64::from(d.max_nodes)) as u32).max(1),
-        seconds: (num(x, "seconds", f64::from(d.seconds)) as f32).max(0.0),
-    })
-}
-
-fn debris_json(t: Option<DebrisTtl>) -> Value {
-    match t {
-        Some(t) => json!({ "on": true, "seconds": t.seconds, "maxKg": t.max_mass_kg, "maxNodes": t.max_nodes }),
-        None => json!({ "on": false }),
-    }
-}
 
 /// `{ x, z, angle (degrees), kmh, lift }` as a [`Start`].
 fn start_from(s: &Value) -> Start {
@@ -3262,24 +3179,8 @@ impl Lab {
             self.bench.opts.bit_exact = on;
             return Ok(json!({ "bitExact": on }));
         }
-        // { surfaceFast, vvWide }: the schedule switches (LabOptions::surface_fast,
-        // vv_wide; the same results bit for bit), from the next frame, kept for the
-        // process (schedule::host_setting) so a rebuild keeps them. `rebuild`: a browser
-        // host did not compile the modules a switch now on takes (the page builds again).
-        if cmd.get("surfaceFast").is_some() || cmd.get("vvWide").is_some() {
-            if let Some(x) = cmd.get("surfaceFast") {
-                self.bench.opts.surface_fast = surface_fast_from(Some(x));
-            }
-            if let Some(x) = cmd.get("vvWide") {
-                self.bench.opts.vv_wide = vv_wide_from(Some(x));
-            }
-            self.bench.opts.apply_schedule_settings();
-            let mut rebuild = false;
-            if let Some(x) = world.explicit_vehicles_mut() {
-                x.reset_schedule_switches();
-                rebuild = !x.schedule_modules_listed();
-            }
-            return Ok(json!({ "surfaceFast": self.bench.opts.surface_fast, "vvWide": self.bench.opts.vv_wide, "rebuild": rebuild }));
+        if let Some(r) = self.schedule_command(world, cmd) {
+            return r;
         }
         // { wheelsHitBodies: bool }: raycast wheels on World bodies
         // (LabOptions::wheels_hit_bodies), from the next step and after a restart.
