@@ -725,30 +725,10 @@ fn surface_pipes_ready(sw: &Switches) -> bool {
     SURF_FAST_PASSES.iter().all(|(m, _)| (sw.ready)(m)) && (sw.ready)(&solo_rest_module_name(sw.aero, sw.lanes, true))
 }
 
-/// Whether hosts run a fleet with surface contact on the fast schedules, its pass as
-/// pipelines ([`FramePlanner::set_surface_fast`]): on natively and on CUDA unless
-/// `RUBBLE_SURFACE_FAST=0`; off in a browser (wasm32) until Chrome's bit-for-bit A/B has
-/// held it there (AGENTS.md, rung 3).
-pub fn surface_fast_default() -> bool {
-    match std::env::var("RUBBLE_SURFACE_FAST").as_deref() {
-        Ok("0") => false,
-        Ok("1") => true,
-        _ => cfg!(not(target_arch = "wasm32")),
-    }
-}
+#[path = "host_setting.rs"]
+pub mod host_setting;
+pub use host_setting::{surface_fast_contact_default, surface_fast_default};
 
-/// [`FramePlanner::set_surface_fast_contact`]'s default: with `RUBBLE_SURFACE_FAST=1`
-/// on; otherwise the host's own (`host`). On for CUDA: on a T4 every goal row is faster
-/// with it (-6 to -34 %). Off for wgpu: on Metal (M3 Max) two derby rows are 7.5 and
-/// 9.7 % slower with it and two head-on rows 3.6 and 4.7 %, the others 1 to 17 % faster
-/// (vehicle-perf-first-principles.md §8.53); a change that slows a row does not become
-/// a default.
-pub fn surface_fast_contact_default(host: bool) -> bool {
-    match std::env::var("RUBBLE_SURFACE_FAST").as_deref() {
-        Ok("1") => true,
-        _ => host,
-    }
-}
 
 /// Whether this frame (its commands) runs self-collision split with vehicle contact.
 fn self_split_vv_on(planner: &FramePlanner, sw: &Switches, steps: u32, cmds: &[Cmd]) -> bool {

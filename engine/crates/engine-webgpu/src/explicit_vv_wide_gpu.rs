@@ -18,10 +18,30 @@ const DEFAULT_MOST_VEHICLES: usize = 8;
 
 /// [`FramePlanner::set_vv_wide`]'s default on this host for a fleet of `vehicles`
 /// unless `RUBBLE_VV_WIDE` says (`plan::vv_wide::vv_wide_default`): on natively up to
-/// [`DEFAULT_MOST_VEHICLES`]; off in a browser (wasm32) until Chrome's bit-for-bit A/B
-/// has held it there (AGENTS.md, rung 3).
+/// [`DEFAULT_MOST_VEHICLES`]; off in a browser (wasm32). Chrome's A/B (AGENTS.md, rung 3)
+/// held it bit for bit wherever it ran (8 cars in the derby with surface contact's
+/// vehicle-contact part on), but with that part off, as it is there, and in the derby
+/// without surface contact, its frames were never taken in Chrome, so there is no
+/// speed to judge it by (vehicle-perf-first-principles.md §8.64).
 pub(super) fn default_on(vehicles: usize) -> bool {
     cfg!(not(target_arch = "wasm32")) && vehicles <= DEFAULT_MOST_VEHICLES
+}
+
+/// Vehicle contact's frames without a group on the wide passes where the host starts
+/// with them ([`ExplicitBeamsGpu::compute_specs_for`]): the gate and the two passes with
+/// the bounds check (VvWide::new's descriptors), deferred (the schedule waits for every
+/// module it launches, plan::vv_wide's gate on them). Only beside the wide passes.
+pub(super) fn push_specs(specs: &mut Vec<crate::ComputeSpec>, vehicles: usize, u: &dyn Fn(&str) -> String) {
+    let wide_listed = specs.iter().any(|s| s.module == plan::WIDE_PASSES[0]);
+    if vehicles > 1 && wide_listed && plan::vv_wide::vv_wide_default(default_on(vehicles)) {
+        for ((module, entry), layout) in [
+            (plan::VV_GATE, fleet_args_entries()),
+            (plan::VV_WIDE_NODES, wide_entries()),
+            (plan::VV_WIDE_CLOSE, wide_entries()),
+        ] {
+            specs.push(crate::ComputeSpec { label: entry, module, wgsl: u(module_wgsl(module)), entry, layout: Some(layout), deferred: true });
+        }
+    }
 }
 
 pub(super) struct VvWide {
@@ -200,6 +220,31 @@ impl ExplicitBeamsGpu {
     /// read a plan without a group back ([`FramePlanner::set_vv_wide_seen`]).
     pub fn set_vv_wide(&mut self, on: bool) {
         self.planner.set_vv_wide(on);
+    }
+
+    /// The contact groups of two or more vehicles of the current plan (blocking read; 0
+    /// when contact is not active): the plan's indirect-arguments word 15, less one.
+    pub fn contact_groups(&self) -> u32 {
+        if !self.contact_active() {
+            return 0;
+        }
+        let raw = self.read(&self.contact.args);
+        bytemuck::cast_slice::<u8, u32>(&raw)[15].saturating_sub(1)
+    }
+
+    /// Diagnostic (blocking): the member count of each contact group of the current
+    /// plan but the groups of one (0: past VV_MAX_GROUP members, its vehicles alone).
+    #[doc(hidden)]
+    pub fn contact_group_sizes(&self) -> Vec<u32> {
+        if !self.contact_active() {
+            return Vec::new();
+        }
+        // The plan's group count (indirect-arguments word 3; word 4 is the frame's
+        // workgroups, vehicles + groups).
+        let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let at = self.planner.words[46] as usize;
+        (0..n).map(|g| misc[(at + g) * 4 + 1]).filter(|&m| m != 1).collect()
     }
 
     /// Whether the last frame held the wide schedule beside today's (tests: the path

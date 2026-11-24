@@ -67,7 +67,7 @@ pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
-pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
+pub use compute_spec::{mark_pipeline_compiled, pipeline_gated, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_modules::set_explicit_module_override;
 #[cfg(feature = "gpu")]

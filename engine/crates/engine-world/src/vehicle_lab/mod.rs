@@ -21,6 +21,7 @@ pub mod cpu;
 pub mod derby;
 pub mod monitor;
 pub mod mountain;
+pub mod settings;
 
 use crate::explicit_scene::place_vehicle;
 use crate::{
@@ -36,6 +37,8 @@ use engine_webgpu::{CouplingCapacity, CouplingLayout};
 use glam::{DVec3, Quat, Vec3};
 use monitor::{CarModel, CarRead, CarStats, ProxyFrame};
 use mountain::{MountainSpec, RockGeom, Terrain};
+pub use settings::{debris_ttl_from, vehicle_sleep_from};
+use settings::{debris_json, surface_fast_from, vehicle_sleep_json, vv_wide_from};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -178,6 +181,10 @@ pub struct LabOptions {
     /// default): the cars' wheels drive on crates, bricks, blocks and ramps that are World
     /// bodies and push them. Live (`{ wheelsHitBodies: bool }`).
     pub wheels_hit_bodies: bool,
+    /// Surface contact on the fast schedules and vehicle contact's wide frames, as the
+    /// page asks (`None`: the host's default; [`settings`]). Live (`{ surfaceFast, vvWide }`).
+    pub surface_fast: Option<u8>,
+    pub vv_wide: Option<bool>,
 }
 
 impl Default for LabOptions {
@@ -212,27 +219,10 @@ impl Default for LabOptions {
             structures: Vec::new(),
             // Off by default (explicit-vehicles-in-world.md §13, "Open: Chrome").
             wheels_hit_bodies: false,
+            surface_fast: None,
+            vv_wide: None,
         }
     }
-}
-
-/// `{ on, speed, reachMm, dwell }` (missing: `d`'s) as the vehicle sleep setting: on or
-/// off, and the thresholds (speed m/s, reach mm, dwell in 0.5 ms steps).
-pub fn vehicle_sleep_from(x: &Value, d: (bool, VehicleSleep)) -> (bool, VehicleSleep) {
-    let on = match x {
-        Value::Bool(b) => *b,
-        _ => x.get("on").and_then(Value::as_bool).unwrap_or(d.0),
-    };
-    let cfg = VehicleSleep {
-        speed: (num(x, "speed", f64::from(d.1.speed)) as f32).max(0.0),
-        reach: (num(x, "reachMm", f64::from(d.1.reach) * 1e3) as f32 * 1e-3).max(0.0),
-        dwell: num(x, "dwell", f64::from(d.1.dwell)).clamp(1.0, 1.0e9) as u32,
-    };
-    (on, cfg)
-}
-
-fn vehicle_sleep_json(on: bool, c: VehicleSleep) -> Value {
-    json!({ "on": on, "speed": c.speed, "reachMm": f64::from(c.reach) * 1e3, "dwell": c.dwell })
 }
 
 /// The lab's debris time to live (`LabOptions::debris_ttl`).
@@ -243,23 +233,6 @@ fn vehicle_sleep_json(on: bool, c: VehicleSleep) -> Value {
 pub const MAX_CARS: u32 = 32;
 
 pub const LAB_DEBRIS_TTL: DebrisTtl = DebrisTtl { max_mass_kg: 10.0, max_nodes: 40, seconds: 5.0 };
-
-/// `{ on, seconds, maxKg, maxNodes }` (missing: the lab's default) as a time to live.
-pub fn debris_ttl_from(x: &Value) -> Option<DebrisTtl> {
-    let d = LAB_DEBRIS_TTL;
-    x.get("on").and_then(Value::as_bool).unwrap_or(true).then(|| DebrisTtl {
-        max_mass_kg: (num(x, "maxKg", f64::from(d.max_mass_kg)) as f32).max(0.0),
-        max_nodes: (num(x, "maxNodes", f64::from(d.max_nodes)) as u32).max(1),
-        seconds: (num(x, "seconds", f64::from(d.seconds)) as f32).max(0.0),
-    })
-}
-
-fn debris_json(t: Option<DebrisTtl>) -> Value {
-    match t {
-        Some(t) => json!({ "on": true, "seconds": t.seconds, "maxKg": t.max_mass_kg, "maxNodes": t.max_nodes }),
-        None => json!({ "on": false }),
-    }
-}
 
 /// `{ x, z, angle (degrees), kmh, lift }` as a [`Start`].
 fn start_from(s: &Value) -> Start {
@@ -359,6 +332,8 @@ impl LabOptions {
             wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
             group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
             wheels_hit_bodies: v.get("wheelsHitBodies").and_then(Value::as_bool).unwrap_or(d.wheels_hit_bodies),
+            surface_fast: surface_fast_from(v.get("surfaceFast")).or(d.surface_fast),
+            vv_wide: vv_wide_from(v.get("vvWide")).or(d.vv_wide),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2556,6 +2531,7 @@ impl Lab {
         anyhow::ensure!(!templates.is_empty(), "vehicle lab: no vehicle");
         let template = &templates[0];
         let _ = template;
+        opts.apply_schedule_settings();
         let mut def = lab_world_def(&opts);
         tweak(&mut def);
         let mut world = World::new(gpu, &def)?;
@@ -3076,6 +3052,9 @@ impl Lab {
             world.set_explicit_bit_exact(on)?;
             self.bench.opts.bit_exact = on;
             return Ok(json!({ "bitExact": on }));
+        }
+        if let Some(r) = self.schedule_command(world, cmd) {
+            return r;
         }
         // { wheelsHitBodies: bool }: raycast wheels on World bodies
         // (LabOptions::wheels_hit_bodies), from the next step and after a restart.

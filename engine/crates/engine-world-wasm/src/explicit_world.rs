@@ -11,6 +11,8 @@ use wasm_bindgen::prelude::*;
 thread_local! {
     /// Diagnostic: an explicit-vehicles snapshot (`debugExplicitSnapshot`).
     static SNAP: std::cell::RefCell<Option<engine_webgpu::GpuSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// The last A/B's switched-on side as it ended (`explicitScheduleState`).
+    static AB_ON: std::cell::Cell<[u8; 3]> = const { std::cell::Cell::new([0, 0, 0]) };
 }
 
 fn num(v: &serde_json::Value, k: &str, d: f64) -> f64 {
@@ -273,6 +275,9 @@ impl WebWorld {
             for _ in 0..frames {
                 g.frame(steps);
             }
+            if on {
+                AB_ON.with(|a| a.set([u8::from(g.surface_fast()), u8::from(g.vv_wide_used()), u8::from(g.is_wide())]));
+            }
             staged.push(g.stage_state());
         }
         g.restore(&snap);
@@ -284,6 +289,51 @@ impl WebWorld {
             let lines = engine_webgpu::state_differences(&staged[0].ab_words(), &staged[1].ab_words(), 64);
             Ok(lines.into_iter().map(JsValue::from).collect::<js_sys::Array>().into())
         }))
+    }
+
+    /// [`Self::explicit_ab`] for a host switch by name (`vehicle_lab --ab-switch NAME` in
+    /// the browser; `ExplicitBeamsGpu::set_ab_switch`: `surffast`, `surffast_wide`,
+    /// `surffast_contact`, `vvwide`): the frames with it on, then from the same state with
+    /// it off, the state and the host's own setting put back. Its modules must be
+    /// compiled already (the page's schedule settings at build), or its side runs
+    /// without them (the same results). Resolves to the differences (empty: bit for bit).
+    #[wasm_bindgen(js_name = explicitAbSwitch)]
+    pub fn explicit_ab_switch(&mut self, name: &str, frames: u32, steps: u32) -> Result<js_sys::Promise, JsValue> {
+        let g = self.world.explicit_vehicles_mut().ok_or_else(|| err("explicitAbSwitch: no explicit vehicles"))?;
+        let snap = g.snapshot();
+        let mut staged = Vec::new();
+        for on in [true, false] {
+            g.restore(&snap);
+            if !g.set_ab_switch(name, on) {
+                g.reset_schedule_switches();
+                return Err(err(&format!("explicitAbSwitch: no switch {name}")));
+            }
+            for _ in 0..frames {
+                g.frame(steps);
+            }
+            if on {
+                AB_ON.with(|a| a.set([u8::from(g.surface_fast()), u8::from(g.vv_wide_used()), u8::from(g.is_wide())]));
+            }
+            staged.push(g.stage_state());
+        }
+        g.restore(&snap);
+        g.reset_schedule_switches();
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            for s in &staged {
+                crate::read::map_read(s.buffer()).await?;
+            }
+            let lines = engine_webgpu::state_differences(&staged[0].ab_words(), &staged[1].ab_words(), 64);
+            Ok(lines.into_iter().map(JsValue::from).collect::<js_sys::Array>().into())
+        }))
+    }
+
+    /// `[surface contact as pipelines on the fast schedules, the last frame held vehicle
+    /// contact's wide schedule, the last frame ran as the wide passes] (`ExplicitBeamsGpu::surface_fast`, `vv_wide_used`, `is_wide`) at the
+    /// end of the last A/B's switched-on side: its evidence that the path was there to
+    /// take.
+    #[wasm_bindgen(js_name = explicitScheduleState)]
+    pub fn explicit_schedule_state(&self) -> Vec<u8> {
+        AB_ON.with(|a| a.get().to_vec())
     }
 
     /// Whether the explicit frame runs as the wide passes.

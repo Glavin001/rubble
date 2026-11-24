@@ -90,6 +90,12 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
 - **Meanwhile:** #144 ships mask `5` (the loop bound kept), which repeats (the whole matrix against the checked build: 12 rows bit for bit; pile32 `5` on both sides 2 of 2).
 - **Repro:** on #144's branch, `tools/scenario-matrix/run.sh checks=3:3 pile32`. Next: bisect it with the perf switches applied after the fixture's flags are restored, then look for a missing barrier or a read of another workgroup's output in the pass that switch selects.
 
+### F11. NaN accelerations in the derby with surface contact in Chrome; the vehicle-contact part of `surffast` then differs (Confirmed 2026-11-24)
+- **Seen:** Chrome, the lab's derby with 8 generated sedans, surface contact on, bit-exact results, frame-locked (vehicle-perf-first-principles.md §8.64). At t 4.00 s, one step from the held state with `surffast_contact` on and off gives NaN accelerations (`acc`) for nodes 207 and 213 of the second car on both sides, with different NaN bit patterns. After four steps 1,605 node words differ, all finite. It is the same at every run.
+- **Natively** the saved state (`out/fixtures-chrome/cars8_t4.00_derby_surffast.fx`, from `out/chrome-ab/`) replays bit for bit on Metal, with the bounds checks off and on. Whether the NaN happens natively too was not checked: the native A/B compares bits, and it does not report NaN.
+- **Meanwhile:** the vehicle-contact part of `surffast` stays off in the browser, as it already is on native wgpu.
+- **Next:** find what makes those two nodes' accelerations NaN (surface contact against the arena's shapes is the suspect, since it appears with surface contact on). Then find where the schedules take a NaN differently: a `min`, `max`, `clamp` or `select` on it.
+
 ### R1. AVBD rigid solver loses about 5.5 % of momentum in multi-body impacts (Confirmed, on `main` too)
 - **Measured:** a rigid-only World, 1,453 kg block into floating bricks, no car: 20,197 → 19,080 N·s.
 - **Coupling impact:** the soft car into floating bricks shows ±7 %, attributed to this.

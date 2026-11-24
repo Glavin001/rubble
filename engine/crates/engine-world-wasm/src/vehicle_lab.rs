@@ -64,6 +64,9 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
         None => None,
     };
     let (info, device, queue) = crate::web_device().await?;
+    // The page's schedule settings (what `RUBBLE_SURFACE_FAST` / `RUBBLE_VV_WIDE` say
+    // natively) before the kernels are listed and the World is built.
+    opts.apply_schedule_settings();
     {
         // The vehicles' kernels compiled without blocking first (as `createVehicleTown`).
         // (Car `k` of type `k % n`, the parked car of the first.)

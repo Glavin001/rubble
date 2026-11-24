@@ -53,9 +53,14 @@ mod ready {
         }
     }
 
+    /// Whether a host compiles pipelines ahead ([`set_pipeline_gate`]): a browser's.
+    pub fn pipeline_gated() -> bool {
+        GATE.load(Ordering::Relaxed)
+    }
+
     /// Whether `module` can be created without waiting on its compile.
     pub fn pipeline_ready(module: &str) -> bool {
         !GATE.load(Ordering::Relaxed) || DONE.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|m| m == module)
     }
 }
-pub use ready::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate};
+pub use ready::{mark_pipeline_compiled, pipeline_gated, pipeline_ready, set_pipeline_gate};

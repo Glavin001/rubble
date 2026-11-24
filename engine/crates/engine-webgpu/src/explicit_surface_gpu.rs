@@ -198,7 +198,7 @@ impl ExplicitBeamsGpu {
     /// pass as its own pipelines after each step's self-collision hits; or (off) a
     /// workgroup a vehicle or a group with the pass inside it, or the frame in segments.
     /// The same results bit for bit (`--ab-switch surffast`;
-    /// vehicle-perf-first-principles.md §8.53). By default natively a wide frame's
+    /// vehicle-perf-first-principles.md §8.53). By default natively and in a browser a wide frame's
     /// alone ([`plan::schedule::surface_fast_default`],
     /// [`plan::schedule::surface_fast_contact_default`]; `RUBBLE_SURFACE_FAST=1` both
     /// parts, 0 neither); this sets both. No effect without surface contact.
@@ -231,8 +231,52 @@ impl ExplicitBeamsGpu {
         match name {
             "surffast" => Some("surface contact on the fast schedules"),
             "vvwide" => Some("vehicle contact's frames without a group on the wide passes"),
+            "surffast_wide" => Some("surface contact on the fast schedules, a wide frame's part alone"),
+            "surffast_contact" => Some("surface contact on the fast schedules, its vehicle-contact part (the wide part on)"),
             _ => None,
         }
+    }
+
+    /// A browser's A/B of a host switch (`WebWorld.explicitAbSwitch`): `surffast` (both
+    /// parts of [`Self::set_surface_fast`]), `surffast_wide` (its wide frames' part alone
+    /// against neither), `surffast_contact` (its vehicle-contact part, the wide part on
+    /// either side), `vvwide`, on or off. False for a name that is none. Put back with
+    /// [`Self::reset_schedule_switches`].
+    #[doc(hidden)]
+    pub fn set_ab_switch(&mut self, name: &str, on: bool) -> bool {
+        match name {
+            "surffast_wide" => {
+                self.planner.set_surface_fast(on);
+                self.planner.set_surface_fast_contact(false);
+            }
+            "surffast_contact" => {
+                self.planner.set_surface_fast(true);
+                self.planner.set_surface_fast_contact(on);
+            }
+            _ => return self.set_named_switch(name, on),
+        }
+        true
+    }
+
+    /// The schedule switches as this host starts them
+    /// ([`plan::schedule::host_setting`] and the defaults [`Self::with_coupling`]
+    /// applies): after an A/B of [`Self::set_ab_switch`], or once a host setting has
+    /// changed.
+    pub fn reset_schedule_switches(&mut self) {
+        self.planner.set_surface_fast(plan::schedule::surface_fast_default());
+        self.planner.set_surface_fast_contact(plan::schedule::surface_fast_contact_default(false));
+        let n = self.layout.spans.len();
+        self.planner.set_vv_wide(plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(n)));
+    }
+
+    /// Whether a browser host compiled the modules the schedule switches take as the
+    /// host settings now say ([`Self::reset_schedule_switches`]): false when a switch is
+    /// on now that was off when this host's modules were listed
+    /// ([`Self::compute_specs_for`]), so the page builds again to compile them. Always
+    /// true without the pipeline gate (native hosts create pipelines at first use).
+    pub fn schedule_modules_listed(&self) -> bool {
+        let now = schedule_defaults(self.layout.spans.len());
+        !crate::pipeline_gated() || ((!now.0 || self.schedule_listed.0) && (!now.1 || self.schedule_listed.1))
     }
 
     /// The fast schedules' surface launches ([`GroupOp::SoloRest`], [`GroupOp::Surf`]).
@@ -276,6 +320,12 @@ impl ExplicitBeamsGpu {
 /// WGSL of a module): the pass's pipelines and, with vehicle contact (`several`), the
 /// solo vehicles' rest. Deferred: frames keep the pass in the kernels until they are
 /// compiled.
+/// The schedule switches' defaults as the host settings say now, for a fleet of
+/// `vehicles`: (surface contact on the fast schedules, vehicle contact's wide frames).
+pub(super) fn schedule_defaults(vehicles: usize) -> (bool, bool) {
+    (plan::schedule::surface_fast_default(), plan::vv_wide::vv_wide_default(vv_wide_gpu::default_on(vehicles)))
+}
+
 pub(super) fn fast_specs(specs: &mut Vec<crate::ComputeSpec>, aero: bool, lanes: u32, several: bool, u: &dyn Fn(&str) -> String) {
     {
         let rest: &'static str = crate::EXPLICIT_BEAMS_SELF_SPLIT
