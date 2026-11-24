@@ -28,13 +28,6 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
                     .into(),
             )
         }
-        6 => {
-            return Err(
-                "a contact group of more than four vehicles has an edge-contact member: edge vehicle \
-                 contact runs in the small groups' pass only so far (its hits were not found)"
-                    .into(),
-            )
-        }
         5 => {
             return Err(
                 "an owner's edge contact hits passed its edge hit list (its skin edges and contact \

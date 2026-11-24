@@ -25,7 +25,6 @@ static const uint FLAG_EDGE = 2097152u; // vehicle flags bit 21 (explicit_plan.r
 static const float EDGE_END = 1e-3;
 static const float EDGE_DEPTH_M = 0.1; // CLIP_DEPTH (explicit_contact/edge.rs EDGE_DEPTH)
 static const int FL_ERR_EDGES = 5;
-static const int FL_ERR_EDGE_GROUP = 6;
 static const uint EDGE_SCR = 5u;
 
 bool edgeOn() { return gP.edgeBase != 0u; }
@@ -541,20 +540,12 @@ void edgeResidualPhase(uint va, uint slot, uint parity, uint lane, uint lanes, u
 // r toward the stop, never below zero in total, the hit's first-pass normal force λ0.
 float edgeClampRes(float lam0, float r) { return nf(max(nf(lam0 + r), 0.0) - lam0); }
 
-// --- The contact groups' pass (vvPassSmall: members off.., k ≤ VV_SIDE, one workgroup;
-// gsVvPair the overlapping ordered pairs) ---
+// --- The contact groups' passes (members off.., one workgroup) ---
 
-// Before the tests' end: every member's edges this step, their boxes, the lists of each
-// member's edges and contact points near its partners, then each owner's hits.
-void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
+// Every member's counters cleared and, with `prepare`, its edges this step (their scratch
+// and box). Two barriers.
+void edgeResetPrepare(uint k, uint off, uint lane, bool prepare)
 {
-    if (!edgeOn()) return;
-    // (No early return on the pairs: they are workgroup memory, and a barrier after a
-    // branch on it is not uniform control flow to a browser; no pair, no work.)
-    bool anyEdge = false;
-    for (uint a = 0u, aStop = EB_END(812, a, k, 1u); a < aStop; a++)
-        for (uint m = 0u, mStop = EB_END(813, m, k, 1u); m < mStop; m++)
-            if (a != m && (gsVvPair[a * VV_PART + m] & 1u) != 0u && edgePairOn(vvMember(off, a), vvMember(off, m))) anyEdge = true;
     for (uint a = lane, aStop = EB_END(814, a, k, LANES); a < aStop; a += LANES)
     {
         uint v1x = edgeV1(vvMember(off, a)).x;
@@ -565,7 +556,7 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
     }
     sync();
     uint total = 0u;
-    for (uint a = 0u, aStop = EB_END(815, a, anyEdge ? k : 0u, 1u); a < aStop; a++) total += edgeV0(vvMember(off, a)).y;
+    for (uint a = 0u, aStop = EB_END(815, a, prepare ? k : 0u, 1u); a < aStop; a++) total += edgeV0(vvMember(off, a)).y;
     for (uint p = lane, pStop = EB_END(802, p, total, LANES); p < pStop; p += LANES)
     {
         uint q = p;
@@ -581,6 +572,125 @@ void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
         edgePrepare(vvMember(off, a), q);
     }
     sync();
+}
+
+// Vehicle v's live edges in [lo, hi] into its edge list, its contact points (`points`) too.
+void edgeList(uint v, float3 lo, float3 hi, bool points, uint lane)
+{
+    uint4 v0 = edgeV0(v);
+    uint4 v1 = edgeV1(v);
+    for (uint e = lane, eStop = EB_END(825, e, v0.y, LANES); e < eStop; e += LANES)
+    {
+        float4 s0 = gBeams[v0.z + EDGE_SCR * e];
+        if ((asuint(s0.w) & 1u) == 0u) continue;
+        float3 q1 = gBeams[v0.z + EDGE_SCR * e + 1u].xyz;
+        if (any(max(s0.xyz, q1) < lo) || any(min(s0.xyz, q1) > hi)) continue;
+        gNext[v1.w + uint(gAcc[v1.x + 1u].add(1))] = e;
+    }
+    uint cps = points ? vvCpCount(v) : 0u;
+    for (uint i = lane, iStop = EB_END(826, i, cps, LANES); i < iStop; i += LANES)
+    {
+        uint h = gLists[vvCpOff(v) + i];
+        if (gP.retireBase != 0u && nodeRetired(h)) continue;
+        float3 x = edgeWorld(v, h);
+        if (any(x < lo) || any(x > hi)) continue;
+        gNext[v1.w + v0.y + uint(gAcc[v1.x + 2u].add(1))] = h;
+    }
+}
+
+// Owner va (member a, two-body slot `slot`) against partner vb from the lists: edge
+// against edge (va < vb) and vb's points against va's edges.
+void edgePairHits(uint va, uint vb, uint slot, uint lane)
+{
+    uint4 v1a = edgeV1(va);
+    uint4 v0b = edgeV0(vb);
+    uint4 v1b = edgeV1(vb);
+    uint la = uint(gAcc[v1a.x + 1u].load());
+    if (va < vb)
+    {
+        uint lb = uint(gAcc[v1b.x + 1u].load());
+        for (uint p = lane, pStop = EB_END(827, p, la * lb, LANES); p < pStop; p += LANES)
+        {
+            uint ea = gNext[v1a.w + p / lb];
+            uint eb = gNext[v1b.w + p % lb];
+            EdgeHitG H;
+            if (edgeEdgeTest(va, vb, edgeLoad(va, ea), edgeLoad(vb, eb), H)) edgeHitAdd(va, slot, ea, (vb << 20u) | eb, H);
+        }
+    }
+    uint pb = uint(gAcc[v1b.x + 2u].load());
+    for (uint p = lane, pStop = EB_END(828, p, la * pb, LANES); p < pStop; p += LANES)
+    {
+        uint ea = gNext[v1a.w + p / pb];
+        uint h = gNext[v1b.w + v0b.y + p % pb];
+        EdgeHitG H;
+        if (edgeVertexTest(va, vb, edgeLoad(va, ea), h, edgeWorld(vb, h), H)) edgeHitAdd(va, slot, ea | 0x80000000u, h, H);
+    }
+}
+
+// The larger groups' pass (vvPass, owner by owner): owner a's turn, after the previous
+// owner's split counts are cleared and before its own hits apply (gNext's vvPartnerAt its
+// partners). The lists: the owner's edges near its partners' edges, each partner's edges
+// and points near the owner's; then its hits. Three barriers.
+void edgeOwnerBig(uint a, uint k, uint off, uint lane)
+{
+    uint va = vvMember(off, a);
+    for (uint m = lane, mStop = EB_END(829, m, k, LANES); m < mStop; m += LANES)
+    {
+        uint v1x = edgeV1(vvMember(off, m)).x;
+        gAcc[v1x + 1u].store(0);
+        gAcc[v1x + 2u].store(0);
+    }
+    sync();
+    float pad = 0.0;
+    float3 ulo = float3(3.0e38, 3.0e38, 3.0e38);
+    float3 uhi = -ulo;
+    for (uint m = 0u, mStop = EB_END(830, m, k, 1u); m < mStop; m++)
+    {
+        uint vb = vvMember(off, m);
+        if (m == a || gNext[vvPartnerAt(off, m)] == 0u || !edgePairOn(va, vb)) continue;
+        pad = max(pad, nf(edgeRange(va, vb) + EDGE_DEPTH_M));
+        float3 lo;
+        float3 hi;
+        edgeBox(vb, lo, hi);
+        ulo = min(ulo, lo);
+        uhi = max(uhi, hi);
+    }
+    float3 p3 = float3(pad, pad, pad);
+    edgeList(va, ulo - p3, uhi + p3, false, lane);
+    float3 olo;
+    float3 ohi;
+    edgeBox(va, olo, ohi);
+    for (uint m = 0u, mStop = EB_END(831, m, k, 1u); m < mStop; m++)
+    {
+        uint vb = vvMember(off, m);
+        if (m == a || gNext[vvPartnerAt(off, m)] == 0u || !edgePairOn(va, vb)) continue;
+        edgeList(vb, olo - p3, ohi + p3, true, lane);
+    }
+    sync();
+    for (uint m = 0u, mStop = EB_END(832, m, k, 1u); m < mStop; m++)
+    {
+        uint vb = vvMember(off, m);
+        if (m == a || gNext[vvPartnerAt(off, m)] == 0u || !edgePairOn(va, vb)) continue;
+        edgePairHits(va, vb, 0u, lane);
+    }
+    sync();
+}
+
+// --- The small groups' pass (vvPassSmall: k ≤ VV_SIDE; gsVvPair the overlapping ordered
+// pairs) ---
+
+// Before the tests' end: every member's edges this step, their boxes, the lists of each
+// member's edges and contact points near its partners, then each owner's hits.
+void edgeTestsSmall(uint k, uint off, uint parity, uint lane)
+{
+    if (!edgeOn()) return;
+    // (No early return on the pairs: they are workgroup memory, and a barrier after a
+    // branch on it is not uniform control flow to a browser; no pair, no work.)
+    bool anyEdge = false;
+    for (uint a = 0u, aStop = EB_END(812, a, k, 1u); a < aStop; a++)
+        for (uint m = 0u, mStop = EB_END(813, m, k, 1u); m < mStop; m++)
+            if (a != m && (gsVvPair[a * VV_PART + m] & 1u) != 0u && edgePairOn(vvMember(off, a), vvMember(off, m))) anyEdge = true;
+    edgeResetPrepare(k, off, lane, anyEdge);
     // Each member's edges and contact points within reach of a partner's edges' box.
     float rmax = 0.0;
     for (uint a = 0u, aStop = EB_END(816, a, k, 1u); a < aStop; a++) rmax = max(rmax, asfloat(gStatic[vvMember(off, a) * 4u + 3u].z));
@@ -704,16 +814,5 @@ void edgeClearOwner(uint va, uint slot, uint lane, uint lanes)
         gAcc[vvSplitTri(H.a0)].store(0);
         gAcc[vvSplitPoint(slot, H.h)].store(0);
         gAcc[vvSplitPoint(slot, H.h2)].store(0);
-    }
-}
-
-// A group past the small groups' size with an edge-contact member: reported (the big
-// groups' pass has no edge contact yet; contact-design.md).
-void edgeBigGroup(uint k, uint off, uint lane)
-{
-    if (!edgeOn() || lane != 0u) return;
-    for (uint a = 0u, aStop = EB_END(823, a, k, 1u); a < aStop; a++)
-    {
-        if (edgeVeh(vvMember(off, a))) gAcc[vvCtl(VV_OVERFLOW)].max(FL_ERR_EDGE_GROUP);
     }
 }

@@ -4,18 +4,22 @@
 // P: contact throttle resets, the owner's throttle step listing its tested
 // triangles, and its candidates compacted; phase T: tested triangles against the
 // candidates.
-void edgeBigGroup(uint k, uint off, uint lane);
+void edgeResetPrepare(uint k, uint off, uint lane, bool prepare);
+void edgeOwnerBig(uint a, uint k, uint off, uint lane);
+void edgeApplyOwner(uint va, uint slot, uint lane, uint lanes);
+void edgeResidualPhase(uint va, uint slot, uint parity, uint lane, uint lanes, uint phase);
+uint edgeHits(uint va);
+bool edgeOn();
 void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
-    // (Edge vehicle contact runs in the small groups' pass only so far: a larger group
-    // with an edge-contact member reports it, FL_ERR_EDGE_GROUP.)
-    edgeBigGroup(k, off, lane);
     if (gP.vvSplit != 0u)
     {
         vvSnapshot(off, k, parity, lane);
         sync();
     }
+    // Edge vehicle contact (explicit_beams_vv_edges.slang): every member's edges this step.
+    if (edgeOn()) edgeResetPrepare(k, off, lane, true);
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     uint prevTri = 0u;
     uint prevListed = 0u;
@@ -38,6 +42,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 #endif
         uint prevHits = a > 0u ? gsVvHits[q ^ 1u].load() : 0u;
         if (a > 0u) vvApplyHits(prevVa, runOff, points, prevHits, prevRange, parity, lane);
+        if (a > 0u && edgeOn()) edgeApplyOwner(prevVa, 0u, lane, LANES);
         // §37.1: the previous owner's residual pass and work guard (its listed hits).
         if (gP.vvSplit != 0u && a > 0u)
         {
@@ -46,6 +51,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                 sync();
                 if (prevHits <= 2u * points)
                     vvResidualPhase(prevVa, vvHitAt(runOff, 0u), prevHits, prevRange, parity, lane, LANES, 0u, ph);
+                if (edgeOn()) edgeResidualPhase(prevVa, 0u, parity, lane, LANES, ph);
             }
         }
         for (uint b = lane, bStop = EB_END(197, b, k, LANES); b < bStop; b += LANES)
@@ -90,7 +96,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             for (uint t = lane, tStop = EB_END(199, t, r1.y, LANES); t < tStop; t += LANES) gMisc[gP.vvTri + r1.x + t].x = 0u;
         }
         // The previous owner's two-body counts (its hits were applied in phase S).
-        if (prevHits > 0u) vvSplitClear(off, k, 1u, lane);
+        if (prevHits > 0u || (a > 0u && edgeOn() && edgeHits(prevVa) > 0u)) vvSplitClear(off, k, 1u, lane);
         uint4 ra1 = gStatic[va * 4u + 1u];
         float range = asfloat(gStatic[va * 4u + 3u].z);
         // The partners' boxes' union (their contact points all lie in it).
@@ -177,6 +183,8 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             }
         }
         sync();
+        // Edge vehicle contact: the owner's hits (after the counts' clear, before phase T).
+        if (edgeOn()) edgeOwnerBig(a, k, off, lane);
         // Phase T.
         uint listed = gsVvListed[q].load();
         uint cands = gsVvCands[q].load();
@@ -204,6 +212,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
     for (uint i = lane, iStop = EB_END(205, i, prevListed, LANES); i < iStop; i += LANES) vvThrottleEnd(prevTri + gNext[vvTestedAt(prevTri + i)]);
     uint lastHits = k > 0u ? gsVvHits[(k - 1u) & 1u].load() : 0u;
     if (k > 0u) vvApplyHits(prevVa, runOff, points, lastHits, prevRange, parity, lane);
+    if (k > 0u && edgeOn()) edgeApplyOwner(prevVa, 0u, lane, LANES);
     if (gP.vvSplit != 0u)
     {
         for (uint ph = 0u; ph < 3u; ph++)
@@ -211,9 +220,10 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
             sync();
             if (k > 0u && lastHits <= 2u * points)
                 vvResidualPhase(prevVa, vvHitAt(runOff, 0u), lastHits, prevRange, parity, lane, LANES, 0u, ph);
+            if (k > 0u && edgeOn()) edgeResidualPhase(prevVa, 0u, parity, lane, LANES, ph);
         }
         sync();
-        if (lastHits > 0u) vvSplitClear(off, k, 1u, lane);
+        if (lastHits > 0u || (k > 0u && edgeOn() && edgeHits(prevVa) > 0u)) vvSplitClear(off, k, 1u, lane);
     }
     // (The counters are cleared by the next step's first member step, before its
     // first barrier.)

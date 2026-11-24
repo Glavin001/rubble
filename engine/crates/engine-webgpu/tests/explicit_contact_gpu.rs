@@ -870,7 +870,7 @@ fn tetra(points: [Vec3; 4], vel: Vec3) -> ExplicitBeams {
 /// edge). One-step frames, then 17-step ones.
 #[test]
 fn edge_contact_steps_like_the_cpu() {
-    edge_scene(false);
+    edge_scene(false, false);
 }
 
 /// [`edge_contact_steps_like_the_cpu`] on the split group path (the vehicle lab's: a group's
@@ -878,10 +878,17 @@ fn edge_contact_steps_like_the_cpu() {
 /// contact, `PERF_FLEET_FAMILY`).
 #[test]
 fn edge_contact_on_the_split_path_steps_like_the_cpu() {
-    edge_scene(true);
+    edge_scene(true, false);
 }
 
-fn edge_scene(split: bool) {
+/// [`edge_contact_steps_like_the_cpu`] in a contact group of five (the larger groups'
+/// owner-by-owner pass, vvPass): two more tetrahedra coming down on the lower ridge's far end.
+#[test]
+fn edge_contact_in_a_large_group_steps_like_the_cpu() {
+    edge_scene(false, true);
+}
+
+fn edge_scene(split: bool, large: bool) {
     let lower = tetra(
         [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.0, -0.4, 0.4), Vec3::new(0.0, -0.4, -0.4)],
         Vec3::ZERO,
@@ -895,7 +902,15 @@ fn edge_scene(split: bool) {
         [Vec3::new(0.35, 0.03, 0.0), Vec3::new(0.55, 0.5, 0.2), Vec3::new(0.25, 0.5, 0.25), Vec3::new(0.3, 0.5, -0.25)],
         Vec3::new(0.0, -1.5, 0.0),
     );
-    let fleet = vec![lower, upper, corner];
+    let mut fleet = vec![lower, upper, corner];
+    if large {
+        for (x, z) in [(-0.3f32, 0.02f32), (-0.15, -0.03)] {
+            fleet.push(tetra(
+                [Vec3::new(x, 0.03, z), Vec3::new(x - 0.2, 0.5, z + 0.2), Vec3::new(x + 0.1, 0.5, z + 0.25), Vec3::new(x + 0.05, 0.5, z - 0.25)],
+                Vec3::new(0.0, -1.2, 0.0),
+            ));
+        }
+    }
     let Some(mut g) = gpu(&fleet) else {
         eprintln!("no GPU: skipped");
         return;
@@ -919,9 +934,10 @@ fn edge_scene(split: bool) {
             wo.frame(1);
             g.frame(1);
             let pos = g.positions();
-            let d: Vec<f32> = (0..3).map(|k| rms(&pos[k], &w.vehicles[k].positions())).collect();
-            let doff: Vec<f32> = (0..3).map(|k| rms(&pos[k], &wo.vehicles[k].positions())).collect();
-            let cpu: Vec<f32> = (0..3).map(|k| rms(&wo.vehicles[k].positions(), &w.vehicles[k].positions())).collect();
+            let nv = w.vehicles.len();
+            let d: Vec<f32> = (0..nv).map(|k| rms(&pos[k], &w.vehicles[k].positions())).collect();
+            let doff: Vec<f32> = (0..nv).map(|k| rms(&pos[k], &wo.vehicles[k].positions())).collect();
+            let cpu: Vec<f32> = (0..nv).map(|k| rms(&wo.vehicles[k].positions(), &w.vehicles[k].positions())).collect();
             eprintln!("step {step}: GPU-CPU {d:?}  GPU-CPU(off) {doff:?} CPU on-off {cpu:?} edge hits {}", w.edge_stats[5]);
             if d.iter().any(|&x| x != 0.0) {
                 break;
@@ -937,6 +953,9 @@ fn edge_scene(split: bool) {
     }
     g.wait();
     g.contact_status().unwrap();
+    if large {
+        assert!(g.contact_groups() >= 1, "contact groups {}", g.contact_groups());
+    }
     eprintln!("edge pass stats (tested, end, parallel, facing, deep, hits, crossed): {:?}", w.edge_stats);
     assert!(w.edge_stats[5] > 10, "edge hits {:?}", w.edge_stats);
     let pos = g.positions();
