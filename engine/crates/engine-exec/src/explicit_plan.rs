@@ -1268,6 +1268,13 @@ impl ExplicitUpload {
         sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
     ) -> Self {
         let nv = vehicles.len();
+        // Edge vehicle contact (`ExplicitBeams::edge_contact`) is the CPU reference's so far:
+        // the kernels would step such a fleet without it, so it is refused, not ignored.
+        assert!(
+            !vehicles.iter().any(|v| v.edge_contact),
+            "explicit beams: edge vehicle contact (ExplicitBeams::edge_contact) runs on the CPU reference only; \
+             the GPU kernels do not have it yet (docs/contact-design.md)"
+        );
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
