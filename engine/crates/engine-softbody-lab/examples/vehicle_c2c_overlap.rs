@@ -775,6 +775,10 @@ fn main() -> Result<(), String> {
     }
 
     let mut w = ExplicitBeamsWorld::new(vec![sa, sb]);
+    // NO_THROTTLE=1: vehicle contact tests every triangle every step (a measurement).
+    if std::env::var("NO_THROTTLE").is_ok_and(|v| v == "1") {
+        w.throttle = false;
+    }
     let edges_of = |s: &ExplicitBeams| -> Vec<(u32, u32)> {
         let mut e: Vec<(u32, u32)> = (0..s.triangles.len())
             .filter(|&t| !s.tri_dead.get(t).copied().unwrap_or(false) && !s.tri_anti_only(t))

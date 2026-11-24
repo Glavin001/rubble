@@ -218,3 +218,25 @@ corner does not, its rim shared with the doubled layers). Six runs of the 60 + 6
 node-only contact 71 → 60 nodes inside, 191 → 166 L; with edge contact 26 → 30, 49 → 58 L
 (within the spread). So with edge contact the remaining overlap does not come through these
 holes; kept off. The doubled seam layers remain an authoring bug to fix in `bridge_seams`.
+
+### After the authoring fixes (2026-11-24, six runs each, 60 + 60, median nodes inside A + B / overlap)
+
+The rigger fixes (seam bridges that do not fold or cross, holes filled, interior solids first;
+`generated-vehicles-lessons.md` §18) on their own: defaults 71 → 66 nodes, 191 → 145 L. With
+edge + node–edge contact: 33 nodes, 57 L (was 29, 53 L: within the spread).
+
+* **The outward side, now that the outer skin's winding is consistent:** still worse (edges
+  through 106 → 362, overlap 57 → 104 L). Rejected.
+* **Push-out at full strength** (`PUSH_OUT=100`, up to 5 cm a step, through the accounted
+  position step): blows up (mechanical energy 413 kJ → 22 MJ). Moving loaded nodes out by
+  large steps stores the beams' energy, which returns as motion; §37 caps the step by the
+  energy the hit removed for exactly this reason. Rejected; the slow rates (1–3 m/s) stay
+  measured as no gain.
+* **Self edge contact** (edge against edge within one car, outer skin, pairs in range at rest
+  excluded; `edge_contact`): the 64 km/h pole's new crossings of the car's own skin 47 → 30,
+  the front door and fender no longer through each other. Pole energy passes.
+* **Edge contact takes the outer skin's edges only** (`ExplicitBeams::tri_outer`): an edge's
+  outward normal averaged over interior faces (winding not checked) was wrong near them.
+* The candidate default (edge + node–edge, both cars and within one): every guard passes
+  (not fused, slow push touching, energy in every crash with 60 + 60 at 2.04 of 2.07 kJ,
+  cannonball, pole); overlap remains (60 + 60: 11 / 12 nodes, 62 / 65 edges at the worst).
