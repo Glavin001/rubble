@@ -607,6 +607,8 @@ impl Design for Sedan {
             tyre_w: self.p.tyre_w,
             rim_d: self.p.rim_in * 0.0254,
             wheel_y: self.wheel_y,
+            rear_wheel: None,
+            pose: None,
             z_front: self.f.z(R_FRONT),
             z_rear: self.f.z(R_REAR),
             doors: ["FL", "FR", "RL", "RR"].iter().map(|s| s.to_string()).collect(),
@@ -672,6 +674,7 @@ impl Sedan {
             y_pan: 0.222,
             z_nose: Rc::new(move |x, y| a.front_z(x, y)),
             z_tail: Rc::new(move |x, y| b.rear_z(x, y)),
+            rear: None,
         }
     }
 

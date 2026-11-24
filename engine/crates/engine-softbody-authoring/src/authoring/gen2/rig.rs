@@ -271,6 +271,11 @@ pub trait RigInput {
     fn end_pt(&self, front: bool, x: f32, y: f32) -> Vec3;
     /// The section rays' origin height.
     fn ray_y(&self) -> f32;
+    /// Each axle's tyre (radius, width) in metres, front then rear, when
+    /// they differ from the export's default tyre (None: the default).
+    fn wheel_sizes(&self) -> Option<[(f32, f32); 2]> {
+        None
+    }
 
     fn grad(&self, q: Vec3) -> Vec3 {
         let e = 2e-4;
@@ -518,6 +523,18 @@ impl Rig {
     }
     pub(super) fn g(&self, i: usize) -> Vec3 {
         self.to_gltf(self.car.p(i))
+    }
+    /// Move every node and named mass by `f`, a map of glTF points (a rigid
+    /// pose of the whole car).
+    pub fn transform(&mut self, f: impl Fn(Vec3) -> Vec3) {
+        for i in 0..self.car.nodes.len() {
+            let g = f(self.to_gltf(self.car.nodes[i].p));
+            self.car.nodes[i].p = self.to_jbeam(g);
+        }
+        for k in 0..self.car.named.len() {
+            let g = f(self.to_gltf(self.car.named[k].at));
+            self.car.named[k].at = self.to_jbeam(g);
+        }
     }
     /// glTF (model) to JBeam (car) coordinates, about this car's front axle.
     pub fn to_jbeam(&self, g: Vec3) -> Vec3 {
@@ -4045,6 +4062,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             n2,
             arm,
             dir: s,
+            size: None,
         });
     }
     r.car.refs = [
@@ -4061,6 +4079,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     } else {
         hub_extra(&r.car)
     };
+    if let Some(sz) = inp.wheel_sizes() {
+        for w in &mut r.car.wheels {
+            w.size = Some(sz[if w.name.starts_with('F') { 0 } else { 1 }]);
+        }
+    }
     r.car.assign_springs(&hub);
     // Zones: the crush zones' members stack (deformLimit) and carry the crush
     // yield multiple; the cabin's the cabin multiple.

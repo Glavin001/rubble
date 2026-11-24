@@ -433,7 +433,12 @@ pub fn jbeam_files(
             for wh in &car.wheels {
                 // The parking brake acts on the rear wheels (spec §25.1).
                 let rear = wh.name.starts_with('R');
-                w.push(json!({"parkingTorque": if rear { PARKING_TORQUE } else { 0.0 }}));
+                let mut mods = json!({"parkingTorque": if rear { PARKING_TORQUE } else { 0.0 }});
+                if let Some((radius, width)) = wh.size {
+                    mods["radius"] = num(radius);
+                    mods["tireWidth"] = num(width);
+                }
+                w.push(mods);
                 w.push(json!([
                     wh.name,
                     format!("wheel_{}", wh.name),

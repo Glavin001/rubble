@@ -1569,6 +1569,7 @@ pub fn sedan() -> Car {
             n2,
             arm,
             dir: s,
+            size: None,
         });
     }
     c.refs = [c.id("tn1"), c.id("tn2"), c.id("si1l"), c.id("rfC1")];

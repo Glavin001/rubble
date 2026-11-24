@@ -39,11 +39,11 @@ use crate::uvpack::Parts;
 // -- the car ---------------------------------------------------------------------------------
 const WHEELBASE: f64 = 2.743;
 const TRACK: f64 = 1.486;
-const ZF_AX: f64 = WHEELBASE / 2.0;
-const ZR_AX: f64 = -WHEELBASE / 2.0;
-const TYRE_D: f64 = 0.662;
+pub const ZF_AX: f64 = WHEELBASE / 2.0;
+pub const ZR_AX: f64 = -WHEELBASE / 2.0;
+pub const TYRE_D: f64 = 0.662;
 const TYRE_W: f64 = 0.235;
-const WHEEL_Y: f64 = TYRE_D / 2.0;
+pub const WHEEL_Y: f64 = TYRE_D / 2.0;
 /// The floor pan's height: the skin's floor line (0.215) and 27 mm, as the sedan's.
 const Y_PAN: f64 = 0.242;
 const Z_FRONT: f64 = 2.26;
@@ -95,9 +95,49 @@ impl Mach1Params {
     }
 }
 
+/// One wheel of the running gear (the axle's pair alike), in the car's body
+/// frame: its centre's height and z, tyre and rim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxleWheel {
+    pub y: f64,
+    pub z: f64,
+    pub tyre_d: f64,
+    pub tyre_w: f64,
+    pub rim_d: f64,
+    pub rim_w: f64,
+    pub style: RimStyle,
+}
+
+/// The two axles' wheels. The stock car's are alike; a variant sets its own
+/// (staggered tyres, a raked stance) and every consumer (the wheel meshes,
+/// the suspension, the rig data) follows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Running {
+    pub front: AxleWheel,
+    pub rear: AxleWheel,
+}
+
+impl Running {
+    /// The 1969 car's: 215 section on 15 x 7 in rims, both axles.
+    pub fn stock(p: &Mach1Params) -> Running {
+        let style = match p.rim_style.as_str() {
+            "steel" => RimStyle::Steel,
+            "alloy" => RimStyle::Alloy,
+            _ => RimStyle::Magnum,
+        };
+        let w = AxleWheel { y: WHEEL_Y, z: ZF_AX, tyre_d: TYRE_D, tyre_w: TYRE_W, rim_d: 15.0 * 0.0254, rim_w: 7.0 * 0.0254, style };
+        Running { front: w, rear: AxleWheel { z: ZR_AX, ..w } }
+    }
+
+    fn uniform(&self) -> bool {
+        self.rear == AxleWheel { z: self.rear.z, ..self.front }
+    }
+}
+
 #[derive(Clone)]
 pub struct Mach1 {
     pub p: Mach1Params,
+    pub run: Running,
 }
 
 // -- end faces -------------------------------------------------------------------------------
@@ -284,16 +324,17 @@ const VLINES: [f64; 12] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 5.33, 5.67, 6.0, 7.0, 8
 
 impl Mach1 {
     pub fn new(p: Mach1Params) -> Mach1 {
-        Mach1 { p }
+        let run = Running::stock(&p);
+        Mach1 { p, run }
     }
 
-    fn wheel_spec(&self) -> WheelSpec {
-        let rim_style = match self.p.rim_style.as_str() {
-            "steel" => RimStyle::Steel,
-            "alloy" => RimStyle::Alloy,
-            _ => RimStyle::Magnum,
-        };
-        WheelSpec { track: TRACK, wheel_y: WHEEL_Y, tyre_d: TYRE_D, tyre_w: TYRE_W, rim_d: 15.0 * 0.0254, rim_w: 7.0 * 0.0254, rim_style, disc_d: 0.28 }
+    /// The same car on other wheels (a variant's running gear).
+    pub fn with_running(p: Mach1Params, run: Running) -> Mach1 {
+        Mach1 { p, run }
+    }
+
+    fn wheel_spec(w: &AxleWheel) -> WheelSpec {
+        WheelSpec { track: TRACK, wheel_y: w.y, tyre_d: w.tyre_d, tyre_w: w.tyre_w, rim_d: w.rim_d, rim_w: w.rim_w, rim_style: w.style, disc_d: 0.28 }
     }
 
     /// The lines the body-in-white is placed from ([`structure::unibody`]).
@@ -323,18 +364,22 @@ impl Mach1 {
         mechanical::Gear {
             f: Frame::identity(),
             half_track: TRACK / 2.0,
-            wheel_y: WHEEL_Y,
-            zf: ZF_AX,
-            zr: ZR_AX,
-            tyre_d: TYRE_D,
-            tyre_w: TYRE_W,
-            rim_d: 15.0 * 0.0254,
-            rim_w: 7.0 * 0.0254,
+            wheel_y: self.run.front.y,
+            zf: self.run.front.z,
+            zr: self.run.rear.z,
+            tyre_d: self.run.front.tyre_d,
+            tyre_w: self.run.front.tyre_w,
+            rim_d: self.run.front.rim_d,
+            rim_w: self.run.front.rim_w,
             axle_f: ZF_AX,
             axle_r: ZR_AX,
             y_pan: Y_PAN,
             z_nose: Rc::new(front_z),
             z_tail: Rc::new(rear_z_body),
+            rear: (!self.run.uniform()).then(|| {
+                let r = &self.run.rear;
+                mechanical::AxleGear { wheel_y: r.y, tyre_d: r.tyre_d, tyre_w: r.tyre_w, rim_d: r.rim_d, rim_w: r.rim_w }
+            }),
         }
     }
 
@@ -618,10 +663,15 @@ impl Design for Mach1 {
             track: TRACK,
             axle_f: ZF_AX,
             axle_r: ZR_AX,
-            tyre_d: TYRE_D,
-            tyre_w: TYRE_W,
-            rim_d: 15.0 * 0.0254,
-            wheel_y: WHEEL_Y,
+            tyre_d: self.run.front.tyre_d,
+            tyre_w: self.run.front.tyre_w,
+            rim_d: self.run.front.rim_d,
+            wheel_y: self.run.front.y,
+            rear_wheel: (!self.run.uniform()).then(|| {
+                let r = &self.run.rear;
+                crate::assemble::AxleWheel { wheel_y: r.y, tyre_d: r.tyre_d, tyre_w: r.tyre_w, rim_d: r.rim_d }
+            }),
+            pose: None,
             z_front: Z_FRONT,
             z_rear: Z_REAR,
             doors: ["FL", "FR"].iter().map(|s| s.to_string()).collect(),
@@ -674,8 +724,8 @@ impl Mach1 {
         let _ = up_y;
 
         // wheels
-        let spec = self.wheel_spec();
-        for (tag, z) in [("F", ZF_AX), ("R", ZR_AX)] {
+        for (tag, w) in [("F", &self.run.front), ("R", &self.run.rear)] {
+            let (spec, z) = (Self::wheel_spec(w), w.z);
             for (s, sg) in sides {
                 let (rim, ty, di, c) = p::wheel(&spec, sg, z);
                 out.insert(&format!("rim_{tag}{s}"), rim);

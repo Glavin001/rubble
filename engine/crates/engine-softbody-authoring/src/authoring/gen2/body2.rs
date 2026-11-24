@@ -984,6 +984,7 @@ pub fn wheels(r: &mut Rig, b: &Built, stack: f32) {
             n2,
             arm: n1,
             dir: s,
+            size: None,
         });
         if !name.starts_with('F') || std::env::var("GEN3_NO_WHEEL_STACK").is_ok() {
             continue;

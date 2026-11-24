@@ -39,6 +39,22 @@ pub struct RigDims {
     pub z_rear: f32,
     pub doors: Vec<String>,
     pub rear_closure: String,
+    /// The rear axle's wheel when it differs from the front's (the fields
+    /// above are the front's).
+    #[serde(default)]
+    pub rear_wheel: Option<RearWheel>,
+    /// The car's pose in the world: everything else here is in the body
+    /// frame, which the rigger rigs in; the rig is posed afterwards.
+    #[serde(default)]
+    pub pose: Option<engine_vehiclegen::Pose>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+pub struct RearWheel {
+    pub wheel_y: f32,
+    pub tyre_d: f32,
+    pub tyre_w: f32,
+    pub rim_d: f32,
 }
 
 #[derive(Deserialize)]
@@ -231,6 +247,11 @@ impl VgInput {
         let bytes = glb(&rp, &b.markers, b.paint, b.metallic, b.roughness);
         let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
         let mut me = Self::new(rig, bytes)?;
+        // The rigger works in the design's body frame: a posed design's
+        // render model (built in the world) goes back through the pose.
+        if let Some(ps) = spec.pose {
+            unpose(&mut me.model, &ps);
+        }
         me.structure = spec.structure.as_deref().cloned();
         me.mechanical = spec.mechanical.as_ref().clone();
         if !opts.solid {
@@ -245,10 +266,20 @@ impl VgInput {
         // skins); the hood's edge nodes then drift 16 mm parked
         // (`gen3_rig`), so it waits for the rigger to read the tags itself.
         let sheets = if std::env::var("VG_RIG_OUTER").is_ok_and(|v| v == "1") {
-            engine_vehiclegen::assemble::outer_parts(&b.parts)
+            let mut o = b.parts.clone();
+            if let Some(ps) = spec.pose {
+                // (the body frame, as the sheet build below)
+                let r = ps.rotation().transpose();
+                for (_, m) in o.0.iter_mut() {
+                    let t = ps.invert(glam::DVec3::ZERO);
+                    m.transform(Some(r), t);
+                }
+            }
+            engine_vehiclegen::assemble::outer_parts(&o)
         } else {
             let o = engine_vehiclegen::BuildOpts {
                 solid: false,
+                posed: false,
                 ..opts
             };
             engine_vehiclegen::build(d.as_ref(), o).parts
@@ -415,6 +446,29 @@ impl VgInput {
     }
 }
 
+/// A posed design's render model back in its body frame.
+fn unpose(m: &mut Model, ps: &engine_vehiclegen::Pose) {
+    let inv = |p: Vec3| {
+        let q = ps.invert(glam::DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+        Vec3::new(q.x as f32, q.y as f32, q.z as f32)
+    };
+    let back = ps.rotation().transpose();
+    for p in &mut m.parts {
+        for q in &mut p.pos {
+            *q = inv(*q);
+        }
+        for n in &mut p.nrm {
+            let d = back * glam::DVec3::new(n.x as f64, n.y as f64, n.z as f64);
+            *n = Vec3::new(d.x as f32, d.y as f32, d.z as f32);
+        }
+    }
+    let rot = Quat::from_rotation_x(ps.pitch as f32);
+    for k in &mut m.markers {
+        k.pos = inv(k.pos);
+        k.rot = rot * k.rot;
+    }
+}
+
 /// A `.glb`'s meshes and markers as a render model (world space).
 pub fn model_of(g: &Glb) -> Model {
     let mut parts = Vec::new();
@@ -494,6 +548,10 @@ impl RigInput for VgInput {
     }
     fn ray_y(&self) -> f32 {
         self.ray_y
+    }
+    fn wheel_sizes(&self) -> Option<[(f32, f32); 2]> {
+        let (f, r) = (&self.rig.dims, self.rig.dims.rear_wheel?);
+        Some([(0.5 * f.tyre_d, f.tyre_w), (0.5 * r.tyre_d, r.tyre_w)])
     }
     /// The greenhouse's corner is the design's roof-rail key line (the
     /// daylight opening's top, down the A- and C-pillars), not gen3's
@@ -576,7 +634,14 @@ pub struct Built {
 
 /// Rig a design and bind its art `.glb` to the lattice.
 pub fn build(input: VgInput) -> Result<Built, String> {
-    let rig = rig::rig_with(&input);
+    let mut rig = rig::rig_with(&input);
+    // (A posed design is rigged in its body frame and put in the world.)
+    if let Some(ps) = input.rig.dims.pose {
+        rig.transform(|g| {
+            let q = ps.apply(glam::DVec3::new(g.x as f64, g.y as f64, g.z as f64));
+            Vec3::new(q.x as f32, q.y as f32, q.z as f32)
+        });
+    }
     let skin = bind_art(&input, &rig, &input.glb)?;
     Ok(Built { input, rig, skin })
 }
@@ -838,6 +903,13 @@ fn rig_json_of(
             z_rear: f(spec.z_rear),
             doors: spec.doors.clone(),
             rear_closure: spec.rear_closure.clone(),
+            rear_wheel: spec.rear_wheel.map(|r| RearWheel {
+                wheel_y: f(r.wheel_y),
+                tyre_d: f(r.tyre_d),
+                tyre_w: f(r.tyre_w),
+                rim_d: f(r.rim_d),
+            }),
+            pose: spec.pose,
         },
         arches: spec
             .arches

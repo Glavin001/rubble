@@ -5,6 +5,7 @@
 //! nothing else (CLI, wasm designer, web build, tests, lab) names a design.
 
 pub mod mach1;
+pub mod mach1_gasser;
 pub mod police;
 pub mod sedan;
 pub mod wagon;
@@ -50,6 +51,10 @@ fn mach1_defaults() -> String {
     serde_json::to_string_pretty(&mach1::Mach1Params::default()).unwrap()
 }
 
+fn gasser_defaults() -> String {
+    serde_json::to_string_pretty(&mach1_gasser::livery(mach1::Mach1Params::default())).unwrap()
+}
+
 pub static REGISTRY: &[Entry] = &[
     Entry {
         name: "sedan",
@@ -74,6 +79,12 @@ pub static REGISTRY: &[Entry] = &[
         title: "1969 fastback Mach 1 (two-door)",
         defaults: mach1_defaults,
         build: |j| Ok(Box::new(mach1::Mach1::new(mach1_params(j)?))),
+    },
+    Entry {
+        name: "mach1_gasser",
+        title: "Drag-strip gasser (Mach 1 variant)",
+        defaults: gasser_defaults,
+        build: |j| Ok(Box::new(mach1_gasser::Gasser::new(mach1_params(j)?))),
     },
 ];
 

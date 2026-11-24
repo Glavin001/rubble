@@ -46,3 +46,33 @@ fn it_has_two_doors_and_a_boot_lid() {
         assert!(!m.name.contains("door_R"), "{}: a marker of a rear door", m.name);
     }
 }
+
+/// The gasser stands on its wheels as built: each tyre's lowest point is the
+/// ground, the front tyres are smaller than the rear, and the posed body is
+/// raked nose-up (the bonnet higher than the boot).
+#[test]
+fn the_gasser_stands_on_its_own_tyres_with_the_body_raked() {
+    let d = design_from_json("mach1_gasser", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
+    let low = |n: &str| b.parts.get(n).unwrap().v.iter().map(|v| v.y).fold(f64::MAX, f64::min);
+    let high = |n: &str| b.parts.get(n).unwrap().v.iter().map(|v| v.y).fold(f64::MIN, f64::max);
+    for (tag, d) in [("F", 0.620), ("R", 0.720)] {
+        for s in ["L", "R"] {
+            let (lo, hi) = (low(&format!("tyre_{tag}{s}")), high(&format!("tyre_{tag}{s}")));
+            assert!(lo.abs() < 0.002, "tyre_{tag}{s} lowest {lo}");
+            assert!((hi - lo - d).abs() < 0.004, "tyre_{tag}{s} is {} m tall", hi - lo);
+        }
+    }
+    // the bonnet's lowest point is its nose: 2 m ahead of the pivot, 2.6 degrees
+    // is 9 cm, and the body stands 3 cm higher on the big rear tyres
+    let stock = {
+        let s = design_from_json("mach1_1969", "{}").unwrap();
+        let sb = build(s.as_ref(), BuildOpts { uv: false, ..Default::default() });
+        low_of(&sb, "hood")
+    };
+    assert!(low("hood") > stock + 0.10, "bonnet nose {} against stock {stock}", low("hood"));
+}
+
+fn low_of(b: &engine_vehiclegen::Built, n: &str) -> f64 {
+    b.parts.get(n).unwrap().v.iter().map(|v| v.y).fold(f64::MAX, f64::min)
+}

@@ -159,6 +159,29 @@ pub struct Gear {
     /// the tail and nose faces (as built): z at (x, y)
     pub z_nose: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
     pub z_tail: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
+    /// The rear axle's wheel when it differs from the front's (staggered
+    /// tyres, a raked stance); None: both axles are the fields above.
+    pub rear: Option<AxleGear>,
+}
+
+/// One axle's wheel: its centre's height and its tyre and rim sizes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxleGear {
+    pub wheel_y: f64,
+    pub tyre_d: f64,
+    pub tyre_w: f64,
+    pub rim_d: f64,
+    pub rim_w: f64,
+}
+
+impl Gear {
+    /// The wheel of the front or the rear axle.
+    pub fn axle(&self, front: bool) -> AxleGear {
+        match (&self.rear, front) {
+            (Some(r), false) => *r,
+            _ => AxleGear { wheel_y: self.wheel_y, tyre_d: self.tyre_d, tyre_w: self.tyre_w, rim_d: self.rim_d, rim_w: self.rim_w },
+        }
+    }
 }
 
 fn cyl(a: DVec3, b: DVec3, r: f64) -> Mesh {
@@ -181,7 +204,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     let f = &g.f;
     let r = |x: f64, y: f64, z: f64| f.p(x, y, z);
     let mut out: Vec<MechPart> = Vec::new();
-    let (t, wy) = (g.half_track, g.wheel_y);
+    let t = g.half_track;
 
     // ---- bumper beams: 5 across × 2 heights
     for (front, name, kg, yb, h, dz, dep, strength) in [(true, "impact_beam_front", 8.0, 0.45, 0.110, -0.105, 20e3, 60e3), (false, "impact_beam_rear", 6.0, 0.414, 0.090, 0.105, 15e3, 40e3)] {
@@ -287,6 +310,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let c = cn.to_lowercase();
         let z0 = if front { g.zf } else { g.zr };
         let fwd = if front { 1.0 } else { -1.0 };
+        let ax = g.axle(front);
+        let wy = ax.wheel_y;
         let at = |dx: f64, dy: f64, dz: f64| DVec3::new(sg * (t + dx), wy + dy, z0 + dz);
         let (lo, up, toe, n4) = (at(-0.16, -0.14, 0.0), at(-0.17, 0.14, 0.0), at(-0.15, -0.035, fwd * 0.135), at(-0.14, 0.02, -fwd * 0.12));
         let mut hub = MechPart::new(&format!("hub_{cn}"), "suspension");
@@ -321,7 +346,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let foot = up;
         // (the tube stops under the wheel-well liner; the tower is above it)
         let dir = (pt - foot).normalize();
-        let len = ((wy + 0.375 + (g.tyre_d - 0.683) / 2.0 - 0.045 - foot.y) / dir.y).min((pt - foot).length() - 0.02);
+        let len = ((wy + 0.375 + (ax.tyre_d - 0.683) / 2.0 - 0.045 - foot.y) / dir.y).min((pt - foot).length() - 0.02);
         strut.mesh = cyl(foot + dir * 0.03, foot + dir * len, 0.032);
         strut.links.push(Link { name: format!("strut_{c}"), a: nlo.clone(), b: tower.clone(), v: vals(0.0, 200.0, 17e3, 180e3), group: Some(format!("strut_{c}")) });
         strut.binds.extend([tower.clone(), nlo.clone(), nup.clone(), nn4.clone()]);
@@ -356,7 +381,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let mut wh = MechPart::new(&format!("wheel_{cn}"), "wheel");
         wh.node("ai", at(-0.125, 0.0, 0.0), 5.0);
         wh.node("ao", at(0.125, 0.0, 0.0), 5.0);
-        let rr = 0.42 * g.rim_d;
+        let rr = 0.42 * ax.rim_d;
         for k in 0..3 {
             let a = std::f64::consts::TAU * (k as f64 / 3.0 + 0.25);
             wh.node(&format!("f{}", k + 1), at(0.0, rr * a.sin(), rr * a.cos()), 3.0);
@@ -372,7 +397,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         wh.meshes.extend([format!("rim_{cn}"), format!("tyre_{cn}")]);
         // hub cap: a pressed disc clipped into the rim's centre
         let mut cap = MechPart::new(&format!("hub_cap_{cn}"), "wheel");
-        let xc = 0.5 * g.rim_w - 0.012;
+        let xc = 0.5 * ax.rim_w - 0.012;
         for k in 0..3 {
             let a = std::f64::consts::TAU * (k as f64 / 3.0 + 0.25);
             // (a 136 mm pressed steel disc, 1 mm: π r² t ρ = 0.114 kg, with
@@ -479,7 +504,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             let c = cn.to_lowercase();
             let s = if sg > 0.0 { "l" } else { "r" };
             let mut hs = MechPart::new(&format!("halfshaft_{cn}"), "driveline");
-            let (a, b) = (r(sg * 0.112, y_d, g.axle_r), DVec3::new(sg * (t - 0.215), wy, g.zr));
+            let (a, b) = (r(sg * 0.112, y_d, g.axle_r), DVec3::new(sg * (t - 0.215), g.axle(false).wheel_y, g.zr));
             hs.mesh = cyl(a, b, 0.018);
             hs.links.push(Link { name: format!("halfshaft_{c}"), a: format!("dif_{s}"), b: format!("whe{c}_ai"), v: vals(0.0, 20.0, 3600.0, 9500.0), group: Some(format!("halfshaft_{c}")) });
             hs.binds.extend([format!("dif_{s}"), format!("dif_n"), format!("whe{c}_ai"), format!("hub{c}_up")]);

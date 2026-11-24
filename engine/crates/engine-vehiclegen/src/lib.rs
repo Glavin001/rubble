@@ -26,7 +26,7 @@ pub mod export;
 pub mod designs;
 pub mod physics;
 
-pub use assemble::{build, build_with_body, BuildOpts, Built, Design, RigSpec};
+pub use assemble::{build, build_with_body, AxleWheel, BuildOpts, Built, Design, Pose, RigSpec};
 
 /// Build a design by name from JSON parameters (missing fields take the
 /// design's defaults). The names come from [`designs::REGISTRY`].

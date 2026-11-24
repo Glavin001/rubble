@@ -520,6 +520,9 @@ pub struct Wheel {
     pub n2: usize,
     pub arm: usize,
     pub dir: f32,
+    /// The tyre's radius and width (m) when this wheel's differ from the
+    /// export's default tyre (staggered sizes); None: the default.
+    pub size: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Debug, Default)]
