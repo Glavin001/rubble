@@ -29,6 +29,16 @@ mod kernel_compile {
 pub use kernel::Kernel;
 use kernel::kernel;
 
+/// Measurement (`kernels --closures`, tools/build-time/fanout.py): every kernel of this
+/// build compiled into `out` as the run-time store compiles them (each compile from the
+/// per-compile cache when it has it).
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn compile_kernels_to(out: &std::path::Path) -> Result<(), String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../slang");
+    kernel_compile::compile_all(&root, out).map(|_| ()).map_err(|e| format!("{e:#}"))
+}
+
 /// On wasm, how a build with its kernels compiled at run time (a fast web build) reads
 /// them: `load(rel)` returns the store's file `rel` (`wgsl/<name>.wgsl`, `wgsl_ok.txt`,
 /// `spirv_entries.txt`). Nothing to do anywhere else (embedded kernels, or native, which
@@ -43,7 +53,6 @@ pub fn set_kernel_loader(load: fn(&str) -> Result<String, String>) {
 mod explicit_modules;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
-#[cfg(feature = "gpu")]
 mod fast_float;
 #[cfg(feature = "gpu")]
 mod features;
@@ -66,7 +75,6 @@ pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, group_split_default, set_explicit_shader_checks_off, explicit_shader_module, explicit_shader_checks_off, explicit_compilation_options, SHADER_CHECKS_OFF_METAL, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, StagedSnapshot, StagedState, state_differences, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
-#[cfg(feature = "gpu")]
 pub use fast_float::{bit_exact_default, explicit_wgsl, fast_float_wgsl};
 #[cfg(feature = "gpu")]
 pub use features::{

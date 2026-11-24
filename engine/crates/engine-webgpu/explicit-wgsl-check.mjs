@@ -20,10 +20,12 @@
 // modules with its manifest.json. EXPLICIT_WGSL_PARALLEL=a,b (exact names) compiles
 // those at once, as a page's load does, and prints when each finishes.
 // EXPLICIT_WGSL_MODULES_ONLY=1: the shader modules only (Tint's validation, uniformity
-// included), no pipelines: seconds, not the driver's compile.
+// included), no pipelines: seconds, not the driver's compile. Then a directory without a
+// manifest.json is read as is: every .wgsl file in it (the build's own WGSL, CI's check).
+// EXPLICIT_WGSL_CHROME_FLAGS: more Chrome flags (CI: SwiftShader's WebGPU, CONTRIBUTING.md).
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, existsSync, openSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, openSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -103,13 +105,21 @@ window.__parallel = async (nonce, names) => {
 };
 window.__ready = true;
 </script>`;
-if (!existsSync(join(DIR, 'manifest.json'))) {
+// The modules' list: the manifest, or (modules only) every .wgsl file of the directory.
+let MANIFEST;
+if (existsSync(join(DIR, 'manifest.json'))) {
+  MANIFEST = readFileSync(join(DIR, 'manifest.json'), 'utf8');
+} else if (process.env.EXPLICIT_WGSL_MODULES_ONLY === '1') {
+  MANIFEST = JSON.stringify(readdirSync(DIR).filter((f) => f.endsWith('.wgsl')).sort()
+    .map((f) => ({ name: f.slice(0, -5), entry: '' })));
+} else {
   console.error(`no ${DIR}/manifest.json: run the explicit_wgsl_dump example first`);
   process.exit(2);
 }
 const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html' }).end(PAGE); return; }
+  if (p === '/manifest.json') { res.writeHead(200, { 'content-type': 'application/json' }).end(MANIFEST); return; }
   const path = normalize(join(DIR, p));
   if (!path.startsWith(DIR) || !existsSync(path)) { res.writeHead(404).end(); return; }
   res.writeHead(200, { 'content-type': p.endsWith('.json') ? 'application/json' : 'text/plain' }).end(readFileSync(path));
@@ -121,20 +131,33 @@ const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', '--no-first-run',
+  ...(process.env.EXPLICIT_WGSL_CHROME_FLAGS || '').split(/\s+/).filter(Boolean),
   // Dawn renames every symbol before Metal sees it, so a renamed entry point alone
   // would still hit the driver's shader cache: keep the names (EXPLICIT_WGSL_COLD).
   ...(DUMP ? ['--enable-dawn-features=disable_symbol_renaming,dump_shaders', '--enable-logging=stderr', '--v=0']
     : process.env.EXPLICIT_WGSL_COLD === '1' ? ['--enable-dawn-features=disable_symbol_renaming'] : []), '--no-default-browser-check', 'about:blank',
-], { stdio: DUMP ? ['ignore', 'ignore', openSync(DUMP, 'w')] : 'ignore' });
+], { stdio: DUMP ? ['ignore', 'ignore', openSync(DUMP, 'w')] : ['ignore', 'ignore', 'pipe'] });
+// Chrome's last words, for a launch that never comes up (CI: a slow or failed start).
+let chromeErr = '';
+let chromeExit = null;
+chrome.stderr?.on('data', (d) => { chromeErr = (chromeErr + d).slice(-4000); });
+chrome.on('exit', (code, signal) => { chromeExit = code ?? signal; });
+chrome.on('error', (e) => { chromeExit = `not started (${e.message})`; });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} server.close(); };
 process.on('exit', cleanup);
 // A kill timer's signal (perl -e 'alarm N; exec ...' sends SIGALRM) or a TERM: close
 // Chrome too, or its GPU process is left compiling.
 for (const sig of ['SIGALRM', 'SIGTERM', 'SIGINT']) process.on(sig, () => { console.log(`${sig}: stopping`); process.exit(3); });
+// Up to 60 s for the first page (a cold Chrome on a busy CI runner takes more than 10).
 let targets = [];
-for (let i = 0; i < 100 && !targets.length; i++) {
+for (let i = 0; i < 600 && !targets.length && chromeExit === null; i++) {
   try { targets = (await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).filter((t) => t.type === 'page'); } catch {}
   if (!targets.length) await new Promise((r) => setTimeout(r, 100));
+}
+if (!targets.length) {
+  console.error(`Chrome did not come up (${chromeExit === null ? 'no page in 60 s' : 'exited: ' + chromeExit}); ${CHROME}`);
+  if (chromeErr) console.error(chromeErr);
+  process.exit(2);
 }
 const ws = new WebSocket(targets[0].webSocketDebuggerUrl);
 await new Promise((r) => ws.addEventListener('open', r));
@@ -165,7 +188,7 @@ if (process.env.EXPLICIT_WGSL_PARALLEL) {
   process.exit(p.out.some((m) => m.err) ? 1 : 0);
 }
 // One module per call, each printed as it finishes (a long cold compile shows progress).
-const names = JSON.parse(readFileSync(join(DIR, 'manifest.json'), 'utf8')).map((m) => m.name)
+const names = JSON.parse(MANIFEST).map((m) => m.name)
   .filter((n) => !only.length || only.some((o) => n.includes(o)));
 const r = { out: [], errors: [] };
 let bad = 0;

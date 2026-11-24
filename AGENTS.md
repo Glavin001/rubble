@@ -32,8 +32,13 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
-- Modal's GPU target is CUDA (`engine-cuda`): kernels compile to GPU code locally with
-  nvcc (free), and Modal only runs the binary, seconds a container.
+- Modal's GPU target is CUDA (`engine-cuda`). The CUDA matrix (`run.sh --cuda`) builds on
+  Modal's CPUs by default, so this machine compiles nothing: only changed source files
+  leave it (`engine/tools/modal/remote_build.sh`; a Rust edit about 20 s and half a cent,
+  README "Building on Modal"). Choose where any run compiles with `RUBBLE_BUILD=modal` or
+  `RUBBLE_BUILD=local` (`gpu_run.sh --build modal|local`): the default is modal for the
+  CUDA matrix and local for other selections and the two-build A/B. Modal runs the
+  binary, seconds a container.
   `engine/tools/modal/gpu_run.sh [--fanout | --fanout-tests] -- <cargo selection>`
   runs each test binary or each test in a container of its own, all at once (built in
   local Docker). Vulkan on Modal (wgpu, the World, the matrix's `run.sh --modal`) is
@@ -127,7 +132,8 @@
   every configuration the kernels build in (run it after touching the kernel plumbing).
   A kernel's first-load compile in the browser: `tools/build-time/compile_cost.py`
   predicts it from the WGSL (CI caps it at 10 s, `--burndown` lists what to fix first);
-  a heavy helper is called from one place in a kernel, not once per case.
+  a heavy helper is called from one place in a kernel, not once per case. Read the
+  `fast-kernels-and-builds` skill before writing or changing Slang or kernel plumbing.
   The harness is `-p engine-world-lab --example vehicle_lab`. To iterate on pages:
   `RUBBLE_WEB_PROFILE=fast RUBBLE_WEB_PARTS="kernels world" bash engine/scripts/build-web.sh`
   (never measure with it).

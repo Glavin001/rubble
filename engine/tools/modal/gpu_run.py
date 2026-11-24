@@ -595,13 +595,19 @@ def main(archive: str, spec: str):
     gpu = s["gpu"]
     if gpu not in GPU_PRICE:
         raise SystemExit(f"--gpu {gpu}: one of {', '.join(GPU_PRICE)}")
-    apath = Path(archive)
-    key = _sha256(apath) + ".tar.gz"
-    print(f"[gpu_run] archive {apath.stat().st_size / 1e6:.1f} MB -> Modal {gpu}, cap {cap} s", flush=True)
-    _prune_archives()
-    _upload(archive_volume, {key: apath}, "archive")
-    with tarfile.open(apath, mode="r:gz") as tar:
-        manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
+    if s.get("archive_key"):
+        # Built on Modal (remote_build.py, gpu_run.sh --remote-build): the archive is in the
+        # volume already and its manifest came back with the build; nothing to upload.
+        key, manifest = s["archive_key"], s["archive_manifest"]
+        print(f"[gpu_run] archive {key[:16]} (built on Modal) -> Modal {gpu}, cap {cap} s", flush=True)
+    else:
+        apath = Path(archive)
+        key = _sha256(apath) + ".tar.gz"
+        print(f"[gpu_run] archive {apath.stat().st_size / 1e6:.1f} MB -> Modal {gpu}, cap {cap} s", flush=True)
+        _prune_archives()
+        _upload(archive_volume, {key: apath}, "archive")
+        with tarfile.open(apath, mode="r:gz") as tar:
+            manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
     shards = _shards(s, manifest, run_dir)
     if shards and s.get("fanout") == "matrix" and s["matrix_args"][:1] != ["--make"]:
         _upload(states_volume, {r["state"]: Path(r["local"]) for sh in shards for r in sh["rows"]},
