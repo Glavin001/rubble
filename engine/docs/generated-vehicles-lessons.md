@@ -319,7 +319,7 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   but ran only by hand (`vehicle_lint` example), so even its hard `skin_coverage` rule
   failed unseen (p99 0.149 m against 0.127 m).
 - **(Decision) Every generated design is linted in CI.**
-  `tests/generated_vehicle_lint.rs` rigs each design in `engine_vehiclegen::DESIGNS`
+  `tests/generated_vehicle_lint.rs` rigs each design in `engine_vehiclegen::designs::REGISTRY`
   and gives every hard rule a test of its own; `every_hard_rule_has_a_test` fails when
   the lint gains a hard rule with no test. Failing rules sit on
   `tests-expected-failures.txt` with their measured values (CI fails on a new failure

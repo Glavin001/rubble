@@ -1,5 +1,5 @@
 //! The vehicle lint (`authoring::lint`) on every generated design
-//! (`engine_vehiclegen::DESIGNS`), rigged in memory as the site builds it: each hard rule
+//! (`engine_vehiclegen::design_titles`), rigged in memory as the site builds it: each hard rule
 //! is a test of its own, so a design or rigger change that breaks one is caught at build
 //! time, not found in a crash study. The lint's rules are proven on small synthetic cars
 //! in `tests/host/vehicle_lint.rs` (a sound one passes, each broken variant fails its rule).
@@ -24,7 +24,7 @@ fn findings() -> &'static HashMap<&'static str, Vec<Finding>> {
     static F: OnceLock<HashMap<&'static str, Vec<Finding>>> = OnceLock::new();
     F.get_or_init(|| {
         let mut out = HashMap::new();
-        for &design in engine_vehiclegen::DESIGNS {
+        for design in engine_vehiclegen::design_titles().into_iter().map(|d| d.0) {
             let built = rig::rig_vehicle(design, None, None).expect("rig");
             let files = rig::mod_files(&built);
             let refs: Vec<(String, String)> = files
@@ -85,11 +85,22 @@ fn visual(
     .map(|v| v.0)
 }
 
-/// Every design passes `rule` (no Fail; a rule a design does not have is not checked).
+/// The sedan passes `rule` (no Fail). Its own, so another design's failure never hides one.
 fn passes(rule: &str) {
+    failing(|design, r| design == "sedan" && r == rule);
+}
+
+/// FAILS today (2026-11-25): the wagon, the Mach 1s and the 4x4 (and the police car's as the
+/// sedan's): skin holes, faces inward, coverage, crossings at rest.
+#[test]
+fn every_other_design_passes_every_rule() {
+    failing(|design, _| design != "sedan");
+}
+
+fn failing(of: impl Fn(&str, &str) -> bool) {
     let mut bad = Vec::new();
     for (design, f) in findings() {
-        for x in f.iter().filter(|x| x.rule == rule && x.level == Level::Fail) {
+        for x in f.iter().filter(|x| of(design, x.rule.as_ref()) && x.level == Level::Fail) {
             bad.push(format!("{design} {} {}: {} (band {}); {}", x.rule, x.part, x.value, x.band, x.offenders.join("; ")));
         }
     }
