@@ -1531,8 +1531,7 @@ impl ExplicitBeamsGpu {
             }
         }
         if vehicles.len() > 1 {
-            // The split group path's pipelines (GroupSplit::new's), after the first frame's; with
-            // edge contact, which changes results, those its path runs are compiled before it.
+            // The split group path's, deferred unless edge contact (it changes results) needs them.
             let ahead = |w| vehicles.iter().any(|v| v.edge_contact) && matches!(w, "member" | "tests" | "groupbegin" | "grouplevels" | "grouplv" | "edges");
             for (which, entry) in [
                 ("member", SPLIT_MEMBER_ENTRY),
