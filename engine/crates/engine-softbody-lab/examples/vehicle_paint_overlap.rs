@@ -30,5 +30,8 @@ fn main() -> Result<(), String> {
         format!("{:.2} / {:.2} / {:.2}", x[0], x[x.len() / 2], x[x.len() - 1])
     };
     println!("{scene} {kmh} km/h, edge {edge}, {runs} runs, paint cutting paint (m): at spawn {} | worst {} | at {secs} s {} | centres apart then (m) {} | own paint: worst {} | at the end {}", col(0), col(1), col(2), col(3), col(4), col(5));
+    let mm = |c: usize| { let mut x: Vec<f32> = res.iter().map(|r| r[c] * 1e3).collect(); x.sort_by(f32::total_cmp); format!("{:.0} / {:.0} / {:.0}", x[0], x[x.len() / 2], x[x.len() - 1]) };
+    let pass = res.iter().all(|r| r[6] <= 0.05 && r[8] <= 0.01 && r[9] <= 0.2);
+    println!("  DEPTH {} (5 cm, 1 cm from 0.3 s, 0.2 s) {scene} {kmh} edge {edge} press {}: paint inside the other car (mm): worst {} | at the end {} | from 0.3 s after the hit {} | s past 1 cm before {}", if pass { "pass" } else { "FAIL" }, on("PRESS"), mm(6), mm(7), mm(8), col(9));
     Ok(())
 }

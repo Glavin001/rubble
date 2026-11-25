@@ -78,3 +78,34 @@ fn own_paint_ends_apart() {
         assert!(m <= 0.05, "{scene} {kmh}: {m}");
     }
 }
+
+/// How deep one car's paint is inside the other (`paint_overlap::depth`, m; cars' own winding
+/// and distance, not the length of a line), over 8 runs: the worst sample and the end.
+fn deepest(scene: &str, kmh: f32, secs: f32, press: bool) -> (f32, f32) {
+    let r = crash(scene, kmh, secs, 8, true, press, true).expect("the scene");
+    let m = |c: usize| r.iter().map(|x| x[c]).fold(0.0f32, f32::max);
+    println!("| paint inside the other car | {scene} {kmh} km/h, press {press}, 8 runs | worst {:.0} mm, at the end {:.0} mm |", m(6) * 1e3, m(7) * 1e3);
+    (m(6), m(7))
+}
+
+/// The depth sees cars through each other (contact off).
+#[test]
+fn the_depth_sees_cars_through_each_other() {
+    let r = crash("head", 60.0, 0.15, 1, false, false, false).expect("the scene");
+    assert!(r[0][6] > 0.3, "{r:?}");
+}
+
+/// Side on at 60 km/h: nothing of one car inside the other at any sample. (88 mm before the
+/// B-pillar had collision triangles.)
+#[test]
+fn side_60_no_depth() {
+    assert!(deepest("side", 60.0, 0.6, false).0 <= 0.01);
+}
+
+/// After a head-on and in a side hit pressed on, nothing is left inside.
+#[test]
+fn crashes_end_with_no_depth() {
+    for (scene, kmh, secs, press) in [("head", 60.0, 1.0, false), ("head", 100.0, 1.0, false), ("head", 60.0, 2.0, true), ("side", 60.0, 2.0, true)] {
+        assert!(deepest(scene, kmh, secs, press).1 <= 0.01, "{scene} {kmh} {press}");
+    }
+}

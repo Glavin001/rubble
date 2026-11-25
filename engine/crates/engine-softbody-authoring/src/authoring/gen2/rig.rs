@@ -4843,10 +4843,13 @@ fn interior_skins(r: &mut Rig) {
                 // the tunnel's wall
                 [format!("sh_c1_{a}t{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c3_{b}"), format!("sh_c3_{a}")],
             ] {
-                if let Some(ids) = named(&q) {
-                    poly(&ids, Part::Body, None);
-                }
+                named(&q).into_iter().for_each(|ids| poly(&ids, Part::Body, None));
             }
+        }
+        // The B-pillar, sill to waist to roof rail: without it doors crush past a pillar nothing can
+        // touch, and its paint stands in the other car (side 60: 88 mm -> 0).
+        for q in [["sh_c2_2", "sh_c2_3", "sh_d2_b"], ["sh_c2_3", "sh_c2_4", "sh_d2_b"], ["sh_d1_t", "sh_d2_t", "sh_d2_b"]] {
+            named(&q.map(|n| format!("{n}{s}"))).into_iter().for_each(|ids| poly(&ids, Part::Body, None));
         }
     }
     let across = ["ol", "il", "ir", "or"];
@@ -4856,9 +4859,7 @@ fn interior_skins(r: &mut Rig) {
             [format!("sh_b2_{}", across[k]), format!("sh_b2_{}", across[k + 1]), format!("sh_b1_{}", across[k + 1]), format!("sh_b1_{}", across[k])],
             [format!("sh_b1_{}", across[k]), format!("sh_b1_{}", across[k + 1]), format!("sh_c1_1{}", floor1[k + 1]), format!("sh_c1_1{}", floor1[k])],
         ] {
-            if let Some(ids) = named(&q) {
-                poly(&ids, Part::Body, None);
-            }
+            named(&q).into_iter().for_each(|ids| poly(&ids, Part::Body, None));
         }
     }
     // The doors.
@@ -4872,15 +4873,11 @@ fn interior_skins(r: &mut Rig) {
                 [o(0, k), o(0, k + 1), i(0, k + 1), i(0, k)],
                 [o(2, k), o(2, k + 1), i(1, k + 1), i(1, k)],
             ] {
-                if let Some(ids) = named(&q) {
-                    poly(&ids, part, None);
-                }
+                named(&q).into_iter().for_each(|ids| poly(&ids, part, None));
             }
         }
         for k in [0, 2] {
-            if let Some(ids) = named(&[o(0, k), i(0, k), i(1, k), o(2, k)]) {
-                poly(&ids, part, None);
-            }
+            named(&[o(0, k), i(0, k), i(1, k), o(2, k)]).into_iter().for_each(|ids| poly(&ids, part, None));
         }
     }
     r.car.tris.extend(add);

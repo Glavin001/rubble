@@ -212,6 +212,92 @@ fn paint_ids(v: &ShowcaseVisual, rest: &[Vec3], s: &ExplicitBeams) -> Vec<(u32, 
         .collect()
 }
 
+/// A solid as vehicle contact sees it: the live outer collision triangles at their contact
+/// offsets, and per corner how far that surface stands outside the paint (m, signed; [`gaps`]).
+pub struct Solid { pub tris: Vec<Tri>, gap: Vec<[f32; 3]> }
+
+/// How deep `a`'s points lie inside `b`'s paint (m; 0: none): the largest distance to `b`'s
+/// surface, less the surface's own gap to the paint there, of a point where `b`'s generalized
+/// winding number is over a half (it needs no closed surface; Jacobson et al. 2013).
+/// (Well over a half: at an open wheel arch, real empty space, the winding is about a half.)
+const INSIDE: f32 = 0.75;
+pub fn depth(a: &[Tri], b: &Solid) -> f32 { deepest(a, b).0 }
+
+/// [`depth`] with its point.
+pub fn deepest(a: &[Tri], b: &Solid) -> (f32, Vec3) {
+    let (lo, hi) = b.tris.iter().flatten().fold((Vec3::MAX, Vec3::MIN), |(l, h), p| (l.min(*p), h.max(*p)));
+    let mut worst = (0.0f32, Vec3::ZERO);
+    for t in a {
+        for p in [t[0], (t[0] + t[1] + t[2]) / 3.0] {
+            if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                continue;
+            }
+            let (mut d, mut g) = (f32::MAX, 0.0);
+            for (q, gap) in b.tris.iter().zip(&b.gap) {
+                let w = closest(p, q);
+                let x = p.distance(q[0] * w[0] + q[1] * w[1] + q[2] * w[2]);
+                if x < d {
+                    (d, g) = (x, gap[0] * w[0] + gap[1] * w[1] + gap[2] * w[2]);
+                }
+            }
+            if d - g > worst.0 && winding(p, &b.tris) > INSIDE {
+                worst = (d - g, p);
+            }
+        }
+    }
+    worst
+}
+
+/// Per node of the car as built: how far its contact surface stands outside the nearest of the
+/// visible mesh (`drawn`: every triangle), along the surface's normal there.
+fn gaps(s: &ExplicitBeams, drawn: &[Tri]) -> Vec<f32> {
+    let p = engine_softbody::explicit_contact::contact_surface_positions(s);
+    let mut n = vec![Vec3::ZERO; p.len()];
+    for t in live_outer(s) {
+        let [a, b, c] = s.triangles[t].nodes.map(|i| p[i as usize]);
+        s.triangles[t].nodes.iter().for_each(|&i| n[i as usize] += (b - a).cross(c - a).normalize_or_zero());
+    }
+    (0..p.len())
+        .map(|i| {
+            if n[i] == Vec3::ZERO { return 0.0; }
+            let x = s.origin + p[i];
+            let c = drawn.iter().map(|t| { let w = closest(x, t); t[0] * w[0] + t[1] * w[1] + t[2] * w[2] }).min_by(|a, b| x.distance(*a).total_cmp(&x.distance(*b))).unwrap_or(x);
+            x.distance(c).copysign((x - c).dot(n[i]))
+        })
+        .collect()
+}
+
+fn live_outer(s: &ExplicitBeams) -> impl Iterator<Item = usize> + '_ {
+    (0..s.triangles.len()).filter(|&t| !s.tri_dead.get(t).copied().unwrap_or(false) && !s.tri_anti_only(t) && s.tri_outer.get(t).copied().unwrap_or(true))
+}
+
+/// The distance from `p` to the triangle.
+fn distance(p: Vec3, t: &Tri) -> f32 {
+    let w = closest(p, t);
+    p.distance(t[0] * w[0] + t[1] * w[1] + t[2] * w[2])
+}
+
+/// `t`'s generalized winding number at `p`: 1 inside, 0 outside a closed outward surface.
+pub fn winding(p: Vec3, t: &[Tri]) -> f32 {
+    let mut sum = 0.0f64;
+    for q in t {
+        let [a, b, c] = q.map(|x| (x - p).as_dvec3());
+        let (la, lb, lc) = (a.length(), b.length(), c.length());
+        let den = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+        sum += a.dot(b.cross(c)).atan2(den);
+    }
+    (sum / (2.0 * std::f64::consts::PI)) as f32
+}
+
+fn surface(s: &ExplicitBeams, gap: &[f32]) -> Solid {
+    let p = engine_softbody::explicit_contact::contact_surface_positions(s);
+    let tri = |t: usize| s.triangles[t].nodes;
+    Solid {
+        tris: live_outer(s).map(|t| tri(t).map(|i| s.origin + p[i as usize])).collect(),
+        gap: live_outer(s).map(|t| tri(t).map(|i| gap[i as usize])).collect(),
+    }
+}
+
 pub fn paint(v: &ShowcaseVisual, rest: &[Vec3], s: &ExplicitBeams) -> Vec<Tri> {
     paint_ids(v, rest, s).into_iter().map(|x| x.1).collect()
 }
@@ -242,9 +328,12 @@ fn self_pairs(t: &[(u32, Tri)]) -> Vec<((u32, u32), f32)> {
 /// `press`: A at full throttle throughout, B's handbrake on; `contact` off: the control.
 /// Per run: the paint crossing (m) at spawn, at the worst sample (every 20 ms) and after
 /// `secs`, the centres' distance then (m), and the
-/// larger of the cars' own paint cutting itself (pairs that did not as built), worst and last.
+/// larger of the cars' own paint cutting itself (pairs that did not as built), worst and last;
+/// then one car's paint inside the other ([`depth`], m): at the worst sample and at the end, and
+/// the largest from 0.3 s after the hit (the 25 cm between the cars closed) on, and the seconds
+/// past 1 cm before that.
 #[allow(clippy::too_many_arguments)]
-pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 6]>, String> {
+pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 10]>, String> {
     let built = rig::rig_vehicle("sedan", None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> =
@@ -304,7 +393,7 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
         let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
         println!("paint carried by its collision panel: {} of {n} vertices", on.at.iter().filter(|x| x.is_some()).count());
     }
-    let run = |k: usize| -> [f32; 6] {
+    let run = |k: usize| -> [f32; 10] {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
         let aa = spawn(&d, Vec3::new(0.0, 0.0, -0.125 - za), Vec3::Z * speed);
@@ -349,14 +438,80 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
             w.vehicles.iter().map(|s| self_pairs(&paint_ids(&v, &rest, s)).iter().filter(|x| !built.contains(&x.0)).map(|x| x.1).sum::<f32>()).fold(0.0, f32::max)
         };
         let (mut own_worst, mut own_last) = (0.0f32, 0.0f32);
+        let gap = {
+            let n: Vec<Vec3> = w.vehicles[0].nodes.iter().map(|n| w.vehicles[0].origin + n.pos).collect();
+            let p = deform(&v, &n).0;
+            gaps(&w.vehicles[0], &v.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|k| p[t[k] as usize])).collect::<Vec<_>>())
+        };
+        // (The depth's resolution: a car's own paint against its own contact surface, as built.)
+        if k == 0 && std::env::var("PAINT_CALIB").is_ok_and(|x| x == "1") {
+            let (pt, sf) = (paint(&v, &rest, &w.vehicles[0]), surface(&w.vehicles[0], &gap));
+            let mut d: Vec<f32> = gap.iter().copied().filter(|g| *g != 0.0).collect();
+            d.sort_by(f32::total_cmp);
+            let q = |f: f32| d[((d.len() - 1) as f32 * f) as usize] * 1e3;
+            println!("the contact surface outside the drawn mesh, per node (mm): p1 {:.0} p10 {:.0} p50 {:.0} p90 {:.0} p99 {:.0} max {:.0}; {} painted, {} surface triangles", q(0.01), q(0.1), q(0.5), q(0.9), q(0.99), q(1.0), pt.len(), sf.tris.len());
+        }
+        // (PAINT_CARRY=1: painted area by the part it is bound to, and how much is carried by no
+        // collision triangle's nodes or by nodes over 0.4 m apart.)
+        if k == 0 && std::env::var("PAINT_CARRY").is_ok_and(|x| x == "1") {
+            let a = &w.vehicles[0];
+            let hull: std::collections::HashSet<u32> = (0..a.triangles.len()).filter(|&t| !a.tri_anti_only(t)).flat_map(|t| a.triangles[t].nodes).collect();
+            let np: Vec<Vec3> = a.nodes.iter().map(|n| n.pos).collect();
+            let mut by: std::collections::BTreeMap<String, [f32; 4]> = Default::default();
+            for t in v.indices.chunks_exact(3).filter(|t| t.iter().all(|&i| v.material[i as usize] == mat::PAINT)) {
+                let [x, y, z] = [0, 1, 2].map(|k| rest[t[k] as usize]);
+                let area = (y - x).cross(z - x).length() * 0.5;
+                let b = v.bind_nodes[t[0] as usize];
+                let span = (0..3).map(|e| np[b[e] as usize].distance(np[b[(e + 1) % 3] as usize])).fold(0.0, f32::max);
+                let off = b.iter().filter(|n| !hull.contains(n)).count();
+                let name: String = d.nodes[b[0] as usize].name.split('_').take(2).collect::<Vec<_>>().join("_").trim_end_matches(|c: char| c.is_ascii_digit()).into();
+                for key in [name, "ALL".into()] { let e = by.entry(key).or_default(); e[0] += area; if off > 0 { e[1] += area; } if off == 3 { e[2] += area; } if span > 0.4 { e[3] += area; } }
+            }
+            let mut o: Vec<_> = by.into_iter().collect();
+            o.sort_by(|a, b| b.1[0].total_cmp(&a.1[0]));
+            for (n, e) in o.into_iter().take(26) { println!("carry {n:12} painted {:6.2} m2; some bound node without a triangle {:3.0} %, none with one {:3.0} %, nodes over 0.4 m apart {:3.0} %", e[0], 100.0 * e[1] / e[0], 100.0 * e[2] / e[0], 100.0 * e[3] / e[0]); }
+        }
         let start = now(&w);
         let steps = (secs * 2000.0) as usize;
         let (mut worst, mut last) = (0.0f32, 0.0f32);
+        let (mut deep, mut deep_last, mut lasting, mut brief) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let settled = 0.3 + 0.25 / (speed * if scene == "side" { 1.0 } else { 2.0 });
         for s in 1..=steps {
             w.step();
             if s % 40 == 0 || s == steps {
                 last = now(&w);
                 worst = worst.max(last);
+                if !pole {
+                    let [a, b] = [0, 1].map(|k| &w.vehicles[k]);
+                    deep_last = depth(&paint(&v, &rest, a), &surface(b, &gap)).max(depth(&paint(&v, &rest, b), &surface(a, &gap)));
+                    deep = deep.max(deep_last);
+                    // (PAINT_WHERE=1, run 0: the deepest paint of each car in the other, and the parts.)
+                    if k == 0 && deep_last > 0.03 && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
+                        for (n, x, y) in [("A in B", a, b), ("B in A", b, a)] {
+                            let (dd, at) = deepest(&paint(&v, &rest, x), &surface(y, &gap));
+                            if dd < 0.03 { continue; }
+                            let near = |s: &ExplicitBeams| { let i = (0..s.nodes.len()).min_by(|&i, &j| (s.origin + s.nodes[i].pos).distance(at).total_cmp(&(s.origin + s.nodes[j].pos).distance(at))).unwrap(); d.nodes[i].name.clone() };
+                            let cs = |s: &ExplicitBeams, at: Vec3| { let sf = surface(s, &gap); let ids: Vec<usize> = live_outer(s).collect();
+                                let m = (0..ids.len()).min_by(|&i, &j| { let h = |t: &Tri| { let w = closest(at, t); at.distance(t[0] * w[0] + t[1] * w[1] + t[2] * w[2]) }; h(&sf.tris[i]).total_cmp(&h(&sf.tris[j])) }).unwrap();
+                                (s.triangles[ids[m]].nodes.map(|i| d.nodes[i as usize].name.clone()), sf.gap[m], sf.tris[m], (sf.tris[m][1] - sf.tris[m][0]).cross(sf.tris[m][2] - sf.tris[m][0]).normalize()) };
+                            { let np: Vec<Vec3> = x.nodes.iter().map(|n| x.origin + n.pos).collect(); let pp = deform(&v, &np).0;
+                              if let Some(i) = (0..pp.len()).filter(|&i| v.material[i] == mat::PAINT).min_by(|&i, &j| pp[i].distance(at).total_cmp(&pp[j].distance(at))) {
+                                let names: Vec<_> = v.bind_nodes[i].iter().map(|&n| { let n = n as usize; format!("{} at {:.2} (contact {}, triangles {})", d.nodes[n].name, np[n], x.contact_points.contains(&(n as u32)), live_outer(x).filter(|&t| x.triangles[t].nodes.contains(&(n as u32))).count()) }).collect();
+                                println!("    paint vertex, bound to {names:?}");
+                              } }
+                            println!("    its surface there {:?}", cs(y, at));
+                            println!("    own surface there {:?}", cs(x, at));
+                            for (i, n) in x.nodes.iter().enumerate() { let q = x.origin + n.pos; let dq = deepest(&[[q; 3]], &surface(y, &gap)).0; if dq > 0.0 { println!("    node {} inside {:.0} mm, contact node {}", d.nodes[i].name, dq * 1e3, x.contact_points.contains(&(i as u32))); } }
+                            println!("  t {:.2} {n}: {:.0} mm at {at:.2}, nearest nodes {} / {}, winding {:.2}", s as f32 / 2000.0, dd * 1e3, near(x), near(y), winding(at, &surface(y, &gap).tris));
+                        }
+                    }
+                    let t = s as f32 / 2000.0;
+                    if t >= settled {
+                        lasting = lasting.max(deep_last);
+                    } else if deep_last > 0.01 {
+                        brief += 0.02;
+                    }
+                }
                 if s % 80 == 0 || s == steps {
                     own_last = own(&w);
                     own_worst = own_worst.max(own_last);
@@ -574,9 +729,9 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
             }
         }
         let centre = |s: &ExplicitBeams| s.nodes.iter().map(|n| (s.origin + n.pos) * n.mass).sum::<Vec3>() / s.nodes.iter().map(|n| n.mass).sum::<f32>();
-        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last]
+        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief]
     };
-    let res: Vec<[f32; 6]> = std::thread::scope(|t| {
+    let res: Vec<[f32; 10]> = std::thread::scope(|t| {
         let run = &run;
         let js: Vec<_> = (0..runs).map(|k| t.spawn(move || run(k))).collect();
         js.into_iter().map(|j| j.join().expect("run")).collect()
