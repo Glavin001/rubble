@@ -1112,14 +1112,12 @@ impl ExplicitBeams {
         let r = self.collision_range;
         let mut excl: Vec<Vec<u32>> = vec![Vec::new(); self.triangles.len()];
         let mut pairs = 0;
+        let at = self.self_positions();
         for t in 0..self.triangles.len() {
             let g = self.triangle_self_group(t);
             let [i0, i1, i2] = self.triangles[t].nodes;
-            let p0 = self.nodes[i0 as usize].pos;
-            let (e1, e2) = (
-                self.nodes[i1 as usize].pos - p0,
-                self.nodes[i2 as usize].pos - p0,
-            );
+            let p0 = at.0[i0 as usize];
+            let (e1, e2) = (at.0[i1 as usize] - p0, at.0[i2 as usize] - p0);
             let n = e1.cross(e2).normalize_or_zero();
             let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
             let det = d11 * d22 - d12 * d12;
@@ -1133,7 +1131,7 @@ impl ExplicitBeams {
                 if g != 0 && self.self_groups.get(c as usize) == Some(&g) {
                     continue;
                 }
-                let q = self.nodes[c as usize].pos - p0;
+                let q = at.1[c as usize] - p0;
                 let delta = n.dot(q);
                 if delta.abs() > r {
                     continue;

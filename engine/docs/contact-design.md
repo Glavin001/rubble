@@ -527,3 +527,9 @@ and fender, bumper and fender, body and hood.
   24 to 63 mm; self contact's range is 20 mm and it ignores the offsets), the rest past its edge
   (p50 28 to 74, p90 127 mm and more). Parts are by the bound node's name, so some are misassigned.
   The panels' skins must reach their painted outlines; self contact must use the offsets.
+- Self contact at the contact offsets (CPU, SELF_OFFSET: 1 the triangles, 2 the contacters too; off),
+  4 runs, edge contact on, own paint at the end, median: pole 64 5.38 -> 2.97 -> 2.90, head on 60
+  7.50 -> 6.17 -> 4.73, side 60 3.97 -> 5.75 -> 3.86; driving 0; car through car worst head on
+  2.62 -> 4.00 -> 2.52. Mode 2: no test of gen_sedan_contact changes, energy rises inside the bar. With
+  SELF_EDGE=1 on top it is worse (head on own 10.8, car through car worst 8.8). The GPU's self
+  contact has no offsets, so it stays off until it does.

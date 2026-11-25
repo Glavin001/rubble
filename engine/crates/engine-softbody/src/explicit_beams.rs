@@ -4339,6 +4339,9 @@ impl ExplicitBeams {
         let r = self.collision_range;
         let h = STEP;
         self.last_self_pairs = 0;
+        // (Under measurement, SELF_OFFSET: 1 the triangles at the contact offsets, 2 the
+        // contacters too, as vehicle contact's.)
+        let at = self.self_positions();
         // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
         let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
         // The two-body rule (spec §36, as vehicle contact's §10.3): the step's hits
@@ -4367,7 +4370,7 @@ impl ExplicitBeams {
                 continue;
             }
             let tri_group = self.triangle_self_group(t);
-            let world = |i: u32| self.origin + self.nodes[i as usize].pos;
+            let world = |i: u32| self.origin + at.0[i as usize];
             let (p0, p1, p2) = (world(i0), world(i1), world(i2));
             let frame = TriFrame::new(p0, p1, p2);
             // Anti-clip (§36): the box also reaches what crossed it over the step
@@ -4429,7 +4432,7 @@ impl ExplicitBeams {
                 if !self.tri_excl.is_empty() && self.tri_excl[t].contains(&hn) {
                     continue;
                 }
-                let p = self.origin + self.nodes[hn as usize].pos;
+                let p = self.origin + at.1[hn as usize];
                 if p.cmplt(lo).any() || p.cmpgt(hi).any() {
                     continue;
                 }
@@ -4446,7 +4449,7 @@ impl ExplicitBeams {
                 self.last_self_pairs += 1;
                 // (α, β, γ, depth into the contact, normal).
                 let found_hit = if anti {
-                    self.clip_hit(t, hn, p, &frame, [i0, i1, i2], r, only)
+                    self.clip_hit(t, hn, p, [p0, p1, p2], &frame, [i0, i1, i2], r, only)
                 } else {
                     frame.hit(p, r).map(|(a, b, g, d, n)| (a, b, g, r - d, n))
                 };
@@ -4635,6 +4638,7 @@ impl ExplicitBeams {
         t: usize,
         hn: u32,
         p: Vec3,
+        corners: [Vec3; 3],
         frame: &TriFrame,
         tri: [u32; 3],
         r: f32,
@@ -4649,8 +4653,8 @@ impl ExplicitBeams {
         let local = frame.local(p);
         let held = clip_side(&self.clip_sides[hn as usize], CLIP_SELF, t as u32);
         let crossing = || {
-            let back = |i: u32| self.origin + self.nodes[i as usize].pos - self.nodes[i as usize].vel * STEP;
-            let pf = TriFrame::new(back(tri[0]), back(tri[1]), back(tri[2]));
+            let back = |k: usize| corners[k] - self.nodes[tri[k] as usize].vel * STEP;
+            let pf = TriFrame::new(back(0), back(1), back(2));
             let p_prev = p - self.nodes[hn as usize].vel * STEP;
             let (a0, b0, _, d0) = pf.local(p_prev);
             crossing_weights(a0, b0, d0, local.0, local.1, local.3)
@@ -4663,6 +4667,20 @@ impl ExplicitBeams {
         }
         let pen = crate::explicit_contact::clip_depth(only, c.d, r);
         Some((c.w[0], c.w[1], c.w[2], pen, frame.n * c.side))
+    }
+
+    /// Self contact's positions, relative to the origin: (triangle corners, contacters).
+    pub(crate) fn self_positions(&self) -> (Vec<Vec3>, Vec<Vec3>) {
+        let raw: Vec<Vec3> = self.nodes.iter().map(|n| n.pos).collect();
+        static MODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        match MODE.get_or_init(|| std::env::var("SELF_OFFSET").ok().and_then(|x| x.parse().ok()).unwrap_or(0)) {
+            1 => (crate::explicit_contact::contact_surface_positions(self), raw),
+            2 => {
+                let o = crate::explicit_contact::contact_surface_positions(self);
+                (o.clone(), o)
+            }
+            _ => (raw.clone(), raw),
+        }
     }
 
     /// Self-collision's two-body rule (spec §36; vehicle contact's §10.3 within
