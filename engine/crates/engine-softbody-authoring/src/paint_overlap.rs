@@ -14,6 +14,8 @@ use std::collections::HashMap;
 
 pub type Tri = [Vec3; 3];
 
+
+
 /// (A measurement, PAINT_ON_SKIN=1) The paint embedded in its part's collision skin: per render
 /// vertex the closest point on its own part's triangles as built (clamped, so never
 /// extrapolated), as the barycentric blend of the triangle's nodes, each carrying the vertex's
@@ -334,6 +336,13 @@ fn self_pairs(t: &[(u32, Tri)]) -> Vec<((u32, u32), f32)> {
 /// past 1 cm before that.
 #[allow(clippy::too_many_arguments)]
 pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 10]>, String> {
+    crash_measuring(scene, kmh, secs, runs, edge, press, contact, true, true)
+}
+
+/// [`crash`] with only some measures: a car's own paint crossing itself (`own`, the slowest by
+/// far) and the length of one car's paint cutting the other's (`line`); those off read 0.
+#[allow(clippy::too_many_arguments)]
+pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool) -> Result<Vec<[f32; 10]>, String> {
     let built = rig::rig_vehicle("sedan", None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> =
@@ -422,7 +431,7 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 b.set_drive_input(DriveInput { brake: 1.0, handbrake: 1.0, ..Default::default() });
             }
         }
-        let now = |w: &ExplicitBeamsWorld| if pole { 0.0 } else { crossing(&paint(&v, &rest, &w.vehicles[0]), &paint(&v, &rest, &w.vehicles[1])) };
+        let now = |w: &ExplicitBeamsWorld| if pole || !line_on { 0.0 } else { crossing(&paint(&v, &rest, &w.vehicles[0]), &paint(&v, &rest, &w.vehicles[1])) };
         // (As built: the pairs of a car's own paint that cut then do not count.)
         // The collision skin's own triangles, at the nodes or at the contact offsets.
         let skin = |s: &ExplicitBeams, off: bool| -> Vec<(u32, Tri)> {
@@ -433,7 +442,7 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 .collect()
         };
         let skin_built: [std::collections::HashSet<(u32, u32)>; 2] = [false, true].map(|o| self_pairs(&skin(&w.vehicles[0], o)).into_iter().map(|x| x.0).collect());
-        let built: std::collections::HashSet<(u32, u32)> = self_pairs(&paint_ids(&v, &rest, &w.vehicles[0])).into_iter().map(|x| x.0).collect();
+        let built: std::collections::HashSet<(u32, u32)> = if !own_on { Default::default() } else { self_pairs(&paint_ids(&v, &rest, &w.vehicles[0])).into_iter().map(|x| x.0).collect() };
         let own = |w: &ExplicitBeamsWorld| -> f32 {
             w.vehicles.iter().map(|s| self_pairs(&paint_ids(&v, &rest, s)).iter().filter(|x| !built.contains(&x.0)).map(|x| x.1).sum::<f32>()).fold(0.0, f32::max)
         };
@@ -527,7 +536,7 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                     }
                 }
                 if s % 80 == 0 || s == steps {
-                    own_last = own(&w);
+                    own_last = if own_on { own(&w) } else { 0.0 };
                     own_worst = own_worst.max(own_last);
                 }
             }

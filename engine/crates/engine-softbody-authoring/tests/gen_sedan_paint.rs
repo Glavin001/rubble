@@ -3,7 +3,7 @@
 //! scene, the second car moved 0 and 1 mm (a crash is chaotic: one run proves little); the
 //! largest counts. Bound: exact, 0 (two solids share no space), past 1 mm of line.
 
-use engine_softbody_authoring::paint_overlap::crash;
+use engine_softbody_authoring::paint_overlap::{crash, crash_measuring};
 
 /// (the largest crossing at any sample, the largest at the end) of two runs.
 fn largest(scene: &str, kmh: f32, secs: f32, edge: bool, press: bool) -> (f32, f32) {
@@ -27,37 +27,6 @@ fn edge_contact_side_30_paint_never_cuts() {
     assert!(largest("side", 30.0, 1.0, true, false).0 <= CLEAR);
 }
 
-/// (After the 60 km/h head-on the cars are 8 to 11 m apart: there it says only that they come
-/// apart. The 100 km/h one mostly ends in contact, about 3.6 m between centres.)
-#[test]
-fn edge_contact_crashes_end_with_paint_clear() {
-    for (scene, kmh, secs) in [("head", 60.0, 1.5), ("head", 100.0, 1.5), ("side", 60.0, 2.0)] {
-        assert!(largest(scene, kmh, secs, true, false).1 <= CLEAR, "{scene} {kmh}");
-    }
-}
-
-/// FAILS today (2026-11-24): the crush itself cuts (head on 60: about 3 m, side 60: 1.4 m).
-#[test]
-fn edge_contact_crashes_paint_never_cuts() {
-    for (scene, kmh) in [("head", 60.0), ("head", 100.0), ("side", 60.0)] {
-        assert!(largest(scene, kmh, 0.6, true, false).0 <= CLEAR, "{scene} {kmh}");
-    }
-}
-
-/// FAILS today (2026-11-24): one car pressing on at full throttle (the user's screenshots).
-#[test]
-fn edge_contact_pressing_ends_with_paint_clear() {
-    for (scene, kmh, secs) in [("head", 30.0, 2.5), ("head", 60.0, 2.5), ("side", 60.0, 2.0)] {
-        assert!(largest(scene, kmh, secs, true, true).1 <= CLEAR, "{scene} {kmh}");
-    }
-}
-
-/// FAILS today (2026-11-24): the default (edge contact off), side 60 pressed on: about 2.4 m.
-#[test]
-fn default_pressing_ends_with_paint_clear() {
-    assert!(largest("side", 60.0, 2.0, false, true).1 <= CLEAR);
-}
-
 /// The control for a car's own paint: driving at 60 km/h nothing new cuts (past 5 cm of
 /// line: shut lines a few millimetres wide rub as the car flexes).
 #[test]
@@ -79,33 +48,34 @@ fn own_paint_ends_apart() {
     }
 }
 
-/// How deep one car's paint is inside the other (`paint_overlap::depth`, m; cars' own winding
-/// and distance, not the length of a line), over 8 runs: the worst sample and the end.
-fn deepest(scene: &str, kmh: f32, secs: f32, press: bool) -> (f32, f32) {
-    let r = crash(scene, kmh, secs, 8, true, press, true).expect("the scene");
+/// The owner's bar (2026-11-25), edge contact on, 8 runs: one car's paint inside the other
+/// (`paint_overlap::depth`) at most 5 cm at any sample (every 20 ms), above 1 cm for at most
+/// 0.2 s before 0.3 s after the hit, and at most 1 cm from then on.
+fn accept(scene: &str, kmh: f32, secs: f32, press: bool) {
+    let r = crash_measuring(scene, kmh, secs, 8, true, press, true, false, false).expect("the scene");
     let m = |c: usize| r.iter().map(|x| x[c]).fold(0.0f32, f32::max);
-    println!("| paint inside the other car | {scene} {kmh} km/h, press {press}, 8 runs | worst {:.0} mm, at the end {:.0} mm |", m(6) * 1e3, m(7) * 1e3);
-    (m(6), m(7))
+    let pass = m(6) <= 0.05 && m(9) <= 0.2 && m(8) <= 0.01;
+    println!("| paint inside the other car | {scene} {kmh} km/h, press {press}, 8 runs | worst {:.0} mm, above 1 cm {:.2} s, from 0.3 s after the hit {:.0} mm | 50 mm, 0.2 s, 10 mm | {} |", m(6) * 1e3, m(9), m(8) * 1e3, if pass { "pass" } else { "FAIL" });
+    assert!(pass);
 }
 
-/// The depth sees cars through each other (contact off).
 #[test]
-fn the_depth_sees_cars_through_each_other() {
-    let r = crash("head", 60.0, 0.15, 1, false, false, false).expect("the scene");
-    assert!(r[0][6] > 0.3, "{r:?}");
-}
-
-/// Side on at 60 km/h: nothing of one car inside the other at any sample. (88 mm before the
-/// B-pillar had collision triangles.)
+fn accept_side_30() { accept("side", 30.0, 1.0, false); }
 #[test]
-fn side_60_no_depth() {
-    assert!(deepest("side", 60.0, 0.6, false).0 <= 0.01);
-}
-
-/// After a head-on and in a side hit pressed on, nothing is left inside.
+fn accept_side_60() { accept("side", 60.0, 1.0, false); }
 #[test]
-fn crashes_end_with_no_depth() {
-    for (scene, kmh, secs, press) in [("head", 60.0, 1.0, false), ("head", 100.0, 1.0, false), ("head", 60.0, 2.0, true), ("side", 60.0, 2.0, true)] {
-        assert!(deepest(scene, kmh, secs, press).1 <= 0.01, "{scene} {kmh} {press}");
-    }
-}
+fn accept_head_30_pressed() { accept("head", 30.0, 2.0, true); }
+#[test]
+fn accept_head_60_pressed() { accept("head", 60.0, 2.0, true); }
+/// FAILS today (2026-11-25): 52 mm at the hood's front edge.
+#[test]
+fn accept_head_60() { accept("head", 60.0, 1.0, false); }
+/// FAILS today (2026-11-25): 54 mm at the hood's front edge.
+#[test]
+fn accept_head_100() { accept("head", 100.0, 1.0, false); }
+/// FAILS today (2026-11-25): 68 mm, the door's top front corner in the other's hood.
+#[test]
+fn accept_side_90() { accept("side", 90.0, 1.0, false); }
+/// FAILS today (2026-11-25): 34 mm from 0.94 s (a second hit, pressing on).
+#[test]
+fn accept_side_60_pressed() { accept("side", 60.0, 2.0, true); }

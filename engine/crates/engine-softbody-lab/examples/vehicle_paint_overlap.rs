@@ -11,9 +11,9 @@
 //! The measure: `engine_softbody_authoring::paint_overlap`; the tests: gen_sedan_paint.rs.
 
 //! Environment: EDGE_CONTACT=1, PRESS=1 (A at full throttle, B's handbrake on), CONTACT=0
-//! (the control: the cars go through each other).
+//! (the control: the cars go through each other), DEPTH_ONLY=1 (only the depth: a few times faster).
 
-use engine_softbody_authoring::paint_overlap::crash;
+use engine_softbody_authoring::paint_overlap::crash_measuring;
 
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().collect();
@@ -23,7 +23,7 @@ fn main() -> Result<(), String> {
     let runs: usize = a.get(4).and_then(|x| x.parse().ok()).unwrap_or(8);
     let on = |k: &str| std::env::var(k).is_ok_and(|x| x == "1");
     let edge = on("EDGE_CONTACT");
-    let res = crash(&scene, kmh, secs, runs, edge, on("PRESS"), std::env::var("CONTACT").map_or(true, |x| x != "0"))?;
+    let res = crash_measuring(&scene, kmh, secs, runs, edge, on("PRESS"), std::env::var("CONTACT").map_or(true, |x| x != "0"), !on("DEPTH_ONLY"), !on("DEPTH_ONLY"))?;
     let col = |c: usize| {
         let mut x: Vec<f32> = res.iter().map(|r| r[c]).collect();
         x.sort_by(f32::total_cmp);
