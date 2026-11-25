@@ -76,6 +76,8 @@ BASE = os.environ.get("BASE_BIN")
 # The generated sedan from the current code (AGENTS.md: the car every benchmark uses):
 # cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- sedan --out out/gen/sedan_new
 CAR = os.environ.get("CAR", os.path.join(ENGINE, "out", "gen", "sedan_new"))
+# Where a row's "vehicles" names its designs' mod folders (<design>_new).
+MODS = os.environ.get("MODS", os.path.join(ENGINE, "out", "gen"))
 FRAMES = int(os.environ.get("FRAMES", "10"))
 ROUNDS = int(os.environ.get("ROUNDS", "3"))
 # A row past the threshold runs RETRIES more times; the median run decides.
@@ -189,6 +191,16 @@ def lab_args(row):
         args += ["--cars", "1"]
     if isinstance(scenario, dict):
         import json
+        # An optional "vehicles" (a list of design names or mod folders, or "a,b,c"): the
+        # row's cars take turns through them (vehicle_lab --vehicles; car k of type k % n),
+        # designs from MODS (default out/gen/<design>_new). Without it the row's cars are
+        # all CAR, as before. The saved states (--make, A/B replays) assume one type, so a
+        # mixed row runs its scene live (no fixture).
+        scenario = dict(scenario)
+        vehicles = scenario.pop("vehicles", None)
+        if vehicles:
+            args += ["--vehicles", vehicles if isinstance(vehicles, str) else ",".join(vehicles),
+                     "--mods", MODS]
         os.makedirs(os.path.join(STATES, "scenes"), exist_ok=True)
         path = os.path.join(STATES, "scenes", name + ".json")
         with open(path, "w") as f:

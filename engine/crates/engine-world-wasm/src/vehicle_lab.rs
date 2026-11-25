@@ -23,7 +23,8 @@ pub struct WebVehicleLab {
 }
 
 /// The vehicle lab on a new device: `[WebWorld, WebVehicleLab]`. `spec`: `{ vehicle:
-/// { truck } | { jbeam: [[name, text]], pc } (on raycast wheels), drag (default true),
+/// { truck } | { jbeam: [[name, text]], pc } (on raycast wheels) or `vehicles`: a list of
+/// them (a mixed run: car k of type k % n), drag (default true),
 /// centredDamping (the solver's centred damping correction; default its own),
 /// gpuTiming ('off' | 'step' | 'phases'), scene ('flat' | 'mountain'), surface (the car's
 /// opt-in surface contact), parked (a second car broadside ahead), cars (1 to 8 copies of the car: the multi-car
@@ -45,37 +46,18 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
             .unwrap_or(d.centred_damping),
         ..d
     };
-    let v = spec
-        .get("vehicle")
-        .ok_or_else(|| err("createVehicleLab: no vehicle"))?;
-    let template = if let Some(truck) = v.get("truck").and_then(|t| t.as_str()) {
-        ExplicitBeams::from_truck_raycast(
-            truck,
-            None,
-            glam::Vec3::ZERO,
-            0.0,
-            glam::Vec3::ZERO,
-            settings,
-        )
-        .map_err(err)?
-        .0
-    } else if let Some(files) = v.get("jbeam").and_then(|f| f.as_array()) {
-        let files: Vec<(&str, &str)> = files
-            .iter()
-            .map(|f| {
-                (
-                    f.get(0).and_then(|x| x.as_str()).unwrap_or(""),
-                    f.get(1).and_then(|x| x.as_str()).unwrap_or(""),
-                )
-            })
-            .collect();
-        let pc = v.get("pc").and_then(|t| t.as_str());
-        res(jbeam_vehicle_on(&files, pc, settings, JbeamWheels::Raycast))?.0
-    } else {
-        return Err(err(
-            "createVehicleLab: the vehicle needs `truck` or `jbeam`",
-        ));
+    // `vehicles: [{ jbeam, pc } | { truck }]`: the types of a mixed run (car `k` is of type
+    // `k % n`); `vehicle` alone: one type, every car the same.
+    let list: Vec<&serde_json::Value> = match spec.get("vehicles").and_then(|x| x.as_array()) {
+        Some(l) if !l.is_empty() => l.iter().collect(),
+        _ => vec![spec
+            .get("vehicle")
+            .ok_or_else(|| err("createVehicleLab: no vehicle"))?],
     };
+    let mut templates: Vec<ExplicitBeams> = Vec::new();
+    for v in list {
+        templates.push(template_of(v, &settings)?);
+    }
     let opts = LabOptions::from_json(&spec);
     let timing = match spec.get("gpuTiming").and_then(|t| t.as_str()) {
         Some(t) => Some(crate::defs::gpu_timing(t)?),
@@ -84,21 +66,23 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
     let (info, device, queue) = crate::web_device().await?;
     {
         // The vehicles' kernels compiled without blocking first (as `createVehicleTown`).
-        let car = lab_car(&template, &opts, None);
-        let fleet = vec![car; opts.cars as usize + usize::from(opts.parked)];
+        // (Car `k` of type `k % n`, the parked car of the first.)
+        let fleet: Vec<ExplicitBeams> = (0..opts.cars as usize + usize::from(opts.parked))
+            .map(|k| lab_car(&templates[if k < opts.cars as usize { k % templates.len() } else { 0 }], &opts, None))
+            .collect();
         let mut specs = engine_webgpu::ExplicitBeamsGpu::compute_specs_for(&fleet, Some(opts.capacity), opts.bit_exact);
         if opts.self_split {
             engine_webgpu::ExplicitBeamsGpu::prefer_self_split(&mut specs);
         }
         crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
     }
-    let (world, lab) = res(Lab::build(
+    let (world, lab) = res(Lab::build_mixed(
         GpuContext::Shared {
             info,
             device,
             queue,
         },
-        &template,
+        &templates,
         opts,
         |d| {
             if let Some(t) = timing {
@@ -111,6 +95,36 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
         &JsValue::from(WebWorld::of(world)),
         &JsValue::from(WebVehicleLab { lab }),
     ))
+}
+
+/// One vehicle of the spec: `{ truck }` or `{ jbeam: [[name, text]], pc }` (on raycast wheels).
+fn template_of(v: &serde_json::Value, settings: &ExplicitBeamsSettings) -> Result<ExplicitBeams, JsValue> {
+    if let Some(truck) = v.get("truck").and_then(|t| t.as_str()) {
+        Ok(ExplicitBeams::from_truck_raycast(
+            truck,
+            None,
+            glam::Vec3::ZERO,
+            0.0,
+            glam::Vec3::ZERO,
+            settings.clone(),
+        )
+        .map_err(err)?
+        .0)
+    } else if let Some(files) = v.get("jbeam").and_then(|f| f.as_array()) {
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.get(0).and_then(|x| x.as_str()).unwrap_or(""),
+                    f.get(1).and_then(|x| x.as_str()).unwrap_or(""),
+                )
+            })
+            .collect();
+        let pc = v.get("pc").and_then(|t| t.as_str());
+        Ok(res(jbeam_vehicle_on(&files, pc, settings.clone(), JbeamWheels::Raycast))?.0)
+    } else {
+        Err(err("createVehicleLab: the vehicle needs `truck` or `jbeam`"))
+    }
 }
 
 /// The projectile material presets: `[[name, kg/m³]]`.

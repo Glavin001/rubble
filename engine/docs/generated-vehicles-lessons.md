@@ -285,7 +285,33 @@ Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
 - **(Fact) The renderer learns "closed solids" from the model, not the page:** the generator writes `_SURFACE` only on solid parts; `beamng-mod.mjs` `closedSolids()` reads it and sets `visual.closedPanels`.
 - **(Process) A picture someone saw depends on the files they ran.** The page's default run rests on its roof, lightly damaged, and shows nothing; the wreck came from a local `__mods/sedan_new` whose body JBeam was two days older than the generator's. Check the mod folder a checkout links to before trying to reproduce.
 
-## 18. The collision skin is checked at build time (2026-11-24, S4)
+## 18. Adding a vehicle (2026-11-24)
+
+A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus one line in `designs::REGISTRY` (`designs/mod.rs`: name, title, defaults, build). Nothing else names a design (CLI, wasm designer, web build, tests, lab); the gates read the registry, so a registered design is checked without editing any test.
+
+- **Variant or standalone.** A *variant* wraps a design and overrides what differs: `police.rs` (194 lines: livery and a function adding parts), `wagon.rs` (226: key-line tables, tail face, tail layout, roof rails) and `mach1_gasser.rs` (162: livery, running gear, pose, parts) delegate every `Design` method to the base. The sedan exposes `Variant` hooks (keys, rear face, panel rule, tail, tailgate, rear lines: `Sedan::with_variant`); Mach 1 exposes `Running` (`Mach1::with_running`). A *standalone* design (`mach1.rs`, `suv4x4.rs`) brings its own params struct (serde, `#[serde(default)]`, `validate`), tube, layout, caps and parts. Port the Python (`tools/vehicle-gen/designs/`) piece by piece; its pinned numbers (`tests/mach1.rs`) are for the legacy sheet build (`BuildOpts { solid: false }`).
+- **What the rigger needs from a design** (all in `RigSpec` and the two definitions; never a design's name in the rigger):
+  - `structure::Lines` (`structure()`): reference-frame door, screen, B-pillar, seat and rear lines, the wheel-well liner (`well_x`, `well_r`), `wheel_y` (the opening's centre), `y_pan` (the floor pan, a little over the skin's floor line: the sills and the firewall's foot stand on it). Reference z is the sedan frame's: a design with its own proportions maps its z through its `Frame` (`f.zi`), as `suv4x4.rs` does; the `Frame` also lifts the floor (`dy`) and scales the roof (`kr`).
+  - `mechanical::Gear` (`mechanical()`): track, wheel centre and axles, tyre and rim sizes, the nose and tail faces; `Gear::rear` when the rear axle's wheel differs.
+  - `RigSpec::doors` (two- or four-door), `rear_closure` (`"trunk_lid"` or `"tailgate"`; a tailgate's `hinge_tailgate_*` / `latch_tailgate` markers are read as the lid's), `arches`, `front_z` / `rear_z`, `physics`.
+  - Rear lines for a tailgate car: the back light's top and base on the centre line (the rear header and the parcel shelf stand there); they must be ahead of the tailgate's skin (`tests/every_design_structure.rs` fails a node outside it).
+  - `Design::pose()` and `RigSpec::pose` for a posed car (a pitch about the rear axle and a lift). Build every part in the body frame, wheels included: the build places the whole car by the pose; the rigger rigs the body frame. `RigSpec::rear_wheel` (with `Gear::rear`) for different front and rear tyres.
+- **The gate** (run from `engine/`, `--release`, no GPU): `cargo test -p engine-softbody-authoring --test every_design -- --nocapture` (every registered design rigs, parks 3 s on raycast wheels: drift within 5 mm of design, 0 broken, 0 bent, the lowest point on the ground within 30 mm, then drives 3 s); `cargo test -p engine-vehiclegen` (`tests/registry.rs`: every part builds and every solid is closed; `tests/every_design_structure.rs`: the body-in-white lies inside its skin, members 8 mm under it; `tests/build.rs` and `tests/mach1.rs`: the pinned sedan and Mach 1 builds). A stale test binary can omit a new design: `touch crates/engine-vehiclegen/src/lib.rs` and rerun, and check that every registered design prints a line.
+- **Gate results (2026-11-24, same build):**
+
+| Design | Nodes | Beams | Mass | Worst drift | Rust |
+|---|---|---|---|---|---|
+| sedan | 548 | 4251 | 1410 kg | 2.0 mm | `sedan.rs` 1,212 lines |
+| police_sedan | 548 | 4251 | 1410 kg | 2.0 mm | `police.rs` 194 |
+| wagon | 531 | 4064 | 1410 kg | 1.8 mm | `wagon.rs` 226 |
+| mach1_1969 | 478 | 3548 | 1363 kg | 2.6 mm | `mach1.rs` 1,198 |
+| mach1_gasser | 478 | 3550 | 1363 kg | 2.7 mm | `mach1_gasser.rs` 162 |
+| suv_4x4 | 539 | 4090 | 1410 kg | 2.7 mm | `suv4x4.rs` 816 |
+
+- **(Fact) Two things a tall or posed car taught the rigger,** each fixed at its source and neutral for the earlier designs (their results are bit for bit the same): a tailgate over 0.9 m tall had nodes only along its top edge and its foot, one plane, so no flexbody skin fit was well posed ("no well-posed fit": it now has rows up its face); and the shell's brace lengths (1.25 m, and 0.9 m before a beam counts as long) were the study's for a cabin up to 1.07 m from the tunnel to the roof bow, so a 4x4's roof bow centre had no beam with a vertical part and sagged 42 mm (they now scale with a taller cabin).
+- **(Process)** A gate that only compares a car with its own design cannot see a car that fell through the ground, since a rigid fit removes the fall: `every_design` also asserts the parked car's lowest point is at the ground.
+
+## 19. The collision skin is checked at build time (2026-11-24, S4)
 
 - **(Process) Defects are detected, not discovered.** The S4 crash study found the
   generated sedan's collision-skin defects by hand: holes over the lamps, doubled layers
@@ -330,6 +356,7 @@ Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
 
 ## Changelog
 
+- 2026-11-24: section 18, adding a vehicle (the registry, variant or standalone, what the rigger needs, the gate); mach1_gasser (pose, per-axle wheels) and suv_4x4 registered.
 - 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).
 - 2026-11-14: section 16, hinges that snap instead of bending.
 - 2026-11-13: section 14: the GPU kernels carry the centred damping's objective form; on by default for CPU and GPU.

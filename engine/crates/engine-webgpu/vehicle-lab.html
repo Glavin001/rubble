@@ -96,11 +96,16 @@
       <div class="row" id="modes"></div>
       <div class="row">
         <label class="muted" for="car">Car</label><select id="car" data-opt="build"></select>
+        <span id="vehiclesRow" style="display:none"><label class="muted" for="vehicles" title="Single: every car is the one chosen under Car. Mixed: the cars take turns through every generated vehicle design this build has (car 1 the first, car 2 the next, and so on round again), each its own soft body, in the derby and on the mountain. Rebuilds the lab in place.">Vehicles</label><select id="vehicles" data-opt="build"><option value="single">Single</option><option value="mixed">Mixed</option></select></span>
         <label class="muted" for="res" title="The authored sedan's model detail: how many nodes and beams its body has (low is the fastest; high the finest crumpling). The generated sedan has one version. Rebuilds the simulation in place.">Detail</label><select id="res" data-opt="build"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
         <label class="muted" for="visual" title="The generated sedan's drawn mesh (car detail): full, or a lighter render of the same design (its body meshed coarser, about half the vertices and skin entries, bound to the same nodes; the physics is the same car). Auto: full, unless this device's memory or GPU limits cannot hold it (then the lighter one, and the status line says why). Rebuilds the lab in place.">Car detail</label><select id="visual" data-opt="build"><option value="auto">auto</option><option value="full">full</option><option value="lite">lighter</option></select>
         <label class="muted" for="cam">Camera</label><select id="cam" data-opt="live"></select>
         <span id="followRow"><label class="muted" for="follow" title="Which car the camera follows (V cycles). The readouts are the first car's. Applies as it runs.">follows</label><select id="follow" data-opt="live"><option value="0">car 1</option></select></span>
       </div>
+      <details id="designBox" class="mode-any">
+        <summary title="Edit any registered vehicle design's parameters, see it live, then rig it with the soft-body physics and drive that car (the generator and rigger run in this page, as WebAssembly).">Design: edit a vehicle, then drive it</summary>
+        <div id="designRoot"></div>
+      </details>
       <div class="row">
         <span class="muted">Time</span>
         <select id="slow" data-opt="live"><option value="1">×1</option><option value="0.25">×¼ slow motion</option><option value="0.0625">×1⁄16 slow motion</option></select>
@@ -312,7 +317,8 @@
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer, DrawPacer, setStepsInFlight } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { loadMod, modFromFiles, modModelSizesOf, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { createDesignPanel } from './vehicle-design-ui.mjs';
     import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
@@ -343,9 +349,22 @@
     // BeamNG community ETK (a community mod, never shipped: local only), the repo's
     // authored sedan always.
     const MODS = {
-      gen: { base: './__mods/sedan_new', pc: 'sedan/sedan.pc', name: 'Generated sedan', missing: 'not generated: run engine/scripts/build-web.sh' },
+      gen: { base: './__mods/sedan_new', pc: 'sedan/sedan.pc', design: 'sedan', name: 'Generated sedan', missing: 'not generated: run engine/scripts/build-web.sh' },
       etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc', name: 'ETK K-series', missing: 'community mod: local only' },
     };
+    // Every generated design this build made (__mods/designs.json, from the registry:
+    // build-web.sh); the generated sedan is `gen` above, the others each a car of their own.
+    const GENERATED = ['gen'];
+    try {
+      const list = await (await fetch('./__mods/designs.json')).json();
+      for (const d of list) {
+        const base = `./__mods/${d.folder}`;
+        if (base === MODS.gen.base) continue;
+        const key = d.name in MODS || d.name === 'sedan' ? `design-${d.name}` : d.name;
+        MODS[key] = { base, pc: d.pc, design: d.name, name: d.title, missing: 'not generated: run engine/scripts/build-web.sh' };
+        GENERATED.push(key);
+      }
+    } catch { /* an older build: the generated sedan only */ }
     const have = {};
     await Promise.all(Object.entries(MODS).map(async ([k, m]) => { try { have[k] = (await fetch(`${m.base}/files.json`, { method: 'HEAD' })).ok; } catch { have[k] = false; } }));
     $('car').add(new Option('Soft-body sedan (authored)', 'sedan'));
@@ -355,6 +374,12 @@
     const put = (id, v) => { const c = $(id); if (!c || v == null) return; if (c.type === 'checkbox') c.checked = v === true || v === '1' || v === 'true'; else c.value = v; };
     const defaults = Object.fromEntries(controls.map((c) => [c.id, get(c.id)]));
     let mode = 'shoot';
+    // The run's vehicle types. Mixed (the derby and the mountain, when more than one
+    // generated design is built): every generated design that is there, the cars taking
+    // turns through them (car i is of type i % n); otherwise the one under Car.
+    const available = () => GENERATED.filter((k) => have[k]);
+    const mixedOn = () => get('vehicles') === 'mixed' && (mode === 'derby' || mode === 'mountain') && available().length > 1;
+    const kindsOf = () => (mixedOn() ? available() : [get('car')]);
     // The followed car from the URL, kept until the build lists the cars.
     let followWant = qs.get('follow');
     // The URL first; then what the URL leaves open: the car (the generated sedan when it
@@ -371,19 +396,20 @@
     const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0) | (get('fleetAny') ? 16384 : 0) | (get('fleetPost') ? 65536 : 0) | (get('fleetLevels') ? 524288 : 0) | (get('fleetHitLat') ? 8388608 : 0) | (get('levelsOnce') ? 4 : 0) | (get('fleetFuse') ? 16777216 : 0) | (get('fleetKeep') ? 32768 : 0) | (get('aheadApart') ? 131072 : 0) | (get('tyreAhead') ? 262144 : 0) | (get('hitsLocal') ? 1048576 : 0) | (get('tyreEarly') ? 2097152 : 0) | (get('wheelsApart') ? 4194304 : 0) | (get('selfHitsLocal') ? 33554432 : 0) | (get('splitWheelsAhead') ? 67108864 : 0) | (get('hitSlotMap') ? 134217728 : 0);
     // (The derby too: its walls and ramps are the cars' own static shapes, and the
     // fleet-wide passes keep many cars in real time without it.)
-    const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby';
+    const surfaceDefault = () => GENERATED.includes(get('car')) && mode !== 'mountain' && mode !== 'derby';
     if (!surfaceChosen) put('surface', surfaceDefault());
     // Edge contact between cars by default for up to three generated cars on the flat arena:
     // it costs two cars 1 to 3 ms a frame and an 8-car pile three times its frame (CUDA T4,
     // docs/contact-design.md). A control, kept as chosen once it is.
     let edgeChosen = qs.has('edge');
-    const edgeDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby' && get('cars') + (get('parked') ? 1 : 0) <= 3;
+    const edgeDefault = () => GENERATED.includes(get('car')) && mode !== 'mountain' && mode !== 'derby' && get('cars') + (get('parked') ? 1 : 0) <= 3;
     const edgeFollow = () => { const on = edgeDefault(); if (edgeChosen || get('edge') === on) return false; put('edge', on); return true; };
     edgeFollow();
     function syncUrl() {
       const q = new URLSearchParams();
       q.set('mode', mode);
-      for (const c of controls) { const v = get(c.id); if (c.id === 'edge' ? edgeChosen : v !== defaults[c.id] || c.id === 'car' || c.id === 'surface') q.set(c.id, typeof v === 'boolean' ? (v ? '1' : '0') : v ?? ''); }
+      for (const c of controls) { const v = get(c.id); if (c.id === 'car' && v === 'custom') continue; // (a design made on this page: not a link)
+      if (c.id === 'edge' ? edgeChosen : v !== defaults[c.id] || c.id === 'car' || c.id === 'surface') q.set(c.id, typeof v === 'boolean' ? (v ? '1' : '0') : v ?? ''); }
       if (RECORD) q.set('record', '1');
       history.replaceState(null, '', `${location.pathname}?${q}`);
     }
@@ -394,13 +420,14 @@
     const shapeUi = () => {
       // The model detail is the authored sedan's; the generated sedan and the mods have one version.
       $('res').disabled = get('car') !== 'sedan';
-      $('visual').disabled = get('car') === 'sedan';
+      $('visual').disabled = get('car') === 'sedan' && !mixedOn();
+      $('vehiclesRow').style.display = (mode === 'derby' || mode === 'mountain') && GENERATED.filter((k) => have[k]).length > 1 ? '' : 'none';
       const s = get('shape'); $('dimBox').style.display = s === 'box' ? '' : 'none'; $('dimR').style.display = s === 'box' ? 'none' : ''; $('dimL').style.display = $('cylAxis').style.display = s === 'cylinder' ? '' : 'none';
       const k = get('crashKind'); $('rowOverlap').style.display = k === 'offset' ? '' : 'none'; $('rowOffset').style.display = k === 'pole' || k === 'sidepole' ? '' : 'none'; $('rowAngle').style.display = k === 'wall' || k === 'offset' ? '' : 'none';
       document.body.classList.toggle('clean', get('clean') || RECORD);
     };
     // The scene the simulation was last built for (null: none yet).
-    let builtScene = null;
+    let builtScene = null, builtMixed = null;
     function setMode(m) {
       for (const k of Object.keys(MODES)) document.body.classList.toggle(k, k === m);
       mode = m;
@@ -408,6 +435,8 @@
       // Returns whether the simulation must be rebuilt (surface contact is a build option,
       // and the derby's arena is a build of its own).
       let rebuild = builtScene !== null && (m === 'derby') !== (builtScene === 'derby');
+      // (The cars' types are a build's: Mixed applies in the derby and on the mountain only.)
+      if (builtMixed !== null && mixedOn() !== builtMixed) rebuild = true;
       if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); rebuild = true; }
       if (edgeFollow()) rebuild = true;
       return rebuild;
@@ -429,6 +458,7 @@
         if (c.id === 'edge') { edgeChosen = true; syncUrl(); }
         if (['car', 'cars', 'parked'].includes(c.id)) edgeFollow();
         if (c.id === 'car' && !surfaceChosen) { put('surface', surfaceDefault()); syncUrl(); }
+        if (c.id === 'car' && MODS[get('car')]?.design && MODS[get('car')].design !== 'custom') designPanel?.setDesign(MODS[get('car')].design);
         if (c.id === 'script') { await loadScript(); restart(); return; }
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
@@ -495,6 +525,8 @@
     let smallDevice = '';
     async function detailOf(kind) {
       const m = MODS[kind], want = get('visual');
+      // A design rigged in this page has the lighter render only (the full art's 140 MB are not built in a browser).
+      if (m.memory) return { detail: 'lite', why: '' };
       const full = await modModelSizes(m.base, 'full');
       if (!full.hasLite) return { detail: 'full', why: '' };
       if (want === 'full' || want === 'lite') return { detail: want, why: '' };
@@ -505,11 +537,11 @@
       if (!navigator.deviceMemory && appleMobile()) return { detail: 'lite', why: 'this phone or tablet does not say how much memory a tab may use, and iOS closes the tab or refuses its GPU memory before the full car fits' };
       return { detail: 'full', why: '' };
     }
-    async function carOf(kind) {
+    async function carOf(kind, paint = 0) {
       // The authored sedan has three model details (its node and beam counts): each is its own car.
       // A generated car's two drawn meshes are two entries (the physics files are the same).
       const chosen = kind === 'sedan' ? null : await detailOf(kind);
-      smallDevice = chosen?.why ?? '';
+      if (chosen?.why) smallDevice = chosen.why;
       const key = kind === 'sedan' ? `sedan:${get('res')}` : `${kind}:${chosen.detail}`;
       if (carCache.has(key)) return carCache.get(key);
       // The other drawn mesh of this car, if it was loaded, is dropped (a phone cannot keep both).
@@ -520,7 +552,7 @@
         progress('building the sedan\'s body…'); await new Promise((r) => setTimeout(r));
         const make = (paint) => { const c = showcaseCar({ style: 'sedan', resolution: get('res'), paint, wheels: 'raycast' }); c.visual.lod = [c.visualLod, c.visualFar]; return c; };
         const first = make(PAINTS[0]);
-        entry = { kind, name: `soft-body sedan (${get('res')} detail)`, visuals: [first], make, vehicle: { truck: first.truck }, mod: null };
+        entry = { kind, name: `soft-body sedan (${get('res')} detail)`, visuals: [first], paints: [0], make, vehicle: { truck: first.truck }, mod: null };
       } else {
         const m = MODS[kind];
         // Before downloading it: whether it fits this device (its estimated footprint
@@ -531,23 +563,25 @@
         if (!waived.has(kind)) {
           progress(`checking that the ${m.name} fits this device…`);
           const adapter = await navigator.gpu.requestAdapter().catch(() => null);
-          const check = footprintCheck(modFootprint(await modModelSizes(m.base, chosen.detail)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+          const check = footprintCheck(modFootprint(m.memory ? modModelSizesOf(m.memory) : await modModelSizes(m.base, chosen.detail)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
           if (!check.fits) throw Object.assign(new Error(check.message), { footprint: kind });
         }
-        progress(`downloading the ${m.name}…`);
-        const mod = await loadMod(m.base, { pc: m.pc, detail: chosen.detail });
+        progress(m.memory ? `loading the ${m.name}…` : `downloading the ${m.name}…`);
+        const mod = m.memory ?? await loadMod(m.base, { pc: m.pc, detail: chosen.detail });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
         // The model files (a generated car's glb and rskin, ~140 MB) are dropped once a
         // visual is built and fetched again (the HTTP cache) for another paint.
         // Each visual is built in a worker of its own (modVisualApart): the wasm heap
         // the build grows (~530 MB for the generated sedan) goes with the worker.
+        // (A design of the Design panel is painted its own colour, the first paint.)
         const make = async (paint) => {
+          if (m.paint && paint === PAINTS[0]) paint = m.paint;
           await modModels(mod);
           try { return await modVisualApart(mod, { native: true, raycast: true, paint }); }
           catch (e) { console.warn('the visual\'s worker failed; building it on the page', e); await modModels(mod); return modVisual(mod, { native: true, raycast: true, paint }); }
           finally { releaseModels(mod); }
         };
-        entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes, detail: mod.detail };
+        entry = { kind, name: m.name, visuals: [await make(PAINTS[paint])], paints: [paint], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes, detail: mod.detail };
       }
       entry.loadMs = performance.now() - t;
       carCache.set(key, entry);
@@ -598,18 +632,34 @@
       loading.stage('Building the car');
       let buildingCar = null;
       try {
-        const car = buildingCar = await carOf(get('car'));
+        // The run's vehicle types (one, or every generated design): the first loads first,
+        // since its device check sets how many cars fit.
+        const kinds = kindsOf();
+        smallDevice = '';
+        const first = buildingCar = await carOf(kinds[0], 0);
         // A device the auto detail found short of memory runs SMALL_DEVICE_CARS (the status says so).
         // (The derby: its own cars control, up to 32 cars; no parked car.)
         const derby = mode === 'derby';
         const asked = derby ? Math.min(32, Math.max(2, Number(get('derbyCars')) || 4)) : Math.min(32, Math.max(1, Math.round(get('cars') || 1)));
         const nCars = smallDevice ? Math.min(derby ? 2 : SMALL_DEVICE_CARS, asked) : asked, n = nCars + (get('parked') && !derby ? 1 : 0);
-        // The second car's paint: built when first asked for (kept, like the first).
-        while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
+        // Car i is of type i % used (the parked car, the first type); with fewer cars than
+        // designs only the first `nCars` types are in the run. Its paint is PAINTS[i % 8].
+        const used = Math.min(kinds.length, nCars), typeOf = (i) => (i < nCars ? i % used : 0);
+        const entries = [first];
+        for (let t = 1; t < used; t++) entries.push(buildingCar = await carOf(kinds[t], t % PAINTS.length));
+        const car = entries[0];
+        const w_paints = (i) => i % PAINTS.length;
+        // Each paint a car asks for: built when first asked for (kept, like the first).
+        for (let i = 0; i < n; i++) {
+          const e = entries[typeOf(i)], p = w_paints(i);
+          if (e.paints.includes(p)) continue;
+          progress(`building another ${e.name}'s body…`); await new Promise((r) => setTimeout(r));
+          e.visuals.push(await e.make(PAINTS[p])); e.paints.push(p);
+        }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), edge: get('edge'), ownTravel: get('ownTravel'), wheelsHitBodies: get('wheelsHitBodies'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), bitExact: get('bitExact'), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
+          ...(used > 1 ? { vehicles: entries.slice(0, used).map((e) => e.vehicle) } : { vehicle: car.vehicle }), drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), edge: get('edge'), ownTravel: get('ownTravel'), wheelsHitBodies: get('wheelsHitBodies'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), bitExact: get('bitExact'), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
@@ -628,21 +678,28 @@
         const gen = ++buildGen;
         device.addEventListener('uncapturederror', (e) => { if (gen !== buildGen) return; fail(gpuErrorText(e.error, device)); if (e.error?.constructor?.name === 'GPUOutOfMemoryError') outOfMemoryRetry(car); });
         // The ground slab (the World's first collider) is left to the renderer's ground.
-        const { env, cars } = await gpuPhase(device, `building the ${car.name}'s renderers`, async () => {
+        const { env, cars, texBase, dataBase } = await gpuPhase(device, `building the ${car.name}'s renderers`, async () => {
           const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
           const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'], skinBatch: get('skinBatch') });
           cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
-          if (car.mod) {
+          // The types' texture layers, one array each for the colour and the data maps (a
+          // type's car draws from its own layers: addCar's texBase and dataBase).
+          const colour = [], data = [], texBase = [], dataBase = [];
+          for (const e of entries) {
+            texBase.push(colour.length); dataBase.push(data.length);
+            if (!e.mod) continue;
             progress('decoding the textures…');
-            car.textures ??= await Promise.all([modTextures(car.mod, vis0.textures), modTextures(car.mod, vis0.dataTextures)]);
-            if (car.textures[0].length) cars.setTextures(car.textures[0], 1024);
-            if (car.textures[1].length) cars.setDataTextures(car.textures[1], 1024);
+            const v = e.visuals[0].visual;
+            e.textures ??= await Promise.all([modTextures(e.mod, v.textures), modTextures(e.mod, v.dataTextures)]);
+            colour.push(...e.textures[0]); data.push(...e.textures[1]);
           }
-          return { env, cars };
+          if (colour.length) cars.setTextures(colour, 1024);
+          if (data.length) cars.setDataTextures(data, 1024);
+          return { env, cars, texBase, dataBase };
         }).catch((e) => { try { world.free(); lab.free(); } catch {} throw e; });
         const spans = world.explicitSpans();
         const [nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize] = lab.readPlan();
-        const w = { world, lab, device, env, cars, car, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
+        const w = { world, lab, device, env, cars, car, entries, typeOf, texBase, dataBase, paintOf: w_paints, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
           plan: { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize }, depthTex: null, msaaTex: null,
           pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize + fSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })),
           // The camera's own readback of the car it follows, every drawn frame (its nodes
@@ -685,7 +742,7 @@
         cmd({ perfFlags: perfFlags() });
         cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         W.spec = spec;
-        builtScene = spec.scene;
+        builtScene = spec.scene; builtMixed = mixedOn();
         configure();
         structureOpts();
         gpuSeg.clear(); gpuTotal = []; gpuRun = [];
@@ -694,6 +751,7 @@
         lastBuildMs = performance.now() - t0;
         firstLoadMs ??= performance.now() - tLoad;
         statusEl.textContent = `built in ${(lastBuildMs / 1000).toFixed(1)} s (first load ${(firstLoadMs / 1000).toFixed(1)} s${car.bytes ? `; the car's model ${(car.bytes / 1e6).toFixed(0)} MB, parsed once` : ''})`
+          + (used > 1 ? `; ${used} vehicle types` : '')
           + (car.detail === 'lite' ? `; car detail: lighter${smallDevice ? ` (auto: ${smallDevice})` : ''}` : '')
           + (nCars < asked ? `; ${nCars} car${nCars > 1 ? 's' : ''} on this device (its memory), not ${asked}` : '');
         window.__carDetail = car.detail ?? null;
@@ -763,13 +821,14 @@
       return { ...v, indices: new Uint32Array(keep) };
     };
     function addCar(w, i) {
-      const v = w.car.visuals[i % w.car.visuals.length].visual, cut = i === 0 && w.hidden.size > 0;
-      // A generated car's paints are one model: the cars share the skin's bind buffer
-      // (showcase-car-render.mjs bindsLike; the same bytes, one copy on the GPU). Not a
-      // cutaway's car (another mesh).
-      const like = w.car.mod && !cut ? w.carIds.find((id, k) => id != null && k !== i && !(k === 0 && w.hidden.size > 0)) : undefined;
+      const t = w.typeOf(i), e = w.entries[t], cut = i === 0 && w.hidden.size > 0;
+      const v = e.visuals[e.paints.indexOf(w.paintOf(i))].visual;
+      // A generated car's paints are one model: the cars of a type share the skin's bind
+      // buffer (showcase-car-render.mjs bindsLike; the same bytes, one copy on the GPU).
+      // Not a cutaway's car (another mesh); never another type's (another model).
+      const like = e.mod && !cut ? w.carIds.find((id, k) => id != null && k !== i && w.typeOf(k) === t && !(k === 0 && w.hidden.size > 0)) : undefined;
       w.skinGen = (w.skinGen ?? 0) + 1;
-      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord(), bindsLike: like ?? null });
+      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, texBase: w.texBase[t], dataBase: w.dataBase[t], wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord(), bindsLike: like ?? null });
     }
 
     // ---------------------------------------------------------------- restart (in place)
@@ -781,7 +840,7 @@
     // non-finite check.
     function watch() {
       document.getElementById('stopped')?.remove();
-      W.stop = createStabilityStop(W.world.explicitHealth() ?? null, { params: { mode, script: script?.name ?? null, spec: { ...W.spec, vehicle: undefined, parts: undefined } } });
+      W.stop = createStabilityStop(W.world.explicitHealth() ?? null, { params: { mode, script: script?.name ?? null, spec: { ...W.spec, vehicle: undefined, vehicles: undefined, parts: undefined } } });
       W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || mode === 'mountain' || mode === 'derby');
     }
     async function restart(first = false) {
@@ -807,7 +866,7 @@
       for (const p of W.derbyPool) p.stale = p.busy;
       derbyShown = null; $('derbyFeed').textContent = '';
       restartMs = performance.now() - t0; restartAt = t0; if (!first) restarts++;
-      const name = W.car.name;
+      const name = W.entries.length > 1 ? `${W.entries.length} vehicle types (${W.entries.map((e) => e.name).join(', ')})` : W.car.name;
       $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'derby' ? `demolition derby, ${W.lab.vehicleCount()} cars${get('derbyObstacles') ? ', obstacles' : ''}` : scene() === 'mountain' ? `${get('terrain') === 'ledges' ? 'ledged ' : ''}mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
       $('capTitle').textContent = script?.title || `Vehicle Lab · ${MODES[mode]}${mode === 'crash' ? `: ${$('crashKind').selectedOptions[0].text}, ${get('kmh')} km/h` : ''}`;
       $('capSub').textContent = `${name}, 2 kHz node–beam, in one GPU World${get('surface') ? ' · surface contact on' : ''}`;
@@ -1556,6 +1615,31 @@
     // ---------------------------------------------------------------- loops
     const before = () => { runPageEvents(W.lab.time()); applyDrive(); W.lab.beforeStep(W.world); };
     syncUrl();
+    // The Design panel: edit a registered design's parameters, preview it, rig it and drive
+    // it (vehicle-design-ui.mjs). Its car is the type 'custom': the Car select's "Your
+    // design", and one more type in Mixed. Each Apply replaces it.
+    let designPanel = null;
+    try {
+      designPanel = createDesignPanel($('designRoot'), {
+        async onApply({ design, title, params, files, ms, setStatus }) {
+          const mod = modFromFiles(files, { detail: 'lite', label: `${design} (Design panel)` });
+          MODS.custom = { base: null, memory: mod, pc: mod.pcName, design: 'custom', name: `Your ${title}`, paint: params.paint, missing: '' };
+          have.custom = true;
+          if (!GENERATED.includes('custom')) GENERATED.push('custom');
+          let o = [...$('car').options].find((x) => x.value === 'custom');
+          if (!o) { o = new Option('', 'custom'); $('car').add(o); }
+          o.text = `Your ${title} (Design panel)`; o.disabled = false;
+          for (const k of [...carCache.keys()]) if (k.startsWith('custom:')) carCache.delete(k);
+          surfaceChosen = surfaceChosen || false;
+          put('car', 'custom');
+          if (!surfaceChosen) put('surface', surfaceDefault());
+          shapeUi(); syncUrl();
+          setStatus('building the lab with it…');
+          await build();
+          setStatus(`driving: ${(ms / 1000).toFixed(1)} s to rig. Drive with the arrow keys or WASD in Drive, Derby or the mountain.`);
+        },
+      });
+    } catch (e) { console.warn('the Design panel did not start', e); }
     await build();
     canvas.focus();
     if (RECORD) {
