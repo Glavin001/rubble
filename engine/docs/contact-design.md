@@ -554,4 +554,9 @@ and fender, bumper and fender, body and hood.
   14.6 mm apart), 9,520 rejected for facing alike, 1,462 (2 %) tested. Many of the excluded are seams
   at rest, not crossings. A seam pair needs its side remembered from spawn and contact only at
   crossing; neighbours' edges are nearly parallel, where the edges' cross product gives no normal, so
-  the pair's own faces must give the side. Not built.
+  the pair's own faces must give the side.
+- Built and dropped: those pairs keep the direction between their closest points while apart and are
+  pushed back to it when it flips, or apart inside 80 % of the gap first seen (SELF_OFFSET=2, 4 runs,
+  medians, own paint at the end / car through car worst). Alone: pole 2.90 -> 3.03, head on 4.73 ->
+  8.19 / 2.52 -> 5.62; with the other self edge pairs: pole 3.16, head on 8.00 / 8.56; driving 0. The
+  control (neither tested) is the baseline to the digit. So the seams' edge pairs are not the lever.
