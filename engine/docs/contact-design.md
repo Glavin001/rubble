@@ -628,3 +628,7 @@ that surface's gap to the paint as built; contact off reads 626 mm; sampled ever
   side 60 pressed 34 -> 18, head 60 52 -> 63, but a car's own paint crossing length about doubles
   (head 60 end 6.7 -> 17.8 m). A depth measure of a car against itself has to judge it.
 - The pillar's own crossing (end median, side 60): 4.1 -> 5.1 m; 5.3 with the dogleg's faces.
+- **Speculative look-ahead (`SPECULATIVE=1`, CPU only) by depth, 8 runs, worst (mm):** head 60 52 -> 44
+  (passes), side 90 68 -> 53, head 100 54 -> 60. Not adopted: one row worse, and not on the GPU.
+- The acceptance tests (`gen_sedan_paint.rs`, `accept_*`): 4 of 8 pass; the file 956 -> 475 s with the
+  own-paint and line measures off where a test does not read them (`crash_measuring`).
