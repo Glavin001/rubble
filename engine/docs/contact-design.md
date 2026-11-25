@@ -579,3 +579,7 @@ four times, and inner door faces are in the count.
   2.23 -> 3.29, pressed 60 3.72 -> 3.23, pressed side 60 1.38 -> 1.41: dropped.
 - The default path (no offsets, edge contact off) on CUDA, 46223bae against b596b26a: 12 rows bit for
   bit, none slower (head on +2.2 % the most), with the shipped ssqrt.
+- Near-parallel edges by their closest points' direction (below a sine of 0.05 and 0.2; built,
+  measured, dropped): edges through, medians of 12, head on 60 58 -> 67, 62; 100 61 -> 70, 72; overlap
+  the same; pressed side 60 at the end 0.15 -> 0.24, 0.50 m. The tail cases at an edge's end were not
+  tried. In contact and clear: head on 100 pressed, centres 3.0 to 3.7 m, 0 in all 8 runs.
