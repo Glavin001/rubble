@@ -19,10 +19,10 @@ fn sedan(at: Vec3) -> ExplicitBeams {
     s
 }
 
-/// Edge contact in a browser host: whatever order its modules' compiles end in, the frames
-/// run (none panics), and with all of them marked the edge pass acts.
+/// Edge contact in a browser host: its path's modules are compiled before the first
+/// frame, and whatever order the compiles end in no frame panics.
 #[test]
-fn edge_contact_waits_for_its_deferred_compiles() {
+fn a_page_starts_with_edge_contact_compiled() {
     let Ok((_, device, queue)) = default_device() else { return };
     let fleet = || {
         let mut f = vec![sedan(Vec3::ZERO), sedan(Vec3::new(1.0, 0.0, 0.0))];
@@ -41,12 +41,15 @@ fn edge_contact_waits_for_its_deferred_compiles() {
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet());
     gpu.set_vehicle_contact(true);
     run(&mut gpu);
-    // The edge pass first, then the others in turn.
-    let deferred: Vec<&str> = specs.iter().filter(|s| s.deferred).map(|s| s.module).collect();
-    let (edge, rest): (Vec<&str>, Vec<&str>) = deferred.iter().copied().partition(|m| m.contains("split_edges"));
-    assert_eq!(edge.len(), 1, "{deferred:?}");
-    for m in edge.iter().chain(&rest) {
-        engine_webgpu::mark_pipeline_compiled(m);
+    // Edge contact changes results, so its path's modules are compiled before a page's first
+    // frame: never after the crash (it was 111 s late in Chrome).
+    let (later, ahead): (Vec<_>, Vec<_>) = specs.iter().partition(|s| s.deferred);
+    for w in ["member", "tests", "groupbegin", "grouplevels", "grouplv", "edges"] {
+        let m = format!("explicit_beams_split_{w}");
+        assert!(ahead.iter().any(|s| s.module.starts_with(&m)), "{m} compiles after the page starts");
+    }
+    for s in ahead.iter().chain(&later) {
+        engine_webgpu::mark_pipeline_compiled(s.module);
         run(&mut gpu);
     }
     engine_webgpu::set_pipeline_gate(false);

@@ -1531,8 +1531,9 @@ impl ExplicitBeamsGpu {
             }
         }
         if vehicles.len() > 1 {
-            // The split group path's three pipelines (GroupSplit::new's descriptors),
-            // after the first frame's: they run only once a contact group forms.
+            // The split group path's pipelines (GroupSplit::new's), after the first frame's; with
+            // edge contact, which changes results, those its path runs are compiled before it.
+            let ahead = |w| vehicles.iter().any(|v| v.edge_contact) && matches!(w, "member" | "tests" | "groupbegin" | "grouplevels" | "grouplv" | "edges");
             for (which, entry) in [
                 ("member", SPLIT_MEMBER_ENTRY),
                 ("group", SPLIT_GROUP_ENTRY),
@@ -1544,7 +1545,7 @@ impl ExplicitBeamsGpu {
                 ("fleetplan", FLEET_PLAN_ENTRY),
                 ("fleetpost", FLEET_POST_ENTRY),
                 ("fleetlevels", FLEET_LEVELS_ENTRY),
-            ].into_iter().chain(vehicles.iter().any(|v| v.edge_contact).then_some(("edges", plan::SPLIT_EDGE_ENTRY))) {
+            ].into_iter().chain(ahead("edges").then_some(("edges", plan::SPLIT_EDGE_ENTRY))) {
                 let module = split_module(which, aero, lanes);
                 // (The groups' and the fleet plan's modules bind the fleet's arguments.)
                 let args = matches!(which, "group" | "groupbegin" | "grouplevels" | "grouplv" | "fleetplan");
@@ -1554,7 +1555,7 @@ impl ExplicitBeamsGpu {
                     wgsl: u(module_wgsl(module)),
                     entry,
                     layout: Some(if args { fleet_args_entries() } else { split_entries() }),
-                    deferred: true,
+                    deferred: !ahead(which),
                 });
             }
         }

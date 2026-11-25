@@ -600,3 +600,15 @@ four times, and inner door faces are in the count.
 - **Until the compile finishes**, a page's first frames run without edge contact.
 - **Default.** The lab turns it on for up to three generated cars on the flat arena (parked
   ones counted); at four the box clears (checked). Larger scenes do not afford it yet.
+
+### On a page, edge contact started 111 s after the crash could (fixed 2026-11-25)
+
+- **Measured** (Chrome, M3 Max, car at 60 km/h into a parked car's side, cold kernel cache): after "ready",
+  111 s of frames ran on the groups' workgroup (28 ms a step, half real time) with edge contact
+  silently off, on = off to the last digit, while its modules compiled in the background. The
+  3-car proof above saw the pass only because it waited longer than that.
+- **Fix:** with edge contact on, the modules its path runs (member, tests, groupbegin, grouplevels,
+  grouplv, edges) compile before the first frame. A cold load is longer; `edge_gate.rs` holds it.
+- **The crash once compiled:** 60 steps/s; resting contact 10.6 ms a step on, 11.6 off. The impact
+  second: 13.7 ms. Frame-locked stills (`out/chrome-crash`, one run each): on, the cars part
+  and the red one rolls on at 6 km/h (t 5 s); off, they stay locked at 0 km/h.
