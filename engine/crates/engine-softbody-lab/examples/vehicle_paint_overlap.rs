@@ -29,6 +29,6 @@ fn main() -> Result<(), String> {
         x.sort_by(f32::total_cmp);
         format!("{:.2} / {:.2} / {:.2}", x[0], x[x.len() / 2], x[x.len() - 1])
     };
-    println!("{scene} {kmh} km/h, edge {edge}, {runs} runs, paint cutting paint (m): at spawn {} | worst {} | at {secs} s {} | centres apart then (m) {}", col(0), col(1), col(2), col(3));
+    println!("{scene} {kmh} km/h, edge {edge}, {runs} runs, paint cutting paint (m): at spawn {} | worst {} | at {secs} s {} | centres apart then (m) {} | own paint: worst {} | at the end {}", col(0), col(1), col(2), col(3), col(4), col(5));
     Ok(())
 }

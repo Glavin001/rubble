@@ -55,3 +55,24 @@ fn edge_contact_pressing_ends_with_paint_clear() {
 fn default_pressing_ends_with_paint_clear() {
     assert!(largest("side", 60.0, 2.0, false, true).1 <= CLEAR);
 }
+
+/// The control for a car's own paint: driving at 60 km/h nothing new cuts (past 5 cm of
+/// line: shut lines a few millimetres wide rub as the car flexes).
+#[test]
+fn driving_own_paint_stays_apart() {
+    let r = crash("drive", 60.0, 0.5, 1, false, false, true).expect("the scene");
+    println!("| own paint | drive 60 km/h | worst {:.3} m | 0.05 |", r[0][4]);
+    assert!(r[0][4] <= 0.05, "{r:?}");
+}
+
+/// FAILS today (2026-11-25): a car's own panels through each other after a crash (about 5 m
+/// of line at a pole, 4 to 8 m after a head-on): self contact is node against face.
+#[test]
+fn own_paint_ends_apart() {
+    for (scene, kmh) in [("pole", 64.0), ("head", 60.0)] {
+        let r = crash(scene, kmh, 1.0, 2, true, false, true).expect("the scene");
+        let m = r.iter().map(|x| x[5]).fold(0.0f32, f32::max);
+        println!("| own paint | {scene} {kmh} km/h | at the end {m:.2} m | 0.05 |");
+        assert!(m <= 0.05, "{scene} {kmh}: {m}");
+    }
+}
