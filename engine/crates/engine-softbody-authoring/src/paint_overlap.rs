@@ -14,6 +14,48 @@ use std::collections::HashMap;
 
 pub type Tri = [Vec3; 3];
 
+/// (A measurement, PAINT_ON_SKIN=1) Per render vertex the collision triangle it lies over as
+/// built, of the part it is bound to when it has one there, and its place in it: the paint
+/// carried by its collision panel instead of its own skinning.
+type OnSkin = Vec<Option<([u32; 3], [f32; 3])>>;
+static ON_SKIN: std::sync::OnceLock<OnSkin> = std::sync::OnceLock::new();
+
+fn on_skin(v: &ShowcaseVisual, s: &ExplicitBeams, part: impl Fn(u32) -> String) -> OnSkin {
+    let r: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    let p = deform(v, &r).0;
+    let tri: Vec<([u32; 3], String)> =
+        (0..s.triangles.len()).filter(|&t| !s.tri_anti_only(t)).map(|t| (s.triangles[t].nodes, part(s.triangles[t].nodes[0]))).collect();
+    (0..p.len())
+        .map(|i| {
+            if v.material[i] != mat::PAINT {
+                return None;
+            }
+            let mine = part(v.bind_nodes[i][0]);
+            let mut best: Option<(f32, [u32; 3], [f32; 3])> = None;
+            for (nodes, name) in &tri {
+                let q = nodes.map(|n| r[n as usize]);
+                let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
+                let n = e1.cross(e2).normalize_or_zero();
+                let h = (p[i] - q[0]).dot(n);
+                let x = p[i] - q[0] - n * h;
+                let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+                let det = d11 * d22 - d12 * d12;
+                if det <= 1e-12 {
+                    continue;
+                }
+                let (b1, b2) = ((d22 * x.dot(e1) - d12 * x.dot(e2)) / det, (d11 * x.dot(e2) - d12 * x.dot(e1)) / det);
+                // (Past the triangle: by how far its place in it is out of range; another part costs more.)
+                let out = (-b1).max(-b2).max(b1 + b2 - 1.0).max(0.0) * d11.max(d22).sqrt();
+                let cost = h.abs() + 2.0 * out + if *name == mine { 0.0 } else { 0.1 };
+                if out < 0.2 && best.as_ref().is_none_or(|b| cost < b.0) {
+                    best = Some((cost, *nodes, [b1, b2, h]));
+                }
+            }
+            best.filter(|b| b.0 < 0.35).map(|b| (b.1, b.2))
+        })
+        .collect()
+}
+
 /// The crossing segment's length of two triangles (0: none, or coplanar).
 fn cut(a: &Tri, b: &Tri) -> f32 {
     let mut pts: Vec<Vec3> = Vec::new();
@@ -82,7 +124,15 @@ pub fn crossing(a: &[Tri], b: &[Tri]) -> f32 {
 /// painted triangles.
 fn paint_ids(v: &ShowcaseVisual, rest: &[Vec3], s: &ExplicitBeams) -> Vec<(u32, Tri)> {
     let n: Vec<Vec3> = s.nodes.iter().map(|n| s.origin + n.pos).collect();
-    let p = deform(v, &n).0;
+    let mut p = deform(v, &n).0;
+    if let Some(on) = ON_SKIN.get() {
+        for (i, b) in on.iter().enumerate() {
+            let Some((t, [b1, b2, h])) = b else { continue };
+            let q = t.map(|k| n[k as usize]);
+            let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
+            p[i] = q[0] + e1 * *b1 + e2 * *b2 + e1.cross(e2).normalize_or_zero() * *h;
+        }
+    }
     v.indices
         .chunks_exact(3)
         .filter(|t| t.iter().all(|&i| v.material[i as usize] == mat::PAINT))
@@ -177,6 +227,12 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
         s
     };
     let rest: Vec<Vec3> = v.positions.iter().map(|&p| Vec3::from(p)).collect();
+    if std::env::var("PAINT_ON_SKIN").is_ok_and(|x| x == "1") {
+        let part = |n: u32| d.nodes.get(n as usize).map_or("?".to_string(), |n| n.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string());
+        let on = ON_SKIN.get_or_init(|| on_skin(&v, &probe, part));
+        let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
+        println!("paint carried by its collision panel: {} of {n} vertices", on.iter().filter(|x| x.is_some()).count());
+    }
     let run = |k: usize| -> [f32; 6] {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
@@ -254,7 +310,20 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 println!("{scene} {kmh}: collision skin through itself {:.2} m (visible panels {:.2}), at the offsets {:.2} ({:.2})", sum(&raw, false), sum(&raw, true), sum(&off, false), sum(&off, true));
                 // Each crossing painted triangle against its own part's collision skin: over it (the
                 // closest point inside a triangle: how far) or past its edge.
-                let sk = skin(s, false);
+                // (Its part's dead triangles counted too, PAINT_DEAD=1.)
+                let with_dead = std::env::var("PAINT_DEAD").is_ok_and(|x| x == "1");
+                let sk: Vec<(u32, Tri)> = (0..s.triangles.len())
+                    .filter(|&t| (with_dead || !s.tri_dead.get(t).copied().unwrap_or(false)) && !s.tri_anti_only(t))
+                    .map(|t| (t as u32, s.triangles[t].nodes.map(|i| s.nodes[i as usize].pos)))
+                    .collect();
+                let (mut total, mut dead): (HashMap<String, usize>, HashMap<String, usize>) = Default::default();
+                for t in 0..s.triangles.len() {
+                    *total.entry(name(t as u32)).or_default() += 1;
+                    if s.tri_dead.get(t).copied().unwrap_or(false) { *dead.entry(name(t as u32)).or_default() += 1; }
+                }
+                let mut dl: Vec<_> = dead.iter().map(|(p, n)| (*n, total[p], p.clone())).collect();
+                dl.sort(); dl.reverse();
+                println!("{scene} {kmh}: dead triangles {} of {}: {:?}", dl.iter().map(|x| x.0).sum::<usize>(), s.triangles.len(), &dl[..dl.len().min(9)]);
                 let (mut over, mut past): (Vec<f32>, Vec<f32>) = Default::default();
                 let pt = paint_ids(&v, &rest, s);
                 let at: HashMap<u32, Tri> = pt.iter().copied().collect();
@@ -294,6 +363,84 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 o.sort_by(|a, b| b.1.total_cmp(&a.1));
                 let same: f32 = o.iter().filter(|x| x.0 .0 == x.0 .1).map(|x| x.1).sum();
                 println!("{scene} {kmh}: own paint {:.2} m, of it a part through itself {same:.2}: {:?}", o.iter().map(|x| x.1).sum::<f32>(), &o[..o.len().min(10)]);
+            }
+        }
+        // (PAINT_BIND=1, run 0: is each painted vertex bound to a collision triangle, and how far is
+        // its paint from where the collision triangle it lies on as built carries it?)
+        if k == 0 && std::env::var("PAINT_BIND").is_ok_and(|x| x == "1") {
+            for s in &w.vehicles {
+                let key = |mut t: [u32; 3]| { t.sort_unstable(); t };
+                let tris: std::collections::HashSet<[u32; 3]> = (0..s.triangles.len()).filter(|&t| !s.tri_anti_only(t)).map(|t| key(s.triangles[t].nodes)).collect();
+                let used: std::collections::BTreeSet<usize> = v.indices.iter().map(|&i| i as usize).filter(|&i| v.material[i] == mat::PAINT).collect();
+                let on = used.iter().filter(|&&i| tris.contains(&key(v.bind_nodes[i]))).count();
+                println!("{scene} {kmh}: painted vertices {} bound to a collision triangle {} ({:.0} %)", used.len(), on, 100.0 * on as f32 / used.len() as f32);
+                let r0: Vec<Vec3> = probe.nodes.iter().map(|n| n.pos).collect();
+                let r1: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+                let p1 = deform(&v, &r1).0;
+                let p0 = deform(&v, &r0).0;
+                let (mut dev_on, mut dev_off): (Vec<f32>, Vec<f32>) = Default::default();
+                for &i in used.iter().step_by(7) {
+                    let c = p0[i];
+                    let mut best = (f32::MAX, 0usize, [0.0f32; 3]);
+                    for t in 0..s.triangles.len() {
+                        if s.tri_anti_only(t) { continue; }
+                        let q = s.triangles[t].nodes.map(|n| r0[n as usize]);
+                        let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
+                        let n = e1.cross(e2).normalize_or_zero();
+                        let h = (c - q[0]).dot(n);
+                        let x = c - q[0] - n * h;
+                        let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+                        let det = d11 * d22 - d12 * d12;
+                        if det <= 1e-12 { continue; }
+                        let (b1, b2) = ((d22 * x.dot(e1) - d12 * x.dot(e2)) / det, (d11 * x.dot(e2) - d12 * x.dot(e1)) / det);
+                        if b1 < -0.02 || b2 < -0.02 || b1 + b2 > 1.02 { continue; }
+                        if h.abs() < best.0 { best = (h.abs(), t, [b1, b2, h]); }
+                    }
+                    if best.0 > 0.15 { continue; }
+                    let q = s.triangles[best.1].nodes.map(|n| r1[n as usize]);
+                    let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
+                    let y = q[0] + e1 * best.2[0] + e2 * best.2[1] + e1.cross(e2).normalize_or_zero() * best.2[2];
+                    if tris.contains(&key(v.bind_nodes[i])) { dev_on.push(y.distance(p1[i])) } else { dev_off.push(y.distance(p1[i])) }
+                }
+                let q = |v: &mut Vec<f32>| { v.sort_by(f32::total_cmp); if v.is_empty() { "none".into() } else { format!("{}: p50 {:.0} p90 {:.0} p99 {:.0} mm", v.len(), v[v.len() / 2] * 1e3, v[v.len() * 9 / 10] * 1e3, v[v.len() * 99 / 100] * 1e3) } };
+                println!("{scene} {kmh}: paint from where its collision panel carries it: bound to one {}; not bound to one {}", q(&mut dev_on), q(&mut dev_off));
+            }
+        }
+        // (PAINT_FIT=1, run 0, at the end; `drive 0 0.02`: as built.) Per part the painted area and
+        // how much of it lies past the edge of the whole car's collision skin, by how far.
+        if k == 0 && std::env::var("PAINT_FIT").is_ok_and(|x| x == "1") {
+            let s = &w.vehicles[0];
+            let ids: Vec<u32> = v.indices.chunks_exact(3).filter(|t| t.iter().all(|&i| v.material[i as usize] == mat::PAINT)).map(|t| t[0]).collect();
+            let sk = skin(s, false);
+            let mut by: HashMap<String, (f32, f32, Vec<f32>)> = HashMap::new();
+            for (id, t) in paint_ids(&v, &rest, s) {
+                let name = &d.nodes[v.bind_nodes[ids[id as usize] as usize][0] as usize].name;
+                let part = name.split('_').next().unwrap_or(name).trim_end_matches(|c: char| c.is_ascii_digit()).to_string();
+                let c = (t[0] + t[1] + t[2]) / 3.0 - s.origin;
+                let area = 0.5 * (t[1] - t[0]).cross(t[2] - t[0]).length();
+                // The nearest collision triangle: over it, or past its edge by the in-plane distance.
+                let mut best = (f32::MAX, 0.0f32);
+                for (_, q) in &sk {
+                    let n = (q[1] - q[0]).cross(q[2] - q[0]).normalize_or_zero();
+                    let h = (c - q[0]).dot(n);
+                    let x = c - n * h;
+                    let inside = (0..3).all(|e| (q[(e + 1) % 3] - q[e]).cross(x - q[e]).dot(n) >= 0.0);
+                    let lat = if inside { 0.0 } else {
+                        (0..3).map(|e| { let (u, w) = (q[e], q[(e + 1) % 3] - q[e]); x.distance(u + w * ((x - u).dot(w) / w.length_squared().max(1e-12)).clamp(0.0, 1.0)) }).fold(f32::MAX, f32::min)
+                    };
+                    let dist = h.hypot(lat);
+                    if dist < best.0 { best = (dist, lat); }
+                }
+                let e = by.entry(part).or_default();
+                e.0 += area;
+                if best.1 > 0.02 { e.1 += area; }
+                e.2.push(best.1);
+            }
+            let mut o: Vec<_> = by.into_iter().collect();
+            o.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
+            for (p, (a, past, mut l)) in o.into_iter().take(14) {
+                l.sort_by(f32::total_cmp);
+                println!("fit {p:10} painted {a:6.2} m2, past an edge by > 2 cm {past:5.2} m2 ({:2.0} %), p90 {:4.0} max {:4.0} mm", 100.0 * past / a.max(1e-6), l[l.len() * 9 / 10] * 1e3, l[l.len() - 1] * 1e3);
             }
         }
         let centre = |s: &ExplicitBeams| s.nodes.iter().map(|n| (s.origin + n.pos) * n.mass).sum::<Vec3>() / s.nodes.iter().map(|n| n.mass).sum::<f32>();

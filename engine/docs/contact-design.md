@@ -526,10 +526,19 @@ and fender, bumper and fender, body and hood.
 - The crossing painted triangles: 40 to 60 % lie over their part's collision skin (p50 11 to 17, p90
   24 to 63 mm; self contact's range is 20 mm and it ignores the offsets), the rest past its edge
   (p50 28 to 74, p90 127 mm and more). Parts are by the bound node's name, so some are misassigned.
-  The panels' skins must reach their painted outlines; self contact must use the offsets.
+  (The reading that the panels' skins stop short of their painted outlines was wrong: see below.)
 - Self contact at the contact offsets (CPU, SELF_OFFSET: 1 the triangles, 2 the contacters too; off),
   4 runs, edge contact on, own paint at the end, median: pole 64 5.38 -> 2.97 -> 2.90, head on 60
   7.50 -> 6.17 -> 4.73, side 60 3.97 -> 5.75 -> 3.86; driving 0; car through car worst head on
   2.62 -> 4.00 -> 2.52. Mode 2: no test of gen_sedan_contact changes, energy rises inside the bar. With
   SELF_EDGE=1 on top it is worse (head on own 10.8, car through car worst 8.8). The GPU's self
   contact has no offsets, so it stays off until it does.
+- As built the panels do reach their outlines (paint more than 2 cm past the car's collision skin:
+  hood 0 %, fenders 5 %, body 7 %, doors 12 %, inner shell 10 %), no collision triangle dies in these
+  crashes, and the earlier "past its edge" matched parts by name.
+- The paint has its own weighted skinning (rubbleSkin) and leaves its collision panel in a crush: from
+  where the panel it lies on carries it, driving p99 1 mm; pole 64 p50 2 to 3, p90 34 to 43, p99 103
+  to 183 mm; head on 60 p90 46 to 58, p99 113 to 182.
+- The paint carried rigidly by its collision triangle instead (PAINT_ON_SKIN=1) is four times worse
+  (pole at the end 5.4 -> 21.9 m, head on 7.5 -> 27.2): it tears at each triangle's edge. Not a fix.
+  What is left to try is the reverse: collide points and edges placed as the paint is.
