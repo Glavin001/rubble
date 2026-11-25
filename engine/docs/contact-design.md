@@ -519,4 +519,11 @@ and fender, bumper and fender, body and hood.
 - SELF_EDGE=1: pole at the end 5.4 -> 3.3, but head on 7.5 -> 8.3 and car through car worst 2.6 -> 6.8.
 - Not the pairs excluded for starting inside the contact range: 20 of them, and with none excluded
   (SELF_EXCL=0) 5.39 and 8.01 against 5.38 and 7.50.
-- Open: self contact does not use the contact offsets; whether the collision skins cross there too.
+- Mostly geometry, not the solver: on the panels seen, the collision skin through itself at the end
+  is 0.1 to 0.4 m at a pole (0.0 to 0.2 at the contact offsets) where the paint is 5.5; head on 0.4
+  and 1.2 m (0.4, 1.1) against 4.2 and 6.1; side 0.1 and 0 against 1.7 and 4.0 (one run each; an
+  open skin can also pass by another's edge uncut).
+- The crossing painted triangles: 40 to 60 % lie over their part's collision skin (p50 11 to 17, p90
+  24 to 63 mm; self contact's range is 20 mm and it ignores the offsets), the rest past its edge
+  (p50 28 to 74, p90 127 mm and more). Parts are by the bound node's name, so some are misassigned.
+  The panels' skins must reach their painted outlines; self contact must use the offsets.

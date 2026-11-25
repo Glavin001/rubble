@@ -208,6 +208,15 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
         }
         let now = |w: &ExplicitBeamsWorld| if pole { 0.0 } else { crossing(&paint(&v, &rest, &w.vehicles[0]), &paint(&v, &rest, &w.vehicles[1])) };
         // (As built: the pairs of a car's own paint that cut then do not count.)
+        // The collision skin's own triangles, at the nodes or at the contact offsets.
+        let skin = |s: &ExplicitBeams, off: bool| -> Vec<(u32, Tri)> {
+            let p: Vec<Vec3> = if off { engine_softbody::explicit_contact::contact_surface_positions(s) } else { s.nodes.iter().map(|n| n.pos).collect() };
+            (0..s.triangles.len())
+                .filter(|&t| !s.tri_dead.get(t).copied().unwrap_or(false) && !s.tri_anti_only(t))
+                .map(|t| (t as u32, s.triangles[t].nodes.map(|i| p[i as usize])))
+                .collect()
+        };
+        let skin_built: [std::collections::HashSet<(u32, u32)>; 2] = [false, true].map(|o| self_pairs(&skin(&w.vehicles[0], o)).into_iter().map(|x| x.0).collect());
         let built: std::collections::HashSet<(u32, u32)> = self_pairs(&paint_ids(&v, &rest, &w.vehicles[0])).into_iter().map(|x| x.0).collect();
         let own = |w: &ExplicitBeamsWorld| -> f32 {
             w.vehicles.iter().map(|s| self_pairs(&paint_ids(&v, &rest, s)).iter().filter(|x| !built.contains(&x.0)).map(|x| x.1).sum::<f32>()).fold(0.0, f32::max)
@@ -236,6 +245,44 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 n.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string()
             };
             for s in &w.vehicles {
+                let of = |o: bool| self_pairs(&skin(s, o)).into_iter().filter(|x| !skin_built[o as usize].contains(&x.0)).collect::<Vec<_>>();
+                let name = |t: u32| { let n = &d.nodes[s.triangles[t as usize].nodes[0] as usize].name; n.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string() };
+                // (The panels you see: the parts whose paint shows above.)
+                let seen = |t: u32| ["hd", "fe", "door", "bf", "bb", "ebody", "tk"].iter().any(|p| name(t).starts_with(p));
+                let sum = |v: &[((u32, u32), f32)], only: bool| v.iter().filter(|x| !only || (seen(x.0 .0) && seen(x.0 .1))).map(|x| x.1).sum::<f32>();
+                let (raw, off) = (of(false), of(true));
+                println!("{scene} {kmh}: collision skin through itself {:.2} m (visible panels {:.2}), at the offsets {:.2} ({:.2})", sum(&raw, false), sum(&raw, true), sum(&off, false), sum(&off, true));
+                // Each crossing painted triangle against its own part's collision skin: over it (the
+                // closest point inside a triangle: how far) or past its edge.
+                let sk = skin(s, false);
+                let (mut over, mut past): (Vec<f32>, Vec<f32>) = Default::default();
+                let pt = paint_ids(&v, &rest, s);
+                let at: HashMap<u32, Tri> = pt.iter().copied().collect();
+                for ((i, j), _) in self_pairs(&pt) {
+                    if built.contains(&(i, j)) { continue; }
+                    for k in [i, j] {
+                        let c = (at[&k][0] + at[&k][1] + at[&k][2]) / 3.0 - s.origin;
+                        let mine = part(k);
+                        let mut best = (f32::MAX, false);
+                        for (t, q) in sk.iter().filter(|(t, _)| name(*t) == mine) {
+                            let _ = t;
+                            let n = (q[1] - q[0]).cross(q[2] - q[0]);
+                            let x = c - n * ((c - q[0]).dot(n) / n.length_squared().max(1e-12));
+                            if (0..3).all(|e| (q[(e + 1) % 3] - q[e]).cross(x - q[e]).dot(n) >= 0.0) {
+                                if c.distance(x) < best.0 { best = (c.distance(x), true); }
+                            } else {
+                                for e in 0..3 {
+                                    let (u, w) = (q[e], q[(e + 1) % 3] - q[e]);
+                                    let y = u + w * ((c - u).dot(w) / w.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                                    if c.distance(y) < best.0 { best = (c.distance(y), false); }
+                                }
+                            }
+                        }
+                        if best.0 < f32::MAX { if best.1 { over.push(best.0) } else { past.push(best.0) } }
+                    }
+                }
+                let q = |v: &mut Vec<f32>| { v.sort_by(f32::total_cmp); if v.is_empty() { "none".into() } else { format!("{} (p50 {:.0}, p90 {:.0} mm)", v.len(), v[v.len() / 2] * 1e3, v[v.len() * 9 / 10] * 1e3) } };
+                println!("{scene} {kmh}: crossing paint over its part's skin {}, past its edge {}", q(&mut over), q(&mut past));
                 let mut by: HashMap<(String, String), f32> = HashMap::new();
                 for ((i, j), l) in self_pairs(&paint_ids(&v, &rest, s)) {
                     if !built.contains(&(i, j)) {
