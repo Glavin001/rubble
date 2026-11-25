@@ -3814,7 +3814,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let inner_skins =
         defined.is_some() && std::env::var("RIG_NO_INNER_SKINS").map_or(true, |v| v != "1");
     if inner_skins {
-        interior_skins(&mut r);
+        interior_skins(&mut r, inp);
     }
     // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.

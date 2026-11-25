@@ -612,3 +612,19 @@ four times, and inner door faces are in the count.
 - **The crash once compiled:** 60 steps/s; resting contact 10.6 ms a step on, 11.6 off. The impact
   second: 13.7 ms. Frame-locked stills (`out/chrome-crash`, one run each): on, the cars part
   and the red one rolls on at 6 km/h (t 5 s); off, they stay locked at 0 km/h.
+
+### Depth instead of line length, and what it found: authoring (2026-11-25)
+
+Owner's bar: at most 1 cm from 0.3 s after a hit, at most 5 cm during it and above 1 cm for at most
+0.2 s; 8 runs a case (`paint_overlap::depth`: winding number of the contact surface over 0.75, less
+that surface's gap to the paint as built; contact off reads 626 mm; sampled every 20 ms).
+- **B-pillar with no collision triangle:** side 60 88 mm -> 0. **Dogleg node ahead of the rear arch in
+  no triangle (`cover_bare`):** side 60 pressed, worst 63 -> 34 mm.
+- Edge contact on, after both, worst / from 0.3 s on (mm): side 30 0/0 and head 30 pressed 7/7, head 60
+  pressed 36/0 (these three before the dogleg's faces), side 60 0/0, head 60 52/0, head 100 54/0,
+  side 90 68/0, side 60 pressed 34/34 (a second hit at 0.94 s; the measure counts it as lasting).
+  After a hit nothing stays in any of the eight by the end.
+- Not adopted: paint carried by its own panel (`PAINT_ON_SKIN=1`): side 90 68 -> 30, head 100 54 -> 39,
+  side 60 pressed 34 -> 18, head 60 52 -> 63, but a car's own paint crossing length about doubles
+  (head 60 end 6.7 -> 17.8 m). A depth measure of a car against itself has to judge it.
+- The pillar's own crossing (end median, side 60): 4.1 -> 5.1 m; 5.3 with the dogleg's faces.

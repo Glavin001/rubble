@@ -489,3 +489,28 @@ fn belly_faces(r: &mut Rig) {
     }
     r.car.tris.extend(add);
 }
+
+/// A body-skin node (within 3 cm of the surface: it carries paint) in no collision triangle
+/// and outside the body's solid (the dogleg ahead of the rear arch): nothing catches what it meets,
+/// and it stood up to 79 mm inside another car pressing on it. It gets the faces between its
+/// two nearest skin neighbours and its nearest shell node, as an inner face.
+pub(super) fn cover_bare(r: &mut Rig, inp: &dyn RigInput) {
+    let on: std::collections::HashSet<usize> = r.car.tris.iter().flat_map(|t| t.n).collect();
+    let body = |i: usize| { let n = &r.car.nodes[i]; n.part == Part::Body && !n.contact && !n.no_group && n.sub.is_none() };
+    let skin = |i: usize| body(i) && r.car.nodes[i].name.starts_with("ebody");
+    let mut add = Vec::new();
+    for i in (0..r.car.nodes.len()).filter(|&i| skin(i) && !on.contains(&i) && inp.sdf(r.g(i)).abs() < 0.03) {
+        let near = |of: &dyn Fn(usize) -> bool| {
+            let mut v: Vec<usize> = (0..r.car.nodes.len()).filter(|&j| j != i && on.contains(&j) && of(j) && r.g(j).distance(r.g(i)) < 0.5).collect();
+            v.sort_by(|&a, &b| r.g(a).distance(r.g(i)).total_cmp(&r.g(b).distance(r.g(i))));
+            v
+        };
+        let (s, h) = (near(&skin), near(&|j| body(j) && r.car.nodes[j].name.starts_with("sh_")));
+        if let (Some(&a), Some(&b), Some(&c)) = (s.first(), s.get(1), h.first()) {
+            for n in [[i, a, c], [i, c, b], [i, b, a]] {
+                add.push(Tri { n, part: Part::Body, group: None, sub: None, inner: true });
+            }
+        }
+    }
+    r.car.tris.extend(add);
+}

@@ -467,6 +467,20 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 let name: String = d.nodes[b[0] as usize].name.split('_').take(2).collect::<Vec<_>>().join("_").trim_end_matches(|c: char| c.is_ascii_digit()).into();
                 for key in [name, "ALL".into()] { let e = by.entry(key).or_default(); e[0] += area; if off > 0 { e[1] += area; } if off == 3 { e[2] += area; } if span > 0.4 { e[3] += area; } }
             }
+            let mut bare: std::collections::BTreeMap<u32, f32> = Default::default();
+            for t in v.indices.chunks_exact(3).filter(|t| t.iter().all(|&i| v.material[i as usize] == mat::PAINT)) {
+                let [x, y, z] = [0, 1, 2].map(|k| rest[t[k] as usize]);
+                for n in v.bind_nodes[t[0] as usize] { if !hull.contains(&n) { *bare.entry(n).or_default() += (y - x).cross(z - x).length() * 0.5; } }
+            }
+            let out = surface(a, &gap).tris;
+            let mut l: Vec<_> = bare.into_iter().collect();
+            l.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (n, area) in l {
+                let x = a.origin + np[n as usize];
+                let (dd, t, w) = out.iter().enumerate().map(|(i, q)| { let w = closest(x, q); (distance(x, q), i, w) }).min_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+                let ids: Vec<usize> = live_outer(a).collect();
+                println!("bare {:14} at {:.2} carries {area:.2} m2, {:.0} mm from the outer surface (winding {:.2}), triangle {:?} weights {:.2?}", d.nodes[n as usize].name, d.nodes[n as usize].position.map(|x| (x * 100.0).round() / 100.0)[0], dd * 1e3, winding(x, &out), a.triangles[ids[t]].nodes.map(|i| d.nodes[i as usize].name.clone()), w);
+            }
             let mut o: Vec<_> = by.into_iter().collect();
             o.sort_by(|a, b| b.1[0].total_cmp(&a.1[0]));
             for (n, e) in o.into_iter().take(26) { println!("carry {n:12} painted {:6.2} m2; some bound node without a triangle {:3.0} %, none with one {:3.0} %, nodes over 0.4 m apart {:3.0} %", e[0], 100.0 * e[1] / e[0], 100.0 * e[2] / e[0], 100.0 * e[3] / e[0]); }
@@ -486,10 +500,10 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                     deep_last = depth(&paint(&v, &rest, a), &surface(b, &gap)).max(depth(&paint(&v, &rest, b), &surface(a, &gap)));
                     deep = deep.max(deep_last);
                     // (PAINT_WHERE=1, run 0: the deepest paint of each car in the other, and the parts.)
-                    if deep_last > 0.04 && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
+                    if deep_last > 0.015 && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
                         for (n, x, y) in [("A in B", a, b), ("B in A", b, a)] {
                             let (dd, at) = deepest(&paint(&v, &rest, x), &surface(y, &gap));
-                            if dd < 0.04 { continue; }
+                            if dd < 0.015 { continue; }
                             let near = |s: &ExplicitBeams| { let i = (0..s.nodes.len()).min_by(|&i, &j| (s.origin + s.nodes[i].pos).distance(at).total_cmp(&(s.origin + s.nodes[j].pos).distance(at))).unwrap(); d.nodes[i].name.clone() };
                             let cs = |s: &ExplicitBeams, at: Vec3| { let sf = surface(s, &gap); let ids: Vec<usize> = live_outer(s).collect();
                                 let m = (0..ids.len()).min_by(|&i, &j| { let h = |t: &Tri| { let w = closest(at, t); at.distance(t[0] * w[0] + t[1] * w[1] + t[2] * w[2]) }; h(&sf.tris[i]).total_cmp(&h(&sf.tris[j])) }).unwrap();

@@ -402,7 +402,7 @@ pub(super) fn hull_faces(p: &[Vec3]) -> Vec<Vec<usize>> {
 /// Before this only the outer skin had triangles: a door T-boned at 50 km/h
 /// went through the sill's top edge and the A-pillar, and nothing in the
 /// cabin could stop it or be pushed by it.
-pub(super) fn interior_skins(r: &mut Rig) {
+pub(super) fn interior_skins(r: &mut Rig, inp: &dyn RigInput) {
     let ix: HashMap<String, usize> = r
         .car
         .nodes
@@ -532,6 +532,7 @@ pub(super) fn interior_skins(r: &mut Rig) {
     r.car.tris.extend(add);
     fill_holes(r);
     belly_cap(r);
+    cover_bare(r, inp);
 }
 
 /// The least share of an edge node's ties' directions along their weakest
