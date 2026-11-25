@@ -163,7 +163,7 @@
         <div class="note">Every slider restarts the test in place: the car back to rest at the new speed, no reload.</div>
       </div>
       <h2>Options</h2>
-      <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label title="Edge contact between cars: their skins' edges against each other's, and a car's corners against the other's edges, so panels cannot slide through each other between nodes (a pass of its own after car-to-car contact; off by default while measured). Rebuilds the scene."><input type="checkbox" id="edge" data-opt="build" /> edge contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
+      <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label title="Edge contact between cars: their skins' edges against each other's, and a car's corners against the other's edges, so panels cannot slide through each other between nodes (a pass of its own after car-to-car contact). On by default for up to three cars on the flat arena, off in larger scenes, where it is too slow. Rebuilds the scene."><input type="checkbox" id="edge" data-opt="build" /> edge contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
         <label title="Copies of the car in the run. On the mountain they leave the lip together, side by side and stacked, closing on the first car, so they crash into each other on the way down; on the flat arena the others stand in a row to one side. The numbers shown are the first car's. Rebuilds the lab in place (no reload).">cars <input type="number" id="cars" data-opt="build" value="1" min="1" max="32" step="1" /></label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
@@ -373,10 +373,17 @@
     // fleet-wide passes keep many cars in real time without it.)
     const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby';
     if (!surfaceChosen) put('surface', surfaceDefault());
+    // Edge contact between cars by default for up to three generated cars on the flat arena:
+    // it costs two cars 1 to 3 ms a frame and an 8-car pile three times its frame (CUDA T4,
+    // docs/contact-design.md). A control, kept as chosen once it is.
+    let edgeChosen = qs.has('edge');
+    const edgeDefault = () => get('car') === 'gen' && mode !== 'mountain' && mode !== 'derby' && get('cars') + (get('parked') ? 1 : 0) <= 3;
+    const edgeFollow = () => { const on = edgeDefault(); if (edgeChosen || get('edge') === on) return false; put('edge', on); return true; };
+    edgeFollow();
     function syncUrl() {
       const q = new URLSearchParams();
       q.set('mode', mode);
-      for (const c of controls) { const v = get(c.id); if (v !== defaults[c.id] || c.id === 'car' || c.id === 'surface') q.set(c.id, typeof v === 'boolean' ? (v ? '1' : '0') : v ?? ''); }
+      for (const c of controls) { const v = get(c.id); if (c.id === 'edge' ? edgeChosen : v !== defaults[c.id] || c.id === 'car' || c.id === 'surface') q.set(c.id, typeof v === 'boolean' ? (v ? '1' : '0') : v ?? ''); }
       if (RECORD) q.set('record', '1');
       history.replaceState(null, '', `${location.pathname}?${q}`);
     }
@@ -402,6 +409,7 @@
       // and the derby's arena is a build of its own).
       let rebuild = builtScene !== null && (m === 'derby') !== (builtScene === 'derby');
       if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); rebuild = true; }
+      if (edgeFollow()) rebuild = true;
       return rebuild;
     }
     for (const [k, v] of Object.entries(MODES)) {
@@ -418,6 +426,8 @@
       const on = async () => {
         showOuts(); shapeUi(); syncUrl();
         if (c.id === 'surface') surfaceChosen = true;
+        if (c.id === 'edge') { edgeChosen = true; syncUrl(); }
+        if (['car', 'cars', 'parked'].includes(c.id)) edgeFollow();
         if (c.id === 'car' && !surfaceChosen) { put('surface', surfaceDefault()); syncUrl(); }
         if (c.id === 'script') { await loadScript(); restart(); return; }
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }

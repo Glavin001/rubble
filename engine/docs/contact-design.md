@@ -583,3 +583,20 @@ four times, and inner door faces are in the count.
   measured, dropped): edges through, medians of 12, head on 60 58 -> 67, 62; 100 61 -> 70, 72; overlap
   the same; pressed side 60 at the end 0.15 -> 0.24, 0.50 m. The tail cases at an edge's end were not
   tried. In contact and clear: head on 100 pressed, centres 3.0 to 3.7 m, 0 in all 8 runs.
+
+### Edge contact had never run in a browser (fixed 2026-11-25)
+
+- **The fault.** The `edges` module was missing from `ExplicitBeamsGpu::compute_specs`, so on a
+  host that compiles ahead (the browser) `pipeline_ready("edges")` was never true and every
+  frame went out with edge contact off. Every earlier statement here that `edge=1` ran on the
+  lab page is wrong: those checks only saw the page load. Native and CUDA numbers stand.
+- **The fix** lists the pass for any vehicle with `edge_contact`; the frame check waits while
+  the split modules compile instead of panicking.
+  Tests: `a_browser_host_compiles_the_edge_pass`, `edge_contact_waits_for_its_deferred_compiles`.
+- **Proof on the page** (`mode=drive&car=gen&surface=1&cars=3`, pipelines counted by hooking
+  `setPipeline`): `explicit_beams_split_edges_wide` 5400 against 5400 member steps, no
+  engine error. The cars were not in contact in that run, so a crash on the page is not yet
+  measured, nor is its frame time (the pane was hidden and throttled to 1 frame a second).
+- **Until the compile finishes**, a page's first frames run without edge contact.
+- **Default.** The lab turns it on for up to three generated cars on the flat arena (parked
+  ones counted); at four the box clears (checked). Larger scenes do not afford it yet.

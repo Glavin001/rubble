@@ -1544,7 +1544,7 @@ impl ExplicitBeamsGpu {
                 ("fleetplan", FLEET_PLAN_ENTRY),
                 ("fleetpost", FLEET_POST_ENTRY),
                 ("fleetlevels", FLEET_LEVELS_ENTRY),
-            ] {
+            ].into_iter().chain(vehicles.iter().any(|v| v.edge_contact).then_some(("edges", plan::SPLIT_EDGE_ENTRY))) {
                 let module = split_module(which, aero, lanes);
                 // (The groups' and the fleet plan's modules bind the fleet's arguments.)
                 let args = matches!(which, "group" | "groupbegin" | "grouplevels" | "grouplv" | "fleetplan");

@@ -991,7 +991,7 @@ fn frame_with(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
     let vv = !selfs && self_split_vv_on(planner, sw, steps, &cmds);
     kind.self_split_vv = vv;
     let group = vv || group_split_on(planner, sw, steps);
-    super::edge::edge_frame_check(planner, group, steps);
+    super::edge::edge_frame_check(planner, sw, group, steps);
     kind.vv_wide = group && super::vv_wide::on(planner, sw, steps, vv);
     // Vehicle sleep's awake-indexed dispatch on a split path (a step a dispatch): the
     // kernel's sleepPad0 = 2 in every copy. The awake list's kernel then also wakes

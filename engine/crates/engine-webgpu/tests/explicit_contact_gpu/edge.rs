@@ -412,3 +412,23 @@ fn contact_offsets_scene(split: bool) {
     eprintln!("without offsets the CPU ends {moved:.4} m away");
     assert!(moved > 1e-4, "the offsets made no difference");
 }
+
+/// A browser host compiles the modules `compute_specs` lists and runs a pass only once its
+/// module is compiled: a fleet with edge contact must list the edge pass's (it did not until
+/// 2026-11-25, so pages never ran edge contact), one without must not.
+#[test]
+fn a_browser_host_compiles_the_edge_pass() {
+    let fleet = |edge: bool| -> Vec<ExplicitBeams> {
+        (0..2)
+            .map(|k| {
+                let x = 2.0 * k as f32;
+                let mut s = tetra([Vec3::new(x, 0.0, 0.0), Vec3::new(x + 1.0, 0.0, 0.0), Vec3::new(x, 1.0, 0.0), Vec3::new(x, 0.0, 1.0)], Vec3::ZERO);
+                s.edge_contact = edge;
+                s
+            })
+            .collect()
+    };
+    let has = |edge: bool| ExplicitBeamsGpu::compute_specs(&fleet(edge), None).iter().any(|s| s.module.starts_with("explicit_beams_split_edges"));
+    assert!(has(true), "the edge pass's module is not listed");
+    assert!(!has(false), "the edge pass's module without edge contact");
+}

@@ -137,9 +137,14 @@ pub(super) fn offset_tables(
 
 /// Edge vehicle contact runs only as the split group path's pass: a frame with contact
 /// off that path would drop its edge hits.
-pub(super) fn edge_frame_check(planner: &FramePlanner, group: bool, steps: u32) {
+pub(super) fn edge_frame_check(planner: &FramePlanner, sw: &Switches, group: bool, steps: u32) {
+    // (A browser host whose split path's modules still compile runs the groups' workgroup,
+    // without edge hits, until they are.)
+    let waiting = ["member", "tests", "group", "groupbegin", "grouplevels", "grouplv"]
+        .iter()
+        .any(|w| !(sw.ready)(&split_module_name(w, sw.aero, sw.lanes)));
     assert!(
-        planner.words[W_EDGE] == 0 || group || !planner.contact_active() || steps == 0,
+        planner.words[W_EDGE] == 0 || group || waiting || !planner.contact_active() || steps == 0,
         "explicit beams: edge vehicle contact needs the split group path (group_split on, not debug)"
     );
 }
