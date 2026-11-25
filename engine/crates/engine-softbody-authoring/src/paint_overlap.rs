@@ -486,10 +486,10 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                     deep_last = depth(&paint(&v, &rest, a), &surface(b, &gap)).max(depth(&paint(&v, &rest, b), &surface(a, &gap)));
                     deep = deep.max(deep_last);
                     // (PAINT_WHERE=1, run 0: the deepest paint of each car in the other, and the parts.)
-                    if k == 0 && deep_last > 0.03 && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
+                    if deep_last > 0.04 && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
                         for (n, x, y) in [("A in B", a, b), ("B in A", b, a)] {
                             let (dd, at) = deepest(&paint(&v, &rest, x), &surface(y, &gap));
-                            if dd < 0.03 { continue; }
+                            if dd < 0.04 { continue; }
                             let near = |s: &ExplicitBeams| { let i = (0..s.nodes.len()).min_by(|&i, &j| (s.origin + s.nodes[i].pos).distance(at).total_cmp(&(s.origin + s.nodes[j].pos).distance(at))).unwrap(); d.nodes[i].name.clone() };
                             let cs = |s: &ExplicitBeams, at: Vec3| { let sf = surface(s, &gap); let ids: Vec<usize> = live_outer(s).collect();
                                 let m = (0..ids.len()).min_by(|&i, &j| { let h = |t: &Tri| { let w = closest(at, t); at.distance(t[0] * w[0] + t[1] * w[1] + t[2] * w[2]) }; h(&sf.tris[i]).total_cmp(&h(&sf.tris[j])) }).unwrap();
