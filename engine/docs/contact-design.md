@@ -548,3 +548,10 @@ and fender, bumper and fender, body and hood.
   0.52; bumper x itself 0.88 over 1.95. One triangle reaches through another by 8 mm at most (they are
   that small). The "behind" figures it prints are not a depth: they count any vertex within 30 cm
   under the other part's surface, curved panels included, with no baseline as built.
+- The self edge experiment (SELF_EDGE=1) already solves its hits in the self node hits' turn; it
+  hardly tests the seams. Pole 64, edge pairs within the range with both closest points inside
+  (pair-steps): 49,018 excluded for starting within 25 mm (44 pairs, 27 of them facing alike, p50
+  14.6 mm apart), 9,520 rejected for facing alike, 1,462 (2 %) tested. Many of the excluded are seams
+  at rest, not crossings. A seam pair needs its side remembered from spawn and contact only at
+  crossing; neighbours' edges are nearly parallel, where the edges' cross product gives no normal, so
+  the pair's own faces must give the side. Not built.
