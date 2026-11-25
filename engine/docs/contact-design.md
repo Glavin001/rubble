@@ -542,3 +542,9 @@ and fender, bumper and fender, body and hood.
 - The paint carried rigidly by its collision triangle instead (PAINT_ON_SKIN=1) is four times worse
   (pole at the end 5.4 -> 21.9 m, head on 7.5 -> 27.2): it tears at each triangle's edge. Not a fix.
   What is left to try is the reverse: collide points and edges placed as the paint is.
+- Where a car's own crossings are (PAINT_DEPTH=1, SELF_OFFSET=2, one run): small places at the seams
+  of neighbours. Pole 64: door x fender 0.88 m of line over 0.26 m, bumper x fender 0.65 over 0.16,
+  doors' inner x hood 0.34 to 0.38 over 0.15, the rest under 0.3 m. Side 60: fender x hood 1.0 m over
+  0.52; bumper x itself 0.88 over 1.95. One triangle reaches through another by 8 mm at most (they are
+  that small). The "behind" figures it prints are not a depth: they count any vertex within 30 cm
+  under the other part's surface, curved panels included, with no baseline as built.

@@ -406,6 +406,65 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                 println!("{scene} {kmh}: paint from where its collision panel carries it: bound to one {}; not bound to one {}", q(&mut dev_on), q(&mut dev_off));
             }
         }
+        // (PAINT_DEPTH=1, run 0: how deep a car's own crossings go. Crossing triangles are joined
+        // into patches (pairs within 5 cm); a patch's depth is the farthest any painted vertex
+        // within 25 cm of it, of the part that pokes, lies behind the other part's crossing plane.)
+        if k == 0 && std::env::var("PAINT_DEPTH").is_ok_and(|x| x == "1") {
+            let ids: Vec<u32> = v.indices.chunks_exact(3).filter(|t| t.iter().all(|&i| v.material[i as usize] == mat::PAINT)).map(|t| t[0]).collect();
+            let part = |t: u32| { let n = &d.nodes[v.bind_nodes[ids[t as usize] as usize][0] as usize].name; n.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string() };
+            for s in &w.vehicles {
+                let pt = paint_ids(&v, &rest, s);
+                let at: HashMap<u32, Tri> = pt.iter().copied().collect();
+                // Per pair of parts the crossing points with the other's normal there.
+                let mut by: HashMap<(String, String), Vec<(Vec3, f32, f32)>> = HashMap::new();
+                for ((i, j), l) in self_pairs(&pt) {
+                    if built.contains(&(i, j)) { continue; }
+                    let (a, b) = (part(i), part(j));
+                    let c = (at[&i][0] + at[&i][1] + at[&i][2]) / 3.0;
+                    // How far each triangle reaches through the other's plane.
+                    let through = |x: &Tri, y: &Tri| {
+                        let n = (y[1] - y[0]).cross(y[2] - y[0]).normalize_or_zero();
+                        let e = x.map(|p| (p - y[0]).dot(n));
+                        e[0].max(e[1]).max(e[2]).min(-(e[0].min(e[1]).min(e[2])))
+                    };
+                    let t = through(&at[&i], &at[&j]).min(through(&at[&j], &at[&i]));
+                    by.entry(if a <= b { (a, b) } else { (b, a) }).or_default().push((c, l, t));
+                }
+                let mut o: Vec<_> = by.into_iter().map(|(k, v)| {
+                    let lo = v.iter().fold(Vec3::splat(f32::MAX), |m, x| m.min(x.0));
+                    let hi = v.iter().fold(Vec3::splat(f32::MIN), |m, x| m.max(x.0));
+                    (v.iter().map(|x| x.1).sum::<f32>(), k, v.len(), (hi - lo).length(), v.iter().map(|x| x.2).fold(0.0f32, f32::max))
+                }).collect();
+                o.sort_by(|a, b| b.0.total_cmp(&a.0));
+                println!("{scene} {kmh}: own crossings by parts (line m, pairs, extent m, deepest one triangle reaches mm):");
+                for (l, k, n, e, t) in o.iter().take(9) { println!("    {:>11} x {:<11} {l:5.2} {n:5} {e:5.2} {:5.1}", k.0, k.1, t * 1e3); }
+                // The depth proper: per painted vertex of a crossing part, its distance inside the other
+                // part's own closed neighbourhood: signed against the other part's nearest painted triangle.
+                for (_, kk, _, _, _) in o.iter().take(5) {
+                    let of = |p: &str| -> Vec<Tri> { pt.iter().filter(|x| part(x.0) == p).map(|x| x.1).collect() };
+                    let (x, y) = (of(&kk.0), of(&kk.1));
+                    let deep = |x: &[Tri], y: &[Tri]| -> (usize, f32) {
+                        let mut r: Vec<f32> = Vec::new();
+                        for t in x.iter().step_by(3) {
+                            let c = t[0];
+                            let mut best = (f32::MAX, 0.0f32);
+                            for q in y {
+                                let n = (q[1] - q[0]).cross(q[2] - q[0]).normalize_or_zero();
+                                let h = (c - q[0]).dot(n);
+                                if h.abs() > 0.3 { continue; }
+                                let z = c - n * h;
+                                if (0..3).all(|e| (q[(e + 1) % 3] - q[e]).cross(z - q[e]).dot(n) >= 0.0) && h.abs() < best.0 { best = (h.abs(), h); }
+                            }
+                            if best.0 < f32::MAX && best.1 < 0.0 { r.push(best.0); }
+                        }
+                        r.sort_by(f32::total_cmp);
+                        (r.len(), r.get(r.len() * 9 / 10).copied().unwrap_or(0.0))
+                    };
+                    let (a, b) = (deep(&x, &y), deep(&y, &x));
+                    println!("    behind: {} of {} under {} p90 {:.0} mm; {} of {} under {} p90 {:.0} mm", a.0, x.len() / 3, kk.1, a.1 * 1e3, b.0, y.len() / 3, kk.0, b.1 * 1e3);
+                }
+            }
+        }
         // (PAINT_FIT=1, run 0, at the end; `drive 0 0.02`: as built.) Per part the painted area and
         // how much of it lies past the edge of the whole car's collision skin, by how far.
         if k == 0 && std::env::var("PAINT_FIT").is_ok_and(|x| x == "1") {
