@@ -27,6 +27,8 @@ fn edge_contact_side_30_paint_never_cuts() {
     assert!(largest("side", 30.0, 1.0, true, false).0 <= CLEAR);
 }
 
+/// (After the 60 km/h head-on the cars are 8 to 11 m apart: there it says only that they come
+/// apart. The 100 km/h one mostly ends in contact, about 3.6 m between centres.)
 #[test]
 fn edge_contact_crashes_end_with_paint_clear() {
     for (scene, kmh, secs) in [("head", 60.0, 1.5), ("head", 100.0, 1.5), ("side", 60.0, 2.0)] {

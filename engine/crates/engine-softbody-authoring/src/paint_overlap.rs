@@ -14,46 +14,111 @@ use std::collections::HashMap;
 
 pub type Tri = [Vec3; 3];
 
-/// (A measurement, PAINT_ON_SKIN=1) Per render vertex the collision triangle it lies over as
-/// built, of the part it is bound to when it has one there, and its place in it: the paint
-/// carried by its collision panel instead of its own skinning.
-type OnSkin = Vec<Option<([u32; 3], [f32; 3])>>;
+/// (A measurement, PAINT_ON_SKIN=1) The paint embedded in its part's collision skin: per render
+/// vertex the closest point on its own part's triangles as built (clamped, so never
+/// extrapolated), as the barycentric blend of the triangle's nodes, each carrying the vertex's
+/// rest offset from it by its own rotation (its skin neighbours', `rotations`). Continuous
+/// across triangle edges.
+struct OnSkin {
+    at: Vec<Option<([u32; 3], [f32; 3])>>,
+    rest_p: Vec<Vec3>,
+    rest_n: Vec<Vec3>,
+    near: Vec<Vec<u32>>,
+}
 static ON_SKIN: std::sync::OnceLock<OnSkin> = std::sync::OnceLock::new();
+
+/// Each node's rotation from rest: the one best fitting its skin neighbours (the neighbours'
+/// area-free normals stand in for the third direction of a flat patch).
+fn rotations(o: &OnSkin, x: &[Vec3]) -> Vec<glam::Quat> {
+    (0..x.len())
+        .map(|i| {
+            let nb = &o.near[i];
+            if nb.len() < 2 {
+                return glam::Quat::IDENTITY;
+            }
+            let pairs: Vec<(Vec3, Vec3)> = nb.iter().map(|&j| (o.rest_n[j as usize] - o.rest_n[i], x[j as usize] - x[i])).collect();
+            let mut m = glam::DMat3::ZERO;
+            let outer = |a: Vec3, b: Vec3, w: f64| { let (a, b) = (a.as_dvec3(), b.as_dvec3()); glam::DMat3::from_cols(b * a.x, b * a.y, b * a.z) * w };
+            for (k, (r, d)) in pairs.iter().enumerate() {
+                m += outer(*r, *d, 1.0);
+                let (r2, d2) = pairs[(k + 1) % pairs.len()];
+                let (nr, nd) = (r.cross(r2), d.cross(d2));
+                let l = r.length().max(1e-6);
+                if nr.length() > 1e-8 && nd.length() > 1e-8 {
+                    m += outer(nr.normalize() * l, nd.normalize() * l, 1.0);
+                }
+            }
+            // The rotation of m (Müller et al. 2016, iterated from the identity).
+            let mut q = glam::DQuat::IDENTITY;
+            for _ in 0..60 {
+                let r = glam::DMat3::from_quat(q);
+                let c = r.x_axis.cross(m.x_axis) + r.y_axis.cross(m.y_axis) + r.z_axis.cross(m.z_axis);
+                let d = r.x_axis.dot(m.x_axis) + r.y_axis.dot(m.y_axis) + r.z_axis.dot(m.z_axis);
+                let w = c / (d.abs() + 1e-9);
+                let a = w.length();
+                if a < 1e-9 { break; }
+                q = (glam::DQuat::from_axis_angle(w / a, a) * q).normalize();
+            }
+            q.as_quat()
+        })
+        .collect()
+}
 
 fn on_skin(v: &ShowcaseVisual, s: &ExplicitBeams, part: impl Fn(u32) -> String) -> OnSkin {
     let r: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
     let p = deform(v, &r).0;
-    let tri: Vec<([u32; 3], String)> =
-        (0..s.triangles.len()).filter(|&t| !s.tri_anti_only(t)).map(|t| (s.triangles[t].nodes, part(s.triangles[t].nodes[0]))).collect();
-    (0..p.len())
+    let mut near: Vec<Vec<u32>> = vec![Vec::new(); r.len()];
+    let mut tri: HashMap<String, Vec<[u32; 3]>> = HashMap::new();
+    for t in (0..s.triangles.len()).filter(|&t| !s.tri_anti_only(t)) {
+        let n = s.triangles[t].nodes;
+        let name = part(n[0]);
+        // (A seam bridge, its nodes of two parts: none's.)
+        if n.iter().any(|&k| part(k) != name) { continue; }
+        for k in 0..3 {
+            for m in 0..3 {
+                if m != k && !near[n[k] as usize].contains(&n[m]) { near[n[k] as usize].push(n[m]); }
+            }
+        }
+        tri.entry(name).or_default().push(n);
+    }
+    let at = (0..p.len())
         .map(|i| {
-            if v.material[i] != mat::PAINT {
-                return None;
+            if v.material[i] != mat::PAINT { return None; }
+            // Its part: of the nodes it follows (one part's pool), the nearest as built.
+            let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
+            let top = (a..b).map(|k| v.wt_node[k]).min_by(|&x, &y| r[x as usize].distance(p[i]).total_cmp(&r[y as usize].distance(p[i]))).unwrap_or(v.bind_nodes[i][0]);
+            let mut best = (f32::MAX, [0u32; 3], [0.0f32; 3]);
+            for &n in tri.get(&part(top))? {
+                let q = n.map(|k| r[k as usize]);
+                let w = closest(p[i], &q);
+                let d = p[i].distance(q[0] * w[0] + q[1] * w[1] + q[2] * w[2]);
+                if d < best.0 { best = (d, n, w); }
             }
-            let mine = part(v.bind_nodes[i][0]);
-            let mut best: Option<(f32, [u32; 3], [f32; 3])> = None;
-            for (nodes, name) in &tri {
-                let q = nodes.map(|n| r[n as usize]);
-                let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
-                let n = e1.cross(e2).normalize_or_zero();
-                let h = (p[i] - q[0]).dot(n);
-                let x = p[i] - q[0] - n * h;
-                let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
-                let det = d11 * d22 - d12 * d12;
-                if det <= 1e-12 {
-                    continue;
-                }
-                let (b1, b2) = ((d22 * x.dot(e1) - d12 * x.dot(e2)) / det, (d11 * x.dot(e2) - d12 * x.dot(e1)) / det);
-                // (Past the triangle: by how far its place in it is out of range; another part costs more.)
-                let out = (-b1).max(-b2).max(b1 + b2 - 1.0).max(0.0) * d11.max(d22).sqrt();
-                let cost = h.abs() + 2.0 * out + if *name == mine { 0.0 } else { 0.1 };
-                if out < 0.2 && best.as_ref().is_none_or(|b| cost < b.0) {
-                    best = Some((cost, *nodes, [b1, b2, h]));
-                }
-            }
-            best.filter(|b| b.0 < 0.35).map(|b| (b.1, b.2))
+            (best.0 < f32::MAX).then_some((best.1, best.2))
         })
-        .collect()
+        .collect();
+    OnSkin { at, rest_p: p, rest_n: r, near }
+}
+
+/// The closest point of a triangle to p, as weights (Ericson 5.1.5).
+fn closest(p: Vec3, t: &Tri) -> [f32; 3] {
+    let (ab, ac, ap) = (t[1] - t[0], t[2] - t[0], p - t[0]);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 { return [1.0, 0.0, 0.0]; }
+    let bp = p - t[1];
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 { return [0.0, 1.0, 0.0]; }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 { let v = d1 / (d1 - d3); return [1.0 - v, v, 0.0]; }
+    let cp = p - t[2];
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 { return [0.0, 0.0, 1.0]; }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 { let w = d2 / (d2 - d6); return [1.0 - w, 0.0, w]; }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 { let w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); return [0.0, 1.0 - w, w]; }
+    let k = 1.0 / (va + vb + vc);
+    [1.0 - vb * k - vc * k, vb * k, vc * k]
 }
 
 /// The crossing segment's length of two triangles (0: none, or coplanar).
@@ -125,12 +190,13 @@ pub fn crossing(a: &[Tri], b: &[Tri]) -> f32 {
 fn paint_ids(v: &ShowcaseVisual, rest: &[Vec3], s: &ExplicitBeams) -> Vec<(u32, Tri)> {
     let n: Vec<Vec3> = s.nodes.iter().map(|n| s.origin + n.pos).collect();
     let mut p = deform(v, &n).0;
+    // (PAINT_STRETCHED=1: triangles stretched past 3 times rest too; the page draws weighted paint so.)
+    let stretched = std::env::var("PAINT_STRETCHED").is_ok_and(|x| x == "1");
     if let Some(on) = ON_SKIN.get() {
-        for (i, b) in on.iter().enumerate() {
-            let Some((t, [b1, b2, h])) = b else { continue };
-            let q = t.map(|k| n[k as usize]);
-            let (e1, e2) = (q[1] - q[0], q[2] - q[0]);
-            p[i] = q[0] + e1 * *b1 + e2 * *b2 + e1.cross(e2).normalize_or_zero() * *h;
+        let rot = rotations(on, &n);
+        for (i, b) in on.at.iter().enumerate() {
+            let Some((t, w)) = b else { continue };
+            p[i] = (0..3).map(|k| { let j = t[k] as usize; (n[j] + rot[j] * (on.rest_p[i] - on.rest_n[j])) * w[k] }).sum();
         }
     }
     v.indices
@@ -140,7 +206,7 @@ fn paint_ids(v: &ShowcaseVisual, rest: &[Vec3], s: &ExplicitBeams) -> Vec<(u32, 
         .enumerate()
         .filter(|(_, t)| (0..3).all(|k| {
             let (i, j) = (t[k], t[(k + 1) % 3]);
-            p[i].is_finite() && p[i].distance(p[j]) <= 3.0 * rest[i].distance(rest[j]) + 0.01
+            p[i].is_finite() && (stretched || p[i].distance(p[j]) <= 3.0 * rest[i].distance(rest[j]) + 0.01)
         }))
         .map(|(k, t)| (k as u32, t.map(|i| p[i])))
         .collect()
@@ -228,10 +294,15 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
     };
     let rest: Vec<Vec3> = v.positions.iter().map(|&p| Vec3::from(p)).collect();
     if std::env::var("PAINT_ON_SKIN").is_ok_and(|x| x == "1") {
-        let part = |n: u32| d.nodes.get(n as usize).map_or("?".to_string(), |n| n.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string());
+        // The rig's parts, joined to the body where a part has no collision triangle of its own
+        // (groups: the file's self-collision groups; the car's own table of node parts).
+        let parts: HashMap<String, String> = built.rig.car.nodes.iter().map(|n| (n.name.clone(), n.part.name().to_string())).collect();
+        let own: std::collections::HashSet<String> = (0..probe.triangles.len()).filter_map(|t| d.nodes.get(probe.triangles[t].nodes[0] as usize)).filter_map(|n| parts.get(&n.name).cloned()).collect();
+        println!("parts with collision triangles: {}", own.len());
+        let part = |n: u32| d.nodes.get(n as usize).and_then(|n| parts.get(&n.name)).filter(|p| own.contains(*p)).cloned().unwrap_or("?".into());
         let on = ON_SKIN.get_or_init(|| on_skin(&v, &probe, part));
         let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
-        println!("paint carried by its collision panel: {} of {n} vertices", on.iter().filter(|x| x.is_some()).count());
+        println!("paint carried by its collision panel: {} of {n} vertices", on.at.iter().filter(|x| x.is_some()).count());
     }
     let run = |k: usize| -> [f32; 6] {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);

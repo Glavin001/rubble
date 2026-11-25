@@ -560,3 +560,22 @@ and fender, bumper and fender, body and hood.
   medians, own paint at the end / car through car worst). Alone: pole 2.90 -> 3.03, head on 4.73 ->
   8.19 / 2.52 -> 5.62; with the other self edge pairs: pole 3.16, head on 8.00 / 8.56; driving 0. The
   control (neither tested) is the baseline to the digit. So the seams' edge pairs are not the lever.
+
+### An outside read (Fable, read-only, 2026-11-25) and its first tests
+
+Its points found true in the code: the paint follows a smooth field of radius 0.42 m or more a part
+(flexskin.rs R_MIN); the page draws stretched weighted paint (the measure leaves it out; counted,
+PAINT_STRETCHED=1, the numbers are the same); clip memory keeps a node's two smallest keys, not its
+deepest; the edge pass takes the cross product down to 1e-8 (no near-parallel rule). Taken from its
+report, not rechecked: painted panels are double sheets, so one panel through another counts up to
+four times, and inner door faces are in the count.
+- "Ends clear" was mostly the cars apart: head on 60 at 1 s the centres are 8.5 to 10.8 m apart.
+  In contact at the end: head on 100 (3.2 to 8.8 m, median 3.6), side 60 and 30 pressed (3.1 to 3.4).
+- Its next experiment, the paint embedded continuously in its part's collision skin (closest point,
+  each node carrying the rest offset by its rotation; all 354,966 vertices): own paint at the end pole
+  5.38 -> 8.13, head on 7.50 -> 18.85: its stop rule (under 40 % less) is met. The driving control is
+  not clean (0 -> 3.2 worst), so it says this embedding is no way, not that the drawing has no part.
+- Paint points with edge contact (RUBBLE_PAINT_POINTS=1), worst median: head on 60 3.21 -> 4.07, 100
+  2.23 -> 3.29, pressed 60 3.72 -> 3.23, pressed side 60 1.38 -> 1.41: dropped.
+- The default path (no offsets, edge contact off) on CUDA, 46223bae against b596b26a: 12 rows bit for
+  bit, none slower (head on +2.2 % the most), with the shipped ssqrt.
