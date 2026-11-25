@@ -508,3 +508,15 @@ be rebuilt alone yet); the preparation works out every edge each step, listed or
 Edges near no partner (its box grown by the lists' reach) are not worked out: read per partner box
 the pile got slower (89.5 -> 94), per member's joint box all three rows gain. Last run pile8_e,
 side_e, headon_e: see the commit; before 89.5, 18.4, 13.7.
+
+### A car through itself, as seen (2026-11-25, CPU)
+
+A car's own paint cutting itself (m; pairs that did not as built; min/median/max of 4; the control,
+standing, 60 and 120 km/h: 0): pole 64 worst 7.3/7.5/8.5, at the end 5.1/5.4/5.5; pole 40 11.4/11.7/
+12.2, 5.0/5.1/5.5; head on 60 13.1/14.3/14.8, 4.8/7.5/7.8; side 60 7.5/8.5/9.3, 3.7/4.0/4.1. It is
+more than car through car, which ends at 0 there. Mostly neighbouring panels: hood and fender, door
+and fender, bumper and fender, body and hood.
+- SELF_EDGE=1: pole at the end 5.4 -> 3.3, but head on 7.5 -> 8.3 and car through car worst 2.6 -> 6.8.
+- Not the pairs excluded for starting inside the contact range: 20 of them, and with none excluded
+  (SELF_EXCL=0) 5.39 and 8.01 against 5.38 and 7.50.
+- Open: self contact does not use the contact offsets; whether the collision skins cross there too.

@@ -159,6 +159,21 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
         s.surface_contact = true;
         s.edge_contact = edge;
         s.finish();
+        // (SELF_EXCL=0: the pairs excluded from self contact for starting in range take part;
+        // PAINT_PARTS=1 counts them.)
+        if std::env::var("PAINT_PARTS").is_ok_and(|x| x == "1") {
+            let mut by: HashMap<(String, String), usize> = HashMap::new();
+            let part = |n: u32| d.nodes.get(n as usize).map_or("?".into(), |n| n.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string());
+            for (t, e) in s.tri_excl.iter().enumerate() {
+                for &h in e { *by.entry((part(h), part(s.triangles[t].nodes[0]))).or_default() += 1; }
+            }
+            let mut o: Vec<_> = by.into_iter().collect();
+            o.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("excluded node-triangle pairs {}: {:?}", o.iter().map(|x| x.1).sum::<usize>(), &o[..o.len().min(16)]);
+        }
+        if std::env::var("SELF_EXCL").is_ok_and(|x| x == "0") {
+            s.tri_excl.iter_mut().for_each(|e| e.clear());
+        }
         s
     };
     let rest: Vec<Vec3> = v.positions.iter().map(|&p| Vec3::from(p)).collect();
@@ -210,6 +225,28 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
                     own_last = own(&w);
                     own_worst = own_worst.max(own_last);
                 }
+            }
+        }
+        // (PAINT_PARTS=1, run 0: the parts whose paint cuts, and whether the car's own collision
+        // skin crosses there too.)
+        if k == 0 && std::env::var("PAINT_PARTS").is_ok_and(|x| x == "1") {
+            let ids: Vec<[u32; 3]> = v.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).filter(|t| t.iter().all(|&i| v.material[i as usize] == mat::PAINT)).collect();
+            let part = |t: u32| {
+                let n = &d.nodes[v.bind_nodes[ids[t as usize][0] as usize][0] as usize];
+                n.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string()
+            };
+            for s in &w.vehicles {
+                let mut by: HashMap<(String, String), f32> = HashMap::new();
+                for ((i, j), l) in self_pairs(&paint_ids(&v, &rest, s)) {
+                    if !built.contains(&(i, j)) {
+                        let (a, b) = (part(i), part(j));
+                        *by.entry(if a <= b { (a, b) } else { (b, a) }).or_default() += l;
+                    }
+                }
+                let mut o: Vec<_> = by.into_iter().collect();
+                o.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let same: f32 = o.iter().filter(|x| x.0 .0 == x.0 .1).map(|x| x.1).sum();
+                println!("{scene} {kmh}: own paint {:.2} m, of it a part through itself {same:.2}: {:?}", o.iter().map(|x| x.1).sum::<f32>(), &o[..o.len().min(10)]);
             }
         }
         let centre = |s: &ExplicitBeams| s.nodes.iter().map(|n| (s.origin + n.pos) * n.mass).sum::<Vec3>() / s.nodes.iter().map(|n| n.mass).sum::<f32>();

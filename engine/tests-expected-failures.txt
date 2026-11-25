@@ -34,6 +34,7 @@ gen_sedan_contact::offset_head_on_no_overlap
 gen_sedan_paint::edge_contact_crashes_paint_never_cuts
 gen_sedan_paint::edge_contact_pressing_ends_with_paint_clear
 gen_sedan_paint::default_pressing_ends_with_paint_clear
+gen_sedan_paint::own_paint_ends_apart
 
 # The vehicle lint on every generated design (tests/generated_vehicle_lint.rs, 2026-11-24): the
 # collision skin's defects, found by hand in the S4 crash study, now caught at build time.
