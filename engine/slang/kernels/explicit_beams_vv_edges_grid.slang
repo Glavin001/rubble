@@ -97,7 +97,6 @@ int3 edgeCellAt(int3 c0, int3 c1, uint k)
 // cursors, 4 scatter); a barrier after each.
 void edgeGridStage(uint v, float cell, float reach, uint stage, uint lane)
 {
-    if ((edgeAblate() & 2u) != 0u) return;
     uint blocks = EDGE_BUCKETS / EDGE_BLOCK;
     if (stage == 0u)
     {

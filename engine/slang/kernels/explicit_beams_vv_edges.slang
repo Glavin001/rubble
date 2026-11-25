@@ -39,8 +39,7 @@ groupshared uint gsEdgeSig[VV_PART];
 static uint gEdgeCollect = 0u;
 static float gEdgeCollectReach = 0.0;
 
-// Measurement only (`RUBBLE_EDGE_ABLATE`, time; results meaningless): 1 the pair tests, 2 the
-// grids, 4 the edges' step data, 8 the hits (found, not kept) skipped; 16 the candidates
+// Measurement only (`RUBBLE_EDGE_ABLATE`, time; results meaningless): 1 the pair tests, 8 the hits (found, not kept) skipped; 16 the candidates
 // found again every step (lossless: a check of the list's margin).
 uint edgeAblate() { return gStatic[gP.edgeBase - 1u].x; }
 float edgeSkin() { float s = asfloat(gStatic[gP.edgeBase - 1u].y); return s > 0.0 ? s : EDGE_SKIN; }
@@ -152,7 +151,6 @@ void edgeNearBoxes(uint k, uint off, uint parity, float reach, uint lane)
 // its scratch, its ends into the vehicle's box when live.
 void edgePrepare(uint v, uint k)
 {
-    if ((edgeAblate() & 4u) != 0u) return;
     uint4 v0 = edgeV0(v);
     uint4 v1 = edgeV1(v);
     uint4 rec = gStatic[v0.x + k];

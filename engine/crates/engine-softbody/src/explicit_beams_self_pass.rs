@@ -4,6 +4,22 @@
 use super::*;
 
 impl ExplicitBeams {
+    /// Self contact's positions, relative to the origin: (triangle corners, contacters).
+    /// Under measurement, SELF_OFFSET: 1 the triangles at the contact offsets, 2 the
+    /// contacters too, as vehicle contact's (off).
+    pub(crate) fn self_positions(&self) -> (Vec<Vec3>, Vec<Vec3>) {
+        let raw: Vec<Vec3> = self.nodes.iter().map(|n| n.pos).collect();
+        static MODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        match MODE.get_or_init(|| std::env::var("SELF_OFFSET").ok().and_then(|x| x.parse().ok()).unwrap_or(0)) {
+            1 => (crate::explicit_contact::contact_surface_positions(self), raw),
+            2 => {
+                let o = crate::explicit_contact::contact_surface_positions(self);
+                (o.clone(), o)
+            }
+            _ => (raw.clone(), raw),
+        }
+    }
+
     /// §37's residual pass over the step's two-body self hits (after the first,
     /// [`Self::apply_two_body_self_hits`], with its counts `split`): a second
     /// iteration of the mass-split pass for the approach the first left. Its

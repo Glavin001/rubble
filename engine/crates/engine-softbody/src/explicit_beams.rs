@@ -4339,8 +4339,6 @@ impl ExplicitBeams {
         let r = self.collision_range;
         let h = STEP;
         self.last_self_pairs = 0;
-        // (Under measurement, SELF_OFFSET: 1 the triangles at the contact offsets, 2 the
-        // contacters too, as vehicle contact's.)
         let at = self.self_positions();
         // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
         let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
@@ -4370,8 +4368,7 @@ impl ExplicitBeams {
                 continue;
             }
             let tri_group = self.triangle_self_group(t);
-            let world = |i: u32| self.origin + at.0[i as usize];
-            let (p0, p1, p2) = (world(i0), world(i1), world(i2));
+            let [p0, p1, p2] = [i0, i1, i2].map(|i| self.origin + at.0[i as usize]);
             let frame = TriFrame::new(p0, p1, p2);
             // Anti-clip (§36): the box also reaches what crossed it over the step
             // or is remembered up to CLIP_DEPTH behind it.
@@ -4654,9 +4651,8 @@ impl ExplicitBeams {
         let held = clip_side(&self.clip_sides[hn as usize], CLIP_SELF, t as u32);
         let crossing = || {
             let back = |k: usize| corners[k] - self.nodes[tri[k] as usize].vel * STEP;
-            let pf = TriFrame::new(back(0), back(1), back(2));
             let p_prev = p - self.nodes[hn as usize].vel * STEP;
-            let (a0, b0, _, d0) = pf.local(p_prev);
+            let (a0, b0, _, d0) = TriFrame::new(back(0), back(1), back(2)).local(p_prev);
             crossing_weights(a0, b0, d0, local.0, local.1, local.3)
         };
         let delta = local.3;
@@ -4667,20 +4663,6 @@ impl ExplicitBeams {
         }
         let pen = crate::explicit_contact::clip_depth(only, c.d, r);
         Some((c.w[0], c.w[1], c.w[2], pen, frame.n * c.side))
-    }
-
-    /// Self contact's positions, relative to the origin: (triangle corners, contacters).
-    pub(crate) fn self_positions(&self) -> (Vec<Vec3>, Vec<Vec3>) {
-        let raw: Vec<Vec3> = self.nodes.iter().map(|n| n.pos).collect();
-        static MODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-        match MODE.get_or_init(|| std::env::var("SELF_OFFSET").ok().and_then(|x| x.parse().ok()).unwrap_or(0)) {
-            1 => (crate::explicit_contact::contact_surface_positions(self), raw),
-            2 => {
-                let o = crate::explicit_contact::contact_surface_positions(self);
-                (o.clone(), o)
-            }
-            _ => (raw.clone(), raw),
-        }
     }
 
     /// Self-collision's two-body rule (spec §36; vehicle contact's §10.3 within
