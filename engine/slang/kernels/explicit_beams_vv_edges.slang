@@ -34,6 +34,8 @@ static const uint EDGE_CAND = 32u; // candidate pairs a listed item (explicit_pl
 static const float EDGE_SKIN = 0.12;
 // The candidate list's mode (a thread's): edgeTry keeps the pairs within reach + 2 skins
 // instead of testing them.
+// Each member's partners' signature this step (lane 0's).
+groupshared uint gsEdgeSig[VV_PART];
 static uint gEdgeCollect = 0u;
 static float gEdgeCollectReach = 0.0;
 
