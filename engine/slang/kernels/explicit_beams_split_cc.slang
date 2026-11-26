@@ -6,10 +6,10 @@
 
 #include "explicit_beams_cc_math.slang"
 
-static const uint CC_BEAMS_NODE = 5u;
+static const uint CC_BEAMS_NODE = 6u;
 static const uint CC_ACC_NODE = 9u;
-static const uint CC_VEH_WORDS = 10u;
-static const uint CC_PAIR_WORDS = 6u;
+static const uint CC_VEH_WORDS = 12u;
+static const uint CC_PAIR_WORDS = 16u;
 static const uint CC_GRID_BUCKETS = 1024u;
 // The CPU's Dat::new(0.08, 0.85) and its rounds: 8 speculative, 8 impulse, 16 zone rounds.
 static const uint CC_SPEC_ROUNDS = 8u;
@@ -38,10 +38,13 @@ uint ccCount(uint v) { return ccVW(v, 0u); }
 float ccReachV(uint v) { return asfloat(gAcc[ccVW(v, 1u)].load()); }
 float3 ccOrigin(uint v) { return asfloat(gMisc[v].xyz); }
 // World positions: at the step's start (the snapshot), now (x1), before the pass.
-float3 ccX0(uint v, uint gi) { return nf3(ccOrigin(v) + gBeams[ccB(gi, 0u)].xyz); }
+float3 ccX0Snap(uint v, uint gi) { return nf3(ccOrigin(v) + gBeams[ccB(gi, 0u)].xyz); }
+// (World x0, written once a pass in the scratch's slot 5.)
+float3 ccX0(uint v, uint gi) { return gBeams[ccB(gi, 5u)].xyz; }
 float3 ccX1(uint gi) { return gBeams[ccB(gi, 1u)].xyz; }
 float3 ccVel(uint gi) { return gBeams[ccB(gi, 3u)].xyz; }
-float ccIm(uint gi)
+float ccIm(uint gi) { return gBeams[ccB(gi, 1u)].w; }
+float ccImOf(uint gi)
 {
     if ((gStatic[gP.nodeInfoBase + gi].x & NODE_IMMOVABLE) != 0u || (gP.retireBase != 0u && nodeRetired(gi))) return 0.0;
     return sdiv(1.0, gNodes[gi * 3u].w);
@@ -94,19 +97,6 @@ CcPair ccLoad(uint v, uint p)
     q.vb = gNext[at + 5u] >> 16;
     return q;
 }
-void ccStore(uint v, CcPair q)
-{
-    uint p = asuint(gAcc[ccCount(v)].add(1));
-    if (p >= ccVeh(v, 0u).w)
-    {
-        gAcc[ccC(CC_C_OVERFLOW)].store(1);
-        return;
-    }
-    uint at = ccPairAt(v, p);
-    for (uint j = 0u; j < 4u; j++) gNext[at + j] = q.k[j];
-    gNext[at + 4u] = q.nn | (q.own ? 0x100u : 0u);
-    gNext[at + 5u] = q.va | (q.vb << 16);
-}
 
 // Rec::new: the pair's closest points at the start (cn on the first side, cp the second's),
 // weights (unsigned), its gap, unit normal and thickness (the sides' offsets along the normal,
@@ -120,6 +110,42 @@ struct CcRec
     float d;
 };
 float ccSign(uint nn, uint j) { return j < nn ? -1.0 : 1.0; }
+// The record beside its pair (words 6..14: weights, normal, gap, thickness), once at listing.
+void ccStoreRec(uint at, CcRec r)
+{
+    for (uint j = 0u; j < 4u; j++) gNext[at + 6u + j] = asuint(r.w[j]);
+    gNext[at + 10u] = asuint(r.n.x);
+    gNext[at + 11u] = asuint(r.n.y);
+    gNext[at + 12u] = asuint(r.n.z);
+    gNext[at + 13u] = asuint(r.g);
+    gNext[at + 14u] = asuint(r.d);
+}
+CcRec ccRecAt(uint v, uint p)
+{
+    uint at = ccPairAt(v, p);
+    CcRec r;
+    for (uint j = 0u; j < 4u; j++) r.w[j] = asfloat(gNext[at + 6u + j]);
+    r.n = float3(asfloat(gNext[at + 10u]), asfloat(gNext[at + 11u]), asfloat(gNext[at + 12u]));
+    r.cn = float3(0.0, 0.0, 0.0);
+    r.g = asfloat(gNext[at + 13u]);
+    r.d = asfloat(gNext[at + 14u]);
+    return r;
+}
+
+void ccStore(uint v, CcPair q, CcRec r)
+{
+    uint p = asuint(gAcc[ccCount(v)].add(1));
+    if (p >= ccVeh(v, 0u).w)
+    {
+        gAcc[ccC(CC_C_OVERFLOW)].store(1);
+        return;
+    }
+    uint at = ccPairAt(v, p);
+    for (uint j = 0u; j < 4u; j++) gNext[at + j] = q.k[j];
+    gNext[at + 4u] = q.nn | (q.own ? 0x100u : 0u);
+    gNext[at + 5u] = q.va | (q.vb << 16);
+    ccStoreRec(at, r);
+}
 CcRec ccRecOf(CcPair q)
 {
     CcRec r;
@@ -359,7 +385,7 @@ void ccList(uint a, uint b, float rq, float moA, float moB, float grow, float ce
             q.k[0] = tn.x; q.k[1] = tn.y; q.k[2] = tn.z; q.k[3] = gi;
             q.nn = 3u; q.own = own; q.va = a; q.vb = b;
             CcRec rec = ccRecOf(q);
-            if (rec.g < nf(rec.d + rq)) ccStore(a, q);
+            if (rec.g < nf(rec.d + rq)) ccStore(a, q, rec);
         }
     }
     // Edges against edges, once a vehicle pair (a ≤ b; a car's own, the second edge after the
@@ -407,7 +433,7 @@ void ccList(uint a, uint b, float rq, float moA, float moB, float grow, float ce
                         q.k[0] = er.x; q.k[1] = er.y; q.k[2] = fr.x; q.k[3] = fr.y;
                         q.nn = 2u; q.own = own; q.va = b; q.vb = a;
                         CcRec rec = ccRecOf(q);
-                        if (rec.g < nf(rec.d + rq)) ccStore(a, q);
+                        if (rec.g < nf(rec.d + rq)) ccStore(a, q, rec);
                     }
                 }
     }
@@ -473,7 +499,8 @@ void ccPass(uint off, uint k, uint s, uint lane)
             uint gi = r0.x + i;
             float3 x = nf3(o + gNodes[gi * 3u].xyz);
             float3 vel = gNodes[gi * 3u + 1u].xyz;
-            gBeams[ccB(gi, 1u)] = float4(x, 0.0);
+            gBeams[ccB(gi, 1u)] = float4(x, ccImOf(gi));
+            gBeams[ccB(gi, 5u)] = float4(ccX0Snap(v, gi), 0.0);
             gBeams[ccB(gi, 2u)] = float4(x, 0.0);
             gBeams[ccB(gi, 3u)] = float4(vel, 0.0);
             gBeams[ccB(gi, 4u)] = float4(vel, 0.0);
@@ -540,6 +567,12 @@ uint ccFlags(uint v, uint p) { return gNext[ccPairAt(v, p) + 4u]; }
 void ccFlagSet(uint v, uint p, uint f) { gNext[ccPairAt(v, p) + 4u] = ccFlags(v, p) | f; }
 void ccFlagClear(uint v, uint p, uint f) { gNext[ccPairAt(v, p) + 4u] = ccFlags(v, p) & ~f; }
 uint ccPairs(uint v) { return min(asuint(gAcc[ccCount(v)].load()), ccVeh(v, 0u).w); }
+// The compact lists of the speculative pass's pairs (list 0) and the CCD's (list 1): pair
+// indices after the vehicle's pairs, their counts in its words 9 and 10.
+uint ccListAt(uint v, uint which) { return ccVeh(v, 0u).z + CC_PAIR_WORDS * ccVeh(v, 0u).w + which * ccVeh(v, 0u).w; }
+uint ccListN(uint v, uint which) { return min(asuint(gAcc[ccVW(v, 9u + which)].load()), ccVeh(v, 0u).w); }
+uint ccListP(uint v, uint which, uint i) { return gNext[ccListAt(v, which) + i]; }
+void ccListAdd(uint v, uint which, uint p) { gNext[ccListAt(v, which) + asuint(gAcc[ccVW(v, 9u + which)].add(1))] = p; }
 
 // How far node gi can close this step (its step, or its speed times h: reach).
 float ccReach(uint gi, uint v, bool speed)
@@ -711,8 +744,8 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint p = lane, pStop = EB_END(900, p, ccPairs(v), LANES); p < pStop; p += LANES)
         {
             CcPair q = ccLoad(v, p);
-            CcRec r = ccRecOf(q);
-            if (nf(r.g - r.d) < nf(ccSide(q, true, true) + ccSide(q, false, true))) ccFlagSet(v, p, CC_F_NEAR);
+            CcRec r = ccRecAt(v, p);
+            if (nf(r.g - r.d) < nf(ccSide(q, true, true) + ccSide(q, false, true))) ccListAdd(v, 0u, p);
         }
     }
     sync();
@@ -724,11 +757,11 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint m = 0u; m < k; m++)
         {
             uint v = vvMember(off, m);
-            for (uint p = lane, pStop = EB_END(902, p, ccPairs(v), LANES); p < pStop; p += LANES)
+            for (uint i = lane, iStop = EB_END(902, i, ccListN(v, 0u), LANES); i < iStop; i += LANES)
             {
-                if ((ccFlags(v, p) & CC_F_NEAR) == 0u) continue;
+                uint p = ccListP(v, 0u, i);
                 CcPair q = ccLoad(v, p);
-                CcRec r = ccRecOf(q);
+                CcRec r = ccRecAt(v, p);
                 float rel = 0.0;
                 for (uint j = 0u; j < 4u; j++) rel = nf(rel + smul(smul(ccSign(q.nn, j), r.w[j]), sdot(ccVel(q.k[j]), r.n)));
                 float c = nf(rel + sdiv(max(nf(r.g - r.d), 0.0), STEP));
@@ -747,11 +780,12 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint m = 0u; m < k; m++)
         {
             uint v = vvMember(off, m);
-            for (uint p = lane, pStop = EB_END(903, p, ccPairs(v), LANES); p < pStop; p += LANES)
+            for (uint i = lane, iStop = EB_END(903, i, ccListN(v, 0u), LANES); i < iStop; i += LANES)
             {
+                uint p = ccListP(v, 0u, i);
                 if ((ccFlags(v, p) & CC_F_ACT) == 0u) continue;
                 CcPair q = ccLoad(v, p);
-                CcRec r = ccRecOf(q);
+                CcRec r = ccRecAt(v, p);
                 float rel = 0.0;
                 for (uint j = 0u; j < 4u; j++) rel = nf(rel + smul(smul(ccSign(q.nn, j), r.w[j]), sdot(ccVel(q.k[j]), r.n)));
                 float c = nf(rel + sdiv(max(nf(r.g - r.d), 0.0), STEP));
@@ -806,8 +840,8 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint p = lane, pStop = EB_END(905, p, ccPairs(v), LANES); p < pStop; p += LANES)
         {
             CcPair q = ccLoad(v, p);
-            CcRec r = ccRecOf(q);
-            if (nf(r.g - r.d) < smul(2.0, nf(ccSide(q, true, false) + ccSide(q, false, false)))) ccFlagSet(v, p, CC_F_CCD);
+            CcRec r = ccRecAt(v, p);
+            if (nf(r.g - r.d) < smul(2.0, nf(ccSide(q, true, false) + ccSide(q, false, false)))) ccListAdd(v, 1u, p);
         }
     }
     sync();
@@ -820,12 +854,13 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint m = 0u; m < k; m++)
         {
             uint v = vvMember(off, m);
-            for (uint p = lane, pStop = EB_END(907, p, ccPairs(v), LANES); p < pStop; p += LANES)
+            for (uint i = lane, iStop = EB_END(907, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
             {
+                uint p = ccListP(v, 1u, i);
                 ccFlagClear(v, p, CC_F_ACT);
-                if ((ccFlags(v, p) & CC_F_CCD) == 0u) continue;
                 CcPair q = ccLoad(v, p);
-                float t = ccCollide(q, ccXi(ccRecOf(q)));
+                float t = ccCollide(q, ccXi(ccRecAt(v, p)));
+                gNext[ccPairAt(v, p) + 15u] = asuint(t);
                 if (t < 0.0) continue;
                 gAcc[ccC(CC_C_HITS)].add(1);
                 gAcc[ccC(CC_C_FLAG)].store(1);
@@ -846,11 +881,12 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint m = 0u; m < k; m++)
         {
             uint v = vvMember(off, m);
-            for (uint p = lane, pStop = EB_END(908, p, ccPairs(v), LANES); p < pStop; p += LANES)
+            for (uint i = lane, iStop = EB_END(908, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
             {
+                uint p = ccListP(v, 1u, i);
                 if ((ccFlags(v, p) & CC_F_ACT) == 0u) continue;
                 CcPair q = ccLoad(v, p);
-                float t = ccCollide(q, ccXi(ccRecOf(q)));
+                float t = asfloat(gNext[ccPairAt(v, p) + 15u]);
                 float4 w;
                 float3 dp[4];
                 float3 n = contactNormOrZero(ccAt(q, t, w, dp));
@@ -890,11 +926,11 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint m = 0u; m < k; m++)
         {
             uint v = vvMember(off, m);
-            for (uint p = lane, pStop = EB_END(910, p, ccPairs(v), LANES); p < pStop; p += LANES)
+            for (uint i = lane, iStop = EB_END(910, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
             {
-                if ((ccFlags(v, p) & CC_F_CCD) == 0u) continue;
+                uint p = ccListP(v, 1u, i);
                 CcPair q = ccLoad(v, p);
-                if (!ccAcross(q) || ccCollide(q, ccXi(ccRecOf(q))) < 0.0) continue;
+                if (!ccAcross(q) || ccCollide(q, ccXi(ccRecAt(v, p))) < 0.0) continue;
                 ccFlagSet(v, p, CC_F_ZONED);
                 gAcc[ccC(CC_C_FLAG)].store(1);
                 for (uint j = 0u; j < 4u; j++)
@@ -942,11 +978,11 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         for (uint m = 0u; m < k; m++)
         {
             uint v = vvMember(off, m);
-            for (uint p = lane, pStop = EB_END(914, p, ccPairs(v), LANES); p < pStop; p += LANES)
+            for (uint i = lane, iStop = EB_END(914, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
             {
-                if ((ccFlags(v, p) & CC_F_CCD) == 0u) continue;
+                uint p = ccListP(v, 1u, i);
                 CcPair q = ccLoad(v, p);
-                if (ccAcross(q) && ccCollide(q, ccXi(ccRecOf(q))) >= 0.0) gAcc[ccC(CC_C_UNRESOLVED)].add(1);
+                if (ccAcross(q) && ccCollide(q, ccXi(ccRecAt(v, p))) >= 0.0) gAcc[ccC(CC_C_UNRESOLVED)].add(1);
             }
         }
         sync();

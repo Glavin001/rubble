@@ -83,13 +83,13 @@ pub fn copies(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps: u3
 /// two words an entry (primitive | kind << 31, packed cell).
 /// (Word W_CC + 1: the per-vehicle pair counts' first word in gAcc, then the counters.)
 pub const W_CC: usize = 109;
-pub const CC_BEAMS_NODE: usize = 5;
+pub const CC_BEAMS_NODE: usize = 6;
 pub const CC_ACC_NODE: usize = 9;
 /// Words a vehicle in gAcc at word W_CC + 1: its listed pairs, its reach's bits, its largest
 /// offset's bits, its box as six keys, one spare.
-pub const CC_VEH_WORDS: usize = 10;
+pub const CC_VEH_WORDS: usize = 12;
 pub const CC_COUNTERS: usize = 16;
-pub const CC_PAIR_WORDS: usize = 6;
+pub const CC_PAIR_WORDS: usize = 16;
 pub const CC_GRID_BUCKETS: usize = 1024;
 /// Pairs a surface node or edge may list on average (the list's capacity; past it the frame
 /// fails with an error, never drops a pair).
@@ -137,7 +137,7 @@ pub(super) fn cc_tables(
     for ((v, p), &(n0, _)) in vehicles.iter().zip(&per).zip(&firsts) {
         let cap = CC_PAIRS_PER_ITEM * (v.nodes.len() + p.len());
         let list_at = next_init.len() as u32;
-        next_init.extend(std::iter::repeat_n(0, CC_PAIR_WORDS * cap));
+        next_init.extend(std::iter::repeat_n(0, (CC_PAIR_WORDS + 2) * cap));
         let grid_cap = 64 * (v.triangles.len() + p.len());
         let grid_at = next_init.len() as u32;
         next_init.extend(std::iter::repeat_n(0, 2 * grid_cap));
