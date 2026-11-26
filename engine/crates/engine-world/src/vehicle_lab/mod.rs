@@ -41,6 +41,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 mod options;
+use options::continuous_on;
 mod setup;
 pub use setup::*;
 
@@ -133,6 +134,9 @@ pub struct LabOptions {
     /// contact group on one workgroup; the same results bit for bit. Live
     /// (`{ groupSplit }`).
     pub group_split: bool,
+    /// Continuous contact (`ExplicitBeamsGpu::set_continuous`; `{ continuous }`, live): on the
+    /// split group path, so it turns group split on and self split and the wide passes off.
+    pub continuous: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -329,6 +333,7 @@ impl LabOptions {
             wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
             wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
             group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
+            continuous: v.get("continuous").and_then(Value::as_bool).unwrap_or(d.continuous),
             wheels_hit_bodies: v.get("wheelsHitBodies").and_then(Value::as_bool).unwrap_or(d.wheels_hit_bodies),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
@@ -2566,8 +2571,9 @@ impl Lab {
             x.set_self_split(opts.self_split);
             x.set_wide_list(opts.wide_list);
             x.set_wide_fused(opts.wide_fused);
-            x.set_group_split(opts.group_split);
-            x.set_wide(opts.wide);
+            x.set_group_split(opts.group_split || opts.continuous);
+            x.set_wide(opts.wide && !opts.continuous);
+            continuous_on(x, opts.continuous);
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
@@ -3056,6 +3062,14 @@ impl Lab {
             world.set_explicit_wheels_hit_bodies(on)?;
             self.bench.opts.wheels_hit_bodies = on;
             return Ok(json!({ "wheelsHitBodies": on }));
+        }
+        // { continuous: bool }: continuous contact (LabOptions::continuous).
+        if let Some(on) = cmd.get("continuous").and_then(Value::as_bool) {
+            self.bench.opts.continuous = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                continuous_on(x, on);
+            }
+            return Ok(json!({ "continuous": on }));
         }
         // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
         if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {

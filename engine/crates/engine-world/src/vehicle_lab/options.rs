@@ -17,6 +17,7 @@ impl Default for LabOptions {
             wide_list: true,
             wide_fused: true,
             group_split: true,
+            continuous: false,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             cars: 1,
@@ -37,5 +38,17 @@ impl Default for LabOptions {
             // Off by default (explicit-vehicles-in-world.md §13, "Open: Chrome").
             wheels_hit_bodies: false,
         }
+    }
+}
+
+/// Continuous contact on the lab's vehicles: on the split group path (group split on, self
+/// split and the wide passes off, which would step the cars elsewhere), or off (those back as
+/// the lab's defaults).
+pub(super) fn continuous_on(x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool) {
+    x.set_continuous(on);
+    if on {
+        x.set_group_split(true);
+        x.set_self_split(false);
+        let _ = x.set_wide(false);
     }
 }
