@@ -730,3 +730,10 @@ statics, the skin with them.)
   100 only past 5 cm during the hit (0 from 0.3 s on); head 30 pressed 11 mm and side 60 pressed 22 mm
   from 0.3 s on (today 7 and 34). The adoption candidate; it needs the GPU port (the edge pass's
   normal) and GPU == CPU before it can be a default.
+- **The exact rule alone (no clamp; a pair only where its normal is inside both cones), 4 runs, depth
+  from 0.3 s on (min / median / max, mm) and jitter (m/s):** head 60 pressed 0/43/47, 0.70 median;
+  side 100 pressed 3/46/101, 0.88; side 60 pressed 20/24/42, 0.37; head 130 9/67/140. Energy rows 0.0 J.
+  Exact for separated edges, but in discrete contact the pairs it drops are crossed ones no other
+  contact catches: cars stay inside each other. Kept as a CPU measurement (`EDGE_CONE=1`), off; the
+  default is as before. The principled answer is not to let surfaces cross:
+  docs/continuous-contact-design.md.

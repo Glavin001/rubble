@@ -255,23 +255,6 @@ struct EdgeHitG
     float pen;
 };
 
-// Edge e's face (first: c0, else c1) in-plane direction across it, out of the face (edge.rs cone_dirs).
-float3 edgeConeDir(SkinE e, float3 oc)
-{
-    float3 d = ssub3(e.q, e.p);
-    float ll = max(sdot(d, d), 1e-12);
-    float3 f = sadd3(e.p, sscale(d, sdiv(sdot(ssub3(oc, e.p), d), ll)));
-    return edgeNormOrZero(ssub3(f, oc));
-}
-// How far n is inside edge e's normal cone: the least of n.u over its faces (edge.rs cone_margin).
-float edgeConeMargin(SkinE e, float3 n)
-{
-    float m = 3.4028235e38;
-    if ((e.flags & 8u) != 0u) m = min(m, sdot(n, edgeConeDir(e, e.c0)));
-    if ((e.flags & 16u) != 0u) m = min(m, sdot(n, edgeConeDir(e, e.c1)));
-    return m;
-}
-
 // Owner va's edge e against vb's edge f (va < vb): false when no contact.
 bool edgeEdgeTest(uint va, uint vb, SkinE e, SkinE f, out EdgeHitG H)
 {
@@ -309,9 +292,6 @@ bool edgeEdgeTest(uint va, uint vb, SkinE e, SkinE f, out EdgeHitG H)
     float g = sdot(n, ssub3(cb, ca));
     if (g > r) return false;
     if (g < -EDGE_DEPTH_M) return false;
-    // Both outer: an edge-edge contact only with the normal inside each edge's normal cone (edge.rs).
-    if (eo && fo && ((e.flags & 4u) == 0u || (f.flags & 4u) == 0u || edgeConeMargin(e, n) < 0.0 || edgeConeMargin(f, -n) < 0.0))
-        return false;
     H.s = s;
     H.t = t;
     H.n = n;

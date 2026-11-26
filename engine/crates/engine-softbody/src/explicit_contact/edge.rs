@@ -174,7 +174,7 @@ pub(crate) fn banded(r: f32, closing: f32) -> f32 {
 
 fn edge_cone() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("EDGE_CONE").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("EDGE_CONE").is_ok_and(|v| v == "1"))
 }
 /// Each face's in-plane direction across edge `e` (perpendicular to it, out of the face).
 fn cone_dirs(e: &SkinEdge) -> Vec<Vec3> {
@@ -387,7 +387,7 @@ impl ExplicitBeamsWorld {
                 // normals; empty at a concave edge). Elsewhere a face or a node is nearer and
                 // that contact is theirs (node against face, or this face's own edges); a push
                 // along e x f there points where neither panel faces (docs/contact-design.md;
-                // `EDGE_CONE=0`, a measurement: as before).
+                // `EDGE_CONE=1`, a measurement, CPU only: it leaves crossed cars inside each other).
                 let gap = n.dot((f.p + (f.q - f.p) * t) - (e.p + (e.q - e.p) * s));
                 if edge_cone() && e.outer && f.outer && gap <= r && gap >= -edge_depth()
                     && (!e.convex || !f.convex || cone_margin(e, n) < 0.0 || cone_margin(f, -n) < 0.0)
