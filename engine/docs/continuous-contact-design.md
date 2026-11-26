@@ -397,6 +397,26 @@ cost, so a derby's throughput scales; one crash's latency does not.
     step, rebuilt when the nodes' motion relative to their vehicle's first node passes half
     the skin. This takes most of the grid and listing, about 15 of their 20 ms.
   - One-dispatch grid builds.
-- **Lossy (owner's decision).**
-  - Fewer rounds, or a coloured Gauss-Seidel response that converges in fewer rounds. This
-    is the response's cost.
+- **Lossy (owner's decision).** Fewer rounds were measured only, never adopted. Times are ms
+  a frame over frames 2 to 8, averaged; the default is 8 speculative and 8 CCD rounds.
+
+  | speculative / CCD rounds | ms a frame |
+  |---|---|
+  | 8 / 8 (default) | ~92 |
+  | 8 / 2 | ~80 |
+  | 4 / 4 | ~79 |
+  | 2 / 8 | ~88 |
+  | 2 / 2 | ~75 |
+
+  Fewer rounds leave more pairs to the impact zones, which pick up the work. No round count
+  comes near the 16.7 ms of a 60 Hz frame. The split path alone is ~29 ms here, and the
+  matrix's head-on row without continuous contact is 15.4 ms. A coloured Gauss-Seidel
+  response would have the same limit: its colours are phases too.
+
+**Conclusion.** At one 2 kHz step a pass, one workgroup a group, a crash between two cars
+cannot be real time on this design: the response alone is ~130 dependent phases a step.
+Real time needs a change of design, which is the owner's decision. Candidates:
+- the response every few steps, with the paths over those steps, in place of every step;
+- the response spread over many workgroups with far fewer phases (a different solver);
+- continuous contact only for pairs that close fast, with the explicit penalty contact for
+  the rest.
