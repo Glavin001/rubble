@@ -519,7 +519,9 @@ void ccPass(uint off, uint k, uint s, uint lane)
             float3 ahi;
             ccBox(a, alo, ahi);
             float3 r3 = float3(r, r, r);
-            if (any(ssub3(alo, r3) > bhi) || any(ssub3(blo, r3) > ahi)) continue;
+            // (Uniform: the barriers in ccList; the boxes are read from storage.)
+            bool far = any(ssub3(alo, r3) > bhi) || any(ssub3(blo, r3) > ahi);
+            if (splitUniform(lane, far ? 1u : 0u) != 0u) continue;
             ccList(a, b, rr, moA, moB, grow, max(grow, 0.02), lane);
             sync();
         }

@@ -170,7 +170,13 @@ uint contactMemberStepHeadPhase(uint v, uint lane, uint s, bool first, uint phas
             gBeams[gStatic[gP.cc].x + 5u * (nodeOff + i)] = gNodes[(nodeOff + i) * 3u];
         // (The contact offsets at the step's start, which the pass reads: every step's
         // member computes them at its end; before the run's first step, here.)
-        if (gP.offsetBase != 0u && misc.w + s == 0u)
+        // (Uniform for Chrome: the step count is read from storage.)
+        sync();
+        if (lane == 0u) gsUniformLanes = gP.offsetBase != 0u && misc.w + s == 0u ? 1u : 0u;
+        sync();
+        uint first = gsUniformLanes;
+        sync();
+        if (first != 0u)
         {
             contactOffsets(v, lane, LANES);
             sync();
