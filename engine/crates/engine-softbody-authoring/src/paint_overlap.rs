@@ -469,7 +469,8 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
                 let dd = sf.tris.iter().map(|t| distance(x, t)).fold(f32::MAX, f32::min);
                 if dd < 0.02 { continue; }
                 let n = turned.nodes[v.bind_nodes[i][0] as usize].name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string();
-                let e = by.entry(n).or_default(); e.0 += 1; e.1 = e.1.max(dd);
+                let e = by.entry(n.clone()).or_default(); e.0 += 1; e.1 = e.1.max(dd);
+                if std::env::var("PAINT_OUT_PART").is_ok_and(|p| n == p) { println!("out {n} at {:.2} by {:.0} mm, bound to {:?} piece {}", x - w.vehicles[0].origin, dd * 1e3, v.bind_nodes[i].map(|k| turned.nodes[k as usize].name.clone()), v.pieces.iter().find(|q| (q.1..q.1 + q.2).contains(&(i as u32))).map_or("?", |q| q.0.as_str())); }
             }
             let mut o: Vec<_> = by.into_iter().collect(); o.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
             println!("painted vertices over 2 cm outside the contact surface, by part (count, max mm): {:?}", o.iter().take(20).map(|(n, (c, m))| format!("{n} {c} {:.0}", m * 1e3)).collect::<Vec<_>>());
