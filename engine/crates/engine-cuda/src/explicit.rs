@@ -34,6 +34,7 @@ use glam::Vec3;
 use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 
+mod continuous;
 pub mod table {
     pub struct ExplicitCudaKernel {
         /// The plan module (`engine_exec::explicit_plan::MODULES`).
@@ -817,9 +818,7 @@ impl CudaExplicitBeams {
     pub fn set_group_split_tests(&mut self, on: bool) {
         self.group_split_tests = on;
     }
-    pub fn set_self_split(&mut self, on: bool) {
-        self.self_split = on;
-    }
+    pub fn set_self_split(&mut self, on: bool) { self.self_split = on; }
     pub fn set_wide_list(&mut self, on: bool) {
         self.wide_list = on;
     }

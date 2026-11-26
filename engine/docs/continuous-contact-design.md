@@ -413,6 +413,18 @@ cost, so a derby's throughput scales; one crash's latency does not.
   matrix's head-on row without continuous contact is 15.4 ms. A coloured Gauss-Seidel
   response would have the same limit: its colours are phases too.
 
+**On CUDA (Modal, `engine-cuda` `tests/continuous.rs`, 2026-11-26).** The same head-on, ms a
+frame with the readback, frames 2 to 8:
+
+| GPU | continuous off | continuous on | its cost |
+|---|---|---|---|
+| T4 | ~100 | ~130 | ~+30 |
+| L40S | ~39 | ~77 | ~+38 |
+| M3 Max (Metal, above) | ~29 | ~92 | ~+63 |
+
+CUDA lowers the pass's cost, but no GPU comes near 16.7 ms. On each of them, the split path
+without continuous contact is already past it in this test.
+
 **The pass every few steps, measured (CPU, reverted).** One pass every N steps, over the
 nodes' paths since the last pass (`h` = N steps in its velocities):
 
