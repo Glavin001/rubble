@@ -413,10 +413,23 @@ cost, so a derby's throughput scales; one crash's latency does not.
   matrix's head-on row without continuous contact is 15.4 ms. A coloured Gauss-Seidel
   response would have the same limit: its colours are phases too.
 
+**The pass every few steps, measured (CPU, reverted).** One pass every N steps, over the
+nodes' paths since the last pass (`h` = N steps in its velocities):
+
+| scene, 8 runs | every 2 steps | every 4 steps |
+|---|---|---|
+| ball 100 km/h | pass (27 mm, 0 crossings) | pass (23 mm) |
+| side 60 km/h | pass (0 mm) | **fail**: 4 crossings |
+| head 100 km/h | **fail**: 10 crossings, 3.4 m/s jitter | not reached (5-minute limit) |
+| offset 100 km/h | **fail**: 6 crossings, 88 mm, 6.8 m/s jitter | not reached |
+
+Between passes the explicit steps move nodes through each other, and the pass then sees
+paths that already crossed. This design breaks the guarantee and is ruled out.
+
 **Conclusion.** At one 2 kHz step a pass, one workgroup a group, a crash between two cars
 cannot be real time on this design: the response alone is ~130 dependent phases a step.
 Real time needs a change of design, which is the owner's decision. Candidates:
-- the response every few steps, with the paths over those steps, in place of every step;
+- ~~the response every few steps~~ (measured above: crossings at every 2 steps);
 - the response spread over many workgroups with far fewer phases (a different solver);
 - continuous contact only for pairs that close fast, with the explicit penalty contact for
   the rest.
