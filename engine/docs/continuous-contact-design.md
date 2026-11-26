@@ -140,3 +140,61 @@ vehicle definition, a lab control).
 - **Impact zones:** rare.
 - **Estimate:** contact cost about 2-3 times today's in a crash, and about the same at rest.
   This will be measured at stage 2, before any GPU work.
+
+## Stage 2 results (CPU prototype, car against car, 2026-11-26)
+
+`CONTACT_MODE=continuous` (`explicit_contact/dat.rs`). Each step, on every point-triangle and
+edge-edge pair between two vehicles within `r_q` = 8 cm at the step's start (collision
+triangles, the node mesh):
+
+1. **Speculative inelastic contact** on velocities, Jacobi with mass splitting, 8 rounds
+   (`DAT_ITERS`): each pair's closing speed is cut so its gap ends at its paint thickness
+   (the two sides' contact offsets at the closest points), or at its start gap when already
+   closer. It removes approach and never adds separation, and passes momentum to the struck
+   side.
+2. **Planar-DAT** as the failsafe (γ = 0.85). A pair whose plane cannot be certified (gap
+   within rounding) stops only its nodes moving toward the other side; nodes moving away keep
+   their step.
+
+What was learnt on the way:
+
+- **Truncation alone fails.** It stops a node at 85 % of its room each step, so a pushed pair's
+  gap decays geometrically. Head 60 km/h: 20,574 pairs went uncertified, the cars froze into
+  each other, and 25 mm of paint was still inside at the end. The response must hold the gap;
+  truncation only guarantees it.
+- **A position-level speculative pass created energy** (+3.9 MJ at head 100), because a step's
+  displacement includes the contact's position shifts. The velocity-level form only removes
+  energy.
+- **Freezing every node of an uncertified pair locks cars together for good** (hood nodes
+  frozen for 2,900 of 3,000 steps). Freezing only the approaching nodes lets them part.
+
+Generated sedan, 1 run each, 1.5 s, edge contact on. Depth in mm (worst / after 0.3 s);
+crossings are the most edges of one car through the other's triangles at any check (every
+20 ms).
+
+| crash | continuous depth | crossings | jitter m/s | discrete depth | crossings | jitter |
+|---|---|---|---|---|---|---|
+| head 100 | 9 / 0 | 0 | 0.24 | 0 / 0 | 52 | 2.58 |
+| head 60 pressed | 5 / 0 | 0 | 0.79 | 22 / 0 | 56 | 2.72 |
+| side 60 pressed | 0 / 0 | 0 | 1.40 | 11 / 11 | 0 | 1.70 |
+| side 90 | 16 / 0 | 0 | 1.31 | 23 / 4 | 0 | 1.05 |
+| head 60 | 0 / 0 | 0 | 0.66 | | | |
+| head 30 pressed | 0 / 0 | 0 | 0.18 | | | |
+| side 30 | 0 / 0 | 0 | 0.14 | | | |
+| side 60 | 0 / 0 | 0 | 1.19 | | | |
+
+Every row passes the adopted bar; the speculative pass removed between 0.8 and 122 kJ in
+each. The side rows' jitter includes the struck car's spin, since the measure is about its
+centre of mass. Pairs: about 16 a step at head 60, a few a step in side hits. CPU wall time,
+head 60 for 1 s: 24 s continuous against 19 s discrete. The prototype rebuilds hash grids
+every step and is unoptimised.
+
+Open:
+
+- 8 runs per crash (the bar's count).
+- Uncertified pairs still occur at head 100 (981 node freezes).
+- A car against itself: its own paint inside its interior solids, up to 52 mm at head 100.
+  Stage 3.
+- Rigid bodies.
+- A test in the suite (the mode as a parameter, not the environment).
+- The GPU port.
