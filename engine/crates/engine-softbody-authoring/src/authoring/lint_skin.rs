@@ -59,7 +59,7 @@ fn skin_finding(rule: &'static str, hard: bool, bad: usize, warn_only: bool, val
         },
         value,
         band: band.into(),
-        offenders: offenders.into_iter().take(8).collect(),
+        offenders: offenders.into_iter().take(if std::env::var("LINT_ALL").is_ok() { usize::MAX } else { 8 }).collect(),
     }
 }
 
