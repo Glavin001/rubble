@@ -31,6 +31,13 @@ pub struct Dat {
     pub r_q: f32,
     /// The fraction of the room to its plane a node may use (Newton's γ_r, 0.85).
     pub gamma: f32,
+    /// Pairs on the contact surface (`DAT_SURFACE=paint`: each node pushed out by its
+    /// offset as at the step's start; a measurement: the offsets' directions jump between
+    /// steps as panels crumple, and the node meshes then cross). Off (default): the
+    /// collision triangles, each pair's thickness its nodes' offsets along its normal.
+    pub paint: bool,
+    /// The split correction's share of a paint overlap removed a step (0: none).
+    pub beta: f32,
     /// Rounds of the speculative inelastic contact before the truncation (0: none).
     pub iters: u32,
     /// `DAT_WHO=1` (a measurement): per (vehicle, node), the steps it moved past the cover
@@ -48,6 +55,8 @@ pub struct DatStats {
     /// Point-triangle and edge-edge pairs given a plane.
     pub pairs_vt: u64,
     pub pairs_ee: u64,
+    /// Of those, the pairs whose sides could meet this step (given a plane).
+    pub pairs_dat: u64,
     /// Nodes whose step was cut (t < 1), and frozen for want of a separating plane (t = 0:
     /// a pair touching or crossed at the start).
     pub truncated: u64,
@@ -72,6 +81,7 @@ impl DatStats {
         self.steps += o.steps;
         self.pairs_vt += o.pairs_vt;
         self.pairs_ee += o.pairs_ee;
+        self.pairs_dat += o.pairs_dat;
         self.truncated += o.truncated;
         self.uncertified += o.uncertified;
         self.touching += o.touching;
@@ -90,11 +100,12 @@ impl Dat {
     pub fn from_env() -> Option<Self> {
         let on = std::env::var("CONTACT_MODE").is_ok_and(|v| v == "continuous");
         let f = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
+        let paint = std::env::var("DAT_SURFACE").is_ok_and(|v| v == "paint");
+        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, paint, beta: f("DAT_BETA", 0.0), ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -256,16 +267,19 @@ struct Rec {
 }
 
 impl Rec {
-    fn new(neg: &[(usize, u32)], wn: &[f32], pos: &[(usize, u32)], wp: &[f32], cn: Vec3, cp: Vec3, off: &[Vec<f32>]) -> Self {
+    fn new(neg: &[(usize, u32)], wn: &[f32], pos: &[(usize, u32)], wp: &[f32], cn: Vec3, cp: Vec3, off: &[Vec<Vec3>]) -> Self {
         let (mut k, mut w) = ([(0, 0); 4], [0.0; 4]);
         for (j, (&x, &y)) in neg.iter().chain(pos).zip(wn.iter().chain(wp)).enumerate() {
             k[j] = x;
             w[j] = y;
         }
         let len = neg.len() + pos.len();
-        let d = (0..len).map(|j| w[j] * off[k[j].0].get(k[j].1 as usize).copied().unwrap_or(0.0)).sum();
         let g = (cp - cn).length();
-        Self { k, w, nn: neg.len(), len, n: (cp - cn) / g.max(f32::MIN_POSITIVE), cn, g, d }
+        let n = (cp - cn) / g.max(f32::MIN_POSITIVE);
+        // Each side's paint toward the other along the normal: its nodes' offsets projected.
+        let sign = |j: usize| if j < neg.len() { 1.0 } else { -1.0 };
+        let d = (0..len).map(|j| w[j] * (sign(j) * off[k[j].0].get(k[j].1 as usize).map_or(0.0, |o| o.dot(n))).max(0.0)).sum();
+        Self { k, w, nn: neg.len(), len, n, cn, g, d }
     }
     fn sign(&self, j: usize) -> f32 {
         if j < self.nn { -1.0 } else { 1.0 }
@@ -278,12 +292,12 @@ impl Rec {
 /// is already closer): an inelastic impulse by the nodes' inverse masses, so momentum
 /// passes to the struck side. It removes approach and never adds separation. Each change
 /// of velocity moves the node by h times it (as the node update would have).
-fn speculative(recs: &[Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
+fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
     let h = STEP;
     let mut acc: Vec<Vec<(Vec3, u32)>> = v.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
     for _ in 0..iters {
         let mut any = false;
-        for r in recs {
+        for &r in recs {
             let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
             let c = rel + (r.g - r.d).max(0.0) / h;
             if c >= 0.0 {
@@ -309,6 +323,51 @@ fn speculative(recs: &[Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
             break;
         }
         for (x, a) in v.iter_mut().zip(acc.iter_mut()) {
+            for (p, e) in x.iter_mut().zip(a.iter_mut()) {
+                if e.1 > 0 {
+                    *p += e.0 / e.1 as f32;
+                    *e = (Vec3::ZERO, 0);
+                }
+            }
+        }
+    }
+}
+
+/// The split correction (Box2D's and Bullet's split impulse): pairs whose paint overlaps
+/// at the step's end (gap below their thickness) are moved apart by `beta` of the overlap,
+/// positions only, Jacobi with mass splitting, `iters` rounds. No velocity changes, so no
+/// kinetic energy is added; the truncation that follows keeps the node mesh uncrossed.
+fn separate(recs: &[&Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32, beta: f32) {
+    let mut acc: Vec<Vec<(Vec3, u32)>> = x1.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
+    for _ in 0..iters {
+        let mut any = false;
+        for &r in recs {
+            let dx = |j: usize| x1[r.k[j].0][r.k[j].1 as usize] - x0[r.k[j].0][r.k[j].1 as usize];
+            let gap = r.g + (0..r.len).map(|j| r.sign(j) * r.w[j] * dx(j).dot(r.n)).sum::<f32>();
+            let c = gap - r.d;
+            if c >= 0.0 {
+                continue;
+            }
+            let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize]).sum();
+            if wsum <= 0.0 {
+                continue;
+            }
+            let l = -c * beta / wsum;
+            for j in 0..r.len {
+                let (q, i) = r.k[j];
+                let m = im[q][i as usize];
+                if m > 0.0 && r.w[j] > 0.0 {
+                    let e = &mut acc[q][i as usize];
+                    e.0 += r.n * (r.sign(j) * r.w[j] * m * l);
+                    e.1 += 1;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+        for (x, a) in x1.iter_mut().zip(acc.iter_mut()) {
             for (p, e) in x.iter_mut().zip(a.iter_mut()) {
                 if e.1 > 0 {
                     *p += e.0 / e.1 as f32;
@@ -401,27 +460,51 @@ fn bounds(ps: impl IntoIterator<Item = Vec3>) -> (Vec3, Vec3) {
         .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(l, h), p| (l.min(p), h.max(p)))
 }
 
+/// A step's start: every node's World position and its offset to the paint.
+pub(super) type DatStart = (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>);
+
 impl ExplicitBeamsWorld {
     /// The continuous mode's start of a step: every node's World position (None: off).
-    pub(super) fn dat_start(&self) -> Option<Vec<Vec<Vec3>>> {
-        self.continuous.as_ref()?;
-        (self.contact && self.vehicles.len() > 1).then(|| world_positions(&self.vehicles))
+    pub(super) fn dat_start(&self) -> Option<DatStart> {
+        let dat = self.continuous.as_ref()?;
+        (self.contact && self.vehicles.len() > 1).then(|| {
+            let x = world_positions(&self.vehicles);
+            // On the contact surface: each node's offset to the paint, as at the step's start
+            // (held through the step, so the surface's vertices move as their nodes do).
+            let _ = dat;
+            let o = self.vehicles.iter().zip(&x).map(|(v, x)| {
+                let o = super::edge::contact_offset_vectors(v);
+                if o.is_empty() { vec![Vec3::ZERO; x.len()] } else { o }
+            }).collect();
+            (x, o)
+        })
     }
 
     /// After the node update and the work guard: the planes and the truncation.
-    pub(super) fn dat_truncate(&mut self, x0: Option<Vec<Vec<Vec3>>>) {
-        let (Some(x0), Some(dat)) = (x0, self.continuous.as_mut()) else {
+    pub(super) fn dat_truncate(&mut self, start: Option<DatStart>) {
+        let (Some((mut x0, mut ov)), Some(dat)) = (start, self.continuous.as_mut()) else {
             return;
         };
-        let x1p = world_positions(&self.vehicles);
+        let off: Vec<Vec<Vec3>> = if dat.paint { vec![Vec::new(); x0.len()] } else { ov.clone() };
+        if !dat.paint {
+            ov.iter_mut().for_each(|o| o.iter_mut().for_each(|x| *x = Vec3::ZERO));
+        }
+        let mut x1p = world_positions(&self.vehicles);
+        for v in 0..x0.len() {
+            for i in 0..x0[v].len() {
+                x0[v][i] += ov[v][i];
+                x1p[v][i] += ov[v][i];
+            }
+        }
         let mut x1 = x1p.clone();
-        let off: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.contact_offset.clone()).collect();
         let im: Vec<Vec<f32>> = self
             .vehicles
             .iter()
             .map(|v| (0..v.nodes.len()).map(|i| if v.nodes[i].has(NODE_IMMOVABLE) || v.is_retired(i) { 0.0 } else { 1.0 / v.nodes[i].mass }).collect())
             .collect();
         let mut recs: Vec<Rec> = Vec::new();
+        // Pairs are listed within r_q of their paint (the gap less the two sides' offsets).
+        let mo: Vec<f32> = off.iter().map(|o| o.iter().map(|v| v.length()).fold(0.0f32, f32::max)).collect();
         let mut t: Vec<Vec<f32>> = x0.iter().map(|x| vec![1.0; x.len()]).collect();
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
         let (r_q, cap) = (dat.r_q, 0.5 * dat.gamma * dat.r_q);
@@ -441,13 +524,13 @@ impl ExplicitBeamsWorld {
         for a in 0..nv {
             for b in 0..nv {
                 let ((alo, ahi), (blo, bhi)) = (boxes[a], boxes[b]);
-                let r = Vec3::splat(r_q);
+                let r = Vec3::splat(r_q + mo[a] + mo[b]);
                 if a == b || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
                     continue;
                 }
                 // a's nodes against b's triangles (both orders run: every node of both).
                 let (sa, sb) = (&surf[a], &surf[b]);
-                let mut grid = Grid::new(r_q.max(0.02));
+                let mut grid = Grid::new((r_q + mo[a] + mo[b]).max(0.02));
                 for (k, tri) in sb.tris.iter().enumerate() {
                     let (lo, hi) = bounds(tri.map(|i| x0[b][i as usize]));
                     grid.insert(k as u32, lo - r, hi + r);
@@ -459,10 +542,13 @@ impl ExplicitBeamsWorld {
                         let tri = sb.tris[k as usize];
                         let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
                         let c = closest_on_triangle(p, q0, q1, q2);
-                        if (p - c).length_squared() < r_q * r_q {
-                            st.pairs_vt += 1;
+                        if (p - c).length_squared() < (r_q + mo[a] + mo[b]).powi(2) {
                             let neg = tri.map(|j| (b, j));
-                            recs.push(Rec::new(&neg, &barycentric(c, q0, q1, q2), &[(a, i)], &[1.0], c, p, &off));
+                            let rec = Rec::new(&neg, &barycentric(c, q0, q1, q2), &[(a, i)], &[1.0], c, p, &off);
+                            if rec.g < rec.d + r_q {
+                                st.pairs_vt += 1;
+                                recs.push(rec);
+                            }
                         }
                     }
                 }
@@ -470,7 +556,7 @@ impl ExplicitBeamsWorld {
                 if a > b {
                     continue;
                 }
-                let mut grid = Grid::new(r_q.max(0.02));
+                let mut grid = Grid::new((r_q + mo[a] + mo[b]).max(0.02));
                 for (k, e) in sb.edges.iter().enumerate() {
                     let (lo, hi) = bounds(e.map(|i| x0[b][i as usize]));
                     grid.insert(k as u32, lo - r, hi + r);
@@ -483,25 +569,58 @@ impl ExplicitBeamsWorld {
                         let f = sb.edges[k as usize];
                         let [p2, q2] = f.map(|j| x0[b][j as usize]);
                         let (c1, c2) = closest_segments(p1, q1, p2, q2);
-                        if (c2 - c1).length_squared() < r_q * r_q {
-                            st.pairs_ee += 1;
+                        if (c2 - c1).length_squared() < (r_q + mo[a] + mo[b]).powi(2) {
                             let (s1, s2) = (along(c1, p1, q1), along(c2, p2, q2));
-                            recs.push(Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off));
+                            let rec = Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off);
+                            if rec.g < rec.d + r_q {
+                                st.pairs_ee += 1;
+                                recs.push(rec);
+                            }
                         }
                     }
                 }
             }
         }
+        // How far each node can close on anything this step (its step, or its speed times h,
+        // whichever is longer: the speculative pass works on speeds). A pair whose two sides
+        // together cannot cover its gap cannot meet and is left out of either pass.
+        let reach = |x1: &[Vec<Vec3>], vel: &[Vec<Vec3>]| -> Vec<Vec<f32>> {
+            (0..x0.len())
+                .map(|v| (0..x0[v].len()).map(|i| (x1[v][i] - x0[v][i]).length().max(vel[v][i].length() * STEP)).collect())
+                .collect()
+        };
+        let side = |r: &Rec, q: &[Vec<f32>], neg: bool| {
+            let js = if neg { 0..r.nn } else { r.nn..r.len };
+            js.map(|j| q[r.k[j].0][r.k[j].1 as usize]).fold(0.0f32, f32::max)
+        };
+        let v0: Vec<Vec<Vec3>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
+        let mut shift: Vec<Vec<Vec3>> = x0.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
         if dat.iters > 0 {
-            let v0: Vec<Vec<Vec3>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
+            let q = reach(&x1, &v0);
+            let near: Vec<&Rec> = recs.iter().filter(|r| r.g - r.d < side(r, &q, true) + side(r, &q, false)).collect();
             let mut v1 = v0.clone();
-            speculative(&recs, &mut v1, &im, dat.iters);
+            speculative(&near, &mut v1, &im, dat.iters);
             for (v, veh) in v1.iter().enumerate() {
                 for (i, &u) in veh.iter().enumerate() {
                     x1[v][i] += (u - v0[v][i]) * STEP;
                 }
             }
+            if dat.beta > 0.0 {
+                let over: Vec<&Rec> = near.iter().copied().filter(|r| r.g < r.d + side(r, &q, true) + side(r, &q, false)).collect();
+                let before = x1.clone();
+                separate(&over, &x0, &mut x1, &im, dat.iters, dat.beta);
+                // (positions only: the velocity change below must not see it)
+                for v in 0..x1.len() {
+                    for i in 0..x1[v].len() {
+                        shift[v][i] = x1[v][i] - before[v][i];
+                    }
+                }
+            }
         }
+        let zero: Vec<Vec<Vec3>> = x0.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+        let q = reach(&x1, &zero);
+        recs.retain(|r| r.g < side(r, &q, true) + side(r, &q, false));
+        st.pairs_dat = recs.len() as u64;
         let mut pass = Pass { x0: &x0, x1: &x1, t: &mut t, gamma: dat.gamma, stats: &mut st };
         for r in &recs {
             pass.pair(r);
@@ -509,12 +628,12 @@ impl ExplicitBeamsWorld {
         for (v, veh) in self.vehicles.iter_mut().enumerate() {
             let o = veh.origin;
             for (i, n) in veh.nodes.iter_mut().enumerate() {
-                let c = x1[v][i] - x1p[v][i];
-                if c != Vec3::ZERO {
+                let c = x1[v][i] - x1p[v][i] - shift[v][i];
+                if x1[v][i] != x1p[v][i] {
                     let v1 = n.vel + c / STEP;
                     st.spec_ke += 0.5 * n.mass as f64 * (v1.length_squared() as f64 - n.vel.length_squared() as f64);
                     n.vel = v1;
-                    n.pos = x1[v][i] - o;
+                    n.pos = x1[v][i] - ov[v][i] - o;
                 }
             }
             for (i, &f) in t[v].iter().enumerate() {
@@ -531,7 +650,7 @@ impl ExplicitBeamsWorld {
                 }
                 st.ke_removed += 0.5 * n.mass as f64 * n.vel.length_squared() as f64 * (1.0 - (f as f64).powi(2));
                 st.p_removed += n.mass as f64 * n.vel.length() as f64 * (1.0 - f as f64);
-                n.pos = x0[v][i] + (x1[v][i] - x0[v][i]) * f - o;
+                n.pos = x0[v][i] + (x1[v][i] - x0[v][i]) * f - ov[v][i] - o;
                 n.vel *= f;
             }
         }

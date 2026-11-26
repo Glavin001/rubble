@@ -374,6 +374,15 @@ pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: b
 /// far) and the length of one car's paint cutting the other's (`line`); those off read 0.
 #[allow(clippy::too_many_arguments)]
 pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool) -> Result<Vec<[f32; 13]>, String> {
+    Ok(crash_mode(scene, kmh, secs, runs, edge, press, contact, own_on, line_on, None)?.into_iter().map(|x| x.0).collect())
+}
+
+/// [`crash_measuring`] in a contact mode (`continuous`: Some(true) continuous, Some(false)
+/// discrete, None as the environment's `CONTACT_MODE`), with each run's most edges of one car
+/// through the other's collision triangles at any 20 ms check (checked in continuous mode or
+/// with `DAT_CHECK`; 0 otherwise).
+#[allow(clippy::too_many_arguments)]
+pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool, continuous: Option<bool>) -> Result<Vec<([f32; 13], usize)>, String> {
     let built = rig::rig_vehicle("sedan", None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> =
@@ -442,7 +451,7 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
         println!("paint carried by its collision panel: {} of {n} vertices", on.at.iter().filter(|x| x.is_some()).count());
     }
-    let run = |k: usize| -> [f32; 13] {
+    let run = |k: usize| -> ([f32; 13], usize) {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
         let aa = spawn(&d, Vec3::new(0.0, 0.0, -0.125 - za), Vec3::Z * speed);
@@ -465,6 +474,9 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
             ExplicitBeamsWorld::new(vec![aa, bb])
         };
         w.contact = contact;
+        if let Some(c) = continuous {
+            w.continuous = c.then(|| engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
+        }
         if press {
             w.vehicles[0].set_drive_input(DriveInput { forward: 1.0, ..Default::default() });
             if let Some(b) = w.vehicles.get_mut(1) {
@@ -555,25 +567,35 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let steps = (secs * 2000.0) as usize;
         let (mut worst, mut last) = (0.0f32, 0.0f32);
         // Jitter: each car's nodes' rms speed about its centre of mass (m/s), the largest over the last 0.25 s.
+        // (About its rigid motion: the centre's velocity and the angular velocity of its angular
+        // momentum, so a car spinning or pitching whole after a hit does not count as shaking.)
         let shake = |w: &ExplicitBeamsWorld| w.vehicles.iter().map(|x| {
-            let m: f32 = x.nodes.iter().map(|n| n.mass).sum();
-            let vc = x.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
-            (x.nodes.iter().map(|n| n.mass * (n.vel - vc).length_squared()).sum::<f32>() / m).sqrt()
+            let m: f64 = x.nodes.iter().map(|n| n.mass as f64).sum();
+            let c = x.nodes.iter().map(|n| n.pos.as_dvec3() * n.mass as f64).sum::<glam::DVec3>() / m;
+            let vc = x.nodes.iter().map(|n| n.vel.as_dvec3() * n.mass as f64).sum::<glam::DVec3>() / m;
+            let (mut l, mut i) = (glam::DVec3::ZERO, glam::DMat3::ZERO);
+            for n in &x.nodes {
+                let (r, mm) = (n.pos.as_dvec3() - c, n.mass as f64);
+                l += r.cross(n.vel.as_dvec3() - vc) * mm;
+                i += (glam::DMat3::IDENTITY * r.length_squared() - glam::DMat3::from_cols(r * r.x, r * r.y, r * r.z)) * mm;
+            }
+            let om = if i.determinant().abs() > 1e-12 { i.inverse() * l } else { glam::DVec3::ZERO };
+            (x.nodes.iter().map(|n| { let r = n.pos.as_dvec3() - c; n.mass as f64 * (n.vel.as_dvec3() - vc - om.cross(r)).length_squared() }).sum::<f64>() / m).sqrt() as f32
         }).fold(0.0f32, f32::max);
         let mut jitter = 0.0f32;
         let (mut deep, mut deep_last, mut lasting, mut brief) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         let settled = 0.3 + 0.25 / (speed * if scene == "side" { 1.0 } else { 2.0 });
         // (DAT_CHECK=N, run 0: every N steps the edges of one car crossing the other's
         // collision triangles, and at the end the continuous mode's counters.)
-        let check: usize = std::env::var("DAT_CHECK").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let check: usize = std::env::var("DAT_CHECK").ok().and_then(|x| x.parse().ok()).unwrap_or(if w.continuous.is_some() { 40 } else { 0 });
         let (mut crossed_max, mut crossed_steps) = (0usize, 0usize);
         for s in 1..=steps {
             w.step();
-            if k == 0 && check > 0 && !pole && s % check == 0 {
+            if check > 0 && !pole && s % check == 0 {
                 let c = w.mesh_crossings();
                 crossed_max = crossed_max.max(c);
                 crossed_steps += (c > 0) as usize;
-                if s == steps - steps % check { println!("DAT {scene} {kmh}: crossings max {crossed_max}, checks with any {crossed_steps} of {}; {:?}", steps / check, w.continuous.as_ref().map(|d| d.total));
+                if k == 0 && s == steps - steps % check && std::env::var("DAT_CHECK").is_ok() { println!("DAT {scene} {kmh}: crossings max {crossed_max}, checks with any {crossed_steps} of {}; {:?}", steps / check, w.continuous.as_ref().map(|d| d.total));
                     if let Some(who) = w.continuous.as_ref().and_then(|d| d.who.as_ref()) {
                         let mut l: Vec<_> = who.iter().collect();
                         l.sort_by_key(|x| std::cmp::Reverse(x.1[0] + x.1[1]));
@@ -616,10 +638,11 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
                     deep_last = depth(&paint(&v, &rest, a), &surface(b, &gap)).max(depth(&paint(&v, &rest, b), &surface(a, &gap)));
                     deep = deep.max(deep_last);
                     // (PAINT_WHERE=1, run 0: the deepest paint of each car in the other, and the parts.)
-                    if deep_last > 0.045 && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
+                    let at_mm = std::env::var("PAINT_WHERE_MM").ok().and_then(|x| x.parse::<f32>().ok()).unwrap_or(45.0) * 1e-3;
+                    if deep_last > at_mm && s as f32 / 2000.0 >= settled && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
                         for (n, x, y) in [("A in B", a, b), ("B in A", b, a)] {
                             let (dd, at) = deepest(&paint(&v, &rest, x), &surface(y, &gap));
-                            if dd < 0.045 { continue; }
+                            if dd < at_mm { continue; }
                             let near = |s: &ExplicitBeams| { let i = (0..s.nodes.len()).min_by(|&i, &j| (s.origin + s.nodes[i].pos).distance(at).total_cmp(&(s.origin + s.nodes[j].pos).distance(at))).unwrap(); d.nodes[i].name.clone() };
                             let cs = |s: &ExplicitBeams, at: Vec3| { let sf = surface(s, &gap); let ids: Vec<usize> = live_outer(s).collect();
                                 let m = (0..ids.len()).min_by(|&i, &j| { let h = |t: &Tri| { let w = closest(at, t); at.distance(t[0] * w[0] + t[1] * w[1] + t[2] * w[2]) }; h(&sf.tris[i]).total_cmp(&h(&sf.tris[j])) }).unwrap();
@@ -866,9 +889,9 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
                 if dd > b + 0.01 { solid = solid.max(dd); solid_n += 1; }
             }
         }
-        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32, jitter]
+        ([start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32, jitter], crossed_max)
     };
-    let res: Vec<[f32; 13]> = std::thread::scope(|t| {
+    let res: Vec<([f32; 13], usize)> = std::thread::scope(|t| {
         let run = &run;
         let js: Vec<_> = (0..runs).map(|k| t.spawn(move || run(k))).collect();
         js.into_iter().map(|j| j.join().expect("run")).collect()
