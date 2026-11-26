@@ -270,6 +270,16 @@ fn cap_hole(r: &Rig, lp: &[usize], k0: usize, max: f32, add: &mut Vec<Tri>) {
             if 2 * backs > rim_tris.len() { " (a flat part's back)" } else { "" }
         );
     }
+    // A flat part's back is its face's own triangles reversed: another triangulation of the
+    // same loop would cross the face along its diagonals (in its plane, never separable).
+    if backs > 0 && 2 * backs > rim_tris.len() {
+        let face: Vec<[usize; 3]> =
+            r.car.tris.iter().filter(|t| t.n.iter().all(|i| lp.contains(i))).map(|t| [t.n[0], t.n[2], t.n[1]]).collect();
+        for n in face {
+            push(add, n);
+        }
+        return;
+    }
     let mut guard = 0;
     while ring.len() > 3 && guard < 256 {
         guard += 1;

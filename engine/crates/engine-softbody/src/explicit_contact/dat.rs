@@ -36,6 +36,15 @@ pub struct Dat {
     /// steps as panels crumple, and the node meshes then cross). Off (default): the
     /// collision triangles, each pair's thickness its nodes' offsets along its normal.
     pub paint: bool,
+    /// Apply the truncation (`DAT_ENFORCE=1`, a measurement: it scales a node's step and
+    /// speed, so it neither conserves momentum nor is physics). Off (default): the planes
+    /// only detect, and `truncated` counts the node steps that would have crossed one.
+    pub enforce: bool,
+    /// A car against itself too (`DAT_SELF=0`: only car against car).
+    pub self_contact: bool,
+    /// A car's own clearance (m, `DAT_SELF_GAP`): its own pairs closing to it close no
+    /// further (the thickness of car-against-car pairs is their paint).
+    pub self_gap: f32,
     /// The split correction's share of a paint overlap removed a step (0: none).
     pub beta: f32,
     /// Rounds of the speculative inelastic contact before the truncation (0: none).
@@ -43,6 +52,9 @@ pub struct Dat {
     /// `DAT_WHO=1` (a measurement): per (vehicle, node), the steps it moved past the cover
     /// and the steps it was frozen.
     pub who: Option<HashMap<(usize, u32), [u32; 2]>>,
+    /// Per vehicle, its own pairs closer than `self_gap` at its first step (neighbours across
+    /// a seam, as self contact's spawn exclusion, spec §10.1): left out of both passes.
+    pub rest_excl: Vec<Option<std::collections::HashSet<[u32; 4]>>>,
     /// The last step's counts and every step's, summed.
     pub last: DatStats,
     pub total: DatStats,
@@ -101,11 +113,13 @@ impl Dat {
         let on = std::env::var("CONTACT_MODE").is_ok_and(|v| v == "continuous");
         let f = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let paint = std::env::var("DAT_SURFACE").is_ok_and(|v| v == "paint");
-        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, paint, beta: f("DAT_BETA", 0.0), ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
+        let self_contact = std::env::var("DAT_SELF").map_or(true, |v| v != "0");
+        let enforce = std::env::var("DAT_ENFORCE").is_ok_and(|v| v == "1");
+        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, paint, self_contact, enforce, self_gap: f("DAT_SELF_GAP", 0.002), beta: f("DAT_BETA", 0.0), ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), rest_excl: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -400,22 +414,34 @@ impl Pass<'_> {
             return;
         }
         let dx = |&(v, i): &(usize, u32)| self.x1[v][i as usize] - self.x0[v][i as usize];
-        let dpos = ks[r.nn..].iter().map(|k| -dx(k).dot(n)).fold(0.0f32, f32::max);
-        let dneg = ks[..r.nn].iter().map(|k| dx(k).dot(n)).fold(0.0f32, f32::max);
+        let dn: Vec<f32> = ks.iter().map(|k| dx(k).dot(n)).collect();
+        // The plane moves with the pair's common motion along the normal (the mean of the two
+        // closest points' normal steps): only relative approach takes room. Each node's
+        // distance to the moving plane stays linear in time, so the guarantee holds.
+        let side_mean = |js: std::ops::Range<usize>| js.map(|j| r.w[j] * dn[j]).sum::<f32>();
+        let mut u = 0.5 * (side_mean(0..r.nn) + side_mean(r.nn..r.len));
+        let dpos = (r.nn..r.len).map(|j| u - dn[j]).fold(0.0f32, f32::max);
+        let dneg = (0..r.nn).map(|j| dn[j] - u).fold(0.0f32, f32::max);
         let lambda = if dpos + dneg > 0.0 { (dneg / (dpos + dneg)).clamp(0.05, 0.95) } else { 0.5 };
         let p = cn + n * (lambda * g);
         // Certify the plane: every node strictly on its side at the start.
-        let s0 = |j: usize| r.sign(j) * (self.x0[ks[j].0][ks[j].1 as usize] - p).dot(n);
-        if (0..r.len).any(|j| s0(j) <= eps) {
+        let s0: Vec<f32> = (0..r.len).map(|j| r.sign(j) * (self.x0[ks[j].0][ks[j].1 as usize] - p).dot(n)).collect();
+        if s0.iter().any(|&a| a <= eps) {
             self.freeze(r);
             return;
         }
+        // The plane moves no further than every node could follow (by γ of its room), so a
+        // node held still stays on its side.
+        let lo = (0..r.nn).map(|j| s0[j]).fold(f32::MAX, f32::min);
+        let hi = (r.nn..r.len).map(|j| s0[j]).fold(f32::MAX, f32::min);
+        u = u.clamp(-self.gamma * lo, self.gamma * hi);
         for j in 0..r.len {
-            let (a, k) = (s0(j), ks[j]);
-            let b = r.sign(j) * (self.x1[k.0][k.1 as usize] - p).dot(n);
-            if b < 0.0 {
+            let k = ks[j];
+            let a = s0[j] - r.sign(j) * u;
+            let b = r.sign(j) * dn[j];
+            if a + b < 0.0 {
                 let t = &mut self.t[k.0][k.1 as usize];
-                *t = t.min(self.gamma * a / (a - b));
+                *t = t.min(self.gamma * a / -b);
             }
         }
     }
@@ -467,11 +493,10 @@ impl ExplicitBeamsWorld {
     /// The continuous mode's start of a step: every node's World position (None: off).
     pub(super) fn dat_start(&self) -> Option<DatStart> {
         let dat = self.continuous.as_ref()?;
-        (self.contact && self.vehicles.len() > 1).then(|| {
+        (self.contact && (self.vehicles.len() > 1 || dat.self_contact)).then(|| {
             let x = world_positions(&self.vehicles);
             // On the contact surface: each node's offset to the paint, as at the step's start
             // (held through the step, so the surface's vertices move as their nodes do).
-            let _ = dat;
             let o = self.vehicles.iter().zip(&x).map(|(v, x)| {
                 let o = super::edge::contact_offset_vectors(v);
                 if o.is_empty() { vec![Vec3::ZERO; x.len()] } else { o }
@@ -521,16 +546,32 @@ impl ExplicitBeamsWorld {
             surf.iter().enumerate().map(|(v, s)| bounds(s.nodes.iter().map(|&i| x0[v][i as usize]))).collect();
         let mut found = Vec::new();
         let nv = self.vehicles.len();
+        let none: Vec<Vec<Vec3>> = vec![Vec::new(); nv];
+        if dat.self_contact {
+            dat.rest_excl.resize(nv, None);
+            for v in 0..nv {
+                if dat.rest_excl[v].is_none() {
+                    let near = close_pairs(&x0[v], &surf[v], dat.self_gap);
+                    dat.rest_excl[v] = Some(near.into_iter().map(|p| p.0).collect());
+                }
+            }
+        }
+        let excl = |v: usize, k: [u32; 4]| dat.rest_excl.get(v).and_then(|e| e.as_ref()).is_some_and(|e| e.contains(&k));
         for a in 0..nv {
             for b in 0..nv {
                 let ((alo, ahi), (blo, bhi)) = (boxes[a], boxes[b]);
-                let r = Vec3::splat(r_q + mo[a] + mo[b]);
-                if a == b || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
+                // A car against itself: its own pairs sharing no node, at thickness 0 (its
+                // collision surface never passes through itself).
+                let own = a == b;
+                let (mo_a, mo_b) = if own { (0.0, 0.0) } else { (mo[a], mo[b]) };
+                let off = if own { &none } else { &off };
+                let r = Vec3::splat(r_q + mo_a + mo_b);
+                if (own && !dat.self_contact) || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
                     continue;
                 }
                 // a's nodes against b's triangles (both orders run: every node of both).
                 let (sa, sb) = (&surf[a], &surf[b]);
-                let mut grid = Grid::new((r_q + mo[a] + mo[b]).max(0.02));
+                let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
                 for (k, tri) in sb.tris.iter().enumerate() {
                     let (lo, hi) = bounds(tri.map(|i| x0[b][i as usize]));
                     grid.insert(k as u32, lo - r, hi + r);
@@ -540,11 +581,17 @@ impl ExplicitBeamsWorld {
                     grid.query(p, p, &mut found);
                     for &k in &found {
                         let tri = sb.tris[k as usize];
+                        if own && (tri.contains(&i) || excl(a, [i, tri[0], tri[1], tri[2]])) {
+                            continue;
+                        }
                         let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
                         let c = closest_on_triangle(p, q0, q1, q2);
-                        if (p - c).length_squared() < (r_q + mo[a] + mo[b]).powi(2) {
+                        if (p - c).length_squared() < (r_q + mo_a + mo_b).powi(2) {
                             let neg = tri.map(|j| (b, j));
-                            let rec = Rec::new(&neg, &barycentric(c, q0, q1, q2), &[(a, i)], &[1.0], c, p, &off);
+                            let mut rec = Rec::new(&neg, &barycentric(c, q0, q1, q2), &[(a, i)], &[1.0], c, p, &off);
+                            if own {
+                                rec.d = dat.self_gap;
+                            }
                             if rec.g < rec.d + r_q {
                                 st.pairs_vt += 1;
                                 recs.push(rec);
@@ -556,22 +603,28 @@ impl ExplicitBeamsWorld {
                 if a > b {
                     continue;
                 }
-                let mut grid = Grid::new((r_q + mo[a] + mo[b]).max(0.02));
+                let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
                 for (k, e) in sb.edges.iter().enumerate() {
                     let (lo, hi) = bounds(e.map(|i| x0[b][i as usize]));
                     grid.insert(k as u32, lo - r, hi + r);
                 }
-                for e in &sa.edges {
+                for (ke, e) in sa.edges.iter().enumerate() {
                     let [p1, q1] = e.map(|i| x0[a][i as usize]);
                     let (lo, hi) = bounds([p1, q1]);
                     grid.query(lo, hi, &mut found);
                     for &k in &found {
                         let f = sb.edges[k as usize];
+                        if own && (k as usize <= ke || f.iter().any(|x| e.contains(x)) || excl(a, [e[0], e[1], f[0], f[1]])) {
+                            continue;
+                        }
                         let [p2, q2] = f.map(|j| x0[b][j as usize]);
                         let (c1, c2) = closest_segments(p1, q1, p2, q2);
-                        if (c2 - c1).length_squared() < (r_q + mo[a] + mo[b]).powi(2) {
+                        if (c2 - c1).length_squared() < (r_q + mo_a + mo_b).powi(2) {
                             let (s1, s2) = (along(c1, p1, q1), along(c2, p2, q2));
-                            let rec = Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off);
+                            let mut rec = Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off);
+                            if own {
+                                rec.d = dat.self_gap;
+                            }
                             if rec.g < rec.d + r_q {
                                 st.pairs_ee += 1;
                                 recs.push(rec);
@@ -648,14 +701,61 @@ impl ExplicitBeamsWorld {
                         w.entry((v, i as u32)).or_default()[1] += 1;
                     }
                 }
+                // (What the cut would remove; with `enforce` off, a detector only: nothing moves.)
                 st.ke_removed += 0.5 * n.mass as f64 * n.vel.length_squared() as f64 * (1.0 - (f as f64).powi(2));
                 st.p_removed += n.mass as f64 * n.vel.length() as f64 * (1.0 - f as f64);
-                n.pos = x0[v][i] + (x1[v][i] - x0[v][i]) * f - ov[v][i] - o;
-                n.vel *= f;
+                if dat.enforce {
+                    n.pos = x0[v][i] + (x1[v][i] - x0[v][i]) * f - ov[v][i] - o;
+                    n.vel *= f;
+                }
             }
         }
         dat.last = st;
         dat.total.add(&st);
+    }
+
+    /// Vehicle `v`'s own surface pairs sharing no node closer than `eps` (m) now: point
+    /// against triangle (4 nodes, the point first) and edge against edge, with the gap. The
+    /// continuous mode cannot certify a plane between primitives that touch.
+    pub fn close_self_pairs(&self, v: usize, eps: f32) -> Vec<([u32; 4], f32)> {
+        let veh = &self.vehicles[v];
+        let x: Vec<Vec3> = veh.nodes.iter().map(|n| veh.origin + n.pos).collect();
+        close_pairs(&x, &surface(veh), eps)
+    }
+
+    /// Each vehicle's edges crossing its own live triangles that share no node with them.
+    pub fn self_crossings(&self) -> Vec<usize> {
+        let x = world_positions(&self.vehicles);
+        let mut found = Vec::new();
+        self.vehicles
+            .iter()
+            .enumerate()
+            .map(|(v, veh)| {
+                let s = surface(veh);
+                let mut grid = Grid::new(0.05);
+                for (k, tri) in s.tris.iter().enumerate() {
+                    let (lo, hi) = bounds(tri.map(|i| x[v][i as usize]));
+                    grid.insert(k as u32, lo, hi);
+                }
+                let mut n = 0;
+                for e in &s.edges {
+                    let [p, q] = e.map(|i| x[v][i as usize]);
+                    let (lo, hi) = bounds([p, q]);
+                    grid.query(lo, hi, &mut found);
+                    n += found
+                        .iter()
+                        .filter(|&&k| {
+                            let t = s.tris[k as usize];
+                            !t.iter().any(|j| e.contains(j)) && {
+                                let [t0, t1, t2] = t.map(|j| x[v][j as usize]);
+                                seg_crosses(p, q, t0, t1, t2)
+                            }
+                        })
+                        .count();
+                }
+                n
+            })
+            .collect()
     }
 
     /// Edges of one vehicle crossing live triangles of another, at the current positions
@@ -691,6 +791,53 @@ impl ExplicitBeamsWorld {
         }
         n
     }
+}
+
+/// A surface's own pairs sharing no node closer than `eps` at positions `x` (keys as the
+/// passes list them: the point then its triangle; the two edges).
+fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
+    let mut out = Vec::new();
+    let mut found = Vec::new();
+    let mut grid = Grid::new(0.05);
+    for (k, t) in s.tris.iter().enumerate() {
+        let (lo, hi) = bounds(t.map(|i| x[i as usize]));
+        grid.insert(k as u32, lo - Vec3::splat(eps), hi + Vec3::splat(eps));
+    }
+    for &i in &s.nodes {
+        let p = x[i as usize];
+        grid.query(p, p, &mut found);
+        for &k in &found {
+            let t = s.tris[k as usize];
+            if t.contains(&i) {
+                continue;
+            }
+            let g = (p - closest_on_triangle(p, x[t[0] as usize], x[t[1] as usize], x[t[2] as usize])).length();
+            if g < eps {
+                out.push(([i, t[0], t[1], t[2]], g));
+            }
+        }
+    }
+    let mut grid = Grid::new(0.05);
+    for (k, e) in s.edges.iter().enumerate() {
+        let (lo, hi) = bounds(e.map(|i| x[i as usize]));
+        grid.insert(k as u32, lo - Vec3::splat(eps), hi + Vec3::splat(eps));
+    }
+    for (ke, e) in s.edges.iter().enumerate() {
+        let (lo, hi) = bounds(e.map(|i| x[i as usize]));
+        grid.query(lo, hi, &mut found);
+        for &k in &found {
+            let f = s.edges[k as usize];
+            if k as usize <= ke || f.iter().any(|y| e.contains(y)) {
+                continue;
+            }
+            let (c1, c2) = closest_segments(x[e[0] as usize], x[e[1] as usize], x[f[0] as usize], x[f[1] as usize]);
+            let g = (c2 - c1).length();
+            if g < eps {
+                out.push(([e[0], e[1], f[0], f[1]], g));
+            }
+        }
+    }
+    out
 }
 
 fn world_positions(vs: &[ExplicitBeams]) -> Vec<Vec<Vec3>> {

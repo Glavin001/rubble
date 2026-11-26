@@ -588,14 +588,24 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
         // (DAT_CHECK=N, run 0: every N steps the edges of one car crossing the other's
         // collision triangles, and at the end the continuous mode's counters.)
         let check: usize = std::env::var("DAT_CHECK").ok().and_then(|x| x.parse().ok()).unwrap_or(if w.continuous.is_some() { 40 } else { 0 });
-        let (mut crossed_max, mut crossed_steps) = (0usize, 0usize);
+        let (mut crossed_max, mut crossed_steps, mut self_max) = (0usize, 0usize, 0usize);
+        let self_x0: Vec<usize> = if check > 0 { w.self_crossings() } else { Vec::new() };
+        if k == 0 && check > 0 && std::env::var("DAT_CHECK").is_ok() { println!("DAT self crossings at the start {self_x0:?}"); }
+        if k == 0 && std::env::var("DAT_CLOSE").is_ok() {
+            let mut l = w.close_self_pairs(0, 0.002);
+            l.sort_by(|a, b| a.1.total_cmp(&b.1));
+            println!("DAT_CLOSE {} own pairs within 2 mm at the start: {:?}", l.len(), l.iter().take(30).map(|(n, g)| format!("{:?} {:.2} mm", n.map(|i| d.nodes[i as usize].name.clone()), g * 1e3)).collect::<Vec<_>>());
+        }
         for s in 1..=steps {
             w.step();
-            if check > 0 && !pole && s % check == 0 {
-                let c = w.mesh_crossings();
+            if check > 0 && s % check == 0 {
+                // (a car's own crossings past those it was built with: the sedan has none)
+                let own_x: usize = w.self_crossings().iter().zip(&self_x0).map(|(a, b)| a.saturating_sub(*b)).sum();
+                self_max = self_max.max(own_x);
+                let c = if pole { 0 } else { w.mesh_crossings() } + own_x;
                 crossed_max = crossed_max.max(c);
                 crossed_steps += (c > 0) as usize;
-                if k == 0 && s == steps - steps % check && std::env::var("DAT_CHECK").is_ok() { println!("DAT {scene} {kmh}: crossings max {crossed_max}, checks with any {crossed_steps} of {}; {:?}", steps / check, w.continuous.as_ref().map(|d| d.total));
+                if k == 0 && s == steps - steps % check && std::env::var("DAT_CHECK").is_ok() { println!("DAT {scene} {kmh}: crossings max {crossed_max} (own {self_max}), checks with any {crossed_steps} of {}; {:?}", steps / check, w.continuous.as_ref().map(|d| d.total));
                     if let Some(who) = w.continuous.as_ref().and_then(|d| d.who.as_ref()) {
                         let mut l: Vec<_> = who.iter().collect();
                         l.sort_by_key(|x| std::cmp::Reverse(x.1[0] + x.1[1]));
