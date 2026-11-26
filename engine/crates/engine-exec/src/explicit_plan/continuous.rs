@@ -97,8 +97,9 @@ pub const W_CC: usize = 109;
 pub const CC_BEAMS_NODE: usize = 6;
 pub const CC_ACC_NODE: usize = 9;
 /// Words a vehicle in gAcc at word W_CC + 1: its listed pairs, its reach's bits, its largest
-/// offset's bits, its box as six keys, one spare.
-pub const CC_VEH_WORDS: usize = 12;
+/// offset's bits, its box as six keys, its two compact lists' counts, its touched nodes', its
+/// group's round flag (a group's first member), four spare.
+pub const CC_VEH_WORDS: usize = 16;
 pub const CC_COUNTERS: usize = 16;
 pub const CC_PAIR_WORDS: usize = 16;
 pub const CC_GRID_BUCKETS: usize = 4096;

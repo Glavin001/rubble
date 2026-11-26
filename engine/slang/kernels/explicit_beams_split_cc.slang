@@ -8,7 +8,7 @@
 
 static const uint CC_BEAMS_NODE = 6u;
 static const uint CC_ACC_NODE = 9u;
-static const uint CC_VEH_WORDS = 12u;
+static const uint CC_VEH_WORDS = 16u;
 static const uint CC_PAIR_WORDS = 16u;
 static const uint CC_GRID_BUCKETS = 4096u;
 // The grids' cells (m): about a primitive's size; each primitive in the cells its own box
@@ -28,7 +28,6 @@ static const uint CC_C_ZONES = 2u;
 static const uint CC_C_UNRESOLVED = 3u;
 static const uint CC_C_SPIN = 4u;
 static const uint CC_C_REACH = 5u;
-static const uint CC_C_FLAG = 7u;
 
 uint4 ccRec(uint k) { return gStatic[gP.cc + k]; }
 uint4 ccVeh(uint v, uint k) { return gStatic[gP.cc + 2u + 3u * v + k]; }
@@ -569,12 +568,16 @@ void ccAddX(uint gi, float3 d)
     gAcc[ccA(gi, 5u)].add(toFixedShift(d.z));
 }
 // Applies node gi's sums to its velocity (and position, `pos`) and clears them and its count.
-void ccApply(uint gi, bool pos)
+void ccApply(uint gi, bool pos, float stamp)
 {
     int3 a = int3(gAcc[ccA(gi, 0u)].load(), gAcc[ccA(gi, 1u)].load(), gAcc[ccA(gi, 2u)].load());
     if (any(a != int3(0, 0, 0))) gBeams[ccB(gi, 3u)].xyz = sadd3(ccVel(gi), sscale(float3(a), 1.0 / CC_VEL_FIXED));
     int3 b = int3(gAcc[ccA(gi, 3u)].load(), gAcc[ccA(gi, 4u)].load(), gAcc[ccA(gi, 5u)].load());
-    if (pos && any(b != int3(0, 0, 0))) gBeams[ccB(gi, 1u)].xyz = sadd3(ccX1(gi), sscale(float3(b), 1.0 / SHIFT_FIXED));
+    if (pos && any(b != int3(0, 0, 0)))
+    {
+        gBeams[ccB(gi, 1u)].xyz = sadd3(ccX1(gi), sscale(float3(b), 1.0 / SHIFT_FIXED));
+        gBeams[ccB(gi, 3u)].w = stamp;
+    }
     for (uint w = 0u; w < 7u; w++) gAcc[ccA(gi, w)].store(0);
 }
 
