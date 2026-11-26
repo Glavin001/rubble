@@ -94,9 +94,10 @@ pub struct LabOptions {
     pub scene: Scene,
     /// The car's opt-in triangle-against-shape contact (`ExplicitBeams::surface_contact`).
     pub surface_contact: bool,
-    /// Edge vehicle contact (`ExplicitBeams::edge_contact`, off by default): cars' skins
-    /// kept apart between their nodes too (`{ edge: bool }`, a build option).
+    /// Edge vehicle contact (`ExplicitBeams::edge_contact`; `{ edge }`, a build option).
     pub edge_contact: bool,
+    /// The car-to-car band (m; `ExplicitBeams::vehicle_contact_range`; `{ vvBandMm }`; None: each car's own).
+    pub vehicle_contact_range: Option<f32>,
     /// Anti-clip's self-collision box padded by each contacter's own travel, not the
     /// car's fastest node's (`ExplicitBeams::own_travel_reach`; on in the lab: debris
     /// falling off the mountain no longer pads every triangle's box). Live
@@ -307,6 +308,7 @@ impl LabOptions {
                 .and_then(Value::as_bool)
                 .unwrap_or(d.surface_contact),
             edge_contact: v.get("edge").and_then(Value::as_bool).unwrap_or(d.edge_contact),
+            vehicle_contact_range: v.get("vvBandMm").and_then(Value::as_f64).filter(|&x| x > 0.0).map(|x| x as f32 * 1e-3).or(d.vehicle_contact_range),
             own_travel_reach: v
                 .get("ownTravel")
                 .and_then(Value::as_bool)
@@ -1949,6 +1951,7 @@ impl Bench {
             "scene": self.opts.scene.name(),
             "surfaceContact": self.opts.surface_contact,
             "edgeContact": self.opts.edge_contact,
+            "vvBandMm": self.opts.vehicle_contact_range.map(|r| r * 1e3),
             "ownTravel": self.opts.own_travel_reach,
             "wheelsHitBodies": self.opts.wheels_hit_bodies,
             "pieceLabels": self.opts.piece_labels,

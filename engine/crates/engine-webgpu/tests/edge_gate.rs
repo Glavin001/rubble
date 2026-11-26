@@ -43,8 +43,13 @@ fn a_page_starts_with_edge_contact_compiled() {
     run(&mut gpu);
     // Edge contact changes results, so its path's modules are compiled before a page's first
     // frame: never after the crash (it was 111 s late in Chrome).
+    // (As the lab orders them: `prefer_self_split` keeps them ahead.)
+    let mut specs = specs;
+    ExplicitBeamsGpu::prefer_self_split(&mut specs);
     let (later, ahead): (Vec<_>, Vec<_>) = specs.iter().partition(|s| s.deferred);
-    for w in ["member", "tests", "groupbegin", "grouplevels", "grouplv", "edges"] {
+    // (With contact offsets the levels-once kernels do not serve: the groups' pass with every pass,
+    // `group`, is the one the split path runs.)
+    for w in ["member", "tests", "group", "groupbegin", "grouplevels", "grouplv", "edges"] {
         let m = format!("explicit_beams_split_{w}");
         assert!(ahead.iter().any(|s| s.module.starts_with(&m)), "{m} compiles after the page starts");
     }

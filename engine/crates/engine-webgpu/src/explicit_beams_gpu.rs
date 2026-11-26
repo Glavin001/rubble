@@ -1532,7 +1532,7 @@ impl ExplicitBeamsGpu {
         }
         if vehicles.len() > 1 {
             // The split group path's, deferred unless edge contact (it changes results) needs them.
-            let ahead = |w| vehicles.iter().any(|v| v.edge_contact) && matches!(w, "member" | "tests" | "groupbegin" | "grouplevels" | "grouplv" | "edges");
+            let ahead = |w| vehicles.iter().any(|v| v.edge_contact) && matches!(w, "member" | "tests" | "group" | "groupbegin" | "grouplevels" | "grouplv" | "edges");
             for (which, entry) in [
                 ("member", SPLIT_MEMBER_ENTRY),
                 ("group", SPLIT_GROUP_ENTRY),
@@ -1640,13 +1640,13 @@ impl ExplicitBeamsGpu {
             return;
         }
         let fallback = [Kernel::Contact.entry(), Kernel::Solo.entry(), Kernel::ContactBig.entry()];
+        let edge = specs.iter().any(|s| s.entry == SPLIT_GROUP_ENTRY && !s.deferred);
         for s in specs.iter_mut() {
-            // (The groups' kernel with every pass stays in the background: with the
-            // default flags the groups' dispatches run the kernels of one kind each,
+            // (The groups' kernel with every pass stays in the background: with the default flags the groups' dispatches run the kernels of one kind each,
             // `explicit_beams_split_group*`, plan::schedule::group_entries_apart. It was
-            // 267 s of a cold load in Chrome.)
+            // 267 s of a cold load in Chrome. Edge contact's path needs it: compute_specs put it ahead.)
             if s.entry == SPLIT_GROUP_ENTRY {
-                s.deferred = true;
+                s.deferred = !edge;
             } else if ahead.iter().any(|m| s.module.starts_with(m)) {
                 s.deferred = false;
             } else if fallback.contains(&s.label) && !s.deferred {

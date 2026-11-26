@@ -651,3 +651,15 @@ With 50 mm: energy never rises (all 8 rows of the energy tests within 0.5 %), th
 after a head-on as with contact off, side scrapes slide; a slow push ends with the paint 21 mm
 apart (7 mm at 25 mm): the visible cost. Self contact keeps 25 mm. The GPU reads one range per
 car for self and car-to-car contact (`gStatic[v].z`): a car-to-car band is a new parameter.
+
+### Edge contact silently off on a cold page, again (fixed 2026-11-25, evening)
+
+With contact offsets (the generated sedan) the levels-once kernels do not serve, so the split
+path runs the groups' kernel with every pass (`explicit_beams_split_group*`), which stayed
+deferred (and `prefer_self_split` deferred it again): until its minutes-long compile ended a page
+ran the groups' workgroup, edge contact off, 30 ms a step. The afternoon's check passed only
+because Chrome had that kernel cached; a kernel change exposed it. Now it is compiled before the
+first frame with edge contact (`edge_gate.rs` checks the lab's order). Cold load 86 s on the M3 Max.
+Chrome, side 60 into a parked car: split path and edge pass from the first frame; median 10.83 ms
+a step, worst 23.5 ms at the impact (47-56 steps/s for about 3 s, then 60); the 50 mm car-to-car
+band (lab control `car-to-car band`) the same to 0.01 ms.

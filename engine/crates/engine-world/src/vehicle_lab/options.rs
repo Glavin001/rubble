@@ -8,6 +8,7 @@ impl Default for LabOptions {
             scene: Scene::Flat,
             surface_contact: false,
             edge_contact: false,
+            vehicle_contact_range: None,
             own_travel_reach: true,
             piece_labels: true,
             piece_windows: true,
