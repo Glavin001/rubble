@@ -134,7 +134,7 @@ pub enum GroupOp {
     Wheels { copy: u32 },
     /// Edge vehicle contact's pass of a step after its groups' contact pass, parameter
     /// copy `copy` (the step's), a workgroup a group (explicit_beams_split_edges.slang).
-    Edge { copy: u32 },
+    Edge { copy: u32, wide: u32 },
     /// A launch of the wide frame a fleet with vehicle contact runs while the plan holds
     /// no group, or one of today's sized by its gate ([`super::vv_wide`]).
     Wide(super::vv_wide::WideOp),
@@ -536,10 +536,10 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
             None,
             None,
         ),
-        Op::Group(GroupOp::Edge { copy }) => l(
+        Op::Group(GroupOp::Edge { copy, wide }) => l(
             (split("edges", aero, lanes), super::SPLIT_EDGE_ENTRY),
             copy,
-            Grid::Indirect(ArgBuf::Plan, SPLIT_GROUP_ARGS),
+            if wide > 0 { Grid::Groups(wide) } else { Grid::Indirect(ArgBuf::Plan, SPLIT_GROUP_ARGS) },
             None,
             None,
         ),
@@ -955,7 +955,7 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
             out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS, part: 5, entry: any });
         }
         if edges && s < steps {
-            out.push(GroupOp::Edge { copy: if sw.group_split_tests { steps + 2 + s } else { s } });
+            out.push(GroupOp::Edge { copy: if sw.group_split_tests { steps + 2 + s } else { s }, wide: 0 });
         }
     }
     if wheels {

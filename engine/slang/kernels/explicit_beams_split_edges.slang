@@ -8,23 +8,36 @@
 // A group of at most VV_PART members finds every owner's hits at once (edgePass); a larger
 // one finds them an owner at a time, slot 0.
 void edgePass(uint off, uint k, uint s, uint lane);
-void ccPass(uint off, uint k, uint s, uint lane);
+void ccListWide(uint g, uint lane);
+void ccPrep(uint off, uint k, uint lane);
+void ccRespondPass(uint off, uint k, uint lane);
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_edge(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint lane = lid.x;
-    uint4 G = gMisc[gP.vvGroups + gid.x];
-    uint off = G.x;
     // Continuous contact's pass between a step's two halves (both seam bits in the step
-    // word: explicit_plan::continuous), a workgroup a group.
+    // word: explicit_plan::continuous): its prep and response a workgroup a group, its
+    // listing CC_SLICES workgroups a vehicle.
     if ((gP.pad2 & (SPLIT_CC_NODES | SPLIT_CC_REST)) == (SPLIT_CC_NODES | SPLIT_CC_REST))
     {
-        uint kc = splitUniform(lane, gP.cc != 0u ? splitAwake(G) : 0u);
-        if (kc != 0u) ccPass(off, kc, gP.pad2 & SPLIT_STEP, lane);
+        if ((gP.pad2 & SPLIT_CC_B) != 0u)
+        {
+            if (gP.cc != 0u) ccListWide(gid.x, lane);
+            return ebLoopCapFlush();
+        }
+        uint4 Gc = gMisc[gP.vvGroups + gid.x];
+        uint kc = splitUniform(lane, gP.cc != 0u ? splitAwake(Gc) : 0u);
+        if (kc != 0u)
+        {
+            if ((gP.pad2 & SPLIT_CC_A) != 0u) ccPrep(Gc.x, kc, lane);
+            else ccRespondPass(Gc.x, kc, lane);
+        }
         return ebLoopCapFlush();
     }
+    uint4 G = gMisc[gP.vvGroups + gid.x];
+    uint off = G.x;
     uint k = splitUniform(lane, edgeOn() ? splitAwake(G) : 0u);
     if (k == 0u) return ebLoopCapFlush();
     uint s = gP.pad2 & SPLIT_STEP;

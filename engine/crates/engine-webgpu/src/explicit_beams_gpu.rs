@@ -4564,10 +4564,10 @@ impl ExplicitBeamsGpu {
                 pass.set_bind_group(0, &g.bind, &at(copy));
                 self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
             }
-            GroupOp::Edge { copy } => {
+            GroupOp::Edge { copy, wide } => {
                 pass.set_pipeline(g.edges());
                 pass.set_bind_group(0, &g.bind, &at(copy));
-                self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
+                if wide > 0 { pass.dispatch_workgroups(wide, 1, 1) } else { self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS) }
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the

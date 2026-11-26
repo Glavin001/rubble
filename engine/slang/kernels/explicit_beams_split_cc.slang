@@ -357,8 +357,10 @@ void ccMarkSurface(uint v, uint lane)
 // list_pairs for vehicles a (points, first edges) and b (triangles, second edges), rq the
 // listing reach: each query's box grown by its threshold walks the cells of b's grid it
 // touches, a candidate taken in the first cell both boxes share (once).
-void ccList(uint a, uint b, float rq, float moA, float moB, uint lane)
+void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slice, uint slices)
 {
+    uint w0 = lane + LANES * slice;
+    uint ws = LANES * slices;
     bool own = a == b;
     float r = own ? rq : nf(nf(rq + moA) + moB);
     float r2 = smul(r, r);
@@ -372,7 +374,7 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane)
     blo = ssub3(blo, r3);
     bhi = sadd3(bhi, r3);
     // Points against triangles.
-    for (uint i = lane, iStop = EB_END(894, i, ra.y, LANES); i < iStop; i += LANES)
+    for (uint i = w0, iStop = EB_END(894, i, ra.y, ws); i < iStop; i += ws)
     {
         uint gi = ra.x + i;
         if (!ccOnSurface(a, gi)) continue;
@@ -416,7 +418,7 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane)
     // first, sharing no node).
     if (a > b) return;
     uint4 ea = ccVeh(a, 0u);
-    for (uint i = lane, iStop = EB_END(895, i, ea.y, LANES); i < iStop; i += LANES)
+    for (uint i = w0, iStop = EB_END(895, i, ea.y, ws); i < iStop; i += ws)
     {
         uint ge = ea.x + i;
         uint4 er = gStatic[ccRec(1).x + ge];
@@ -508,9 +510,10 @@ void ccApply(uint gi, bool pos)
     for (uint w = 0u; w < 7u; w++) gAcc[ccA(gi, w)].store(0);
 }
 
-void ccRespond(uint off, uint k, float rq, uint lane);
 
-void ccPass(uint off, uint k, uint s, uint lane)
+// The pass's prep (dispatch A, a workgroup a group): every member's scratch, surface marks,
+// measures and grid.
+void ccPrep(uint off, uint k, uint lane)
 {
     float rq = asfloat(ccRec(1).z);
     // Each member's scratch: x1 (world) and its copy, the velocity and its copy; sums cleared.
@@ -551,34 +554,9 @@ void ccPass(uint off, uint k, uint s, uint lane)
     for (uint m = 0u; m < k; m++)
         for (uint n = 0u; n < k; n++) apartAll = max(apartAll, ccApart(vvMember(off, m), vvMember(off, n)));
     for (uint m = 0u; m < k; m++) ccGridBuild(vvMember(off, m), lane);
-    for (uint mb = 0u; mb < k; mb++)
-    {
-        uint b = vvMember(off, mb);
-        float moB = ccMaxOffset(b);
-        float3 blo;
-        float3 bhi;
-        ccBox(b, blo, bhi);
-        for (uint ma = 0u; ma < k; ma++)
-        {
-            uint a = vvMember(off, ma);
-            float moA = ccMaxOffset(a);
-            bool own = a == b;
-            float rr = min(rq, smul(4.0, nf(nf(ccReachV(a) + ccReachV(b)) + (own ? ccApartNear(off, k, a, rq) : ccApart(a, b)))));
-            float r = own ? rr : nf(nf(rr + moA) + moB);
-            float3 alo;
-            float3 ahi;
-            ccBox(a, alo, ahi);
-            float3 r3 = float3(r, r, r);
-            // (Uniform: the barriers in ccList; the boxes are read from storage.)
-            bool far = any(ssub3(alo, r3) > bhi) || any(ssub3(blo, r3) > ahi);
-            if (splitUniform(lane, far ? 1u : 0u) != 0u) continue;
-            ccList(a, b, rr, moA, moB, lane);
-            sync();
-        }
-        sync();
-    }
-    ccRespond(off, k, rq, lane);
+    sync();
 }
+
 
 // --- The response (dat.rs dat_truncate after the listing; ccd.rs resolve) ---
 
@@ -1030,3 +1008,42 @@ void ccRespond(uint off, uint k, float rq, uint lane)
     }
     sync();
 }
+
+// The pass's listing (dispatch B): workgroup g lists vehicle g / CC_SLICES's points and edges
+// (its slice g % CC_SLICES of them) against every member of its contact group. No barriers:
+// the grids and measures are the prep's, the pairs appended atomically.
+static const uint CC_SLICES = 8u;
+void ccListWide(uint g, uint lane)
+{
+    uint a = g / CC_SLICES;
+    uint slice = g % CC_SLICES;
+    if (a >= gP.vehicles) return;
+    uint4 fl = gMisc[vvRec(a, VV_FLAGS)];
+    if (fl.y == 0u) return;
+    uint4 G = gMisc[gP.vvGroups + fl.z];
+    uint k = splitAwake(G);
+    if (k == 0u) return;
+    uint off = G.x;
+    float rq = asfloat(ccRec(1).z);
+    float moA = ccMaxOffset(a);
+    float3 alo;
+    float3 ahi;
+    ccBox(a, alo, ahi);
+    for (uint mb = 0u; mb < k; mb++)
+    {
+        uint b = vvMember(off, mb);
+        float moB = ccMaxOffset(b);
+        bool own = a == b;
+        float rr = min(rq, smul(4.0, nf(nf(ccReachV(a) + ccReachV(b)) + (own ? ccApartNear(off, k, a, rq) : ccApart(a, b)))));
+        float r = own ? rr : nf(nf(rr + moA) + moB);
+        float3 blo;
+        float3 bhi;
+        ccBox(b, blo, bhi);
+        float3 r3 = float3(r, r, r);
+        if (any(ssub3(alo, r3) > bhi) || any(ssub3(blo, r3) > ahi)) continue;
+        ccList(a, b, rr, moA, moB, lane, slice, CC_SLICES);
+    }
+}
+
+// The pass's response (dispatch C, a workgroup a group).
+void ccRespondPass(uint off, uint k, uint lane) { ccRespond(off, k, asfloat(ccRec(1).z), lane); }
