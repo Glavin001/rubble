@@ -151,7 +151,8 @@ fn closing(va: &ExplicitBeams, a: [u32; 2], s: f32, vb: &ExplicitBeams, b: [u32;
     (-(ub - ua).dot(n)).max(0.0)
 }
 
-/// The speed-scaled band (a measurement, `SPEED_BAND=k`; 0: off): a pair's band `r` widened by k
+/// The speed-scaled band (a measurement, `SPEED_BAND=k`; 0: off; edge contact's passes only, not
+/// adopted: docs/contact-design.md): a pair's band `r` widened by k
 /// times its closing speed over a step, at most `SPEED_BAND_MAX` (m, default 0.075): thin at rest,
 /// as thick as a fast pair needs to be stopped inside it.
 pub(crate) fn speed_band() -> (f32, f32) {
