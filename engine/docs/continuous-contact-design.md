@@ -420,3 +420,15 @@ Real time needs a change of design, which is the owner's decision. Candidates:
 - the response spread over many workgroups with far fewer phases (a different solver);
 - continuous contact only for pairs that close fast, with the explicit penalty contact for
   the rest.
+
+**Head on at 130 km/h (expected failure), traced 2026-11-26.** The 17 mm is hood paint drawn
+past the collision surface. The paint vertices are skinned to `hd_o32`, `hd_o33` and `hd_i32`.
+`hd_i32` is an inner hood node on no collision triangle. When the hood folds, the inner layer
+pulls the paint off the outer sheet. Contact holds the surface (no crossings in any run); the
+paint is not where the surface is.
+
+Tried and reverted: binding each paint mesh only to its part's collision-surface nodes
+(`gen3::skins_with`). It made the result worse: 53 mm worst, 26 mm lasting. The outer sheet
+alone fits fenders poorly, and one hood mesh still bound `hd_i32`. The fix belongs in the
+skin's fit: weights for paint vertices that keep them on the surface sheet. It is not a
+change of contact.
