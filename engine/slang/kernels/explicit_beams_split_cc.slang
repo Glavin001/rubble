@@ -707,6 +707,9 @@ int ccZoneOf(uint gi) { return asint(gBeams[ccB(gi, 2u)].w); }
 
 // One impact zone, rooted at node `root`, moved rigidly (ccd.rs rigid_zone): its nodes in
 // ascending order over the group's; false when it would turn more than 1 rad.
+// The zoned nodes of vehicle v, ascending (the touched list's second half; word 11 the count).
+uint ccZonedN(uint v) { return asuint(gAcc[ccVW(v, 11u)].load()); }
+uint ccZoned(uint v, uint j) { return gNext[ccTouchedAt(v) + gStatic[v * 4u].y + j]; }
 bool ccRigidZone(uint off, uint k, int root)
 {
     bool pinned = false;
@@ -717,9 +720,9 @@ bool ccRigidZone(uint off, uint k, int root)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];
-        for (uint i = 0u; i < r0.y; i++)
+        for (uint j = 0u; j < ccZonedN(v); j++)
         {
-            uint gi = r0.x + i;
+            uint gi = ccZoned(v, j);
             if (ccZoneOf(gi) != root) continue;
             if (ccIm(gi) == 0.0) pinned = true;
             float ms = gNodes[gi * 3u].w;
@@ -734,9 +737,9 @@ bool ccRigidZone(uint off, uint k, int root)
         {
             uint v = vvMember(off, m);
             uint4 r0 = gStatic[v * 4u];
-            for (uint i = 0u; i < r0.y; i++)
+            for (uint j = 0u; j < ccZonedN(v); j++)
             {
-                uint gi = r0.x + i;
+                uint gi = ccZoned(v, j);
                 if (ccZoneOf(gi) != root) continue;
                 gBeams[ccB(gi, 3u)].xyz = float3(0.0, 0.0, 0.0);
                 gBeams[ccB(gi, 1u)].xyz = ccX0(v, gi);
@@ -752,9 +755,9 @@ bool ccRigidZone(uint off, uint k, int root)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];
-        for (uint i = 0u; i < r0.y; i++)
+        for (uint j = 0u; j < ccZonedN(v); j++)
         {
-            uint gi = r0.x + i;
+            uint gi = ccZoned(v, j);
             if (ccZoneOf(gi) != root) continue;
             float3 r = ssub3(ccX0(v, gi), c);
             float mm = gNodes[gi * 3u].w;
@@ -783,9 +786,9 @@ bool ccRigidZone(uint off, uint k, int root)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];
-        for (uint i = 0u; i < r0.y; i++)
+        for (uint j = 0u; j < ccZonedN(v); j++)
         {
-            uint gi = r0.x + i;
+            uint gi = ccZoned(v, j);
             if (ccZoneOf(gi) != root) continue;
             float3 r = ssub3(ccX0(v, gi), c);
             float3 rot = sadd3(sadd3(sscale(r, sc.y), sscale(scross(axis, r), sc.x)), sscale(axis, smul(sdot(axis, r), nf(1.0 - sc.y))));
@@ -1036,6 +1039,27 @@ void ccRespond(uint off, uint k, float rq, uint lane)
                 gBeams[ccB(r0.x + i, 2u)].w = asfloat(ccLabel(r0.x + i));
         }
         sync();
+        // Each vehicle's zoned nodes listed, then ranked into ascending order (a node's rank:
+        // the zoned nodes below it), so the zones' sums run in the CPU's order.
+        for (uint m = 0u; m < k; m++)
+        {
+            uint v = vvMember(off, m);
+            uint4 r0 = gStatic[v * 4u];
+            if (lane == 0u) gAcc[ccVW(v, 11u)].store(0);
+            sync();
+            for (uint i = lane, iStop = EB_END(919, i, r0.y, LANES); i < iStop; i += LANES)
+                if (ccLabel(r0.x + i) >= 0) gNext[ccTouchedAt(v) + asuint(gAcc[ccVW(v, 11u)].add(1))] = r0.x + i;
+            sync();
+            uint zn = ccZonedN(v);
+            for (uint i = lane, iStop = EB_END(920, i, zn, LANES); i < iStop; i += LANES)
+            {
+                uint gi = gNext[ccTouchedAt(v) + i];
+                uint rank = 0u;
+                for (uint j = 0u, jStop = EB_END(921, j, zn, 1u); j < jStop; j++) rank += gNext[ccTouchedAt(v) + j] < gi ? 1u : 0u;
+                gNext[ccTouchedAt(v) + r0.y + rank] = gi;
+            }
+            sync();
+        }
         // Each zone (rooted at its smallest node) moved rigidly, a lane a zone.
         for (uint m = 0u; m < k; m++)
         {
