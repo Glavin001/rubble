@@ -509,6 +509,47 @@ Edges near no partner (its box grown by the lists' reach) are not worked out: re
 the pile got slower (89.5 -> 94), per member's joint box all three rows gain. Last run pile8_e,
 side_e, headon_e: see the commit; before 89.5, 18.4, 13.7.
 
+### Rebuilding the candidates per owner: built, lossless, slower (2026-11-26)
+
+The idea: the group rebuilds every member's lists when any node of any member moves a skin, so
+rebuild only the owners whose own pairs need it. Built two ways (commit 1ca3df761, reverted in
+the next commit), both GPU == CPU bit for bit in `explicit_contact_gpu` (24 tests). CUDA T4, ms a
+frame, `PROFILE_SPLIT=1 run.sh --cuda perf=0 pile8_e side_e headon_e` (generated sedan; one
+container a run, so directional):
+
+| | pile8_e | its edge pass | side_e | its edge pass | headon_e | its edge pass |
+|---|---|---|---|---|---|---|
+| base (b95f3f754) | 85.6 | 59.1 | 17.7 | 3.8 | 13.3 | 0.98 |
+| per owner, a partner's drift bounded through its own reference | 136.8 | 109.8 | 17.8 | 4.0 | 13.4 | 1.08 |
+| per owner, its partners' nodes copied at its build | 94.4 | 67.2 | 18.0 | 4.2 | 13.5 | 1.19 |
+
+- The bound-only variant keeps no copies (an owner's bound on a partner grows by the partner's
+  motion at each of its builds), so a partner's drift counts twice and owners rebuild in a
+  cascade.
+- The copy variant has exactly the old criterion per owner (its nodes and each partner's within
+  two skins about one vector, from its own build), in the candidates' room (no layout change;
+  9 % of a sedan's room for seven partners). It rebuilds about as often as the group did, pays
+  the extra checks (the two-car head-on +0.2 ms), and is over the split_edges inline budget by
+  about 570 lines. In a pile every car drifts, so an owner's partners trigger it as often as the
+  group.
+
+Where the rebuild's time is (pile8_e, the base with measurement-only edits, physics not kept):
+
+| | edge pass ms a frame |
+|---|---|
+| base | 59.1 |
+| the partner-set signature ignored | 59.8 (partner changes are not what rebuilds) |
+| no rebuild on motion | 26.0 |
+| a rebuild every step | 315 |
+| a rebuild every step without its pair search | 45.6 |
+
+So about one step in nine rebuilds, and a rebuild costs about 8.5 ms, 7.9 of it the pair
+search at reach + 2 skins (lists and grids 0.6): one workgroup searching every (owner,
+partner) pair in turn while the T4's other SMs wait. The lever is the search's cost, not how
+often it runs: spread an 8-car group's (owner, partner) searches over workgroups (the hits
+add in fixed point in any order, so lossless), or balance each search's lanes (an (edge,
+cell) item scans its bucket serially, a lane each).
+
 ### A car through itself, as seen (2026-11-25, CPU)
 
 A car's own paint cutting itself (m; pairs that did not as built; min/median/max of 4; the control,
