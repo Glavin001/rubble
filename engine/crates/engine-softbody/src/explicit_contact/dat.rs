@@ -566,7 +566,7 @@ impl ExplicitBeamsWorld {
             let pairs: Vec<super::ccd::CcdPair> = recs
                 .iter()
                 .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, &q, true) + side(r, &q, false)))
-                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: (0.5 * r.d).max(dat.min_gap) })
+                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: (xi_share() * r.d).max(dat.min_gap) })
                 .collect();
             st.pairs_ccd = pairs.len() as u64;
             let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
@@ -939,4 +939,9 @@ pub(crate) fn seg_crosses(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
     }
     let (s1, s2, s3) = (vol(p, q, a, b), vol(p, q, b, c), vol(p, q, c, a));
     (s1 > 0.0 && s2 > 0.0 && s3 > 0.0) || (s1 < 0.0 && s2 < 0.0 && s3 < 0.0)
+}
+
+/// The share of a pair's thickness the CCD keeps (0.5; `DAT_XI`, a measurement).
+fn xi_share() -> f32 {
+    std::env::var("DAT_XI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)
 }

@@ -320,6 +320,25 @@ response only removes energy, momentum changes by at most 0.002 N·s a step (rou
 - Not adopted as the default yet: the GPU's response is rigid only, and GPU == CPU must hold.
   The port is next (one workgroup a group, the rows' Gauss-Seidel in order, as the CPU).
 
+## Offset 100 during the hit: paint thickness, not skinning (2026-11-26)
+
+`continuous_offset_100` (8 runs) fails at 56 mm worst during the hit (bar 50; 0 mm from 0.3 s,
+0 crossings). Traced with `PAINT_WHERE=2`:
+
+- Around the front of the sedan the drawn paint sits 3-6 cm outside the collision triangles
+  (the contact surface's per-node gaps, 0.027-0.063 m).
+- The CCD stops a pair at half its thickness (`CcdPair::xi`); the speculative pass aims for
+  the full thickness but a violent hit gets past it. Two cars' collision surfaces then sit
+  about half their summed paint thickness apart and their 3-6 cm paint shells overlap.
+- Tried and reverted: paint bound to the collision triangle under it (BeamNG's flexbody
+  practice, `SKIN_TRI`). The deepest vertex was already on its own triangle; worst rose to
+  82 mm in one run.
+- Measured (`DAT_XI=0.9`, the CCD at 0.9 of the thickness): 40 mm worst, passes; but the
+  response removes 180-765 kJ a run against 21-253 kJ at 0.5: contact, not crumpling,
+  absorbs much of the crash. Not adopted: the thickness is one of the owner's compromises.
+- The authoring fix: a collision skin within 1-2 cm of the paint (thin paint shells), so the
+  thickness the contact must hold is small.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
