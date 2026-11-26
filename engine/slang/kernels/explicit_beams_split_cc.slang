@@ -681,6 +681,8 @@ void ccApplyAll(uint off, uint k, bool pos, uint lane)
 
 // The zone label's root: the smallest node of the component (label propagation converged).
 int ccLabel(uint gi) { return gAcc[ccA(gi, 7u)].load(); }
+// (The converged labels copied into the scratch's slot 2 .w for the zones' sums.)
+int ccZoneOf(uint gi) { return asint(gBeams[ccB(gi, 2u)].w); }
 
 // One impact zone, rooted at node `root`, moved rigidly (ccd.rs rigid_zone): its nodes in
 // ascending order over the group's; false when it would turn more than 1 rad.
@@ -697,7 +699,7 @@ bool ccRigidZone(uint off, uint k, int root)
         for (uint i = 0u; i < r0.y; i++)
         {
             uint gi = r0.x + i;
-            if (ccLabel(gi) != root) continue;
+            if (ccZoneOf(gi) != root) continue;
             if (ccIm(gi) == 0.0) pinned = true;
             float ms = gNodes[gi * 3u].w;
             mass = nf(mass + ms);
@@ -714,7 +716,7 @@ bool ccRigidZone(uint off, uint k, int root)
             for (uint i = 0u; i < r0.y; i++)
             {
                 uint gi = r0.x + i;
-                if (ccLabel(gi) != root) continue;
+                if (ccZoneOf(gi) != root) continue;
                 gBeams[ccB(gi, 3u)].xyz = float3(0.0, 0.0, 0.0);
                 gBeams[ccB(gi, 1u)].xyz = ccX0(v, gi);
             }
@@ -732,7 +734,7 @@ bool ccRigidZone(uint off, uint k, int root)
         for (uint i = 0u; i < r0.y; i++)
         {
             uint gi = r0.x + i;
-            if (ccLabel(gi) != root) continue;
+            if (ccZoneOf(gi) != root) continue;
             float3 r = ssub3(ccX0(v, gi), c);
             float mm = gNodes[gi * 3u].w;
             l = sadd3(l, sscale(scross(r, ssub3(ccVel(gi), vc)), mm));
@@ -763,7 +765,7 @@ bool ccRigidZone(uint off, uint k, int root)
         for (uint i = 0u; i < r0.y; i++)
         {
             uint gi = r0.x + i;
-            if (ccLabel(gi) != root) continue;
+            if (ccZoneOf(gi) != root) continue;
             float3 r = ssub3(ccX0(v, gi), c);
             float3 rot = sadd3(sadd3(sscale(r, sc.y), sscale(scross(axis, r), sc.x)), sscale(axis, smul(sdot(axis, r), nf(1.0 - sc.y))));
             gBeams[ccB(gi, 1u)].xyz = sadd3(sadd3(c, sscale(vc, STEP)), rot);
@@ -993,8 +995,9 @@ void ccRespond(uint off, uint k, float rq, uint lane)
             for (uint m = 0u; m < k; m++)
             {
                 uint v = vvMember(off, m);
-                for (uint p = lane, pStop = EB_END(912, p, ccPairs(v), LANES); p < pStop; p += LANES)
+                for (uint i = lane, iStop = EB_END(912, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
                 {
+                    uint p = ccListP(v, 1u, i);
                     if ((ccFlags(v, p) & CC_F_ZONED) == 0u) continue;
                     CcPair q = ccLoad(v, p);
                     int lo = min(min(ccLabel(q.k[0]), ccLabel(q.k[1])), min(ccLabel(q.k[2]), ccLabel(q.k[3])));
@@ -1005,6 +1008,13 @@ void ccRespond(uint off, uint k, float rq, uint lane)
             sync();
             if (splitUniform(lane, uint(gAcc[ccC(CC_C_FLAG)].load())) == 0u) break;
         }
+        for (uint m = 0u; m < k; m++)
+        {
+            uint4 r0 = gStatic[vvMember(off, m) * 4u];
+            for (uint i = lane, iStop = EB_END(918, i, r0.y, LANES); i < iStop; i += LANES)
+                gBeams[ccB(r0.x + i, 2u)].w = asfloat(ccLabel(r0.x + i));
+        }
+        sync();
         // Each zone (rooted at its smallest node) moved rigidly, a lane a zone.
         for (uint m = 0u; m < k; m++)
         {
@@ -1012,7 +1022,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
             for (uint i = lane, iStop = EB_END(913, i, r0.y, LANES); i < iStop; i += LANES)
             {
                 uint gi = r0.x + i;
-                if (ccLabel(gi) != int(gi)) continue;
+                if (ccZoneOf(gi) != int(gi)) continue;
                 gAcc[ccC(CC_C_ZONES)].add(1);
                 if (!ccRigidZone(off, k, int(gi))) gAcc[ccC(CC_C_SPIN)].add(1);
             }
