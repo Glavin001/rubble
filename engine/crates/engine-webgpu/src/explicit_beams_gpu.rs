@@ -1529,10 +1529,9 @@ impl ExplicitBeamsGpu {
                     deferred: false,
                 });
             }
-        }
-        if vehicles.len() > 1 {
-            // The split group path's, deferred unless edge contact (it changes results) needs them.
-            let ahead = |w| vehicles.iter().any(|v| v.edge_contact) && matches!(w, "member" | "tests" | "group" | "groupbegin" | "grouplevels" | "grouplv" | "edges");
+            // The split group path's: ahead for edge contact or contact offsets (`group`, minutes cold).
+            let (edge, offs) = (vehicles.iter().any(|v| v.edge_contact), vehicles.iter().any(|v| !v.contact_offset.is_empty()));
+            let ahead = |w| if w == "edges" { edge } else { (edge || offs) && matches!(w, "member" | "tests" | "group" | "groupbegin" | "grouplevels" | "grouplv") };
             for (which, entry) in [
                 ("member", SPLIT_MEMBER_ENTRY),
                 ("group", SPLIT_GROUP_ENTRY),

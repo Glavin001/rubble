@@ -273,6 +273,36 @@ fn live_outer(s: &ExplicitBeams) -> impl Iterator<Item = usize> + '_ {
     (0..s.triangles.len()).filter(|&t| !s.tri_dead.get(t).copied().unwrap_or(false) && !s.tri_anti_only(t) && s.tri_outer.get(t).copied().unwrap_or(true))
 }
 
+/// The car's closed interior solids (dash, console, engine, fuel tank, seats, radiator: their
+/// collision hulls, by node name) and how deep the car's own paint lies inside them (m): per
+/// painted vertex not bound to the solid, its depth past the solid's surface where the solid's
+/// winding number is over [`INSIDE`]; the largest, over vertices not inside one as built (`base`).
+pub const SOLIDS: [&str; 8] = ["das_", "con_", "eng_", "fuet_", "seafl_", "seafr_", "sear_", "rad_"];
+fn solid_depths(v: &ShowcaseVisual, rest: &[Vec3], s: &ExplicitBeams, names: &[String]) -> Vec<f32> {
+    let np: Vec<Vec3> = s.nodes.iter().map(|n| s.origin + n.pos).collect();
+    let p = deform(v, &np).0;
+    let mut out = vec![0.0f32; p.len()];
+    for pre in SOLIDS {
+        let of = |i: u32| names[i as usize].starts_with(pre);
+        let tris: Vec<Tri> = s.triangles.iter().filter(|t| t.nodes.iter().all(|&i| of(i))).map(|t| t.nodes.map(|i| np[i as usize])).collect();
+        if std::env::var("SOLID_LOG").is_ok() { eprintln!("solid {pre}: {} triangles", tris.len()); }
+        if tris.len() < 4 {
+            continue;
+        }
+        let (lo, hi) = tris.iter().flatten().fold((Vec3::MAX, Vec3::MIN), |(l, h), q| (l.min(*q), h.max(*q)));
+        for (i, x) in p.iter().enumerate() {
+            if v.material[i] != mat::PAINT || v.bind_nodes[i].iter().any(|&n| of(n)) || x.cmplt(lo).any() || x.cmpgt(hi).any() {
+                continue;
+            }
+            let _ = rest;
+            if winding(*x, &tris) > INSIDE {
+                out[i] = out[i].max(tris.iter().map(|t| distance(*x, t)).fold(f32::MAX, f32::min));
+            }
+        }
+    }
+    out
+}
+
 /// The distance from `p` to the triangle.
 fn distance(p: Vec3, t: &Tri) -> f32 {
     let w = closest(p, t);
@@ -335,14 +365,14 @@ fn self_pairs(t: &[(u32, Tri)]) -> Vec<((u32, u32), f32)> {
 /// the largest from 0.3 s after the hit (the 25 cm between the cars closed) on, and the seconds
 /// past 1 cm before that.
 #[allow(clippy::too_many_arguments)]
-pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 10]>, String> {
+pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 12]>, String> {
     crash_measuring(scene, kmh, secs, runs, edge, press, contact, true, true)
 }
 
 /// [`crash`] with only some measures: a car's own paint crossing itself (`own`, the slowest by
 /// far) and the length of one car's paint cutting the other's (`line`); those off read 0.
 #[allow(clippy::too_many_arguments)]
-pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool) -> Result<Vec<[f32; 10]>, String> {
+pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool) -> Result<Vec<[f32; 12]>, String> {
     let built = rig::rig_vehicle("sedan", None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> =
@@ -402,7 +432,7 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
         println!("paint carried by its collision panel: {} of {n} vertices", on.at.iter().filter(|x| x.is_some()).count());
     }
-    let run = |k: usize| -> [f32; 10] {
+    let run = |k: usize| -> [f32; 12] {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
         let aa = spawn(&d, Vec3::new(0.0, 0.0, -0.125 - za), Vec3::Z * speed);
@@ -509,6 +539,8 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
             o.sort_by(|a, b| b.1[0].total_cmp(&a.1[0]));
             for (n, e) in o.into_iter().take(26) { println!("carry {n:12} painted {:6.2} m2; some bound node without a triangle {:3.0} %, none with one {:3.0} %, nodes over 0.4 m apart {:3.0} %", e[0], 100.0 * e[1] / e[0], 100.0 * e[2] / e[0], 100.0 * e[3] / e[0]); }
         }
+        let names: Vec<String> = d.nodes.iter().map(|n| n.name.clone()).collect();
+        let solid_base: Vec<Vec<f32>> = w.vehicles.iter().map(|x| solid_depths(&v, &rest, x, &names)).collect();
         let start = now(&w);
         let steps = (secs * 2000.0) as usize;
         let (mut worst, mut last) = (0.0f32, 0.0f32);
@@ -767,9 +799,16 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
             }
         }
         let centre = |s: &ExplicitBeams| s.nodes.iter().map(|n| (s.origin + n.pos) * n.mass).sum::<Vec3>() / s.nodes.iter().map(|n| n.mass).sum::<f32>();
-        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief]
+        // A car's own paint inside its interior solids at the end (new since spawn): the deepest, and how many vertices past 1 cm.
+        let (mut solid, mut solid_n) = (0.0f32, 0usize);
+        for (x, base) in w.vehicles.iter().zip(&solid_base) {
+            for (dd, b) in solid_depths(&v, &rest, x, &names).into_iter().zip(base) {
+                if dd > b + 0.01 { solid = solid.max(dd); solid_n += 1; }
+            }
+        }
+        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32]
     };
-    let res: Vec<[f32; 10]> = std::thread::scope(|t| {
+    let res: Vec<[f32; 12]> = std::thread::scope(|t| {
         let run = &run;
         let js: Vec<_> = (0..runs).map(|k| t.spawn(move || run(k))).collect();
         js.into_iter().map(|j| j.join().expect("run")).collect()
