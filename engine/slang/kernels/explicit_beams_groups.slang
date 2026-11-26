@@ -167,7 +167,14 @@ uint contactMemberStepHeadPhase(uint v, uint lane, uint s, bool first, uint phas
     if (phase == 1u && gP.cc != 0u)
     {
         for (uint i = lane, iStop = EB_END(892, i, nodeCount, LANES); i < iStop; i += LANES)
-            gBeams[gStatic[gP.cc].x + nodeOff + i] = gNodes[(nodeOff + i) * 3u];
+            gBeams[gStatic[gP.cc].x + 5u * (nodeOff + i)] = gNodes[(nodeOff + i) * 3u];
+        // (The contact offsets at the step's start, which the pass reads: every step's
+        // member computes them at its end; before the run's first step, here.)
+        if (gP.offsetBase != 0u && misc.w + s == 0u)
+        {
+            contactOffsets(v, lane, LANES);
+            sync();
+        }
     }
     if (phase != 2u)
     {

@@ -318,6 +318,8 @@ struct Params
     uint selfRange;
     // Continuous contact's tables (explicit_plan's continuous::W_CC; 0: none).
     uint cc;
+    // Its per-vehicle pair counts' first word in gAcc, then its counters (the host reads them).
+    uint ccCounts;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per

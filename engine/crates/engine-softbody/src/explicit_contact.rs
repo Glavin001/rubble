@@ -29,7 +29,7 @@ mod wheels;
 mod ccd;
 mod dat;
 pub use ccd::CcdStats;
-pub use dat::{closest_on_triangle, closest_segments, Dat, DatStats};
+pub use dat::{close_pairs_at, closest_on_triangle, closest_segments, Dat, DatStats};
 use residual::*;
 pub(crate) use edge::self_edge_hits;
 

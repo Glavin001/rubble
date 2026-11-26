@@ -54,3 +54,33 @@ fn continuous_seam_alone_steps_as_one_member_dispatch() {
         a.contact_status().unwrap();
     }
 }
+
+/// The pass's pair list against the CPU's, every step through the hit: as many pairs
+/// (point-triangle and edge-edge, between the cars and each car's own) as the CPU lists,
+/// nothing overflowed. (The pass does not move anything yet: the states stay the same.)
+#[test]
+fn continuous_pairs_list_like_the_cpu() {
+    let fleet = sedans_head_on();
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_bit_exact(true);
+    g.set_vehicle_contact(true);
+    g.set_group_split(true);
+    g.set_continuous(true);
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    // (The CPU's listing alone: no response, as the GPU's pass so far.)
+    let mut d = engine_softbody::explicit_contact::Dat::new(0.08, 0.85);
+    (d.iters, d.ccd_rounds) = (0, 0);
+    w.continuous = Some(d);
+    for f in 0..60 {
+        g.frame(1);
+        w.frame(1);
+        let (pairs, c) = g.continuous_counts().expect("continuous tables");
+        let cpu = w.continuous.as_ref().unwrap().last;
+        let total: u64 = pairs.iter().map(|&p| u64::from(p)).sum();
+        assert_eq!(c[0], 0, "step {f}: the pair list or a grid overflowed");
+        assert_eq!(total, cpu.pairs_vt + cpu.pairs_ee, "step {f}: GPU pairs {pairs:?}, CPU vt {} ee {}", cpu.pairs_vt, cpu.pairs_ee);
+    }
+}

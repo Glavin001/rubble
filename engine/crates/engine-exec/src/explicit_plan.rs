@@ -205,7 +205,7 @@ pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
-pub const PARAM_WORDS: usize = 110;
+pub const PARAM_WORDS: usize = 111;
 pub use edge::{W_EDGE, W_OFFSET, W_SELF_RANGE};
 /// gBeams float4 per skin edge of edge contact's step scratch (its ends, outward normal
 /// and flags, its faces' opposite corners).
@@ -2616,7 +2616,7 @@ impl ExplicitUpload {
         };
         let edge_base = if any_edge { edge::edge_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { 0 };
         let (offset_base, self_range_base) = edge::offset_and_self_tables(vehicles, any_offset, &mut statics, &mut lists, &mut beams);
-        let cc_base = if any_edge { continuous::cc_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { 0 };
+        let (cc_base, cc_counts) = if any_edge { continuous::cc_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { (0, 0) };
         let beam_order_base = if beam_order_default() && total_beams > 0 {
             let base = statics.len() as u32;
             statics.extend(beam_order);
@@ -2747,7 +2747,7 @@ impl ExplicitUpload {
         words[W_VV_FLEET_BOX] = vv_fleet_box;
         words[W_VV_ROOM] = vv_room(nv) as u32;
         words[W_EDGE] = edge_base;
-        (words[W_OFFSET], words[W_SELF_RANGE], words[continuous::W_CC]) = (offset_base, self_range_base, cc_base);
+        (words[W_OFFSET], words[W_SELF_RANGE], words[continuous::W_CC], words[continuous::W_CC + 1]) = (offset_base, self_range_base, cc_base, cc_counts);
         let total = [
             total_nodes as u32,
             total_beams as u32,

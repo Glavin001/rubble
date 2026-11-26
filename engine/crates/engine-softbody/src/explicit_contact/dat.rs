@@ -703,6 +703,10 @@ impl ExplicitBeamsWorld {
 
 /// A surface's own pairs sharing no node closer than `eps` at positions `x` (keys as the
 /// passes list them: the point then its triangle; the two edges).
+pub fn close_pairs_at(x: &[Vec3], v: &ExplicitBeams, eps: f32) -> Vec<([u32; 4], f32)> {
+    close_pairs(x, &surface(v), eps)
+}
+
 fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
     let mut out = Vec::new();
     let mut found = Vec::new();
