@@ -1,4 +1,23 @@
-# Intersection-free contact for node-beam bodies (design, 2026-11-26)
+# Intersection-free contact for node-beam bodies (design, 2026-11-26; revised from the literature)
+
+> **Revision (after `contact-literature.md`):** the guarantee comes from Planar Divide and Truncate
+> (Chen, Hsu, Ayman, Macklin, SIGGRAPH 2026, arXiv:2604.15513; in NVIDIA's open-source Newton engine),
+> not from CCD rounds and impact zones. Per step:
+> 1. Proximity contact as today (the dissipative law), with OGC's feature regions for the normal of
+>    each point-triangle and edge-edge pair (the `EDGE_CONE=1` rule, exact once nothing crosses).
+> 2. For every pair near enough to meet this step (query radius about 7-8 cm at 2 kHz), a separating
+>    plane at the start of the step, between its closest points, its room shared by each side's
+>    approach.
+> 3. After integration, each node's step is scaled by the smallest fraction its planes allow: only
+>    motion toward a surface is cut, tangential motion is free. One parallel pass, no iteration, a
+>    minimum (order independent, so bit exact).
+> This is a hard non-penetration constraint applied as a projection, an inelastic contact at the
+> plane; it removes momentum toward the surface where it binds and never adds energy. Counters
+> report how often it binds and the momentum it removes. Runtime CCD, its rounds and impact zones are
+> dropped; ACCD stays as a CPU test oracle. Unverified: the arXiv plane-placement formula (followed
+> Newton's code), planes moving with a pair's common motion (our extension), the cost (to measure).
+> The sections below are the first draft, kept for the record.
+
 
 **Goal (the owner's bar):** in any crash, car against car, a car against itself, or a rigid body
 into a car, no two surfaces ever pass through each other, not even briefly. It must run in real
