@@ -85,11 +85,11 @@ pub fn copies(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps: u3
 /// the counters' first in gAcc; vehicles); (the surface edges' first record in gStatic,
 /// their count, r_q's bits, the own clearance's bits); per vehicle three records: (its first
 /// edge, its edges, its pair list's first word in gNext, its capacity in pairs), (its grid's
-/// entries' first word in gNext, their capacity, its spawn exclusions' first entry in gLists,
-/// their count) and (its grid's bucket counts and cursors' first word in gAcc, 0, 0, 0); per edge (global i, global j, its triangles' first entry in gLists, their
-/// count), the entries the global triangles; a spawn exclusion four global nodes (a point and
-/// a triangle, or two edges). gAcc per node [`CC_ACC_NODE`] words (velocity sums xyz, position
-/// sums xyz, active pairs, zone label, surface mark), then per vehicle [`CC_VEH_WORDS`], then
+/// entries' first word in gNext, their capacity, 0, 0) and (its grid's bucket counts and cursors' first word in gAcc, 0, 0, 0); per edge
+/// (global i, global j, its triangles' first entry in gLists, their count), the entries the
+/// global triangles. No own pair is left out: a vehicle whose own pairs are closer than
+/// [`CC_SELF_GAP`] at spawn cannot turn it on ([`cc_tables`]'s third value). gAcc per node
+/// [`CC_ACC_NODE`] words (velocity sums xyz, position sums xyz, active pairs, zone label, surface mark), then per vehicle [`CC_VEH_WORDS`], then
 /// [`CC_COUNTERS`]. A grid: in gAcc [`CC_GRID_BUCKETS`] starts and as many cursors; in gNext
 /// two words an entry (primitive | kind << 31, packed cell).
 /// (Word W_CC + 1: the per-vehicle pair counts' first word in gAcc, then the counters.)
@@ -116,13 +116,13 @@ pub(super) fn cc_tables(
     beams: &mut Vec<[f32; 4]>,
     next_init: &mut Vec<u32>,
     acc_init: &mut Vec<i32>,
-) -> (u32, u32) {
+) -> (u32, u32, Option<String>) {
     let nv = vehicles.len();
+    let mut refused = None;
     let total: usize = vehicles.iter().map(|v| v.nodes.len()).sum();
     // Each vehicle's collision triangles' edges, each once with its triangles (global).
     let (mut node_at, mut tri_at) = (0u32, 0u32);
     let mut per: Vec<Vec<([u32; 2], Vec<u32>)>> = Vec::new();
-    let mut firsts = Vec::new();
     for v in vehicles {
         let mut m: std::collections::BTreeMap<[u32; 2], Vec<u32>> = Default::default();
         for (t, tri) in v.triangles.iter().enumerate() {
@@ -132,7 +132,6 @@ pub(super) fn cc_tables(
             }
         }
         per.push(m.into_iter().collect());
-        firsts.push((node_at, tri_at));
         node_at += v.nodes.len() as u32;
         tri_at += v.triangles.len() as u32;
     }
@@ -146,7 +145,7 @@ pub(super) fn cc_tables(
     statics.push([scratch_at, acc_at, acc_at + (CC_ACC_NODE * total + CC_VEH_WORDS * nv) as u32, nv as u32]);
     statics.push([edges_at, edges as u32, 0.08f32.to_bits(), CC_SELF_GAP.to_bits()]);
     let mut first = 0u32;
-    for ((v, p), &(n0, _)) in vehicles.iter().zip(&per).zip(&firsts) {
+    for (k, (v, p)) in vehicles.iter().zip(&per).enumerate() {
         let cap = CC_PAIRS_PER_ITEM * (v.nodes.len() + p.len());
         let list_at = next_init.len() as u32;
         // (Then its two pair lists and its touched nodes.)
@@ -156,13 +155,13 @@ pub(super) fn cc_tables(
         next_init.extend(std::iter::repeat_n(0, 2 * grid_cap + 2 * CC_GRID_BUCKETS));
         let buckets_at = acc_init.len() as u32;
         acc_init.extend(std::iter::repeat_n(0, 2 * CC_GRID_BUCKETS));
-        // The own pairs under the clearance at spawn (seam neighbours: never paired).
+        // No own pair is left out: own pairs under the clearance at spawn refuse the mode.
         let x: Vec<glam::Vec3> = v.nodes.iter().map(|n| v.origin + n.pos).collect();
-        let excl = engine_softbody::explicit_contact::close_pairs_at(&x, v, CC_SELF_GAP);
-        let excl_at = lists.len() as u32;
-        lists.extend(excl.iter().flat_map(|(k, _)| k.map(|i| n0 + i)));
+        if let Err(e) = engine_softbody::explicit_contact::own_clearance(&x, v, CC_SELF_GAP) {
+            refused.get_or_insert(format!("vehicle {k}: {e}"));
+        }
         statics.push([first, p.len() as u32, list_at, cap as u32]);
-        statics.push([grid_at, grid_cap as u32, excl_at, excl.len() as u32]);
+        statics.push([grid_at, grid_cap as u32, 0, 0]);
         statics.push([buckets_at, 0, 0, 0]);
         first += p.len() as u32;
     }
@@ -172,5 +171,5 @@ pub(super) fn cc_tables(
             lists.extend(tris);
         }
     }
-    (base, acc_at + (CC_ACC_NODE * total) as u32)
+    (base, acc_at + (CC_ACC_NODE * total) as u32, refused)
 }

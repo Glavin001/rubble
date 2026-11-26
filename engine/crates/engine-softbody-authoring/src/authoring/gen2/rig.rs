@@ -181,6 +181,18 @@ fn bounds(v: &[Vec3]) -> (Vec3, Vec3) {
     )
 }
 
+/// A door skin column's z at height `y`: the edge columns (`k` 0 the front, 2 the rear) 3 cm
+/// inside the door's own outline `pts` at that height, so a shut line that slants (the rear
+/// door's along the C-pillar) does not put the column's node over the body's skin beyond it.
+fn door_column_z(pts: &[Vec3], k: usize, z: f32, y: f32) -> f32 {
+    let edge = |rear: bool| pts.iter().filter(|q| (q.y - y).abs() < 0.04).map(|q| q.z).reduce(if rear { f32::min } else { f32::max });
+    match k {
+        0 => edge(false).map_or(z, |e| z.min(e - 0.03)),
+        2 => edge(true).map_or(z, |e| z.max(e + 0.03)),
+        _ => z,
+    }
+}
+
 /// Lowest y of `v` within `dz` of section `z` (None if none).
 fn low_at(v: &[Vec3], z: f32, dz: f32) -> Option<f32> {
     v.iter()
@@ -2269,7 +2281,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                         grid[row].push(None);
                         continue;
                     }
-                    let p = mirror(side(z, y), s);
+                    let p = mirror(side(door_column_z(pts, k, z, y), y), s);
                     let i = r.node(&format!("{dn}_o{row}{k}"), p, part, Some(Role::Sheet), true);
                     grid[row].push(Some(i));
                 }

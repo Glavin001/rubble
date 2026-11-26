@@ -43,12 +43,14 @@ impl Default for LabOptions {
 
 /// Continuous contact on the lab's vehicles: on the split group path (group split on, self
 /// split and the wide passes off, which would step the cars elsewhere), or off (those back as
-/// the lab's defaults).
-pub(super) fn continuous_on(x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool) {
-    x.set_continuous(on);
+/// the lab's defaults). Refused, with nothing changed, for cars built with own surfaces under
+/// the clearance (`ExplicitBeamsGpu::set_continuous`).
+pub(super) fn continuous_on(x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool) -> anyhow::Result<()> {
+    x.set_continuous(on).map_err(anyhow::Error::msg)?;
     if on {
         x.set_group_split(true);
         x.set_self_split(false);
         let _ = x.set_wide(false);
     }
+    Ok(())
 }

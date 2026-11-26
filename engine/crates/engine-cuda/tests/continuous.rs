@@ -53,7 +53,7 @@ fn cuda_continuous_head_on_cost() {
         let mut g = CudaExplicitBeams::new(&fleet).unwrap();
         g.set_vehicle_contact(true);
         g.set_group_split(true);
-        g.set_continuous(on);
+        g.set_continuous(on).expect("the sedan keeps its clearance");
         let mut w = ExplicitBeamsWorld::new(fleet.clone());
         if on {
             w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));

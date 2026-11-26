@@ -87,6 +87,11 @@ pub struct CcdStats {
     pub zone_spin: u64,
     pub dp: f64,
     pub dl: f64,
+    /// Non-rigid zones (`soft` rounds): rounds run, the constraint rows they held (summed over
+    /// rounds), and the pairs left to the rigid zones after them.
+    pub soft_rounds: u64,
+    pub soft_rows: u64,
+    pub soft_left: u64,
 }
 
 /// The closest points of a pair at positions `p` (four points): their weights (signed by
@@ -154,6 +159,7 @@ pub(super) fn resolve(
     im: &[Vec<f32>],
     h: f32,
     rounds: u32,
+    soft: u32,
     zone_rounds: u32,
     st: &mut CcdStats,
 ) {
@@ -258,6 +264,11 @@ pub(super) fn resolve(
             c.iter_mut().for_each(|c| *c = 0);
         }
     }
+    // Non-rigid impact zones first (`soft` rounds, [`soft_rounds`]), then the rigid ones.
+    if soft > 0 && soft_rounds(pairs, x0, x1, vel, im, soft, st, &collide) {
+        finish(st, x1, vel);
+        return;
+    }
     // Impact zones: the nodes of still-colliding pairs, merged; each moves rigidly. A pair
     // whose nodes are all in one zone moves rigidly and cannot collide: it is not re-tested.
     let mut zone_of: std::collections::HashMap<(usize, u32), usize> = Default::default();
@@ -315,6 +326,107 @@ pub(super) fn resolve(
     st.unresolved += collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).count() as u64;
     finish(st, x1, vel);
 }
+
+/// Non-rigid impact zones (Harmon et al. 2008, inelastic projection), `soft` rounds: every
+/// pair still colliding becomes a constraint row, kept for the rounds after (so a pair
+/// resolved stays resolved), and each round projects the step's end positions and the
+/// velocities onto them, the smallest change by mass ([`soft_project`]). The zones are the
+/// rows' connected nodes; they deform, they are not frozen. What is left after these rounds
+/// goes to the rigid zones ([`resolve`]). Returns true when nothing collides any more.
+#[allow(clippy::too_many_arguments)]
+fn soft_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], soft: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>) -> bool {
+    let pos = |x: &[Vec<Vec3>], k: &[(usize, u32); 4]| k.map(|(v, i)| x[v][i as usize]);
+    let mut rows: Vec<Row> = Vec::new();
+    let mut held: std::collections::HashMap<usize, usize> = Default::default();
+    for _ in 0..soft {
+        let hit = collide(x1);
+        if hit.is_empty() {
+            return true;
+        }
+        st.soft_rounds += 1;
+        for &(q, t) in &hit {
+            let pr = &pairs[q];
+            let (a, b) = (pos(x0, &pr.k), pos(x1, &pr.k));
+            let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
+            let (w, gv) = closest(pr.nn, at);
+            let n = gv.normalize_or_zero();
+            if n == Vec3::ZERO {
+                continue;
+            }
+            // (A pair hit again: its row re-linearised at the new impact.)
+            if let Some(&r) = held.get(&q) {
+                (rows[r].w, rows[r].n, rows[r].at) = (w, n, at);
+            } else {
+                held.insert(q, rows.len());
+                rows.push(Row { k: pr.k, w, n, at });
+            }
+        }
+        st.soft_rows += rows.len() as u64;
+        soft_project(&rows, x1, vel, im);
+    }
+    st.soft_left += collide(x1).len() as u64;
+    false
+}
+
+/// A non-rigid zone's constraint: a pair's nodes, its closest points' signed weights and
+/// normal at its impact, and its nodes' positions there.
+struct Row {
+    k: [(usize, u32); 4],
+    w: [f32; 4],
+    n: Vec3,
+    at: [Vec3; 4],
+}
+
+/// The inelastic projection of the rows (Harmon et al. 2008): the step's end positions moved
+/// the least by mass so that no row's pair is closer along its normal than at its impact
+/// (Σⱼ wⱼ n·(x1ⱼ − atⱼ) ≥ 0), and the velocities so that none closes (Σⱼ wⱼ n·vⱼ ≥ 0). Each
+/// row's push is equal and opposite (its weights sum to zero) along the gap's direction, so
+/// momentum and angular momentum are kept; the velocities' set is a cone through zero, so
+/// kinetic energy never rises (every projected Gauss-Seidel step lowers it). Rows in their
+/// order, [`SOFT_SWEEPS`] sweeps, fewer once none moves; a row not met then is caught by the
+/// next round's detection.
+fn soft_project(rows: &[Row], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>]) {
+    let mi = |k: (usize, u32)| im[k.0][k.1 as usize];
+    let s: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * mi(r.k[j])).sum()).collect();
+    for part in [true, false] {
+        let mut lam = vec![0.0f32; rows.len()];
+        for _ in 0..SOFT_SWEEPS {
+            let mut moved = false;
+            for (q, r) in rows.iter().enumerate() {
+                if s[q] <= 0.0 {
+                    continue;
+                }
+                let c: f32 = (0..4)
+                    .map(|j| {
+                        let (v, i) = (r.k[j].0, r.k[j].1 as usize);
+                        r.w[j] * r.n.dot(if part { x1[v][i] - r.at[j] } else { vel[v][i] })
+                    })
+                    .sum();
+                let d = (-c / s[q]).max(-lam[q]);
+                if d == 0.0 {
+                    continue;
+                }
+                lam[q] += d;
+                moved = true;
+                for j in 0..4 {
+                    let (v, i) = (r.k[j].0, r.k[j].1 as usize);
+                    let push = r.n * (r.w[j] * mi(r.k[j]) * d);
+                    if part {
+                        x1[v][i] += push;
+                    } else {
+                        vel[v][i] += push;
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+}
+
+/// Projected Gauss-Seidel sweeps of a non-rigid zone's projection.
+const SOFT_SWEEPS: u32 = 32;
 
 /// sin and cos of `t` (|t| ≤ 1) by their Taylor series to the t¹¹ and t¹⁰ terms, Horner in a
 /// fixed order: below 2⁻²³ relative error there, and the same bits on the CPU and the kernels

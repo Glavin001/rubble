@@ -31,9 +31,9 @@ pub(super) fn tri_tri_gap(r: &Rig, ia: [usize; 3], ib: [usize; 3]) -> f32 {
     d
 }
 
-/// The least clearance between a car's own collision triangles that share no node: continuous
-/// contact keeps a car's own surfaces this far apart and cannot separate closer ones (m).
-pub(super) const SKIN_CLEARANCE: f32 = 0.002;
+/// The least clearance between a car's own collision triangles that share no node (the lint's
+/// `skin_clearance`): continuous contact keeps a car's own surfaces this far apart.
+pub(super) use crate::authoring::lint::SKIN_CLEARANCE;
 
 /// Whether triangle `t` lies within [`SKIN_CLEARANCE`] of a placed triangle it shares no
 /// node with (a seam bridge folded onto the skin).

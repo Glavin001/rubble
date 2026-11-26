@@ -6,9 +6,15 @@ use super::ExplicitBeamsGpu;
 
 impl ExplicitBeamsGpu {
     /// Continuous contact on or off (off, the default). It runs on the split group path
-    /// ([`ExplicitBeamsGpu::set_group_split`]); without it, frames are as before.
-    pub fn set_continuous(&mut self, on: bool) {
+    /// ([`ExplicitBeamsGpu::set_group_split`]); without it, frames are as before. Refused for
+    /// a fleet with a vehicle whose own surfaces are closer than the own clearance at spawn
+    /// (no pair is left out).
+    pub fn set_continuous(&mut self, on: bool) -> Result<(), String> {
+        if let (true, Some(e)) = (on, &self.layout.cc_refused) {
+            return Err(e.clone());
+        }
         self.planner.continuous = on;
+        Ok(())
     }
 
     /// Continuous contact's counts after the last frame (None without its tables): each

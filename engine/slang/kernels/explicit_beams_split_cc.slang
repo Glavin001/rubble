@@ -326,16 +326,6 @@ uint2 ccBucket(uint v, uint h)
     uint at = ccVeh(v, 1u).x + 2u * ccVeh(v, 1u).y + 2u * h;
     return uint2(gNext[at], gNext[at + 1u]);
 }
-bool ccExcluded(uint v, uint k0, uint k1, uint k2, uint k3)
-{
-    uint4 r = ccVeh(v, 1u);
-    for (uint e = 0u; e < r.w; e++)
-    {
-        uint at = r.z + 4u * e;
-        if (gLists[at] == k0 && gLists[at + 1u] == k1 && gLists[at + 2u] == k2 && gLists[at + 3u] == k3) return true;
-    }
-    return false;
-}
 float ccMaxOffset(uint v) { return asfloat(gAcc[ccVW(v, 2u)].load()); }
 // The vehicle's first node's step (its reach's reference).
 float3 ccRefDx(uint v) { uint g0 = gStatic[v * 4u].x; return ssub3(ccX1(g0), ccX0(v, g0)); }
@@ -467,7 +457,6 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
                         // the thickness test below.)
                         float rt = own ? rq : nf(rp + ot);
                         if (!(sdot(dv, dv) < smul(rt, rt))) continue;
-                        if (own && ccExcluded(a, gi, tn.x, tn.y, tn.z)) continue;
                         CcPair q;
                         q.k[0] = tn.x; q.k[1] = tn.y; q.k[2] = tn.z; q.k[3] = gi;
                         q.nn = 3u; q.own = own; q.va = a; q.vb = b;
@@ -524,7 +513,6 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
                         float3 dv = ssub3(sadd3(p2, sscale(ssub3(q2, p2), st.y)), sadd3(p1, sscale(ssub3(q1, p1), st.x)));
                         float rt = own ? rq : nf(re + of);
                         if (!(sdot(dv, dv) < smul(rt, rt))) continue;
-                        if (own && ccExcluded(a, er.x, er.y, fr.x, fr.y)) continue;
                         CcPair q;
                         q.k[0] = er.x; q.k[1] = er.y; q.k[2] = fr.x; q.k[3] = fr.y;
                         q.nn = 2u; q.own = own; q.va = b; q.vb = a;

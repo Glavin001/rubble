@@ -220,12 +220,16 @@ The guarantee now comes from physics (`explicit_contact/ccd.rs`, after an expert
    cannot add kinetic energy. Pairs inside one zone are not re-tested. Pairs still unresolved
    after 16 zone rounds are counted.
 
-**A car against itself.** A car's own pairs that share no node take part. Pairs under 2 mm at
-the first step are seam neighbours and are left out (self contact's spawn rule). The skin
-authoring keeps them at 2 mm or more: seam bridges, hole caps and belly faces are rejected
-closer (`rig_fill::SKIN_CLEARANCE`). The sedan's own pairs under 2 mm at rest went from 14 to
-2: the rear doors' edge node is 1.2 mm from the shell at the shut line, to fix in the door
-generator.
+**A car against itself.** Every one of a car's own pairs that share no node takes part; none
+is left out (owner, 2026-11-26: no seam exclusion, the authoring is checked instead). A car
+whose own pairs are under 2 mm apart at spawn cannot run the mode: the CPU reference stops
+with an error, and the GPU hosts' `set_continuous(true)` returns one, listing the pairs. The
+skin authoring keeps them at 2 mm or more (`lint::SKIN_CLEARANCE`): seam bridges, hole caps
+and belly faces are rejected closer, and the doors' edge columns sit 3 cm inside the door's
+own outline at each row's height (the rear door's slanted rear edge had put `door_R?_o12`
+1.2 mm over the quarter panel's skin). The lint's hard rule `skin_clearance`
+(`generated_vehicle_lint`) fails a generated design with any such pair; the sedan has none
+(14 before the skin rules, 2 before the door fix).
 
 **Results.** `tests/continuous_contact.rs`, 8 runs each, generated sedan. Every crash passes
 the bar with 0 crossings, between the cars and within a car, at every 20 ms check:
@@ -256,7 +260,8 @@ the bar with 0 crossings, between the cars and within a car, at every 20 ms chec
 - Contact is perfectly inelastic: no bounce.
 - Impact zones remove the relative motion inside a zone for that step. Momentum is kept. At
   head 100 there were 3,288 zones over 2,000 steps.
-- Seam neighbours under 2 mm at spawn are left out.
+- ~~Seam neighbours under 2 mm at spawn are left out.~~ Removed (owner, 2026-11-26): no pair
+  is left out; the authoring keeps them 2 mm apart and the lint and the runtime check it.
 - The thicknesses: paint between cars, 2 mm within a car.
 
 **Cost.** The CPU prototype takes about 100 s per simulated second in a hard crash. It
@@ -270,6 +275,50 @@ rebuilds hash grids every step and runs ACCD on every listed pair.
 - The Slang GPU port, bit exact.
 - The cost on CUDA and in Chrome.
 - The lab control.
+
+## Non-rigid impact zones, compared (2026-11-26)
+
+Rigid zones fired 1-2 times a step in hard crashes (5,220 over 2,000 steps at head 100), so
+they were no longer a rare failsafe: a frozen zone stiffens the crumpling metal for that step
+and removes its relative motion. The non-rigid alternative is Harmon et al. 2008's inelastic
+projection (ArcSim's non-rigid zones): `ccd::soft_project`, `DAT_SOFT=N` rounds before the
+rigid ones.
+
+- Every pair still colliding after the CCD rounds becomes a constraint row, kept for the
+  following rounds so a resolved pair stays resolved (re-linearised when it is hit again).
+- Each round projects the step's end positions so that no row's pair is closer along its
+  normal than at its impact, and the velocities so that none closes: the least change by
+  mass, by projected Gauss-Seidel (32 sweeps at most, rows in order).
+- Each row's push is equal and opposite along the gap's direction: momentum and angular
+  momentum are kept. The velocities' set is a cone through zero, so every Gauss-Seidel step
+  lowers kinetic energy: it cannot create any.
+- What is still colliding after the non-rigid rounds goes to the rigid zones (the guarantee).
+
+One run each, generated sedan, the door fix and no seam exclusion; depth = worst paint depth
+(mm), zones = rigid zones over the run, energy = what the response removed (kJ):
+
+| crash | rigid only: depth / zones / energy | 8 non-rigid rounds | 16 non-rigid rounds |
+|---|---|---|---|
+| head 60 | 0 / 1,002 / 9.0 | 0 / 848 / 6.0 | 0 / 1,029 / 6.1 |
+| head 100 | 4.6 / 5,220 / 130 | 0.4 / 2,440 / 126 | 0.4 / 1,753 / 123 |
+| head 130 | 16.4 / 6,630 / 248 | 0.0 / 2,230 / 269 | 0.0 / 7,078 / 277 |
+| offset 100 | 24.0 / 2,629 / 151 | 27.2 / 1,094 / 71 | 28.1 / 738 / 38 |
+| side 60 | 0 / 99 / 0.07 | 0 / 41 / 0.07 | 0 / 41 / 0.07 |
+| ball 100 | 16.3 / 5 / 0.7 | 19.8 / 14 / 1.2 | 19.8 / 17 / 2.7 |
+
+Every run: 0 crossings (car to car and own), 0 unresolved, 0 from 0.3 s after the hit, the
+response only removes energy, momentum changes by at most 0.002 N·s a step (rounding).
+
+- 8 non-rigid rounds cut the rigid zones 2 to 3 times in the hard crashes and remove the
+  head-on depth (4.6 -> 0.4 mm at 100, 16.4 -> 0 mm at 130). The offset hit removes half the
+  energy (71 against 151 kJ): the rigid zones were damping it. Depth there and in the ball
+  hit is 3 mm worse, both within the bar.
+- 16 rounds are not better: the rows grow faster than 32 sweeps converge them (head 130's
+  rigid zones rise to 7,078).
+- CPU time, head 100 alone in the same conditions: 41 s against 48 s rigid only (fewer
+  rigid zone rounds).
+- Not adopted as the default yet: the GPU's response is rigid only, and GPU == CPU must hold.
+  The port is next (one workgroup a group, the rows' Gauss-Seidel in order, as the CPU).
 
 ## The GPU port (design, 2026-11-26)
 
@@ -294,8 +343,7 @@ A new step-word bit selects the half, as `SPLIT_LEVELS` does.
    point-triangle and edge-edge pairs within r_q of the paint into fixed-capacity per-item
    lists. The lists are kept in ascending candidate order. Overflow sets a flag that fails
    the frame with an error; nothing is ever dropped. This covers pairs between vehicles and
-   within one, excludes pairs sharing a node, and applies the spawn exclusion as a per-vehicle
-   bitset built once on the host.
+   within one, and excludes pairs sharing a node (only those).
 2. **`cc_spec_count`, then `cc_spec_solve`, k rounds.** These are the speculative inelastic
    contact.
    - The count pass gives each active pair's nodes an atomic count.

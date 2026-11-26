@@ -10,6 +10,9 @@ pub const SKIN_HOLE_MAX: f32 = 2.5;
 /// A collision triangle whose height is under this share of its longest edge is a sliver
 /// (it lies across its neighbours; `gen2` rig's own rule).
 pub const SKIN_SLIVER: f32 = 0.1;
+/// The least gap (m) between a car's own collision primitives that share no node:
+/// continuous contact's own thickness (`engine_softbody::explicit_contact::Dat::self_gap`).
+pub const SKIN_CLEARANCE: f32 = 0.002;
 
 /// Whether segment p→q passes through triangle (a, b, c) (Möller–Trumbore, ends included).
 fn seg_through(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
@@ -227,6 +230,57 @@ impl SkinView {
         crossing,
     ));
     }
+    fn clearance(&self, world: &[[Vec3; 3]], out: &mut Vec<Finding>) {
+    // The skin's own pairs sharing no node (a point and a triangle, two edges) closer than
+    // SKIN_CLEARANCE at rest: continuous contact holds a car's own surfaces that far apart
+    // and has no exclusion for closer ones (the closest points as contact finds them).
+    use engine_softbody::explicit_contact::{closest_on_triangle, closest_segments};
+    let g = SKIN_CLEARANCE;
+    let boxes: Vec<(Vec3, Vec3)> = world.iter().map(|t| (t[0].min(t[1]).min(t[2]) - Vec3::splat(g), t[0].max(t[1]).max(t[2]) + Vec3::splat(g))).collect();
+    let mut close: Vec<(f32, String)> = Vec::new();
+    let mut nodes: Vec<u32> = self.tris.iter().flatten().copied().collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    for &i in &nodes {
+        let p = self.pos[i as usize];
+        for (k, t) in self.tris.iter().enumerate() {
+            let (lo, hi) = boxes[k];
+            if t.contains(&i) || p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                continue;
+            }
+            let [a, b, c] = world[k];
+            let d = p.distance(closest_on_triangle(p, a, b, c));
+            if d < g {
+                close.push((d, format!("{} to {} {:.2} mm", self.name(i), t.map(|j| self.name(j)).join(","), d * 1e3)));
+            }
+        }
+    }
+    let edges: Vec<(u32, u32)> = self.by.keys().copied().collect();
+    let eb: Vec<(Vec3, Vec3)> = edges.iter().map(|&(a, b)| (self.pos[a as usize].min(self.pos[b as usize]), self.pos[a as usize].max(self.pos[b as usize]))).collect();
+    for (x, &(a, b)) in edges.iter().enumerate() {
+        for (y, &(c, d)) in edges.iter().enumerate().skip(x + 1) {
+            let ((l1, h1), (l2, h2)) = (eb[x], eb[y]);
+            if [c, d].iter().any(|n| *n == a || *n == b) || (h1 + Vec3::splat(g)).cmplt(l2).any() || (h2 + Vec3::splat(g)).cmplt(l1).any() {
+                continue;
+            }
+            let (q1, q2) = closest_segments(self.pos[a as usize], self.pos[b as usize], self.pos[c as usize], self.pos[d as usize]);
+            let dd = q1.distance(q2);
+            if dd < g {
+                close.push((dd, format!("{}-{} to {}-{} {:.2} mm", self.name(a), self.name(b), self.name(c), self.name(d), dd * 1e3)));
+            }
+        }
+    }
+    close.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out.push(skin_finding(
+        "skin_clearance",
+        true,
+        close.len(),
+        false,
+        format!("{} own pairs sharing no node closer than {:.0} mm at rest", close.len(), g * 1e3),
+        "0",
+        close.into_iter().map(|c| c.1).collect(),
+    ));
+    }
     fn holes(&self, out: &mut Vec<Finding>) {
     // Holes: loops of open edges (components whose every node has two open edges).
     let open: Vec<(u32, u32)> = self.by.iter().filter(|(_, v)| v.len() == 1).map(|(&e, _)| e).collect();
@@ -336,6 +390,9 @@ impl SkinView {
 ///   slivers are left to `skin_slivers` (their normal is not a direction);
 /// * `skin_self_crossing` (hard): no skin edge passes through a triangle it shares no node
 ///   with (the skin through itself at rest: its two layers have no outside between them);
+/// * `skin_clearance` (hard): no two of the skin's own primitives sharing no node (a node
+///   and a triangle, two edges) closer than [`SKIN_CLEARANCE`] at rest: continuous contact
+///   holds a car's own surfaces that far apart and excludes none;
 /// * `skin_holes` (hard): no hole (a loop of open edges) shorter than [`SKIN_HOLE_MAX`]
 ///   round; longer loops, and a door's or the lid's own outline or window (glass is
 ///   visual only), are listed as openings;
@@ -348,6 +405,7 @@ pub fn collision_skin(d: &SoftVehicleDesc) -> Vec<Finding> {
     s.winding(&mut out);
     s.facing(&world, &mut out);
     s.crossing(&world, &mut out);
+    s.clearance(&world, &mut out);
     s.holes(&mut out);
     s.slivers(&world, &mut out);
     out

@@ -6,8 +6,13 @@
 use super::CudaExplicitBeams;
 
 impl CudaExplicitBeams {
-    /// Continuous contact on or off (off, the default).
-    pub fn set_continuous(&mut self, on: bool) {
+    /// Continuous contact on or off (off, the default). Refused for a fleet with a vehicle
+    /// whose own surfaces are closer than the own clearance at spawn (no pair is left out).
+    pub fn set_continuous(&mut self, on: bool) -> Result<(), String> {
+        if let (true, Some(e)) = (on, &self.layout.cc_refused) {
+            return Err(e.clone());
+        }
         self.planner.continuous = on;
+        Ok(())
     }
 }

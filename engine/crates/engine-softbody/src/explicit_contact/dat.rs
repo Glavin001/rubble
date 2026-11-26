@@ -46,6 +46,9 @@ pub struct Dat {
     /// when larger).
     pub ccd_rounds: u32,
     pub zone_rounds: u32,
+    /// Rounds of non-rigid impact zones before the rigid ones (0: rigid only; `DAT_SOFT`, a
+    /// comparison, `ccd::resolve`).
+    pub soft_zones: u32,
     pub min_gap: f32,
     /// A car against itself too (`DAT_SELF=0`: only car against car).
     pub self_contact: bool,
@@ -59,10 +62,10 @@ pub struct Dat {
     /// `DAT_WHO=1` (a measurement): per (vehicle, node), the steps it moved past the cover
     /// and the steps it was frozen.
     pub who: Option<HashMap<(usize, u32), [u32; 2]>>,
-    /// Per vehicle, its own pairs closer than `self_gap` at its first step (neighbours across
-    /// a seam, as self contact's spawn exclusion, spec §10.1): left out of both passes.
-    pub rest_excl: Vec<Option<std::collections::HashSet<[u32; 4]>>>,
-    /// Each vehicle's positions at its first step (the exclusion's).
+    /// Per vehicle, whether its first step's clearance was checked ([`own_clearance`]: no
+    /// own pair is excluded, so a car built closer than `self_gap` fails).
+    pub checked: Vec<bool>,
+    /// Each vehicle's positions at its first step.
     pub first: Vec<Vec<Vec3>>,
     /// The last step's counts and every step's, summed.
     pub last: DatStats,
@@ -117,6 +120,7 @@ impl DatStats {
         self.ccd.zone_nodes += o.ccd.zone_nodes;
         self.ccd.unresolved += o.ccd.unresolved;
         self.ccd.zone_spin += o.ccd.zone_spin;
+        (self.ccd.soft_rounds, self.ccd.soft_rows, self.ccd.soft_left) = (self.ccd.soft_rounds + o.ccd.soft_rounds, self.ccd.soft_rows + o.ccd.soft_rows, self.ccd.soft_left + o.ccd.soft_left);
         self.ccd.ke += o.ccd.ke;
         self.ccd.dp = self.ccd.dp.max(o.ccd.dp);
         self.ccd.dl = self.ccd.dl.max(o.ccd.dl);
@@ -146,7 +150,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), rest_excl: Vec::new(), first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -569,7 +573,7 @@ impl ExplicitBeamsWorld {
             let mut vs: Vec<Vec<Vec3>> = (0..x1.len())
                 .map(|v| (0..x1[v].len()).map(|i| v0[v][i] + (x1[v][i] - x1p[v][i] - shift[v][i]) / STEP).collect())
                 .collect();
-            super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.zone_rounds, &mut st.ccd);
+            super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd);
             vfinal = Some(vs);
         }
         let q = reach(&x1, &zero);
@@ -627,7 +631,7 @@ impl ExplicitBeamsWorld {
     }
 
     /// Vehicle `v`'s own crossings now (edge, triangle) with their distance at its first
-    /// step (`Dat::first`; NaN without): under the self gap, a seam pair left out.
+    /// step (`Dat::first`; NaN without).
     pub fn own_crossings_at(&self, v: usize) -> Vec<([u32; 2], [u32; 3], f32)> {
         let veh = &self.vehicles[v];
         let x: Vec<Vec3> = veh.nodes.iter().map(|n| veh.origin + n.pos).collect();
@@ -733,6 +737,27 @@ pub fn close_pairs_at(x: &[Vec3], v: &ExplicitBeams, eps: f32) -> Vec<([u32; 4],
     close_pairs(x, &surface(v), eps)
 }
 
+/// Continuous contact's own clearance at positions `x`: a car's own surfaces are held `gap`
+/// apart and no pair is left out, so one built with own pairs (sharing no node) closer than
+/// that cannot run; the error lists them (fix the authoring: the lint's `skin_clearance`).
+pub fn own_clearance(x: &[Vec3], v: &ExplicitBeams, gap: f32) -> Result<(), String> {
+    clearance(close_pairs_at(x, v, gap), gap)
+}
+
+fn clearance(mut near: Vec<([u32; 4], f32)>, gap: f32) -> Result<(), String> {
+    if near.is_empty() {
+        return Ok(());
+    }
+    near.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let list: Vec<String> = near.iter().take(8).map(|(k, g)| format!("nodes {k:?} {:.2} mm", g * 1e3)).collect();
+    Err(format!(
+        "continuous contact: {} own pairs of the vehicle's collision surface sharing no node are closer than {:.1} mm at spawn ({}); the authoring must keep them apart (lint skin_clearance)",
+        near.len(),
+        gap * 1e3,
+        list.join(", ")
+    ))
+}
+
 fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
     let mut out = Vec::new();
     let mut found = Vec::new();
@@ -779,7 +804,7 @@ fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
 }
 
 /// Every listed pair at the step's start `x0` (point-triangle, edge-edge; between vehicles
-/// within r_q of their paint, within one vehicle sharing no node and not excluded at spawn),
+/// within r_q of their paint, within one vehicle sharing no node),
 /// in a fixed order: vehicle a, vehicle b, then a's nodes or edges ascending, b's primitives
 /// ascending.
 #[allow(clippy::too_many_arguments)]
@@ -794,17 +819,18 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
     let nv = x0.len();
     let none: Vec<Vec<Vec3>> = vec![Vec::new(); nv];
     if dat.self_contact {
-        dat.rest_excl.resize(nv, None);
+        dat.checked.resize(nv, false);
         for v in 0..nv {
-            if dat.rest_excl[v].is_none() {
+            if !dat.checked[v] {
                 dat.first.resize(nv, Vec::new());
                 dat.first[v] = x0[v].clone();
-                let near = close_pairs(&x0[v], &surf[v], dat.self_gap);
-                dat.rest_excl[v] = Some(near.into_iter().map(|p| p.0).collect());
+                if let Err(e) = clearance(close_pairs(&x0[v], &surf[v], dat.self_gap), dat.self_gap) {
+                    panic!("vehicle {v}: {e}");
+                }
+                dat.checked[v] = true;
             }
         }
     }
-    let excl = |v: usize, k: [u32; 4]| dat.rest_excl.get(v).and_then(|e| e.as_ref()).is_some_and(|e| e.contains(&k));
     for a in 0..nv {
         for b in 0..nv {
             let ((alo, ahi), (blo, bhi)) = (boxes[a], boxes[b]);
@@ -842,7 +868,7 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
                 grid.query(p, p, &mut found);
                 for &k in &found {
                     let tri = sb.tris[k as usize];
-                    if own && (tri.contains(&i) || excl(a, [i, tri[0], tri[1], tri[2]])) {
+                    if own && tri.contains(&i) {
                         continue;
                     }
                     let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
@@ -875,7 +901,7 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
                 grid.query(lo, hi, &mut found);
                 for &k in &found {
                     let f = sb.edges[k as usize];
-                    if own && (k as usize <= ke || f.iter().any(|x| e.contains(x)) || excl(a, [e[0], e[1], f[0], f[1]])) {
+                    if own && (k as usize <= ke || f.iter().any(|x| e.contains(x))) {
                         continue;
                     }
                     let [p2, q2] = f.map(|j| x0[b][j as usize]);

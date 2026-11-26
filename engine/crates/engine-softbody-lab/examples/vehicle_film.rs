@@ -11,6 +11,9 @@
 //! rigid wall), `pole` (32 km/h sideways on a carrier into a 254 mm pole at
 //! the front seat), `c2c` (two cars head on, 50 km/h each). Crash scenes are sampled
 //! every 4 ms (7.5× slow motion at 30 fps) and end with the car at rest.
+//! `FILM_KMH` sets `c2c`'s speed (each car), `FILM_OFFSET` its sideways offset (m),
+//! `FILM_FRAMES` the frame count, and `FILM_CONTINUOUS=1` turns on continuous contact with
+//! edge contact (`DAT_SOFT=N`: its non-rigid impact zones, `explicit_contact::ccd`).
 //! Writes `mesh.bin` (vertex and triangle counts, colours, triangles),
 //! `frame_NNNN.bin` (positions, f32, Rubble's frame: +Y up, +Z forward) and
 //! `scene.json` (the static obstacles, the frame interval, the camera's hint).
@@ -213,17 +216,26 @@ fn main() -> Result<(), String> {
             (0.004, 160, "side")
         }
         "c2c" => {
-            let v = 50.0 / 3.6;
+            let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            let (v, off) = (env("FILM_KMH", 50.0) / 3.6, env("FILM_OFFSET", 0.0));
             sims.push(spawn(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * v)?);
             descs.push(d.clone());
             let t = turned(d, 2);
-            sims.push(spawn(&t, Vec3::new(0.0, 0.0, 0.025 + zmax), -Vec3::Z * v)?);
+            sims.push(spawn(&t, Vec3::new(off, 0.0, 0.025 + zmax), -Vec3::Z * v)?);
             descs.push(t);
             (0.004, 160, "side")
         }
         _ => return Err(format!("unknown scene {scene}")),
     };
     let _ = half_w;
+    let frames: usize = std::env::var("FILM_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(frames);
+    let continuous = std::env::var("FILM_CONTINUOUS").is_ok_and(|v| v == "1");
+    if continuous {
+        for s in &mut sims {
+            s.edge_contact = true;
+            s.finish();
+        }
+    }
     // Bound on a spawn at the desc's own positions (the loader matches the
     // skin's nodes by position); the same node order as the scene's spawn.
     let vis: Vec<ShowcaseVisual> = descs
@@ -236,6 +248,9 @@ fn main() -> Result<(), String> {
         .collect::<Result<_, String>>()?;
     write_mesh(&out, &vis).map_err(|e| e.to_string())?;
     let mut w = ExplicitBeamsWorld::new(sims);
+    if continuous {
+        w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
+    }
     let per = (dt / 0.0005).round() as usize;
     for k in 0..frames {
         if scene == "drive" {
@@ -264,7 +279,7 @@ fn main() -> Result<(), String> {
     std::fs::write(
         out.join("scene.json"),
         serde_json::to_string_pretty(&json!({
-            "scene": scene, "design": design, "dt": dt, "frames": frames, "camera": camera,
+            "scene": scene, "design": design, "continuous": continuous, "dt": dt, "frames": frames, "camera": camera,
             "obstacles": obstacles, "broken": broken, "final_speed": speed,
             "paint": engine_softbody_authoring::glb::paint_of(&l.built.input.glb),
         }))

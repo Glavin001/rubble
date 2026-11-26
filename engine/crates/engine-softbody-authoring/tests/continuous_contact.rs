@@ -17,7 +17,7 @@ fn accept(scene: &str, kmh: f32, secs: f32, press: bool) {
     // vehicles' total momentum changes by rounding only (N·s and N·m·s in a step).
     for (k, x) in r.iter().enumerate() {
         let c = x.2.expect("continuous").ccd;
-        println!("|   run {k} | unresolved {}, zones {}, response energy {:.0} J, momentum {:.1e} N*s, {:.1e} N*m*s |", c.unresolved, c.zones, c.ke, c.dp, c.dl);
+        println!("|   run {k} | unresolved {}, zones {} ({} nodes), soft rounds {} rows {} left {}, response energy {:.0} J, momentum {:.1e} N*s, {:.1e} N*m*s |", c.unresolved, c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.ke, c.dp, c.dl);
         assert_eq!(c.unresolved, 0, "run {k}");
         assert!(c.ke <= 1e-3, "run {k}: {} J", c.ke);
         assert!(c.dp < 0.01 && c.dl < 2.0, "run {k}: {} {}", c.dp, c.dl);
@@ -51,3 +51,17 @@ fn continuous_offset_100() { accept("offset", 100.0, 1.0, false); }
 /// A fast rigid body into a car: a 0.15 m steel ball (111 kg) into the door at 100 km/h.
 #[test]
 fn continuous_ball_100() { accept("ball", 100.0, 0.5, false); }
+
+/// A measurement (ignored): one run of `CC_SCENE` at `CC_KMH` (km/h) for `CC_SECS` s, its
+/// depths, crossings and response counters (`DAT_SOFT=N` compares non-rigid zones).
+#[test]
+#[ignore]
+fn continuous_probe() {
+    let e = |k: &str, d: &str| std::env::var(k).unwrap_or(d.into());
+    let (scene, kmh, secs) = (e("CC_SCENE", "head"), e("CC_KMH", "100").parse().unwrap(), e("CC_SECS", "1").parse().unwrap());
+    let t = std::time::Instant::now();
+    let r = crash_mode(&scene, kmh, secs, 1, true, false, true, false, false, Some(true)).expect("the scene");
+    let (x, c) = (&r[0].0, r[0].2.expect("continuous").ccd);
+    println!("PROBE {scene} {kmh} soft {} | worst {:.1} mm, after 0.3 s {:.1} mm, crossings {}, jitter {:.2} m/s | zones {} ({} nodes), soft rounds {} rows {} left {}, unresolved {}, energy {:.0} J, dp {:.1e}, dl {:.1e} | {:.0} s",
+        e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, t.elapsed().as_secs_f32());
+}

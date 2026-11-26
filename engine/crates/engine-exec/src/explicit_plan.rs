@@ -1195,6 +1195,8 @@ pub struct ExplicitUpload {
 /// Where everything lives, and the fleet's module choice.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitLayout {
+    /// Why continuous contact cannot run here (own surfaces too close at spawn, [`continuous::cc_tables`]).
+    #[serde(default)] pub cc_refused: Option<String>,
     /// gAcc word of the first vehicle's self-collision hit counters (two words a
     /// vehicle: the step's hits, its pending beams; the kernel's hitAcc).
     pub hit_acc: u32,
@@ -2616,7 +2618,7 @@ impl ExplicitUpload {
         };
         let edge_base = if any_edge { edge::edge_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { 0 };
         let (offset_base, self_range_base) = edge::offset_and_self_tables(vehicles, any_offset, &mut statics, &mut lists, &mut beams);
-        let (cc_base, cc_counts) = if any_edge { continuous::cc_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { (0, 0) };
+        let (cc_base, cc_counts, cc_refused) = if any_edge { continuous::cc_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { (0, 0, None) };
         let beam_order_base = if beam_order_default() && total_beams > 0 {
             let base = statics.len() as u32;
             statics.extend(beam_order);
@@ -2759,8 +2761,7 @@ impl ExplicitUpload {
         // (Surface contact runs in the frame modules: not in the wide passes.)
         // (RUBBLE_WIDE_FORCE=1, a measurement of time only: the wide passes for a fleet
         // with raycast wheels, whose wheels then do nothing.)
-        let force = std::env::var("RUBBLE_WIDE_FORCE").as_deref() == Ok("1");
-        let _ = force;
+        let _force = std::env::var("RUBBLE_WIDE_FORCE").as_deref() == Ok("1");
         // (Raycast wheels and the rigid coupling run in the wide passes' aux pass.)
         let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && !any_surface;
         // Every vehicle must have run the same steps for the wide passes (one
@@ -2771,7 +2772,7 @@ impl ExplicitUpload {
         let mut table = table_recs[..n].to_vec();
         table.resize(WIDE_MAX_VEHICLES * 5, [0; 4]);
         let layout = ExplicitLayout {
-            hit_acc: hit_acc as u32,
+            cc_refused, hit_acc: hit_acc as u32,
             spans,
             rest0,
             words,

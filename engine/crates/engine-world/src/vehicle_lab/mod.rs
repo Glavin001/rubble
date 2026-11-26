@@ -2573,7 +2573,7 @@ impl Lab {
             x.set_wide_fused(opts.wide_fused);
             x.set_group_split(opts.group_split || opts.continuous);
             x.set_wide(opts.wide && !opts.continuous);
-            continuous_on(x, opts.continuous);
+            continuous_on(x, opts.continuous)?;
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
@@ -3067,7 +3067,7 @@ impl Lab {
         if let Some(on) = cmd.get("continuous").and_then(Value::as_bool) {
             self.bench.opts.continuous = on;
             if let Some(x) = world.explicit_vehicles_mut() {
-                continuous_on(x, on);
+                continuous_on(x, on)?;
             }
             return Ok(json!({ "continuous": on }));
         }

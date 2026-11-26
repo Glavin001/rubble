@@ -41,7 +41,7 @@ fn continuous_head_on_steps_like_the_cpu() {
         g.set_vehicle_contact(true);
         g.set_group_split(true);
         g.set_group_split_tests(tests);
-        g.set_continuous(true);
+        g.set_continuous(true).expect("the sedan keeps its clearance");
         let mut w = ExplicitBeamsWorld::new(fleet.clone());
         w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
         for f in 0..80 {
@@ -75,7 +75,7 @@ fn continuous_pairs_list_like_the_cpu() {
     g.set_bit_exact(true);
     g.set_vehicle_contact(true);
     g.set_group_split(true);
-    g.set_continuous(true);
+    g.set_continuous(true).expect("the sedan keeps its clearance");
     let mut w = ExplicitBeamsWorld::new(fleet);
     // (Both with their response: the states stay equal, so the listings must too.)
     w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
@@ -101,7 +101,7 @@ fn continuous_head_on_lab_frames_like_the_cpu() {
     g.set_bit_exact(true);
     g.set_vehicle_contact(true);
     g.set_group_split(true);
-    g.set_continuous(true);
+    g.set_continuous(true).expect("the sedan keeps its clearance");
     let mut w = ExplicitBeamsWorld::new(fleet.clone());
     w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
     for f in 0..12 {
@@ -128,7 +128,7 @@ fn continuous_cost() {
         let Some(mut g) = gpu(&fleet) else { return };
         g.set_vehicle_contact(true);
         g.set_group_split(true);
-        g.set_continuous(on);
+        g.set_continuous(on).expect("the sedan keeps its clearance");
         let mut ms = Vec::new();
         for _ in 0..8 {
             let t = std::time::Instant::now();

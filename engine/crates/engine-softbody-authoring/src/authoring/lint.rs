@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[path = "lint_skin.rs"]
 mod skin_rules;
-pub use skin_rules::{collision_skin, SKIN_HOLE_MAX, SKIN_SLIVER};
+pub use skin_rules::{collision_skin, SKIN_CLEARANCE, SKIN_HOLE_MAX, SKIN_SLIVER};
 use skin_rules::tri_dist;
 pub(crate) use skin_rules::tri_dist as tri_dist_pub;
 

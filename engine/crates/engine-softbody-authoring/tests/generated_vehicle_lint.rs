@@ -121,6 +121,7 @@ fn every_hard_rule_has_a_test() {
         "skin_winding",
         "skin_facing",
         "skin_self_crossing",
+        "skin_clearance",
         "skin_holes",
         "bound_wall",
         "tether",
@@ -171,6 +172,12 @@ fn generated_designs_collision_skin_faces_out() {
 #[test]
 fn generated_designs_collision_skin_does_not_cross_itself() {
     passes("skin_self_crossing");
+}
+/// Continuous contact keeps a car's own surfaces 2 mm apart and excludes no pair, so the
+/// skin's own primitives sharing no node are at least that far apart at rest.
+#[test]
+fn generated_designs_collision_skin_keeps_its_clearance() {
+    passes("skin_clearance");
 }
 #[test]
 fn generated_designs_collision_skin_has_no_holes() {
