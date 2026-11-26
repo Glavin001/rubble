@@ -37,3 +37,6 @@ fn continuous_side_60_pressed() { accept("side", 60.0, 2.0, true); }
 fn continuous_head_130() { accept("head", 130.0, 1.0, false); }
 #[test]
 fn continuous_offset_100() { accept("offset", 100.0, 1.0, false); }
+/// A fast rigid body into a car: a 0.15 m steel ball (111 kg) into the door at 100 km/h.
+#[test]
+fn continuous_ball_100() { accept("ball", 100.0, 0.5, false); }

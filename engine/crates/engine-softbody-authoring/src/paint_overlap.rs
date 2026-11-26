@@ -13,6 +13,32 @@ use glam::Vec3;
 use std::collections::HashMap;
 
 pub type Tri = [Vec3; 3];
+
+/// The "ball" scene's steel ball radius (m).
+pub const BALL_R: f32 = 0.15;
+
+/// A steel ball of radius `r` at `at` moving at `vel` (a rigid proxy, surface contact).
+fn ball_set(at: Vec3, vel: Vec3, r: f32) -> engine_softbody::explicit_rigid::ProxySet {
+    use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
+    let mass = 7850.0 * 4.0 / 3.0 * std::f32::consts::PI * r.powi(3);
+    let mut set = ProxySet {
+        bodies: vec![RigidProxy {
+            body: 0,
+            pos: at,
+            rot: glam::Quat::IDENTITY,
+            vel,
+            ang_vel: Vec3::ZERO,
+            inv_mass: 1.0 / mass,
+            inv_inertia: Vec3::splat(1.0 / (0.4 * mass * r * r)),
+            share: 1.0,
+            count: 0,
+        }],
+        shapes: vec![ProxyShape::new(0, Vec3::ZERO, glam::Quat::IDENTITY, ProxyGeom::Sphere { radius: r }, 0, None)],
+        frozen: false,
+    };
+    set.begin_window();
+    set
+}
 thread_local!(static FREQ: std::cell::RefCell<(Vec3, bool, u32, f32)> = const { std::cell::RefCell::new((Vec3::ZERO, false, 0, 0.0)) });
 
 
@@ -454,7 +480,8 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
     let run = |k: usize| -> ([f32; 13], usize) {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
-        let aa = spawn(&d, Vec3::new(0.0, 0.0, -0.125 - za), Vec3::Z * speed);
+        // ("ball": car A at rest, a 0.15 m steel ball into its left door at `kmh`.)
+        let aa = spawn(&d, Vec3::new(0.0, 0.0, -0.125 - za), if scene == "ball" { Vec3::ZERO } else { Vec3::Z * speed });
         let off = k as f32 * 1e-3;
         let bb = if scene == "side" {
             spawn(&sideways, Vec3::new(off - 0.5 * (ext(&sideways, 0).0 + ext(&sideways, 0).1), 0.0, 0.125 - ext(&sideways, 2).0), Vec3::ZERO)
@@ -465,11 +492,16 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
         };
         // ("pole": car A alone into a fixed 0.15 m pole at its front left corner.)
         // ("drive": car A alone, no pole: the control for its own paint.)
-        let pole = scene == "pole" || scene == "drive";
+        let pole = scene == "pole" || scene == "drive" || scene == "ball";
         let mut w = if pole {
             let mut aa = aa;
             if scene == "pole" {
                 aa.shapes.push(StaticShape::cylinder(Vec3::new(0.45 + off, 2.0, 0.3), 0.15, 2.0));
+            }
+            if scene == "ball" {
+                let (r, (z0, z1), x1) = (BALL_R, ext(&d, 2), ext(&d, 0).1);
+                let at = Vec3::new(x1 + 0.3 + r, 0.75, -0.125 - za + 0.5 * (z0 + z1) + off);
+                aa.rigid = Some(Box::new(ball_set(at, -Vec3::X * speed, r)));
             }
             ExplicitBeamsWorld::new(vec![aa])
         } else {
@@ -657,6 +689,13 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
             if s % 40 == 0 || s == steps {
                 last = now(&w);
                 worst = worst.max(last);
+                if scene == "ball" {
+                    // The car's paint inside the ball (m), as one car's paint inside the other.
+                    let b = &w.vehicles[0].rigid.as_ref().expect("ball").bodies[0];
+                    deep_last = paint(&v, &rest, &w.vehicles[0]).iter().flatten().map(|p| BALL_R - p.distance(b.pos)).fold(0.0f32, f32::max);
+                    deep = deep.max(deep_last);
+                    if s as f32 / 2000.0 >= settled { lasting = lasting.max(deep_last); } else if deep_last > 0.01 { brief += 0.02; }
+                }
                 if !pole {
                     let [a, b] = [0, 1].map(|k| &w.vehicles[k]);
                     deep_last = depth(&paint(&v, &rest, a), &surface(b, &gap)).max(depth(&paint(&v, &rest, b), &surface(a, &gap)));
