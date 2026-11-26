@@ -198,3 +198,75 @@ Open:
 - Rigid bodies.
 - A test in the suite (the mode as a parameter, not the environment).
 - The GPU port.
+
+## Stage 2-3 revised: CCD with inelastic impulses (2026-11-26)
+
+The owner ruled truncation out: it scales a node's step and speed, so momentum is lost where
+it binds, and it cut 3,002 node steps of a car simply driving. The Planar-DAT planes remain
+only as a detector (`DAT_ENFORCE=1` applies them, a measurement).
+
+The guarantee now comes from physics (`explicit_contact/ccd.rs`, after an expert review):
+
+1. **Contact pass.** The speculative inelastic contact holds each pair at its thickness: its
+   paint between cars, 2 mm within a car. It uses mass splitting (Tonge 2012), so every
+   pair's impulse is equal and opposite.
+2. **CCD response.** Additive CCD (Li 2021, 32 iterations at most) tests every listed
+   point-triangle and edge-edge pair's straight paths for the first time its gap closes to
+   half its thickness. Each impact gets an inelastic impulse along its normal, mass split.
+   Its velocity part cancels at most the velocities' own closing, and the rest moves
+   positions only. This repeats for up to 8 rounds.
+3. **Impact zones.** Pairs still colliding after the rounds become rigid impact zones
+   (Bridson 2002), which keep their linear and angular momentum. The velocity projection
+   cannot add kinetic energy. Pairs inside one zone are not re-tested. Pairs still unresolved
+   after 16 zone rounds are counted.
+
+**A car against itself.** A car's own pairs that share no node take part. Pairs under 2 mm at
+the first step are seam neighbours and are left out (self contact's spawn rule). The skin
+authoring keeps them at 2 mm or more: seam bridges, hole caps and belly faces are rejected
+closer (`rig_fill::SKIN_CLEARANCE`). The sedan's own pairs under 2 mm at rest went from 14 to
+2: the rear doors' edge node is 1.2 mm from the shell at the shut line, to fix in the door
+generator.
+
+**Results.** `tests/continuous_contact.rs`, 8 runs each, generated sedan. Every crash passes
+the bar with 0 crossings, between the cars and within a car, at every 20 ms check:
+
+| crash | worst (mm) | after 0.3 s (mm) | jitter (m/s) |
+|---|---|---|---|
+| side 30 | 0 | 0 | 0.30 |
+| side 60 | 0 | 0 | 0.48 |
+| side 90 | 0 | 0 | 0.57 |
+| side 60 pressed | 0 | 0 | 0.26 |
+| head 30 pressed | 0 | 0 | 0.63 |
+| head 60 | 5 | 0 | 0.88 |
+| head 60 pressed | 11 | 0 | 0.17 |
+| head 100 | 13 | 0 | 0.72 |
+| head 130 | 34 | 1 | 0.72 |
+| offset 100 (40 % overlap) | 41 | 0 | 1.12 |
+
+**Conservation, 1 run each.**
+
+- Unresolved impacts: 0.
+- Momentum: the largest change in one step of the total linear momentum is at most
+  0.0003 N·s, which is rounding.
+- Kinetic energy: the response only removed it, 2.4 to 385 kJ per crash. Driving alone it
+  removed nothing.
+
+**Compromises, explicit, for the owner's approval.**
+
+- Contact is perfectly inelastic: no bounce.
+- Impact zones remove the relative motion inside a zone for that step. Momentum is kept. At
+  head 100 there were 3,288 zones over 2,000 steps.
+- Seam neighbours under 2 mm at spawn are left out.
+- The thicknesses: paint between cars, 2 mm within a car.
+
+**Cost.** The CPU prototype takes about 100 s per simulated second in a hard crash. It
+rebuilds hash grids every step and runs ACCD on every listed pair.
+
+**Open.**
+
+- Head 130 leaves 54 mm of own paint inside the interior solids, though the collision surface
+  never crosses itself. Those solids' surfaces are not all collision triangles.
+- Rigid bodies: reuse `explicit_surface::cast_toi` with impulses in the same solve.
+- The Slang GPU port, bit exact.
+- The cost on CUDA and in Chrome.
+- The lab control.

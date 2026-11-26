@@ -1,6 +1,7 @@
 //! Continuous contact (`docs/continuous-contact-design.md`): the owner's bar (2026-11-25) in
 //! every acceptance crash, 8 runs, and the mode's invariant: no edge of one car ever passes
-//! through the other's collision triangles (checked every 20 ms, every run). Generated sedan,
+//! through the other's collision triangles, and none through its own (checked every 20 ms,
+//! every run). Generated sedan,
 //! edge contact on.
 
 use engine_softbody_authoring::paint_overlap::crash_mode;
@@ -25,8 +26,6 @@ fn continuous_head_30_pressed() { accept("head", 30.0, 2.0, true); }
 fn continuous_head_60_pressed() { accept("head", 60.0, 2.0, true); }
 #[test]
 fn continuous_head_60() { accept("head", 60.0, 1.0, false); }
-/// FAILS today (2026-11-26): one run of 8 keeps 33 mm from 0.3 s on (the hoods' front edges
-/// wedged inside each other's paint; no crossing of the collision triangles).
 #[test]
 fn continuous_head_100() { accept("head", 100.0, 1.0, false); }
 #[test]
