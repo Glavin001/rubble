@@ -89,6 +89,15 @@ pub fn contact_offsets(d: &SoftVehicleDesc, v: &ShowcaseVisual, cap: f32) -> Vec
             bulge[best.1] = bulge[best.1].max(h);
         }
     }
+    // (CONTACT_OFFSET_LOG=N: the N triangles the paint stands furthest out from, by node.)
+    if let Some(n) = std::env::var("CONTACT_OFFSET_LOG").ok().and_then(|x| x.parse::<usize>().ok()) {
+        let mut by: Vec<usize> = (0..tris.len()).collect();
+        by.sort_by(|&a, &b| bulge[b].total_cmp(&bulge[a]));
+        for &k in by.iter().take(n) {
+            let names = tris[k].1.map(|j| d.nodes[j as usize].name.clone());
+            eprintln!("bulge {:.0} mm over {names:?}", bulge[k] * 1e3);
+        }
+    }
     let mut off = vec![0.0f32; d.nodes.len()];
     for (k, (_, t)) in tris.iter().enumerate() {
         for &i in t {
