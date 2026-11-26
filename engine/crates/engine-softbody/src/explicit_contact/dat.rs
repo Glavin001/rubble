@@ -40,6 +40,12 @@ pub struct Dat {
     /// speed, so it neither conserves momentum nor is physics). Off (default): the planes
     /// only detect, and `truncated` counts the node steps that would have crossed one.
     pub enforce: bool,
+    /// The CCD response's impulse rounds and impact-zone rounds (`DAT_CCD`, `DAT_ZONES`; 0:
+    /// no response), and the smallest gap it keeps (m, `DAT_MIN_GAP`; a pair's thickness
+    /// when larger).
+    pub ccd_rounds: u32,
+    pub zone_rounds: u32,
+    pub min_gap: f32,
     /// A car against itself too (`DAT_SELF=0`: only car against car).
     pub self_contact: bool,
     /// A car's own clearance (m, `DAT_SELF_GAP`): its own pairs closing to it close no
@@ -67,8 +73,12 @@ pub struct DatStats {
     /// Point-triangle and edge-edge pairs given a plane.
     pub pairs_vt: u64,
     pub pairs_ee: u64,
-    /// Of those, the pairs whose sides could meet this step (given a plane).
+    /// Of those, the pairs whose sides could meet this step (given a plane), and those the
+    /// CCD response tested.
     pub pairs_dat: u64,
+    pub pairs_ccd: u64,
+    /// The CCD response's counts.
+    pub ccd: super::ccd::CcdStats,
     /// Nodes whose step was cut (t < 1), and frozen for want of a separating plane (t = 0:
     /// a pair touching or crossed at the start).
     pub truncated: u64,
@@ -94,6 +104,13 @@ impl DatStats {
         self.pairs_vt += o.pairs_vt;
         self.pairs_ee += o.pairs_ee;
         self.pairs_dat += o.pairs_dat;
+        self.pairs_ccd += o.pairs_ccd;
+        self.ccd.hits += o.ccd.hits;
+        self.ccd.rounds += o.ccd.rounds;
+        self.ccd.zones += o.ccd.zones;
+        self.ccd.zone_nodes += o.ccd.zone_nodes;
+        self.ccd.unresolved += o.ccd.unresolved;
+        self.ccd.ke += o.ccd.ke;
         self.truncated += o.truncated;
         self.uncertified += o.uncertified;
         self.touching += o.touching;
@@ -115,11 +132,11 @@ impl Dat {
         let paint = std::env::var("DAT_SURFACE").is_ok_and(|v| v == "paint");
         let self_contact = std::env::var("DAT_SELF").map_or(true, |v| v != "0");
         let enforce = std::env::var("DAT_ENFORCE").is_ok_and(|v| v == "1");
-        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, paint, self_contact, enforce, self_gap: f("DAT_SELF_GAP", 0.002), beta: f("DAT_BETA", 0.0), ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
+        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, paint, self_contact, enforce, ccd_rounds: f("DAT_CCD", 8.0) as u32, zone_rounds: f("DAT_ZONES", 16.0) as u32, min_gap: f("DAT_MIN_GAP", 0.0005), self_gap: f("DAT_SELF_GAP", 0.002), beta: f("DAT_BETA", 0.0), ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), rest_excl: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), rest_excl: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -462,6 +479,14 @@ impl Pass<'_> {
 }
 
 /// The barycentric weights of point `p` (on the triangle) in `a b c`.
+pub(super) fn barycentric_pub(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
+    barycentric(p, a, b, c)
+}
+
+pub(super) fn along_pub(c: Vec3, p: Vec3, q: Vec3) -> f32 {
+    along(c, p, q)
+}
+
 fn barycentric(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
     let (v0, v1, v2) = (b - a, c - a, p - a);
     let (d00, d01, d11, d20, d21) = (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
@@ -671,6 +696,21 @@ impl ExplicitBeamsWorld {
             }
         }
         let zero: Vec<Vec<Vec3>> = x0.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+        if dat.ccd_rounds > 0 {
+            // The physical guarantee: CCD with inelastic impulses, then impact zones.
+            let q = reach(&x1, &zero);
+            let pairs: Vec<super::ccd::CcdPair> = recs
+                .iter()
+                .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, &q, true) + side(r, &q, false)))
+                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: r.d.max(dat.min_gap) })
+                .collect();
+            st.pairs_ccd = pairs.len() as u64;
+            let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
+            let mut vs: Vec<Vec<Vec3>> = (0..x1.len())
+                .map(|v| (0..x1[v].len()).map(|i| v0[v][i] + (x1[v][i] - x1p[v][i] - shift[v][i]) / STEP).collect())
+                .collect();
+            super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.zone_rounds, &mut st.ccd);
+        }
         let q = reach(&x1, &zero);
         recs.retain(|r| r.g < side(r, &q, true) + side(r, &q, false));
         st.pairs_dat = recs.len() as u64;
