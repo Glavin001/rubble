@@ -172,6 +172,47 @@ pub(crate) fn banded(r: f32, closing: f32) -> f32 {
     if k == 0.0 { r } else { r.max((r + k * closing * STEP).min(max)) }
 }
 
+fn edge_cone() -> u8 {
+    static M: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *M.get_or_init(|| std::env::var("EDGE_CONE").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+fn cone_trace() -> Option<(usize, u32)> {
+    static T: std::sync::OnceLock<Option<(usize, u32)>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let s = std::env::var("HIT_TRACE").ok()?;
+        let mut it = s.split(':');
+        Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+    })
+}
+fn cone_from() -> u64 {
+    std::env::var("HIT_TRACE").ok().and_then(|s| s.split(':').nth(2).and_then(|x| x.parse().ok())).unwrap_or(0)
+}
+/// Each face's in-plane direction across edge `e` (perpendicular to it, out of the face).
+fn cone_dirs(e: &SkinEdge) -> Vec<Vec3> {
+    let d = e.q - e.p;
+    let ll = d.dot(d).max(1e-12);
+    e.opp.iter().flatten().map(|&oc| { let f = e.p + d * ((oc - e.p).dot(d) / ll); (f - oc).normalize_or_zero() }).collect()
+}
+/// How far `n` is inside the edge's normal cone: min over its faces of n·u (u across the
+/// edge out of the face); negative: outside, past that face's normal.
+fn cone_margin(e: &SkinEdge, n: Vec3) -> f32 {
+    cone_dirs(e).into_iter().map(|u| n.dot(u)).fold(f32::INFINITY, f32::min)
+}
+/// `n` turned to the normal of the face it is past (the cone's nearest boundary).
+fn cone_clamp(e: &SkinEdge, n: Vec3) -> Vec3 {
+    let d = (e.q - e.p).normalize_or_zero();
+    let mut best = (f32::INFINITY, n);
+    for u in cone_dirs(e) {
+        let m = n.dot(u);
+        if m < best.0 {
+            let mut fnrm = d.cross(u).normalize_or_zero();
+            if fnrm.dot(e.out) < 0.0 { fnrm = -fnrm; }
+            best = (m, fnrm);
+        }
+    }
+    best.1
+}
+
 fn cell(x: Vec3) -> (i32, i32, i32) {
     let c = (x / CELL).floor();
     (c.x as i32, c.y as i32, c.z as i32)
@@ -365,6 +406,35 @@ impl ExplicitBeamsWorld {
                     }
                     note(self, 2, g);
                     continue;
+                }
+                // EDGE_CONE (a measurement): the normal within each edge's normal cone (the
+                // region between its faces' normals); 1 skips a pair outside either, 2 turns
+                // the normal to the nearest face normal.
+                let (ma, mb) = (cone_margin(e, n), cone_margin(f, -n));
+                if let Some((tv, ti)) = cone_trace() {
+                    if b == tv && (f.i == ti || f.j == ti) && self.steps >= cone_from() {
+                        println!("CONE step {} a [{} {}] convex {} b [{} {}] convex {} n {:+.2?} outA {:+.2?} outB {:+.2?} marginA {:+.3} marginB {:+.3} faces {}/{}", self.steps, e.i, e.j, e.convex, f.i, f.j, f.convex, n, e.out, f.out, ma, mb, e.opp.iter().flatten().count(), f.opp.iter().flatten().count());
+                    }
+                }
+                let mode = edge_cone();
+                if mode != 0 && e.outer && f.outer {
+                    if mode == 1 && (ma < 0.0 || mb < 0.0 || !e.convex || !f.convex) {
+                        continue;
+                    }
+                    if mode == 2 {
+                        if !e.convex || !f.convex {
+                            continue;
+                        }
+                        if ma < 0.0 {
+                            n = cone_clamp(e, n);
+                        }
+                        if cone_margin(f, -n) < 0.0 {
+                            n = -cone_clamp(f, -n);
+                        }
+                        if cone_margin(e, n) < -1e-3 {
+                            continue;
+                        }
+                    }
                 }
                 let ca = e.p + (e.q - e.p) * s;
                 let cb = f.p + (f.q - f.p) * t;

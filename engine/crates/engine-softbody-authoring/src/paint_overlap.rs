@@ -574,6 +574,7 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
                 if let Some((c, name)) = std::env::var("JITTER_FREQ").ok().and_then(|x| x.split_once(':').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.to_string()))) {
                     let x = &w.vehicles[c];
                     let i = d.nodes.iter().position(|n| n.name == name).unwrap_or(0);
+                    if s == steps.saturating_sub(500) || s == steps { println!("JITTER_FREQ node {name} index {i} node pos {:.3?}", x.origin + x.nodes[i].pos); for y in &w.vehicles { let m: f32 = y.nodes.iter().map(|n| n.mass).sum(); println!("  car com {:.3?} vel {:.3?}", y.nodes.iter().map(|n| (y.origin + n.pos) * n.mass).sum::<Vec3>() / m, y.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m); } }
                     let m: f32 = x.nodes.iter().map(|n| n.mass).sum();
                     let vc = x.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
                     let v = x.nodes[i].vel - vc;

@@ -710,3 +710,14 @@ statics, the skin with them.)
 - Its trace (JITTER_TRACE=1, the last 80 steps of head 60 pressed): the bumper corner's velocity a
   smooth sine (+2.6 to -3.9 m/s over about 32 steps), 3-4 edge hits every step and no node hit: a
   steady 62 Hz swing of about 1 cm, fed while the throttle pushes, not hits switching on and off.
+- **Root cause (independent trace, HIT_TRACE / CONE):** by 3 s car 0 scrapes past car 1's front corner
+  at 4.3 m/s; the corner's force comes from 3-4 edge-edge hits whose normal n = eA x eB lies outside
+  one or both edges' normal cones (the range between each edge's two face normals), mostly sideways
+  and up while the corner slides along z, and the carrying pair changes edge to edge. A push along a
+  direction neither surface has: a washboard, fed by the throttle. Not turns double counting (all hits
+  in one turn, split counts 3-5, the force never changes sign).
+- **`EDGE_CONE=2`** (off by default: n turned to the nearest face normal of both edges' cones, concave
+  edges skipped), head 60 pressed, 4 runs: jitter 0.21/1.07/1.18 -> 0.09/0.11/0.97, depth from 0.3 s
+  0/5/9 -> 0/0/1 mm (re-measured here). But side impact: jitter 0.10 -> 0.25 median, paint 26-27 mm
+  left at the end in 2 of 4 runs. `EDGE_CONE=1` (skip pairs outside a cone) loses the penetration
+  resistance. Next: the clamp without the concave skip on the side scene; the 0.97 run; the energy ledger.
