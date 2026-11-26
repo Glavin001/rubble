@@ -238,82 +238,86 @@ void ccPrimBoxOff(uint v, uint kind, uint id, out float3 lo, out float3 hi, out 
     lo = ssub3(lo, float3(o, o, o));
     hi = sadd3(hi, float3(o, o, o));
 }
-void ccGridBuild(uint v, uint lane)
+// The grids, built across the GPU in three dispatches (count, prefix, fill) after the prep
+// cleared their counts. A primitive: triangle i < tris, else edge i − tris.
+bool ccGridPrim(uint v, uint i, out uint kind, out uint id)
+{
+    uint4 r1 = gStatic[v * 4u + 1u];
+    kind = i < r1.y ? 0u : 1u;
+    id = kind == 0u ? r1.x + i : ccVeh(v, 0u).x + (i - r1.y);
+    return kind == 0u ? ccTriLive(id) : ccEdgeLive(id);
+}
+uint ccGridPrims(uint v) { return gStatic[v * 4u + 1u].y + ccVeh(v, 0u).y; }
+void ccGridClear(uint v, uint lane)
+{
+    uint ba = ccVeh(v, 2u).x;
+    for (uint b = lane; b < 2u * CC_GRID_BUCKETS; b += LANES) gAcc[ba + b].store(0);
+}
+// Pass 0 counts each bucket's entries, pass 1 writes them at their cursors; workgroup slice
+// `slice` of `slices` takes its share of v's primitives.
+void ccGridPass(uint v, uint pass, uint slice, uint slices, uint lane)
 {
     uint g0 = ccVeh(v, 1u).x;
     uint cap = ccVeh(v, 1u).y;
     uint ba = ccVeh(v, 2u).x;
-    uint4 r1 = gStatic[v * 4u + 1u];
-    uint tris = r1.y;
-    uint edges = ccVeh(v, 0u).y;
-    uint e0 = ccVeh(v, 0u).x;
-    for (uint b = lane; b < 2u * CC_GRID_BUCKETS; b += LANES) gAcc[ba + b].store(0);
-    sync();
-    // Counts, then the starts (lane 0, in bucket order), then the entries.
-    for (uint pass = 0u; pass < 2u; pass++)
+    uint ws = LANES * slices;
+    for (uint i = lane + LANES * slice, iStop = EB_END(893, i, ccGridPrims(v), ws); i < iStop; i += ws)
     {
-        for (uint i = lane, iStop = EB_END(893, i, tris + edges, LANES); i < iStop; i += LANES)
-        {
-            uint kind = i < tris ? 0u : 1u;
-            uint id = kind == 0u ? r1.x + i : e0 + (i - tris);
-            if (kind == 0u ? !ccTriLive(id) : !ccEdgeLive(id)) continue;
-            float3 lo;
-            float3 hi;
-            float o;
-            ccPrimBoxOff(v, kind, id, lo, hi, o);
-            int3 c0 = ccCell(lo, CC_CELL);
-            int3 c1 = ccCell(hi, CC_CELL);
-            for (int x = c0.x; x <= c1.x; x++)
-                for (int y = c0.y; y <= c1.y; y++)
-                    for (int z = c0.z; z <= c1.z; z++)
-                    {
-                        uint h = ccHash(int3(x, y, z), kind);
-                        if (pass == 0u) { gAcc[ba + h].add(1); continue; }
-                        uint slot = asuint(gAcc[ba + CC_GRID_BUCKETS + h].add(1));
-                        if (slot >= cap) { gAcc[ccC(CC_C_OVERFLOW)].store(1); continue; }
-                        gNext[g0 + 2u * slot] = id | (kind << 31);
-                        gNext[g0 + 2u * slot + 1u] = ccPack(int3(x, y, z));
-                    }
-        }
-        sync();
-        if (pass == 0u)
-        {
-            // (Two levels: each lane's run of buckets, then the runs' starts by lane 0.)
-            uint per = CC_GRID_BUCKETS / LANES;
-            int sum = 0;
-            for (uint j = 0u; j < per; j++) sum += gAcc[ba + lane * per + j].load();
-            gAcc[ba + CC_GRID_BUCKETS + lane * per].store(sum);
-            sync();
-            if (lane == 0u)
-            {
-                int run = 0;
-                for (uint l = 0u; l < LANES; l++)
+        uint kind;
+        uint id;
+        if (!ccGridPrim(v, i, kind, id)) continue;
+        float3 lo;
+        float3 hi;
+        float o;
+        ccPrimBoxOff(v, kind, id, lo, hi, o);
+        int3 c0 = ccCell(lo, CC_CELL);
+        int3 c1 = ccCell(hi, CC_CELL);
+        for (int x = c0.x; x <= c1.x; x++)
+            for (int y = c0.y; y <= c1.y; y++)
+                for (int z = c0.z; z <= c1.z; z++)
                 {
-                    int c = gAcc[ba + CC_GRID_BUCKETS + l * per].load();
-                    gAcc[ba + CC_GRID_BUCKETS + l * per].store(run);
-                    run += c;
+                    uint h = ccHash(int3(x, y, z), kind);
+                    if (pass == 0u) { gAcc[ba + h].add(1); continue; }
+                    uint slot = asuint(gAcc[ba + CC_GRID_BUCKETS + h].add(1));
+                    if (slot >= cap) { gAcc[ccC(CC_C_OVERFLOW)].store(1); continue; }
+                    gNext[g0 + 2u * slot] = id | (kind << 31);
+                    gNext[g0 + 2u * slot + 1u] = ccPack(int3(x, y, z));
                 }
-            }
-            sync();
-            int run = gAcc[ba + CC_GRID_BUCKETS + lane * per].load();
-            for (uint j = 0u; j < per; j++)
-            {
-                uint b = lane * per + j;
-                int c = gAcc[ba + b].load();
-                gAcc[ba + b].store(run);
-                gAcc[ba + CC_GRID_BUCKETS + b].store(run);
-                run += c;
-            }
-            sync();
+    }
+}
+// The buckets' starts (a workgroup a vehicle, two levels): the cursors set to them, and each
+// bucket's range [start, start + count) in plain memory for the queries.
+void ccGridPrefix(uint v, uint lane)
+{
+    uint g0 = ccVeh(v, 1u).x;
+    uint cap = ccVeh(v, 1u).y;
+    uint ba = ccVeh(v, 2u).x;
+    uint per = CC_GRID_BUCKETS / LANES;
+    int sum = 0;
+    for (uint j = 0u; j < per; j++) sum += gAcc[ba + lane * per + j].load();
+    gAcc[ba + CC_GRID_BUCKETS + lane * per].store(sum);
+    sync();
+    if (lane == 0u)
+    {
+        int run = 0;
+        for (uint l = 0u; l < LANES; l++)
+        {
+            int c = gAcc[ba + CC_GRID_BUCKETS + l * per].load();
+            gAcc[ba + CC_GRID_BUCKETS + l * per].store(run);
+            run += c;
         }
     }
-    // The buckets' ranges into plain memory (after the entries: the queries read them often).
-    for (uint b = lane; b < CC_GRID_BUCKETS; b += LANES)
-    {
-        gNext[g0 + 2u * cap + 2u * b] = asuint(gAcc[ba + b].load());
-        gNext[g0 + 2u * cap + 2u * b + 1u] = min(asuint(gAcc[ba + CC_GRID_BUCKETS + b].load()), cap);
-    }
     sync();
+    int run = gAcc[ba + CC_GRID_BUCKETS + lane * per].load();
+    for (uint j = 0u; j < per; j++)
+    {
+        uint b = lane * per + j;
+        int c = gAcc[ba + b].load();
+        gAcc[ba + CC_GRID_BUCKETS + b].store(run);
+        gNext[g0 + 2u * cap + 2u * b] = uint(run);
+        gNext[g0 + 2u * cap + 2u * b + 1u] = min(uint(run + c), cap);
+        run += c;
+    }
 }
 // A bucket's entries: from its start to its cursor (where the fill left it).
 uint2 ccBucket(uint v, uint h)
@@ -356,20 +360,32 @@ void ccBox(uint v, out float3 lo, out float3 hi)
 void ccMeasure(uint v, uint lane)
 {
     uint4 r0 = gStatic[v * 4u];
+    // (Each lane's own fold first, then one atomic a word: the same max and min.)
+    int off = 0;
+    int reach = 0;
+    int3 lo = int3(VV_INT_MAX, VV_INT_MAX, VV_INT_MAX);
+    int3 hi = int3(VV_INT_MIN, VV_INT_MIN, VV_INT_MIN);
+    bool any = false;
     for (uint i = lane, iStop = EB_END(916, i, r0.y, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
-        gAcc[ccVW(v, 2u)].max(asint(ccLen(contactOff(gi))));
+        off = max(off, asint(ccLen(contactOff(gi))));
         if (!ccOnSurface(v, gi)) continue;
+        any = true;
         float3 x0 = ccX0(v, gi);
-        gAcc[ccVW(v, 1u)].max(asint(max(ccLen(ssub3(ssub3(ccX1(gi), x0), ccRefDx(v))), smul(ccLen(ssub3(ccVel(gi), ccVel(r0.x))), STEP))));
-        gAcc[ccVW(v, 3u)].min(vvKey(x0.x));
-        gAcc[ccVW(v, 4u)].min(vvKey(x0.y));
-        gAcc[ccVW(v, 5u)].min(vvKey(x0.z));
-        gAcc[ccVW(v, 6u)].max(vvKey(x0.x));
-        gAcc[ccVW(v, 7u)].max(vvKey(x0.y));
-        gAcc[ccVW(v, 8u)].max(vvKey(x0.z));
+        reach = max(reach, asint(max(ccLen(ssub3(ssub3(ccX1(gi), x0), ccRefDx(v))), smul(ccLen(ssub3(ccVel(gi), ccVel(r0.x))), STEP))));
+        lo = min(lo, int3(vvKey(x0.x), vvKey(x0.y), vvKey(x0.z)));
+        hi = max(hi, int3(vvKey(x0.x), vvKey(x0.y), vvKey(x0.z)));
     }
+    gAcc[ccVW(v, 2u)].max(off);
+    if (!any) return;
+    gAcc[ccVW(v, 1u)].max(reach);
+    gAcc[ccVW(v, 3u)].min(lo.x);
+    gAcc[ccVW(v, 4u)].min(lo.y);
+    gAcc[ccVW(v, 5u)].min(lo.z);
+    gAcc[ccVW(v, 6u)].max(hi.x);
+    gAcc[ccVW(v, 7u)].max(hi.y);
+    gAcc[ccVW(v, 8u)].max(hi.z);
 }
 // (Marked once a pass in the node's count word, ccMarkSurface; cleared after the listing.)
 // (Word 8: the node's vehicle << 1, bit 0 its surface mark.)
@@ -605,7 +621,7 @@ void ccPrep(uint off, uint k, uint lane)
     float apartAll = 0.0;
     for (uint m = 0u; m < k; m++)
         for (uint n = 0u; n < k; n++) apartAll = max(apartAll, ccApart(vvMember(off, m), vvMember(off, n)));
-    for (uint m = 0u; m < k; m++) ccGridBuild(vvMember(off, m), lane);
+    for (uint m = 0u; m < k; m++) ccGridClear(vvMember(off, m), lane);
     sync();
 }
 
@@ -1113,17 +1129,40 @@ void ccRespond(uint off, uint k, float rq, uint lane)
 // (its slice g % CC_SLICES of them) against every member of its contact group. No barriers:
 // the grids and measures are the prep's, the pairs appended atomically.
 static const uint CC_SLICES = 32u;
+// Whether vehicle v's contact group runs the pass this step (awake, in a group).
+bool ccVehicleOn(uint v, out uint off, out uint k)
+{
+    off = 0u;
+    k = 0u;
+    if (v >= gP.vehicles) return false;
+    uint4 fl = gMisc[vvRec(v, VV_FLAGS)];
+    if (fl.y == 0u) return false;
+    uint4 G = gMisc[gP.vvGroups + fl.z];
+    k = splitAwake(G);
+    off = G.x;
+    return k != 0u;
+}
+// (Uniform: the prefix's barriers; every lane reads the same records.)
+void ccGridPrefixWide(uint v, uint lane)
+{
+    uint off;
+    uint k;
+    bool on = ccVehicleOn(v, off, k);
+    if (splitUniform(lane, on ? 1u : 0u) != 0u) ccGridPrefix(v, lane);
+}
+void ccGridWide(uint g, uint pass, uint lane)
+{
+    uint off;
+    uint k;
+    if (ccVehicleOn(g / CC_SLICES, off, k)) ccGridPass(g / CC_SLICES, pass, g % CC_SLICES, CC_SLICES, lane);
+}
 void ccListWide(uint g, uint lane)
 {
     uint a = g / CC_SLICES;
     uint slice = g % CC_SLICES;
-    if (a >= gP.vehicles) return;
-    uint4 fl = gMisc[vvRec(a, VV_FLAGS)];
-    if (fl.y == 0u) return;
-    uint4 G = gMisc[gP.vvGroups + fl.z];
-    uint k = splitAwake(G);
-    if (k == 0u) return;
-    uint off = G.x;
+    uint off;
+    uint k;
+    if (!ccVehicleOn(a, off, k)) return;
     float rq = asfloat(ccRec(1).z);
     float moA = ccMaxOffset(a);
     float3 alo;

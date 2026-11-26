@@ -296,14 +296,14 @@ void splitGroupBegin(uint g, uint lane)
 // of them (the listed pairs).
 static const uint SPLIT_TESTS = 0x20000000u;
 static const uint SPLIT_LEVELS = 0x40000000u;
-static const uint SPLIT_STEP = 0x00FFFFFFu;
+static const uint SPLIT_STEP = 0x000FFFFFu;
 // Continuous contact's seam (the members' step in two dispatches, the continuous passes
 // between): the node update's half and the rest's.
 static const uint SPLIT_CC_NODES = 0x08000000u;
 static const uint SPLIT_CC_REST = 0x04000000u;
-// With both: the pass's prep (A) or its listing (B); neither, its response.
-static const uint SPLIT_CC_A = 0x02000000u;
-static const uint SPLIT_CC_B = 0x01000000u;
+// With both, the pass's part in bits 20..23 (explicit_plan::continuous): 0 its response, 1 its
+// prep, 2 and 4 its grids' count and fill, 3 their prefix, 5 its listing.
+static const uint SPLIT_CC_PART_SHIFT = 20u;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
 static const uint SPLIT_TEST_WGS = 64u;
 

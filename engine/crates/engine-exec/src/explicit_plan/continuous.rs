@@ -11,15 +11,14 @@ use super::{FramePlanner, PARAM_STRIDE};
 /// pass between them (in the edge pass's module and entry, a workgroup a group).
 pub const SPLIT_CC_NODES: u32 = 0x0800_0000;
 pub const SPLIT_CC_REST: u32 = 0x0400_0000;
-/// With both: the pass's prep (setup, measures, grids) and its listing (the kernel's
-/// SPLIT_CC_A, SPLIT_CC_B); neither, its response.
-pub const SPLIT_CC_A: u32 = 0x0200_0000;
-pub const SPLIT_CC_B: u32 = 0x0100_0000;
+/// With both: the pass's part in bits 20..23 (the kernel's SPLIT_CC_PART_SHIFT): 0 its
+/// response, 1 its prep, 2 and 4 its grids' count and fill, 3 their prefix, 5 its listing.
+pub const SPLIT_CC_PART_SHIFT: u32 = 20;
 /// The listing's workgroups a vehicle (each a slice of its points and edges).
 pub const CC_SLICES: u32 = 32;
-/// Parameter copies a step: the node update's half, the pass's prep, listing and response,
-/// the rest's half.
-const PER_STEP: u32 = 5;
+/// Parameter copies a step: the node update's half, the pass's prep, grids (count, prefix,
+/// fill), listing and response, the rest's half.
+const PER_STEP: u32 = 8;
 /// The parameter buffer's room for them, past its other copies ([`super::params_bytes`]).
 pub const PARAM_CC_COPIES: u32 = PER_STEP * (super::PARAM_COPIES - 1);
 
@@ -50,10 +49,11 @@ pub fn member_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps
     }
     let c = first_copy(planner, sw, kind, steps) + PER_STEP * s;
     out.push(GroupOp::Member(c));
-    out.push(GroupOp::Edge { copy: c + 1, wide: 0 });
-    out.push(GroupOp::Edge { copy: c + 2, wide: CC_SLICES * planner.vehicles() });
-    out.push(GroupOp::Edge { copy: c + 3, wide: 0 });
-    out.push(GroupOp::Member(c + 4));
+    let (wide, nv) = (CC_SLICES * planner.vehicles(), planner.vehicles());
+    for (k, w) in [(1, 0), (2, wide), (3, nv), (4, wide), (5, wide), (6, 0)] {
+        out.push(GroupOp::Edge { copy: c + k, wide: w });
+    }
+    out.push(GroupOp::Member(c + 7));
 }
 
 /// The halves' parameter copies, appended: step s's copy with its step word's half bit.
@@ -66,8 +66,9 @@ pub fn copies(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps: u3
     let per = PER_STEP as usize;
     bytes.resize(stride * (first + per * steps as usize), 0);
     for s in 0..steps as usize {
-        let both = SPLIT_CC_NODES | SPLIT_CC_REST;
-        for (h, bit) in [SPLIT_CC_NODES, both | SPLIT_CC_A, both | SPLIT_CC_B, both, SPLIT_CC_REST].into_iter().enumerate() {
+        let (both, sh) = (SPLIT_CC_NODES | SPLIT_CC_REST, SPLIT_CC_PART_SHIFT);
+        let parts = [1, 2, 3, 4, 5, 0].map(|p| both | p << sh);
+        for (h, bit) in [SPLIT_CC_NODES].into_iter().chain(parts).chain([SPLIT_CC_REST]).enumerate() {
             let (from, to) = (stride * s, stride * (first + per * s + h));
             bytes.copy_within(from..from + stride, to);
             let at = to + 4 * 11;

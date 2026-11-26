@@ -9,6 +9,8 @@
 // one finds them an owner at a time, slot 0.
 void edgePass(uint off, uint k, uint s, uint lane);
 void ccListWide(uint g, uint lane);
+void ccGridWide(uint g, uint pass, uint lane);
+void ccGridPrefixWide(uint v, uint lane);
 void ccPrep(uint off, uint k, uint lane);
 void ccRespondPass(uint off, uint k, uint lane);
 
@@ -22,16 +24,23 @@ void explicit_beams_split_edge(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
     // listing CC_SLICES workgroups a vehicle.
     if ((gP.pad2 & (SPLIT_CC_NODES | SPLIT_CC_REST)) == (SPLIT_CC_NODES | SPLIT_CC_REST))
     {
-        if ((gP.pad2 & SPLIT_CC_B) != 0u)
+        uint part = (gP.pad2 >> SPLIT_CC_PART_SHIFT) & 15u;
+        if (part >= 2u)
         {
-            if (gP.cc != 0u) ccListWide(gid.x, lane);
+            // (Across the GPU: CC_SLICES workgroups a vehicle; the prefix a workgroup a vehicle.)
+            if (gP.cc != 0u)
+            {
+                if (part == 5u) ccListWide(gid.x, lane);
+                else if (part == 3u) ccGridPrefixWide(gid.x, lane);
+                else ccGridWide(gid.x, part == 2u ? 0u : 1u, lane);
+            }
             return ebLoopCapFlush();
         }
         uint4 Gc = gMisc[gP.vvGroups + gid.x];
         uint kc = splitUniform(lane, gP.cc != 0u ? splitAwake(Gc) : 0u);
         if (kc != 0u)
         {
-            if ((gP.pad2 & SPLIT_CC_A) != 0u) ccPrep(Gc.x, kc, lane);
+            if (part == 1u) ccPrep(Gc.x, kc, lane);
             else ccRespondPass(Gc.x, kc, lane);
         }
         return ebLoopCapFlush();
