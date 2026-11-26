@@ -1245,8 +1245,7 @@ impl ExplicitBeamsWorld {
                     .exact_if(self.vehicles[b].exact_friction)
                     .dissipative_if(dissipative),
                 x.p,
-                // (EDGE_NO_FRICTION=1, a measurement: edge hits frictionless.)
-                if x.kind != 0 && std::env::var("EDGE_NO_FRICTION").is_ok_and(|v| v == "1") { 0.0 } else if x.t > 0.0 { node.friction.min(node2.friction) } else { node.friction },
+                if x.kind != 0 /* EDGE_NO_FRICTION=1: a measurement */ && std::env::var("EDGE_NO_FRICTION").is_ok_and(|v| v == "1") { 0.0 } else if x.t > 0.0 { node.friction.min(node2.friction) } else { node.friction },
             );
             if let (true, Some([imh, im1, im2, im0, imh2])) = ((f != Vec3::ZERO && dissipative) || x.behind > 0.0, ims) {
                 // §37: the position step, a position impulse δ·m shared by the
