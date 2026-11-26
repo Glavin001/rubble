@@ -459,7 +459,9 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
         let bb = if scene == "side" {
             spawn(&sideways, Vec3::new(off - 0.5 * (ext(&sideways, 0).0 + ext(&sideways, 0).1), 0.0, 0.125 - ext(&sideways, 2).0), Vec3::ZERO)
         } else {
-            spawn(&turned, Vec3::new(off, 0.0, 0.125 - ext(&turned, 2).0), -Vec3::Z * speed)
+            // ("offset": head on with 40 % of the width overlapping, the moderate-overlap test.)
+            let lateral = if scene == "offset" { 0.6 * (ext(&turned, 0).1 - ext(&turned, 0).0) } else { 0.0 };
+            spawn(&turned, Vec3::new(off + lateral, 0.0, 0.125 - ext(&turned, 2).0), -Vec3::Z * speed)
         };
         // ("pole": car A alone into a fixed 0.15 m pole at its front left corner.)
         // ("drive": car A alone, no pole: the control for its own paint.)

@@ -30,8 +30,11 @@ pub struct CcdStats {
     pub zones: u64,
     pub zone_nodes: u64,
     pub unresolved: u64,
-    /// Kinetic energy change of the response (J; ≤ 0).
+    /// Kinetic energy change of the response (J; ≤ 0), and the largest change in a step of
+    /// the vehicles' total linear (N·s) and angular (N·m·s) momentum (0 but rounding).
     pub ke: f64,
+    pub dp: f64,
+    pub dl: f64,
 }
 
 /// The closest points of a pair at positions `p` (four points): their weights (signed by
@@ -51,10 +54,10 @@ fn closest(nn: usize, p: [Vec3; 4]) -> ([f32; 4], Vec3) {
 
 /// Additive CCD: the first time in [0, 1] the gap closes to `xi` along the straight paths
 /// `p + τ·dp`, conservatively (None: it stays above). Its iteration count is capped
-/// (`MAX_ITERS`): at the cap the time reached is returned (an impact, conservative).
+/// (`MAX_ITERS`, 32): at the cap the time reached is returned (an impact, conservative).
 pub(super) fn accd(nn: usize, p: [Vec3; 4], dp: [Vec3; 4], xi: f32) -> Option<f32> {
     const S: f32 = 0.1;
-    const MAX_ITERS: u32 = 1000;
+    const MAX_ITERS: u32 = 32;
     let mean = (dp[0] + dp[1] + dp[2] + dp[3]) * 0.25;
     let d: [Vec3; 4] = dp.map(|v| v - mean);
     let mx = |r: std::ops::Range<usize>| r.map(|j| d[j].length()).fold(0.0f32, f32::max);
@@ -106,7 +109,20 @@ pub(super) fn resolve(
     let ke = |vel: &[Vec<Vec3>]| -> f64 {
         vel.iter().zip(m).map(|(v, m)| v.iter().zip(m).map(|(v, &m)| 0.5 * m as f64 * v.length_squared() as f64).sum::<f64>()).sum()
     };
+    // Linear and angular momentum (about the origin, at the step's end positions).
+    let mom = |x: &[Vec<Vec3>], vel: &[Vec<Vec3>]| -> (DVec3, DVec3) {
+        let (mut p, mut l) = (DVec3::ZERO, DVec3::ZERO);
+        for v in 0..vel.len() {
+            for i in 0..vel[v].len() {
+                let q = vel[v][i].as_dvec3() * m[v][i] as f64;
+                p += q;
+                l += x[v][i].as_dvec3().cross(q);
+            }
+        }
+        (p, l)
+    };
     let ke0 = ke(vel);
+    let (p0, l0) = mom(x1, vel);
     let pos = |x: &[Vec<Vec3>], k: &[(usize, u32); 4]| k.map(|(v, i)| x[v][i as usize]);
     // The pairs that collide over the current paths, with their time of impact.
     let collide = |x1: &[Vec<Vec3>]| -> Vec<(usize, f32)> {
@@ -127,65 +143,72 @@ pub(super) fn resolve(
             })
             .collect()
     };
-    let mut acc: Vec<Vec<(Vec3, u32)>> = x1.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
-    let mut accv: Vec<Vec<Vec3>> = x1.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+    let finish = |st: &mut CcdStats, x1: &[Vec<Vec3>], vel: &[Vec<Vec3>]| {
+        st.ke += ke(vel) - ke0;
+        let (p, l) = mom(x1, vel);
+        st.dp = st.dp.max((p - p0).length());
+        st.dl = st.dl.max((l - l0).length());
+    };
+    // Mass splitting (Tonge et al. 2012): each node's share of a round's impulses is its
+    // inverse mass over its count of active pairs, in every pair's effective mass; each pair's
+    // impulse is then applied in full on both sides, equal and opposite (its signed weights
+    // sum to zero), so momentum is exact.
+    let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
     for _ in 0..rounds {
         let hit = collide(x1);
         st.rounds += 1;
         if hit.is_empty() {
-            st.ke += ke(vel) - ke0;
+            finish(st, x1, vel);
             return;
         }
         st.hits += hit.len() as u64;
-        for &(q, t) in &hit {
-            let pr = &pairs[q];
-            let (a, b) = (pos(x0, &pr.k), pos(x1, &pr.k));
-            let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
-            let (w, gv) = closest(pr.nn, at);
-            let n = gv.normalize_or_zero();
-            if n == Vec3::ZERO {
-                continue;
+        let act: Vec<(usize, Vec3, [f32; 4], f32, f32)> = hit
+            .iter()
+            .filter_map(|&(q, t)| {
+                let pr = &pairs[q];
+                let (a, b) = (pos(x0, &pr.k), pos(x1, &pr.k));
+                let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
+                let (w, gv) = closest(pr.nn, at);
+                let n = gv.normalize_or_zero();
+                // Relative normal closing over the path (Δx / h) and of the velocities: the
+                // velocities' closing is cancelled by an impulse; the rest (the contact's
+                // position shifts) by a position change alone: no speed added.
+                let vr: f32 = (0..4).map(|j| w[j] * (b[j] - a[j]).dot(n)).sum::<f32>() / h;
+                let vv: f32 = (0..4).map(|j| w[j] * vel[pr.k[j].0][pr.k[j].1 as usize].dot(n)).sum();
+                (n != Vec3::ZERO && vr < 0.0).then_some((q, n, w, vr, vv))
+            })
+            .collect();
+        for &(q, _, w, _, _) in &act {
+            for j in 0..4 {
+                let (v, i) = pairs[q].k[j];
+                if w[j] != 0.0 && im[v][i as usize] > 0.0 {
+                    count[v][i as usize] += 1;
+                }
             }
-            // Relative normal closing over the path (Δx / h) and of the velocities: the
-            // velocities' closing is cancelled by an impulse; the rest (the contact's position
-            // shifts) by a position change alone, so no speed is added that was not there.
-            let vr: f32 = (0..4).map(|j| w[j] * (b[j] - a[j]).dot(n)).sum::<f32>() / h;
-            if vr >= 0.0 {
-                continue;
-            }
-            let vv: f32 = (0..4).map(|j| w[j] * vel[pr.k[j].0][pr.k[j].1 as usize].dot(n)).sum();
-            let wsum: f32 = (0..4).map(|j| w[j] * w[j] * im[pr.k[j].0][pr.k[j].1 as usize]).sum();
+        }
+        let mut dx: Vec<(usize, u32, Vec3, Vec3)> = Vec::new();
+        for &(q, n, w, vr, vv) in &act {
+            let k = pairs[q].k;
+            let wsum: f32 = (0..4).map(|j| w[j] * w[j] * im[k[j].0][k[j].1 as usize] * count[k[j].0][k[j].1 as usize] as f32).sum();
             if wsum <= 0.0 {
                 continue;
             }
-            let l = -vr / wsum;
-            let lv = (-vv / wsum).clamp(0.0, l);
+            let (l, lv) = (-vr / wsum, (-vv / wsum).clamp(0.0, -vr / wsum));
             for j in 0..4 {
-                let (v, i) = pr.k[j];
-                let mi = im[v][i as usize];
+                let mi = im[k[j].0][k[j].1 as usize];
                 if mi > 0.0 && w[j] != 0.0 {
-                    let e = &mut acc[v][i as usize];
-                    e.0 += n * (w[j] * mi * l);
-                    e.1 += 1;
-                    let f = &mut accv[v][i as usize];
-                    *f += n * (w[j] * mi * lv);
+                    dx.push((k[j].0, k[j].1, n * (w[j] * mi * l * h), n * (w[j] * mi * lv)));
                 }
             }
         }
-        for v in 0..x1.len() {
-            for i in 0..x1[v].len() {
-                let e = &mut acc[v][i];
-                if e.1 > 0 {
-                    let k = 1.0 / e.1 as f32;
-                    x1[v][i] += e.0 * (k * h);
-                    vel[v][i] += accv[v][i] * k;
-                    *e = (Vec3::ZERO, 0);
-                    accv[v][i] = Vec3::ZERO;
-                }
-            }
+        for (v, i, d, dv) in dx {
+            x1[v][i as usize] += d;
+            vel[v][i as usize] += dv;
+            count[v][i as usize] = 0;
         }
     }
-    // Impact zones: the nodes of still-colliding pairs, merged; each moves rigidly.
+    // Impact zones: the nodes of still-colliding pairs, merged; each moves rigidly. A pair
+    // whose nodes are all in one zone moves rigidly and cannot collide: it is not re-tested.
     let mut zone_of: std::collections::HashMap<(usize, u32), usize> = Default::default();
     let mut parent: Vec<usize> = Vec::new();
     fn find(p: &mut [usize], mut a: usize) -> usize {
@@ -195,10 +218,14 @@ pub(super) fn resolve(
         }
         a
     }
+    let across = |q: usize, zone_of: &std::collections::HashMap<(usize, u32), usize>, parent: &mut Vec<usize>| {
+        let ids: Vec<Option<usize>> = pairs[q].k.iter().map(|key| zone_of.get(key).map(|&z| find(parent, z))).collect();
+        !(ids[0].is_some() && ids.iter().all(|z| *z == ids[0]))
+    };
     for _ in 0..zone_rounds {
-        let hit = collide(x1);
+        let hit: Vec<(usize, f32)> = collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).collect();
         if hit.is_empty() {
-            st.ke += ke(vel) - ke0;
+            finish(st, x1, vel);
             return;
         }
         for &(q, _) in &hit {
@@ -231,8 +258,8 @@ pub(super) fn resolve(
             rigid_zone(nodes, x0, x1, vel, m, im, h);
         }
     }
-    st.unresolved += collide(x1).len() as u64;
-    st.ke += ke(vel) - ke0;
+    st.unresolved += collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).count() as u64;
+    finish(st, x1, vel);
 }
 
 /// One impact zone moved as a rigid body over the step: its centre at the start, its linear

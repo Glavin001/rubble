@@ -111,6 +111,8 @@ impl DatStats {
         self.ccd.zone_nodes += o.ccd.zone_nodes;
         self.ccd.unresolved += o.ccd.unresolved;
         self.ccd.ke += o.ccd.ke;
+        self.ccd.dp = self.ccd.dp.max(o.ccd.dp);
+        self.ccd.dl = self.ccd.dl.max(o.ccd.dl);
         self.truncated += o.truncated;
         self.uncertified += o.uncertified;
         self.touching += o.touching;
@@ -325,16 +327,33 @@ impl Rec {
 /// of velocity moves the node by h times it (as the node update would have).
 fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
     let h = STEP;
-    let mut acc: Vec<Vec<(Vec3, u32)>> = v.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
+    // Mass splitting (Tonge et al. 2012): a node's inverse mass is shared by its active pairs
+    // in each pair's effective mass, and each pair's impulse is applied in full, equal and
+    // opposite on its two sides: momentum is exact.
+    let mut count: Vec<Vec<u32>> = v.iter().map(|x| vec![0; x.len()]).collect();
     for _ in 0..iters {
-        let mut any = false;
-        for &r in recs {
-            let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
-            let c = rel + (r.g - r.d).max(0.0) / h;
-            if c >= 0.0 {
-                continue;
+        let act: Vec<(&Rec, f32)> = recs
+            .iter()
+            .filter_map(|&r| {
+                let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
+                let c = rel + (r.g - r.d).max(0.0) / h;
+                (c < 0.0).then_some((r, c))
+            })
+            .collect();
+        if act.is_empty() {
+            break;
+        }
+        for &(r, _) in &act {
+            for j in 0..r.len {
+                let (q, i) = r.k[j];
+                if r.w[j] > 0.0 && im[q][i as usize] > 0.0 {
+                    count[q][i as usize] += 1;
+                }
             }
-            let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize]).sum();
+        }
+        let mut dv: Vec<(usize, u32, Vec3)> = Vec::new();
+        for &(r, c) in &act {
+            let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize] * count[r.k[j].0][r.k[j].1 as usize] as f32).sum();
             if wsum <= 0.0 {
                 continue;
             }
@@ -343,23 +362,13 @@ fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) 
                 let (q, i) = r.k[j];
                 let m = im[q][i as usize];
                 if m > 0.0 && r.w[j] > 0.0 {
-                    let e = &mut acc[q][i as usize];
-                    e.0 += r.n * (r.sign(j) * r.w[j] * m * l);
-                    e.1 += 1;
-                    any = true;
+                    dv.push((q, i, r.n * (r.sign(j) * r.w[j] * m * l)));
                 }
             }
         }
-        if !any {
-            break;
-        }
-        for (x, a) in v.iter_mut().zip(acc.iter_mut()) {
-            for (p, e) in x.iter_mut().zip(a.iter_mut()) {
-                if e.1 > 0 {
-                    *p += e.0 / e.1 as f32;
-                    *e = (Vec3::ZERO, 0);
-                }
-            }
+        for (q, i, d) in dv {
+            v[q][i as usize] += d;
+            count[q][i as usize] = 0;
         }
     }
 }
@@ -703,7 +712,7 @@ impl ExplicitBeamsWorld {
             let pairs: Vec<super::ccd::CcdPair> = recs
                 .iter()
                 .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, &q, true) + side(r, &q, false)))
-                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: r.d.max(dat.min_gap) })
+                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: (0.5 * r.d).max(dat.min_gap) })
                 .collect();
             st.pairs_ccd = pairs.len() as u64;
             let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();

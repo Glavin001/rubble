@@ -33,3 +33,8 @@ fn continuous_head_100() { accept("head", 100.0, 1.0, false); }
 fn continuous_side_90() { accept("side", 90.0, 1.0, false); }
 #[test]
 fn continuous_side_60_pressed() { accept("side", 60.0, 2.0, true); }
+/// Extremes: both cars at 130 km/h head on, and at 100 km/h with 40 % of the width overlapping.
+#[test]
+fn continuous_head_130() { accept("head", 130.0, 1.0, false); }
+#[test]
+fn continuous_offset_100() { accept("offset", 100.0, 1.0, false); }
