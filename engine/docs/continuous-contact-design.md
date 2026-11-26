@@ -339,6 +339,25 @@ response only removes energy, momentum changes by at most 0.002 N·s a step (rou
 - The authoring fix: a collision skin within 1-2 cm of the paint (thin paint shells), so the
   thickness the contact must hold is small.
 
+## Continuous contact damps the crash (measured 2026-11-26, open)
+
+Two generated sedans head on at 100 km/h each, 0.6 s, CPU, `vehicle_film c2c` (its SUMMARY
+line; FILM_EDGE=1 the run without continuous contact, edge contact on):
+
+| | without | rigid zones | non-rigid zones (8) |
+|---|---|---|---|
+| beams' permanent set (sum of rest length change) | 44.5 m | 36.6 m | 38.5 m |
+| beams bent past 1 mm | 1,447 | 1,401 | 1,428 |
+| beams broken | 62 + 63 | 97 + 93 | 85 + 81 |
+| removed by the contact response | - | 156 kJ | 173 kJ |
+| kinetic energy left | 18.5 kJ | 3.4 kJ | 11.2 kJ |
+
+The response removes about 15 % of the crash's energy and the metal bends 14-18 % less: the
+inelastic impact deletes the struck nodes' closing kinetic energy, which in metal goes into
+bending the panel round the impact. Against the owner's rule (AGENTS.md, "Contact never
+stands in for metal"): a bug to fix, not a compromise. (The run without continuous contact
+has 52 crossings, so it is not a perfect reference.)
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

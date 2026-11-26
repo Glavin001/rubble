@@ -230,7 +230,8 @@ fn main() -> Result<(), String> {
     let _ = half_w;
     let frames: usize = std::env::var("FILM_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(frames);
     let continuous = std::env::var("FILM_CONTINUOUS").is_ok_and(|v| v == "1");
-    if continuous {
+    // (FILM_EDGE=1: edge contact without continuous contact, its discrete comparison.)
+    if continuous || std::env::var("FILM_EDGE").is_ok_and(|v| v == "1") {
         for s in &mut sims {
             s.edge_contact = true;
             s.finish();
@@ -268,6 +269,13 @@ fn main() -> Result<(), String> {
         }
     }
     let broken: Vec<usize> = w.vehicles.iter().map(|s| s.beams.iter().filter(|b| b.broken).count()).collect();
+    // Where the crash went: kinetic energy left, beams bent for good (rest length changed
+    // by over 1 mm) and by how much in all, and what continuous contact removed.
+    let ke: f64 = w.vehicles.iter().flat_map(|s| s.nodes.iter()).map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
+    let bent: usize = w.vehicles.iter().flat_map(|s| s.beams.iter()).filter(|b| !b.broken && (b.rest - b.rest0).abs() > 1e-3).count();
+    let set: f32 = w.vehicles.iter().flat_map(|s| s.beams.iter()).filter(|b| !b.broken).map(|b| (b.rest - b.rest0).abs()).sum();
+    let removed = w.continuous.as_ref().map_or(0.0, |d| -d.total.ccd.ke);
+    println!("SUMMARY kinetic left {:.1} kJ, broken {broken:?}, bent {bent} (set {set:.2} m), contact response removed {:.1} kJ", ke * 1e-3, removed * 1e-3);
     let speed: Vec<f32> = w
         .vehicles
         .iter()
