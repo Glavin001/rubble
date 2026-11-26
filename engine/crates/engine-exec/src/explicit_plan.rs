@@ -2861,7 +2861,7 @@ impl ExplicitUpload {
 
 /// Bytes of the parameter buffer ([`PARAM_COPIES`] copies, then [`PARAM_LEVEL_COPIES`]).
 pub const fn params_bytes() -> u64 {
-    PARAM_STRIDE * (PARAM_COPIES + PARAM_LEVEL_COPIES) as u64
+    PARAM_STRIDE * (PARAM_COPIES + PARAM_LEVEL_COPIES + continuous::PARAM_CC_COPIES) as u64
 }
 
 // --- Per-frame planning.

@@ -8,6 +8,7 @@
 // A group of at most VV_PART members finds every owner's hits at once (edgePass); a larger
 // one finds them an owner at a time, slot 0.
 void edgePass(uint off, uint k, uint s, uint lane);
+void ccPass(uint off, uint k, uint s, uint lane);
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
@@ -16,6 +17,14 @@ void explicit_beams_split_edge(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
     uint lane = lid.x;
     uint4 G = gMisc[gP.vvGroups + gid.x];
     uint off = G.x;
+    // Continuous contact's pass between a step's two halves (both seam bits in the step
+    // word: explicit_plan::continuous), a workgroup a group.
+    if ((gP.pad2 & (SPLIT_CC_NODES | SPLIT_CC_REST)) == (SPLIT_CC_NODES | SPLIT_CC_REST))
+    {
+        uint kc = splitUniform(lane, gP.cc != 0u ? splitAwake(G) : 0u);
+        if (kc != 0u) ccPass(off, kc, gP.pad2 & SPLIT_STEP, lane);
+        return ebLoopCapFlush();
+    }
     uint k = splitUniform(lane, edgeOn() ? splitAwake(G) : 0u);
     if (k == 0u) return ebLoopCapFlush();
     uint s = gP.pad2 & SPLIT_STEP;
@@ -92,3 +101,5 @@ void edgePass(uint off, uint k, uint s, uint lane)
         sync();
     }
 }
+
+#include "explicit_beams_split_cc.slang"

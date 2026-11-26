@@ -163,6 +163,12 @@ uint contactMemberStepHeadPhase(uint v, uint lane, uint s, bool first, uint phas
 #endif
     }
     sync();
+    // Continuous contact: the step's start positions (relative to the origin), for its pass.
+    if (phase == 1u && gP.cc != 0u)
+    {
+        for (uint i = lane, iStop = EB_END(892, i, nodeCount, LANES); i < iStop; i += LANES)
+            gBeams[gStatic[gP.cc].x + nodeOff + i] = gNodes[(nodeOff + i) * 3u];
+    }
     if (phase != 2u)
     {
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
