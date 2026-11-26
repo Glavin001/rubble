@@ -632,3 +632,22 @@ that surface's gap to the paint as built; contact off reads 626 mm; sampled ever
   (passes), side 90 68 -> 53, head 100 54 -> 60. Not adopted: one row worse, and not on the GPU.
 - The acceptance tests (`gen_sedan_paint.rs`, `accept_*`): 4 of 8 pass; the file 956 -> 475 s with the
   own-paint and line measures off where a test does not read them (`crash_measuring`).
+
+### The car-to-car band (2026-11-25): 50 mm passes all eight scenes
+
+Depth, 8 runs, edge contact on, the bar's verdict (worst mm / from 0.3 s on):
+
+| Scene | 25 mm (today) | 35 mm | 50 mm | speed-scaled k 2 | k 4 |
+|---|---|---|---|---|---|
+| side 30, side 60, head 30 pressed | pass | pass | pass | pass | pass |
+| head 60 pressed | 36/0 | 7/0 | 2/0 | 45/0 | 43/0 |
+| head 60 | **52**/0 | 48/0 | 47/0 | 31/0 | 37/0 |
+| head 100 | **54**/0 | **92**/0 | 10/0 | 47/0 | 11/0 |
+| side 90 | **68**/0 | 18/0 | 8/0 | **68**/0 | **56**/0 |
+| side 60 pressed | 34/**34** | 23/**23** | 7/7 | 34/**34** | 32/**32** |
+
+(`VV_RANGE`, `VV_SPEED_BAND=k`: the band k x the cars' closing speed x the step, at most 50 mm.)
+With 50 mm: energy never rises (all 8 rows of the energy tests within 0.5 %), the cars part
+after a head-on as with contact off, side scrapes slide; a slow push ends with the paint 21 mm
+apart (7 mm at 25 mm): the visible cost. Self contact keeps 25 mm. The GPU reads one range per
+car for self and car-to-car contact (`gStatic[v].z`): a car-to-car band is a new parameter.

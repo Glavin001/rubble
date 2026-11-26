@@ -826,8 +826,29 @@ impl ExplicitBeamsWorld {
     /// hits' forces in the walk's order (triangles in list order, candidates in
     /// order). The walk reads no force, so the two phases are the specification's
     /// single loop.
+    /// Car-to-car contact's band for the pair (a measurement, `VV_SPEED_BAND=k`: the band `base`
+    /// widened to k × the two cars' closing speed (their centres of mass) × the step, at most
+    /// `VV_BAND_MAX` (m, default 0.05); at rest the band is `base`).
+    pub(crate) fn vv_band(&self, a: usize, b: usize, base: f32) -> f32 {
+        static K: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
+        let (k, max) = *K.get_or_init(|| {
+            let g = |n: &str| std::env::var(n).ok().and_then(|v| v.parse().ok());
+            (g("VV_SPEED_BAND").unwrap_or(0.0), g("VV_BAND_MAX").unwrap_or(0.05))
+        });
+        if k == 0.0 || a == b {
+            return base;
+        }
+        let com = |v: &ExplicitBeams| {
+            let (m, p) = v.nodes.iter().fold((0.0f32, Vec3::ZERO), |(m, p), n| (m + n.mass, p + n.vel * n.mass));
+            (p / m.max(1e-6), v.nodes.iter().fold(Vec3::ZERO, |s, n| s + (v.origin + n.pos) * n.mass) / m.max(1e-6))
+        };
+        let ((va, xa), (vb, xb)) = (com(&self.vehicles[a]), com(&self.vehicles[b]));
+        let closing = (va - vb).dot((xb - xa).normalize_or_zero()).max(0.0);
+        base.max((k * closing * STEP).min(max))
+    }
+
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
-        let r = self.vv_range.unwrap_or(self.vehicles[a].collision_range);
+        let r = partners.iter().map(|&b| self.vv_band(a, b, self.vv_range.unwrap_or(self.vehicles[a].collision_range))).fold(self.vv_range.unwrap_or(self.vehicles[a].collision_range), f32::max);
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
         let mut hits: Vec<Hit> = Vec::new();
