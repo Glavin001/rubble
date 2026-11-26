@@ -90,7 +90,7 @@ pub const CC_ACC_NODE: usize = 9;
 pub const CC_VEH_WORDS: usize = 12;
 pub const CC_COUNTERS: usize = 16;
 pub const CC_PAIR_WORDS: usize = 16;
-pub const CC_GRID_BUCKETS: usize = 1024;
+pub const CC_GRID_BUCKETS: usize = 4096;
 /// Pairs a surface node or edge may list on average (the list's capacity; past it the frame
 /// fails with an error, never drops a pair).
 pub const CC_PAIRS_PER_ITEM: usize = 32;

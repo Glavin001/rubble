@@ -10,7 +10,10 @@ static const uint CC_BEAMS_NODE = 6u;
 static const uint CC_ACC_NODE = 9u;
 static const uint CC_VEH_WORDS = 12u;
 static const uint CC_PAIR_WORDS = 16u;
-static const uint CC_GRID_BUCKETS = 1024u;
+static const uint CC_GRID_BUCKETS = 4096u;
+// The grids' cells (m): about a primitive's size; each primitive in the cells its own box
+// touches (not grown: the queries are grown by their threshold).
+static const float CC_CELL = 0.2;
 // The CPU's Dat::new(0.08, 0.85) and its rounds: 8 speculative, 8 impulse, 16 zone rounds.
 static const uint CC_SPEC_ROUNDS = 8u;
 static const uint CC_CCD_ROUNDS = 8u;
@@ -188,7 +191,7 @@ CcRec ccRecOf(CcPair q)
 
 // The grid of vehicle v's live primitives (triangles, kind 0; edges, kind 1), each in every
 // cell its box at the start grown by `grow` touches, the cells `cell` wide.
-uint ccHash(int3 c) { return (uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u) % CC_GRID_BUCKETS; }
+uint ccHash(int3 c, uint kind) { return (uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ kind * 2654435761u) % CC_GRID_BUCKETS; }
 uint ccPack(int3 c) { return (uint(c.x) & 1023u) | ((uint(c.y) & 1023u) << 10) | ((uint(c.z) & 1023u) << 20); }
 int3 ccCell(float3 p, float cell) { return int3(floor(p / cell)); }
 void ccPrimBox(uint v, uint kind, uint id, out float3 lo, out float3 hi)
@@ -211,7 +214,7 @@ void ccPrimBox(uint v, uint kind, uint id, out float3 lo, out float3 hi)
         hi = max(a, b);
     }
 }
-void ccGridBuild(uint v, float grow, float cell, uint lane)
+void ccGridBuild(uint v, uint lane)
 {
     uint g0 = ccVeh(v, 1u).x;
     uint cap = ccVeh(v, 1u).y;
@@ -233,13 +236,13 @@ void ccGridBuild(uint v, float grow, float cell, uint lane)
             float3 lo;
             float3 hi;
             ccPrimBox(v, kind, id, lo, hi);
-            int3 c0 = ccCell(lo - float3(grow, grow, grow), cell);
-            int3 c1 = ccCell(hi + float3(grow, grow, grow), cell);
+            int3 c0 = ccCell(lo, CC_CELL);
+            int3 c1 = ccCell(hi, CC_CELL);
             for (int x = c0.x; x <= c1.x; x++)
                 for (int y = c0.y; y <= c1.y; y++)
                     for (int z = c0.z; z <= c1.z; z++)
                     {
-                        uint h = ccHash(int3(x, y, z));
+                        uint h = ccHash(int3(x, y, z), kind);
                         if (pass == 0u) { gAcc[ba + h].add(1); continue; }
                         uint slot = asuint(gAcc[ba + CC_GRID_BUCKETS + h].add(1));
                         if (slot >= cap) { gAcc[ccC(CC_C_OVERFLOW)].store(1); continue; }
@@ -351,48 +354,68 @@ void ccMarkSurface(uint v, uint lane)
     }
 }
 
-// list_pairs for vehicles a (points, first edges) and b (triangles, second edges): rq the
-// listing reach, grow and cell b's grid's (its entries' margin and cell).
-void ccList(uint a, uint b, float rq, float moA, float moB, float grow, float cell, uint lane)
+// list_pairs for vehicles a (points, first edges) and b (triangles, second edges), rq the
+// listing reach: each query's box grown by its threshold walks the cells of b's grid it
+// touches, a candidate taken in the first cell both boxes share (once).
+void ccList(uint a, uint b, float rq, float moA, float moB, uint lane)
 {
     bool own = a == b;
     float r = own ? rq : nf(nf(rq + moA) + moB);
     float r2 = smul(r, r);
-    float ownGap = asfloat(ccRec(1).w);
+    float3 r3 = float3(r, r, r);
     uint4 ra = gStatic[a * 4u];
+    uint g0 = ccVeh(b, 1u).x;
+    // (b's surface box grown by the threshold: a query outside it lists nothing.)
+    float3 blo;
+    float3 bhi;
+    ccBox(b, blo, bhi);
+    blo = ssub3(blo, r3);
+    bhi = sadd3(bhi, r3);
     // Points against triangles.
     for (uint i = lane, iStop = EB_END(894, i, ra.y, LANES); i < iStop; i += LANES)
     {
         uint gi = ra.x + i;
         if (!ccOnSurface(a, gi)) continue;
         float3 p = ccX0(a, gi);
-        int3 c = ccCell(p, cell);
-        uint key = ccPack(c);
-        uint2 rg = ccBucket(b, ccHash(c));
-        uint g0 = ccVeh(b, 1u).x;
-        for (uint e = rg.x; e < rg.y; e++)
-        {
-            uint ent = gNext[g0 + 2u * e];
-            if ((ent >> 31) != 0u || gNext[g0 + 2u * e + 1u] != key) continue;
-            uint gt = ent & 0x7FFFFFFFu;
-            uint4 tn = gStatic[gP.triBase + gt];
-            if (own && (tn.x == gi || tn.y == gi || tn.z == gi || ccExcluded(a, gi, tn.x, tn.y, tn.z))) continue;
-            float3 w;
-            float3 cp = fqClosestTri(p, ccX0(b, tn.x), ccX0(b, tn.y), ccX0(b, tn.z), w);
-            float3 dv = ssub3(p, cp);
-            if (!(sdot(dv, dv) < r2)) continue;
-            CcPair q;
-            q.k[0] = tn.x; q.k[1] = tn.y; q.k[2] = tn.z; q.k[3] = gi;
-            q.nn = 3u; q.own = own; q.va = a; q.vb = b;
-            CcRec rec = ccRecOf(q);
-            if (rec.g < nf(rec.d + rq)) ccStore(a, q, rec);
-        }
+        if (any(p < blo) || any(p > bhi)) continue;
+        int3 c0 = ccCell(ssub3(p, r3), CC_CELL);
+        int3 c1 = ccCell(sadd3(p, r3), CC_CELL);
+        for (int x = c0.x; x <= c1.x; x++)
+            for (int y = c0.y; y <= c1.y; y++)
+                for (int z = c0.z; z <= c1.z; z++)
+                {
+                    int3 c = int3(x, y, z);
+                    uint key = ccPack(c);
+                    uint2 rg = ccBucket(b, ccHash(c, 0u));
+                    for (uint e = rg.x; e < rg.y; e++)
+                    {
+                        uint ent = gNext[g0 + 2u * e];
+                        if ((ent >> 31) != 0u || gNext[g0 + 2u * e + 1u] != key) continue;
+                        uint gt = ent & 0x7FFFFFFFu;
+                        float3 tlo;
+                        float3 thi;
+                        ccPrimBox(b, 0u, gt, tlo, thi);
+                        if (any(c != max(c0, ccCell(tlo, CC_CELL)))) continue;
+                        if (any(tlo > p + r3) || any(thi < p - r3)) continue;
+                        uint4 tn = gStatic[gP.triBase + gt];
+                        if (own && (tn.x == gi || tn.y == gi || tn.z == gi)) continue;
+                        float3 w;
+                        float3 cp = fqClosestTri(p, ccX0(b, tn.x), ccX0(b, tn.y), ccX0(b, tn.z), w);
+                        float3 dv = ssub3(p, cp);
+                        if (!(sdot(dv, dv) < r2)) continue;
+                        if (own && ccExcluded(a, gi, tn.x, tn.y, tn.z)) continue;
+                        CcPair q;
+                        q.k[0] = tn.x; q.k[1] = tn.y; q.k[2] = tn.z; q.k[3] = gi;
+                        q.nn = 3u; q.own = own; q.va = a; q.vb = b;
+                        CcRec rec = ccRecOf(q);
+                        if (rec.g < nf(rec.d + rq)) ccStore(a, q, rec);
+                    }
+                }
     }
     // Edges against edges, once a vehicle pair (a ≤ b; a car's own, the second edge after the
     // first, sharing no node).
     if (a > b) return;
     uint4 ea = ccVeh(a, 0u);
-    uint4 eb = ccVeh(b, 0u);
     for (uint i = lane, iStop = EB_END(895, i, ea.y, LANES); i < iStop; i += LANES)
     {
         uint ge = ea.x + i;
@@ -400,35 +423,37 @@ void ccList(uint a, uint b, float rq, float moA, float moB, float grow, float ce
         if (!ccEdgeLive(ge)) continue;
         float3 p1 = ccX0(a, er.x);
         float3 q1 = ccX0(a, er.y);
-        int3 c0 = ccCell(min(p1, q1), cell);
-        int3 c1 = ccCell(max(p1, q1), cell);
-        uint g0 = ccVeh(b, 1u).x;
+        float3 elo = ssub3(min(p1, q1), r3);
+        float3 ehi = sadd3(max(p1, q1), r3);
+        if (any(ehi < blo) || any(elo > bhi)) continue;
+        int3 c0 = ccCell(elo, CC_CELL);
+        int3 c1 = ccCell(ehi, CC_CELL);
         for (int x = c0.x; x <= c1.x; x++)
             for (int y = c0.y; y <= c1.y; y++)
                 for (int z = c0.z; z <= c1.z; z++)
                 {
                     int3 c = int3(x, y, z);
                     uint key = ccPack(c);
-                    uint2 rg = ccBucket(b, ccHash(c));
+                    uint2 rg = ccBucket(b, ccHash(c, 1u));
                     for (uint e = rg.x; e < rg.y; e++)
                     {
                         uint ent = gNext[g0 + 2u * e];
                         if ((ent >> 31) == 0u || gNext[g0 + 2u * e + 1u] != key) continue;
                         uint gf = ent & 0x7FFFFFFFu;
-                        uint4 fr = gStatic[ccRec(1).x + gf];
-                        if (own && (gf <= ge || fr.x == er.x || fr.x == er.y || fr.y == er.x || fr.y == er.y
-                                    || ccExcluded(a, er.x, er.y, fr.x, fr.y))) continue;
-                        // Once: in the first cell both boxes share.
+                        if (own && gf <= ge) continue;
                         float3 flo;
                         float3 fhi;
                         ccPrimBox(b, 1u, gf, flo, fhi);
-                        int3 f0 = ccCell(flo - float3(grow, grow, grow), cell);
-                        if (any(c != max(c0, f0))) continue;
+                        if (any(c != max(c0, ccCell(flo, CC_CELL)))) continue;
+                        if (any(flo > ehi) || any(fhi < elo)) continue;
+                        uint4 fr = gStatic[ccRec(1).x + gf];
+                        if (own && (fr.x == er.x || fr.x == er.y || fr.y == er.x || fr.y == er.y)) continue;
                         float3 p2 = ccX0(b, fr.x);
                         float3 q2 = ccX0(b, fr.y);
                         float2 st = fqSegSeg(p1, q1, p2, q2);
                         float3 dv = ssub3(sadd3(p2, sscale(ssub3(q2, p2), st.y)), sadd3(p1, sscale(ssub3(q1, p1), st.x)));
                         if (!(sdot(dv, dv) < r2)) continue;
+                        if (own && ccExcluded(a, er.x, er.y, fr.x, fr.y)) continue;
                         CcPair q;
                         q.k[0] = er.x; q.k[1] = er.y; q.k[2] = fr.x; q.k[3] = fr.y;
                         q.nn = 2u; q.own = own; q.va = b; q.vb = a;
@@ -525,13 +550,11 @@ void ccPass(uint off, uint k, uint s, uint lane)
     float apartAll = 0.0;
     for (uint m = 0u; m < k; m++)
         for (uint n = 0u; n < k; n++) apartAll = max(apartAll, ccApart(vvMember(off, m), vvMember(off, n)));
+    for (uint m = 0u; m < k; m++) ccGridBuild(vvMember(off, m), lane);
     for (uint mb = 0u; mb < k; mb++)
     {
         uint b = vvMember(off, mb);
         float moB = ccMaxOffset(b);
-        float rb = min(rq, smul(4.0, nf(nf(ccReachV(b) + reachAll) + apartAll)));
-        float grow = nf(nf(rb + moB) + moAll);
-        ccGridBuild(b, grow, max(grow, 0.02), lane);
         float3 blo;
         float3 bhi;
         ccBox(b, blo, bhi);
@@ -549,7 +572,7 @@ void ccPass(uint off, uint k, uint s, uint lane)
             // (Uniform: the barriers in ccList; the boxes are read from storage.)
             bool far = any(ssub3(alo, r3) > bhi) || any(ssub3(blo, r3) > ahi);
             if (splitUniform(lane, far ? 1u : 0u) != 0u) continue;
-            ccList(a, b, rr, moA, moB, grow, max(grow, 0.02), lane);
+            ccList(a, b, rr, moA, moB, lane);
             sync();
         }
         sync();
