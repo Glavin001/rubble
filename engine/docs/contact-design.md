@@ -663,3 +663,17 @@ first frame with edge contact (`edge_gate.rs` checks the lab's order). Cold load
 Chrome, side 60 into a parked car: split path and edge pass from the first frame; median 10.83 ms
 a step, worst 23.5 ms at the impact (47-56 steps/s for about 3 s, then 60); the 50 mm car-to-car
 band (lab control `car-to-car band`) the same to 0.01 ms.
+
+### A per-pair speed-scaled band does not help; paint outside the collision surface does matter (2026-11-25)
+
+- **Speed-scaled band** (`SPEED_BAND=k`: each pair's band 25 mm + k x its closing speed x the step, at
+  most 75 mm; node, edge-edge and node-edge passes), worst depth / from 0.3 s on (mm), 8 runs: k 2:
+  head 60 85/0, head 60 pressed 59/0, side 90 70/0, side 60 pressed 11/11 (the rest pass); k 3: head
+  100 79/51, head 60 51/0, side 90 62/0, head 30 pressed 13/13. Worse than the flat 50 mm (all eight
+  pass) and than 25 mm in places: the band thins as a pair slows inside it. Not adopted.
+- **Why the flat band helps:** painted points more than 2 cm outside the car's own contact surface
+  as built (`PAINT_CALIB=1`): body sides 6,698 (to 142 mm), each front door 3,961 (174 mm), wheel-arch
+  lips 1,850-3,000 each (180-239 mm), sills 1,750 each (166 mm). Some are at openings (wheel wells,
+  side windows: glass is visual only), but side 90's failure is the parked car's door top front, at
+  the window frame: paint no contact surface covers. The vehicle lint's `skin_coverage` passes on its
+  p99 and misses this 1 %. The fix belongs in the authoring (frames and lips covered), not the band.

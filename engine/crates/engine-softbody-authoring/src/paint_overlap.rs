@@ -459,6 +459,20 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
             d.sort_by(f32::total_cmp);
             let q = |f: f32| d[((d.len() - 1) as f32 * f) as usize] * 1e3;
             println!("the contact surface outside the drawn mesh, per node (mm): p1 {:.0} p10 {:.0} p50 {:.0} p90 {:.0} p99 {:.0} max {:.0}; {} painted, {} surface triangles", q(0.01), q(0.1), q(0.5), q(0.9), q(0.99), q(1.0), pt.len(), sf.tris.len());
+            // Painted points outside the car's own contact surface (as built), by the node they bind to.
+            let mut by: HashMap<String, (usize, f32)> = HashMap::new();
+            let np: Vec<Vec3> = w.vehicles[0].nodes.iter().map(|n| w.vehicles[0].origin + n.pos).collect();
+            let pp = deform(&v, &np).0;
+            for i in (0..pp.len()).filter(|&i| v.material[i] == mat::PAINT) {
+                let x = pp[i];
+                if winding(x, &sf.tris) > 0.5 { continue; }
+                let dd = sf.tris.iter().map(|t| distance(x, t)).fold(f32::MAX, f32::min);
+                if dd < 0.02 { continue; }
+                let n = turned.nodes[v.bind_nodes[i][0] as usize].name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_').to_string();
+                let e = by.entry(n).or_default(); e.0 += 1; e.1 = e.1.max(dd);
+            }
+            let mut o: Vec<_> = by.into_iter().collect(); o.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+            println!("painted vertices over 2 cm outside the contact surface, by part (count, max mm): {:?}", o.iter().take(20).map(|(n, (c, m))| format!("{n} {c} {:.0}", m * 1e3)).collect::<Vec<_>>());
         }
         // (PAINT_CARRY=1: painted area by the part it is bound to, and how much is carried by no
         // collision triangle's nodes or by nodes over 0.4 m apart.)

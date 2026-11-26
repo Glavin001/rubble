@@ -828,7 +828,8 @@ impl ExplicitBeamsWorld {
     /// single loop.
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
         let r = self.vv_range.unwrap_or(self.vehicles[a].vv_band());
-        let rr = Vec3::splat(r);
+        // (The speed-scaled band, a measurement: the boxes reach its largest.)
+        let rr = Vec3::splat(if edge::speed_band().0 > 0.0 { r.max(edge::speed_band().1) } else { r });
         let mut cands: Vec<(usize, u32)> = Vec::new();
         let mut hits: Vec<Hit> = Vec::new();
         // The owner's profile without the throttle (§36): a triangle never waits.
@@ -964,6 +965,12 @@ impl ExplicitBeamsWorld {
                             (-(vrel.dot(frame.n)) * side).max(0.0)
                         };
                         let spec_on = speculative() && !only;
+                        // (The speed-scaled band, a measurement: this pair's own.)
+                        let r = if edge::speed_band().0 > 0.0 && !only {
+                            edge::banded(r, closing_of(if delta >= 0.0 { 1.0 } else { -1.0 }))
+                        } else {
+                            r
+                        };
                         let r_eff = if spec_on {
                             r + closing_of(if delta >= 0.0 { 1.0 } else { -1.0 }) * STEP
                         } else {

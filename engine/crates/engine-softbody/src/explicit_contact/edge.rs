@@ -151,6 +151,21 @@ fn closing(va: &ExplicitBeams, a: [u32; 2], s: f32, vb: &ExplicitBeams, b: [u32;
     (-(ub - ua).dot(n)).max(0.0)
 }
 
+/// The speed-scaled band (a measurement, `SPEED_BAND=k`; 0: off): a pair's band `r` widened by k
+/// times its closing speed over a step, at most `SPEED_BAND_MAX` (m, default 0.075): thin at rest,
+/// as thick as a fast pair needs to be stopped inside it.
+pub(crate) fn speed_band() -> (f32, f32) {
+    static K: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        let g = |n: &str| std::env::var(n).ok().and_then(|v| v.parse().ok());
+        (g("SPEED_BAND").unwrap_or(0.0), g("SPEED_BAND_MAX").unwrap_or(0.075))
+    })
+}
+pub(crate) fn banded(r: f32, closing: f32) -> f32 {
+    let (k, max) = speed_band();
+    if k == 0.0 { r } else { r.max((r + k * closing * STEP).min(max)) }
+}
+
 fn cell(x: Vec3) -> (i32, i32, i32) {
     let c = (x / CELL).floor();
     (c.x as i32, c.y as i32, c.z as i32)
@@ -253,7 +268,7 @@ impl ExplicitBeamsWorld {
     fn edge_hits(&mut self, a: usize, b: usize, ea: &[SkinEdge], eb: &[SkinEdge]) -> Vec<EdgeHit> {
         let r = self.vv_range.unwrap_or(self.vehicles[a].vv_band().max(self.vehicles[b].vv_band()));
         let travel = |v: &ExplicitBeams| v.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max) * STEP;
-        let pad = r + edge_depth() + travel(&self.vehicles[a]) + travel(&self.vehicles[b]);
+        let pad = r.max(speed_band().1 * (speed_band().0 > 0.0) as u8 as f32) + edge_depth() + travel(&self.vehicles[a]) + travel(&self.vehicles[b]);
         // A's edges in the grid, by their padded boxes.
         let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
         for (k, e) in ea.iter().enumerate() {
@@ -348,6 +363,7 @@ impl ExplicitBeamsWorld {
                 let ca = e.p + (e.q - e.p) * s;
                 let cb = f.p + (f.q - f.p) * t;
                 let g = n.dot(cb - ca);
+                let r = if speed_band().0 > 0.0 { banded(r, closing(&self.vehicles[a], [e.i, e.j], s, &self.vehicles[b], [f.i, f.j], t, n)) } else { r };
                 let mut spec = 0.0;
                 if g > r {
                     let reach = if crate::explicit_contact::speculative() {
@@ -398,7 +414,7 @@ impl ExplicitBeamsWorld {
             if !e.convex || !e.outer {
                 continue;
             }
-            let pad = r + travel_o + travel_x;
+            let pad = r.max(speed_band().1 * (speed_band().0 > 0.0) as u8 as f32) + travel_o + travel_x;
             let (lo, hi) = (cell(e.p.min(e.q) - Vec3::splat(pad)), cell(e.p.max(e.q) + Vec3::splat(pad)));
             for gx in lo.0..=hi.0 {
                 for gy in lo.1..=hi.1 {
@@ -431,13 +447,14 @@ impl ExplicitBeamsWorld {
                 }
                 let c = e.p + d * s;
                 let g = (p - c).length();
-                if g < 1e-6 || g > r + travel_o + travel_x {
+                if g < 1e-6 || g > r.max(speed_band().1 * (speed_band().0 > 0.0) as u8 as f32) + travel_o + travel_x {
                     continue;
                 }
                 let n = (p - c) / g;
                 if n.dot(e.out) <= 0.0 {
                     continue;
                 }
+                let r = if speed_band().0 > 0.0 { banded(r, closing(&self.vehicles[o], [e.i, e.j], s, vx, [h, h], 0.0, n)) } else { r };
                 let mut spec = 0.0;
                 if g > r {
                     let reach = closing(&self.vehicles[o], [e.i, e.j], s, vx, [h, h], 0.0, n) * STEP;
