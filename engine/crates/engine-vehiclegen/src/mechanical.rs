@@ -662,7 +662,13 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let b2 = sh(st, "sh_b2_ol");
         // the cross-car beam between the hinge pillars, under the cowl; the
         // panel hangs behind it on two brackets
-        let (hx, yb, zb) = (b2.x + 0.012, b2.y - 0.135, b2.z + 0.040);
+        // (Behind the firewall at its own height: the firewall leans from sh_b1 up to sh_b2, and the
+        // beam, 0.135 m under the cowl, sits clear of it by its radius and 1 cm. Placed off sh_b2
+        // alone it stood 3 mm in front of the firewall, its solid through the firewall's faces.)
+        let b1 = sh(st, "sh_b1_ol");
+        let yb = b2.y - 0.135;
+        let z_fw = b1.z + (b2.z - b1.z) * (yb - b1.y) / (b2.y - b1.y);
+        let (hx, zb) = (b2.x + 0.012, z_fw - 0.036);
         let (yp, zp) = (b2.y - 0.075, sh(st, "sh_c3_1").z - 0.35);
         p.mesh.add(&cyl(DVec3::new(-hx, yb, zb), DVec3::new(hx, yb, zb), 0.026));
         p.mesh.add(&rbox(DVec3::new(0.0, yp, zp), DVec3::new(hx - 0.03, 0.105, 0.15), 0.05, 3, Mat::InteriorPlastic));

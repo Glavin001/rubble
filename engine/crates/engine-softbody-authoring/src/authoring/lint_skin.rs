@@ -13,26 +13,20 @@ pub const SKIN_SLIVER: f32 = 0.1;
 
 /// Whether segment p→q passes through triangle (a, b, c) (Möller–Trumbore, ends included).
 fn seg_through(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
-    let d = q - p;
-    let (e1, e2) = (b - a, c - a);
-    let h = d.cross(e2);
-    let det = e1.dot(h);
-    if det.abs() < 1e-12 {
+    // Signed volumes in double precision (the orientation predicate): the segment's ends strictly
+    // on opposite sides of the triangle's plane, and its line strictly inside the triangle's three
+    // edges. A segment touching or lying in the plane does not cross it. (The ray test with an
+    // absolute determinant cut-off read a segment nearly in the plane as crossing.)
+    let o = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| {
+        let (a, b, c, d) = (a.as_dvec3(), b.as_dvec3(), c.as_dvec3(), d.as_dvec3());
+        (b - a).cross(c - a).dot(d - a)
+    };
+    let (sp, sq) = (o(a, b, c, p), o(a, b, c, q));
+    if !(sp > 0.0 && sq < 0.0 || sp < 0.0 && sq > 0.0) {
         return false;
     }
-    let f = 1.0 / det;
-    let s = p - a;
-    let u = f * s.dot(h);
-    if !(0.0..=1.0).contains(&u) {
-        return false;
-    }
-    let qv = s.cross(e1);
-    let v = f * d.dot(qv);
-    if v < 0.0 || u + v > 1.0 {
-        return false;
-    }
-    let t = f * e2.dot(qv);
-    (0.0..=1.0).contains(&t)
+    let (s1, s2, s3) = (o(p, q, a, b), o(p, q, b, c), o(p, q, c, a));
+    s1 > 0.0 && s2 > 0.0 && s3 > 0.0 || s1 < 0.0 && s2 < 0.0 && s3 < 0.0
 }
 
 /// The collision triangles (not anti-clip-only) with their positions, names, outer flags
