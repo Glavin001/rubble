@@ -832,7 +832,7 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
             }
             // a's nodes against b's triangles (both orders run: every node of both).
             let (sa, sb) = (&surf[a], &surf[b]);
-            let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
+            let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.15));
             for (k, tri) in sb.tris.iter().enumerate() {
                 let (lo, hi) = bounds(tri.map(|i| x0[b][i as usize]));
                 grid.insert(k as u32, lo - r, hi + r);
@@ -864,7 +864,7 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
             if a > b {
                 continue;
             }
-            let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
+            let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.15));
             for (k, e) in sb.edges.iter().enumerate() {
                 let (lo, hi) = bounds(e.map(|i| x0[b][i as usize]));
                 grid.insert(k as u32, lo - r, hi + r);
