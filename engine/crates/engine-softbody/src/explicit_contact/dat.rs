@@ -92,6 +92,9 @@ pub struct DatStats {
     pub min_gap: f32,
     /// Nodes that moved more than `0.5·γ·r_q` (the step not covered for unlisted pairs).
     pub over_step: u64,
+    /// Surface nodes the speculative pass moved past twice their vehicle's listing reach (the
+    /// listing's bound broken: an error).
+    pub reach_over: u64,
     /// The smallest fraction taken, the kinetic energy (J) and momentum (N·s, summed
     /// magnitudes) the cuts removed.
     pub min_t: f32,
@@ -122,6 +125,7 @@ impl DatStats {
         self.touching += o.touching;
         self.min_gap = self.min_gap.min(o.min_gap);
         self.over_step += o.over_step;
+        self.reach_over += o.reach_over;
         self.min_t = self.min_t.min(o.min_t);
         self.ke_removed += o.ke_removed;
         self.p_removed += o.p_removed;
@@ -491,7 +495,22 @@ impl ExplicitBeamsWorld {
                 }
             }
         }
-        let mut recs = list_pairs(dat, &x0, &surf, &off, &mut st);
+        // How far each vehicle's surface moves this step at most (its step or its speed times
+        // h): pairs are listed within four times the two sides' (and r_q at most).
+        // (Relative to the vehicle's first node: the car's own travel brings none of its pairs
+        // closer; between cars the two first nodes' relative motion is added.)
+        let dx = |v: usize, i: usize| x1[v][i] - x0[v][i];
+        let vel = |v: usize, i: usize| self.vehicles[v].nodes[i].vel;
+        let reach_v: Vec<f32> = surf
+            .iter()
+            .enumerate()
+            .map(|(v, s)| {
+                s.nodes.iter().map(|&i| (dx(v, i as usize) - dx(v, 0)).length().max((vel(v, i as usize) - vel(v, 0)).length() * STEP)).fold(0.0f32, f32::max)
+            })
+            .collect();
+        let refs: Vec<(Vec3, Vec3)> = (0..x0.len()).map(|v| (dx(v, 0), vel(v, 0))).collect();
+        let mut own_reach = vec![0.0f32; x0.len()];
+        let mut recs = list_pairs(dat, &x0, &surf, &off, &reach_v, &refs, &mut own_reach, &mut st);
         // How far each node can close on anything this step (its step, or its speed times h,
         // whichever is longer: the speculative pass works on speeds). A pair whose two sides
         // together cannot cover its gap cannot meet and is left out of either pass.
@@ -529,6 +548,13 @@ impl ExplicitBeamsWorld {
             }
         }
         let zero: Vec<Vec<Vec3>> = x0.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+        // The listing's bound: a surface node the speculative pass moved, from its vehicle's
+        // first node, past half its own pairs' listing reach may meet a pair not listed (an
+        // error, counted).
+        for (v, sf) in surf.iter().enumerate() {
+            let r = x1[v][0] - x0[v][0];
+            st.reach_over += sf.nodes.iter().filter(|&&i| ((x1[v][i as usize] - x0[v][i as usize]) - r).length() > 0.5 * own_reach[v]).count() as u64;
+        }
         let mut vfinal: Option<Vec<Vec<Vec3>>> = None;
         if dat.ccd_rounds > 0 {
             // The physical guarantee: CCD with inelastic impulses, then impact zones.
@@ -756,7 +782,8 @@ fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
 /// within r_q of their paint, within one vehicle sharing no node and not excluded at spawn),
 /// in a fixed order: vehicle a, vehicle b, then a's nodes or edges ascending, b's primitives
 /// ascending.
-fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3>], st: &mut DatStats) -> Vec<Rec> {
+#[allow(clippy::too_many_arguments)]
+fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3>], reach: &[f32], refs: &[(Vec3, Vec3)], own_reach: &mut [f32], st: &mut DatStats) -> Vec<Rec> {
     let r_q = dat.r_q;
     let mut recs: Vec<Rec> = Vec::new();
     // Pairs are listed within r_q of their paint (the gap less the two sides' offsets).
@@ -784,6 +811,19 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
             // A car against itself: its own pairs sharing no node, at thickness 0 (its
             // collision surface never passes through itself).
             let own = a == b;
+            let apart = |a: usize, b: usize| (refs[a].0 - refs[b].0).length().max((refs[a].1 - refs[b].1).length() * STEP);
+            // (A car's own: the largest relative motion of any vehicle near enough to touch it,
+            // whose impulses can shove its surface this step.)
+            let near = |a: usize, c: usize| {
+                let ((alo, ahi), (clo, chi)) = (boxes[a], boxes[c]);
+                let r = Vec3::splat(r_q + mo[a] + mo[c]);
+                c != a && !((alo - r).cmpgt(chi).any() || (clo - r).cmpgt(ahi).any())
+            };
+            let apart_ab = if own { (0..nv).filter(|&c| near(a, c)).map(|c| apart(a, c)).fold(0.0f32, f32::max) } else { apart(a, b) };
+            let r_q = r_q.min(4.0 * (reach[a] + reach[b] + apart_ab));
+            if own {
+                own_reach[a] = r_q;
+            }
             let (mo_a, mo_b) = if own { (0.0, 0.0) } else { (mo[a], mo[b]) };
             let off: &[Vec<Vec3>] = if own { &none } else { off };
             let r = Vec3::splat(r_q + mo_a + mo_b);

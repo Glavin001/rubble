@@ -120,3 +120,27 @@ fn continuous_head_on_lab_frames_like_the_cpu() {
         eprintln!("frame {f}: {gpu_ms:.1} ms (with readback), counters {c:?}");
     }
 }
+
+/// Measurement (ignored): wall time a 34-step frame with and without continuous contact.
+#[test]
+#[ignore]
+fn continuous_cost() {
+    let fleet = sedans_head_on();
+    for on in [false, true] {
+        let Some(mut g) = gpu(&fleet) else { return };
+        g.set_vehicle_contact(true);
+        g.set_group_split(true);
+        g.set_continuous(on);
+        let mut ms = Vec::new();
+        for _ in 0..8 {
+            let t = std::time::Instant::now();
+            g.frame(34);
+            let _ = g.positions();
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+            if on {
+                let _ = g.continuous_counts();
+            }
+        }
+        eprintln!("continuous {on}: ms a frame {:?}", ms.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
+    }
+}

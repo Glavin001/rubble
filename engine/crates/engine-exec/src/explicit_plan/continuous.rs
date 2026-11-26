@@ -78,13 +78,16 @@ pub fn copies(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps: u3
 /// their count) and (its grid's bucket counts and cursors' first word in gAcc, 0, 0, 0); per edge (global i, global j, its triangles' first entry in gLists, their
 /// count), the entries the global triangles; a spawn exclusion four global nodes (a point and
 /// a triangle, or two edges). gAcc per node [`CC_ACC_NODE`] words (velocity sums xyz, position
-/// sums xyz, active pairs, zone label), then per vehicle its pairs' count, then
+/// sums xyz, active pairs, zone label, surface mark), then per vehicle [`CC_VEH_WORDS`], then
 /// [`CC_COUNTERS`]. A grid: in gAcc [`CC_GRID_BUCKETS`] starts and as many cursors; in gNext
 /// two words an entry (primitive | kind << 31, packed cell).
 /// (Word W_CC + 1: the per-vehicle pair counts' first word in gAcc, then the counters.)
 pub const W_CC: usize = 109;
 pub const CC_BEAMS_NODE: usize = 5;
-pub const CC_ACC_NODE: usize = 8;
+pub const CC_ACC_NODE: usize = 9;
+/// Words a vehicle in gAcc at word W_CC + 1: its listed pairs, its reach's bits, its largest
+/// offset's bits, its box as six keys, one spare.
+pub const CC_VEH_WORDS: usize = 10;
 pub const CC_COUNTERS: usize = 16;
 pub const CC_PAIR_WORDS: usize = 6;
 pub const CC_GRID_BUCKETS: usize = 1024;
@@ -126,9 +129,9 @@ pub(super) fn cc_tables(
     let scratch_at = beams.len() as u32;
     beams.extend(std::iter::repeat_n([0.0f32; 4], CC_BEAMS_NODE * total));
     let acc_at = acc_init.len() as u32;
-    acc_init.extend(std::iter::repeat_n(0, CC_ACC_NODE * total + nv + CC_COUNTERS));
+    acc_init.extend(std::iter::repeat_n(0, CC_ACC_NODE * total + CC_VEH_WORDS * nv + CC_COUNTERS));
     let edges_at = base + 2 + 3 * nv as u32;
-    statics.push([scratch_at, acc_at, acc_at + (CC_ACC_NODE * total + nv) as u32, nv as u32]);
+    statics.push([scratch_at, acc_at, acc_at + (CC_ACC_NODE * total + CC_VEH_WORDS * nv) as u32, nv as u32]);
     statics.push([edges_at, edges as u32, 0.08f32.to_bits(), CC_SELF_GAP.to_bits()]);
     let mut first = 0u32;
     for ((v, p), &(n0, _)) in vehicles.iter().zip(&per).zip(&firsts) {
