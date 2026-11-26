@@ -1250,7 +1250,7 @@ impl ExplicitBeamsWorld {
             if let (true, Some([imh, im1, im2, im0, imh2])) = ((f != Vec3::ZERO && dissipative) || x.behind > 0.0, ims) {
                 // §37: the position step, a position impulse δ·m shared by the
                 // sub-bodies' inverse masses (explicit_beams' self-hit order).
-                let mut delta = if f != Vec3::ZERO && dissipative {
+                let mut delta = if f != Vec3::ZERO && dissipative && !(x.kind != 0 && std::env::var("EDGE_NO_SHIFT").is_ok()) {
                     shift_depth(x.p, budget, fh.dot(x.n))
                 } else {
                     0.0
