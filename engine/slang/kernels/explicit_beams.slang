@@ -316,6 +316,8 @@ struct Params
     // W_SELF_RANGE: gStatic per vehicle (its collision range's bits, 0, 0, 0); 0: none, the
     // vehicle record's range is both).
     uint selfRange;
+    // Continuous contact's tables (explicit_plan's continuous::W_CC; 0: none).
+    uint cc;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
