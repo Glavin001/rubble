@@ -407,8 +407,12 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
     blo = ssub3(blo, r3);
     bhi = sadd3(bhi, r3);
     // Points against triangles.
-    for (uint i = w0, iStop = EB_END(894, i, ra.y, ws); i < iStop; i += ws)
+    // (A thread a point and a cell class: the cells congruent to its class modulo 4 on each
+    // axis, so a query's cells spread over 64 threads, every cell still walked once.)
+    for (uint t = w0, tStop = EB_END(894, t, ra.y * 64u, ws); t < tStop; t += ws)
     {
+        uint i = t >> 6;
+        int3 cls = int3(int(t & 3u), int((t >> 2) & 3u), int((t >> 4) & 3u));
         uint gi = ra.x + i;
         if (!ccOnSurface(a, gi)) continue;
         float3 p = ccX0(a, gi);
@@ -419,9 +423,9 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
         float3 q3 = float3(rp, rp, rp);
         int3 c0 = ccCell(ssub3(p, q3), CC_CELL);
         int3 c1 = ccCell(sadd3(p, q3), CC_CELL);
-        for (int x = c0.x; x <= c1.x; x++)
-            for (int y = c0.y; y <= c1.y; y++)
-                for (int z = c0.z; z <= c1.z; z++)
+        for (int x = c0.x + cls.x; x <= c1.x; x += 4)
+            for (int y = c0.y + cls.y; y <= c1.y; y += 4)
+                for (int z = c0.z + cls.z; z <= c1.z; z += 4)
                 {
                     int3 c = int3(x, y, z);
                     uint key = ccPack(c);
@@ -459,8 +463,10 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
     // first, sharing no node).
     if (a > b) return;
     uint4 ea = ccVeh(a, 0u);
-    for (uint i = w0, iStop = EB_END(895, i, ea.y, ws); i < iStop; i += ws)
+    for (uint t = w0, tStop = EB_END(895, t, ea.y * 64u, ws); t < tStop; t += ws)
     {
+        uint i = t >> 6;
+        int3 cls = int3(int(t & 3u), int((t >> 2) & 3u), int((t >> 4) & 3u));
         uint ge = ea.x + i;
         uint4 er = gStatic[ccRec(1).x + ge];
         if (!ccEdgeLive(ge)) continue;
@@ -474,9 +480,9 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
         if (any(ehi < blo) || any(elo > bhi)) continue;
         int3 c0 = ccCell(elo, CC_CELL);
         int3 c1 = ccCell(ehi, CC_CELL);
-        for (int x = c0.x; x <= c1.x; x++)
-            for (int y = c0.y; y <= c1.y; y++)
-                for (int z = c0.z; z <= c1.z; z++)
+        for (int x = c0.x + cls.x; x <= c1.x; x += 4)
+            for (int y = c0.y + cls.y; y <= c1.y; y += 4)
+                for (int z = c0.z + cls.z; z <= c1.z; z += 4)
                 {
                     int3 c = int3(x, y, z);
                     uint key = ccPack(c);
