@@ -128,6 +128,7 @@ pub(super) fn resolve(
             .collect()
     };
     let mut acc: Vec<Vec<(Vec3, u32)>> = x1.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
+    let mut accv: Vec<Vec<Vec3>> = x1.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
     for _ in 0..rounds {
         let hit = collide(x1);
         st.rounds += 1;
@@ -145,16 +146,20 @@ pub(super) fn resolve(
             if n == Vec3::ZERO {
                 continue;
             }
-            // Relative normal speed of the closest points over the path (Δx / h).
+            // Relative normal closing over the path (Δx / h) and of the velocities: the
+            // velocities' closing is cancelled by an impulse; the rest (the contact's position
+            // shifts) by a position change alone, so no speed is added that was not there.
             let vr: f32 = (0..4).map(|j| w[j] * (b[j] - a[j]).dot(n)).sum::<f32>() / h;
             if vr >= 0.0 {
                 continue;
             }
+            let vv: f32 = (0..4).map(|j| w[j] * vel[pr.k[j].0][pr.k[j].1 as usize].dot(n)).sum();
             let wsum: f32 = (0..4).map(|j| w[j] * w[j] * im[pr.k[j].0][pr.k[j].1 as usize]).sum();
             if wsum <= 0.0 {
                 continue;
             }
             let l = -vr / wsum;
+            let lv = (-vv / wsum).clamp(0.0, l);
             for j in 0..4 {
                 let (v, i) = pr.k[j];
                 let mi = im[v][i as usize];
@@ -162,6 +167,8 @@ pub(super) fn resolve(
                     let e = &mut acc[v][i as usize];
                     e.0 += n * (w[j] * mi * l);
                     e.1 += 1;
+                    let f = &mut accv[v][i as usize];
+                    *f += n * (w[j] * mi * lv);
                 }
             }
         }
@@ -169,10 +176,11 @@ pub(super) fn resolve(
             for i in 0..x1[v].len() {
                 let e = &mut acc[v][i];
                 if e.1 > 0 {
-                    let dv = e.0 / e.1 as f32;
-                    vel[v][i] += dv;
-                    x1[v][i] += dv * h;
+                    let k = 1.0 / e.1 as f32;
+                    x1[v][i] += e.0 * (k * h);
+                    vel[v][i] += accv[v][i] * k;
                     *e = (Vec3::ZERO, 0);
+                    accv[v][i] = Vec3::ZERO;
                 }
             }
         }
@@ -235,8 +243,7 @@ fn rigid_zone(nodes: &[(usize, u32)], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], ve
     let at = |x: &[Vec<Vec3>], k: &(usize, u32)| x[k.0][k.1 as usize].as_dvec3();
     if nodes.iter().any(|k| im[k.0][k.1 as usize] == 0.0) {
         for k in nodes {
-            let d = x0[k.0][k.1 as usize] - x1[k.0][k.1 as usize];
-            vel[k.0][k.1 as usize] += d / h;
+            vel[k.0][k.1 as usize] = Vec3::ZERO;
             x1[k.0][k.1 as usize] = x0[k.0][k.1 as usize];
         }
         return;
@@ -244,7 +251,9 @@ fn rigid_zone(nodes: &[(usize, u32)], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], ve
     let hh = h as f64;
     let mass: f64 = nodes.iter().map(|k| m[k.0][k.1 as usize] as f64).sum();
     let c = nodes.iter().map(|k| at(x0, k) * m[k.0][k.1 as usize] as f64).sum::<DVec3>() / mass;
-    let v = |k: &(usize, u32)| (at(x1, k) - at(x0, k)) / hh;
+    // The zone's momentum and angular momentum from the nodes' velocities (a projection onto
+    // rigid motion: kinetic energy never rises).
+    let v = |k: &(usize, u32)| vel[k.0][k.1 as usize].as_dvec3();
     let vc = nodes.iter().map(|k| v(k) * m[k.0][k.1 as usize] as f64).sum::<DVec3>() / mass;
     let (mut l, mut i) = (DVec3::ZERO, DMat3::ZERO);
     for k in nodes {
@@ -257,10 +266,7 @@ fn rigid_zone(nodes: &[(usize, u32)], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], ve
     let rot = if ang > 0.0 { glam::DQuat::from_axis_angle(w / w.length(), ang) } else { glam::DQuat::IDENTITY };
     for k in nodes {
         let r = at(x0, k) - c;
-        let end = c + vc * hh + rot * r;
-        let new = end.as_vec3();
-        let d = new - x1[k.0][k.1 as usize];
-        vel[k.0][k.1 as usize] += d / h;
-        x1[k.0][k.1 as usize] = new;
+        x1[k.0][k.1 as usize] = (c + vc * hh + rot * r).as_vec3();
+        vel[k.0][k.1 as usize] = (vc + w.cross(r)).as_vec3();
     }
 }

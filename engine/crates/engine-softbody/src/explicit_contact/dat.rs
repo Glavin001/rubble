@@ -696,6 +696,7 @@ impl ExplicitBeamsWorld {
             }
         }
         let zero: Vec<Vec<Vec3>> = x0.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+        let mut vfinal: Option<Vec<Vec<Vec3>>> = None;
         if dat.ccd_rounds > 0 {
             // The physical guarantee: CCD with inelastic impulses, then impact zones.
             let q = reach(&x1, &zero);
@@ -710,6 +711,7 @@ impl ExplicitBeamsWorld {
                 .map(|v| (0..x1[v].len()).map(|i| v0[v][i] + (x1[v][i] - x1p[v][i] - shift[v][i]) / STEP).collect())
                 .collect();
             super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.zone_rounds, &mut st.ccd);
+            vfinal = Some(vs);
         }
         let q = reach(&x1, &zero);
         recs.retain(|r| r.g < side(r, &q, true) + side(r, &q, false));
@@ -722,8 +724,10 @@ impl ExplicitBeamsWorld {
             let o = veh.origin;
             for (i, n) in veh.nodes.iter_mut().enumerate() {
                 let c = x1[v][i] - x1p[v][i] - shift[v][i];
-                if x1[v][i] != x1p[v][i] {
-                    let v1 = n.vel + c / STEP;
+                if x1[v][i] != x1p[v][i] || vfinal.as_ref().is_some_and(|f| f[v][i] != n.vel) {
+                    // (with the CCD response its velocities, which it changes apart from the
+                    // positions; without, the position change's speed)
+                    let v1 = vfinal.as_ref().map_or(n.vel + c / STEP, |f| f[v][i]);
                     st.spec_ke += 0.5 * n.mass as f64 * (v1.length_squared() as f64 - n.vel.length_squared() as f64);
                     n.vel = v1;
                     n.pos = x1[v][i] - ov[v][i] - o;
