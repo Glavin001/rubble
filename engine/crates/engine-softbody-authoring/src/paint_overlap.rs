@@ -577,6 +577,7 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
                     let m: f32 = x.nodes.iter().map(|n| n.mass).sum();
                     let vc = x.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
                     let v = x.nodes[i].vel - vc;
+                    if std::env::var("JITTER_TRACE").is_ok() && s > steps - 80 { let dir = FREQ.with(|f| f.borrow().0); println!("step {s} v {:+.2} edge hits {} node hits {}", v.dot(dir), w.edge_stats[5], w.total.hits); }
                     FREQ.with(|f| { let mut f = f.borrow_mut(); if f.0 == Vec3::ZERO { f.0 = v.normalize_or_zero(); } let sgn = v.dot(f.0) > 0.0; if s > steps - 500 && sgn != f.1 { f.2 += 1; } f.1 = sgn; f.3 = f.3.max(v.length()); });
                     if s == steps { FREQ.with(|f| { let f = f.borrow(); println!("{name}: {} reversals in 0.25 s ({:.0} Hz), peak {:.2} m/s", f.2, f.2 as f32 / 2.0 / 0.25, f.3); }); }
                 }

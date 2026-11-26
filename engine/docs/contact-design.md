@@ -707,3 +707,6 @@ A pile rebuilds the group's edge candidates whenever any node moves a skin (12 c
 group's mean; per-owner rebuilds (lossless when the two cars' motions sum under two skins) are the
 lever. (`RUBBLE_EDGE_SKIN` cannot be A/B'd on the portable fixtures: they carry the upload's
 statics, the skin with them.)
+- Its trace (JITTER_TRACE=1, the last 80 steps of head 60 pressed): the bumper corner's velocity a
+  smooth sine (+2.6 to -3.9 m/s over about 32 steps), 3-4 edge hits every step and no node hit: a
+  steady 62 Hz swing of about 1 cm, fed while the throttle pushes, not hits switching on and off.
