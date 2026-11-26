@@ -563,8 +563,24 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let mut jitter = 0.0f32;
         let (mut deep, mut deep_last, mut lasting, mut brief) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         let settled = 0.3 + 0.25 / (speed * if scene == "side" { 1.0 } else { 2.0 });
+        // (DAT_CHECK=N, run 0: every N steps the edges of one car crossing the other's
+        // collision triangles, and at the end the continuous mode's counters.)
+        let check: usize = std::env::var("DAT_CHECK").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let (mut crossed_max, mut crossed_steps) = (0usize, 0usize);
         for s in 1..=steps {
             w.step();
+            if k == 0 && check > 0 && !pole && s % check == 0 {
+                let c = w.mesh_crossings();
+                crossed_max = crossed_max.max(c);
+                crossed_steps += (c > 0) as usize;
+                if s == steps - steps % check { println!("DAT {scene} {kmh}: crossings max {crossed_max}, checks with any {crossed_steps} of {}; {:?}", steps / check, w.continuous.as_ref().map(|d| d.total));
+                    if let Some(who) = w.continuous.as_ref().and_then(|d| d.who.as_ref()) {
+                        let mut l: Vec<_> = who.iter().collect();
+                        l.sort_by_key(|x| std::cmp::Reverse(x.1[0] + x.1[1]));
+                        println!("DAT_WHO (car node: over, frozen) {:?}", l.iter().take(24).map(|((c, i), n)| format!("{c} {} {}/{}", d.nodes[*i as usize].name, n[0], n[1])).collect::<Vec<_>>());
+                    }
+                }
+            }
             if s >= steps.saturating_sub(500) && s % 20 == 0 {
                 jitter = jitter.max(shake(&w));
             }

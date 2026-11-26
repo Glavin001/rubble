@@ -1,0 +1,592 @@
+//! Continuous contact between vehicles: Planar Divide and Truncate (Chen, Hsu, Ayman and
+//! Macklin, SIGGRAPH 2026, arXiv:2604.15513; `docs/continuous-contact-design.md`). A CPU
+//! prototype, car against car, on the collision triangles (the node mesh).
+//!
+//! Each step, after every vehicle's node update and the work guard: every point-triangle
+//! and edge-edge pair between two vehicles closer than the query radius `r_q` at the
+//! step's start gets a plane square to its closest-point segment, placed so that each
+//! side's room is proportional to its own approach this step (Newton's
+//! `place_dat_division_plane`). Each node then takes the smallest fraction of its step
+//! that keeps it on its side of all its planes, by `gamma` short of each (`t = γ·s0/(s0 −
+//! s1)` where the end distance `s1` is below zero), and keeps that fraction of its step
+//! and of its velocity. A primitive is the convex hull of its nodes and each node's
+//! distance to its fixed plane is linear in time, so no listed pair can meet during the
+//! step: the surfaces never cross, from a start where they do not. The fraction is a
+//! minimum over pairs, the same in any order (bit exact). It only takes energy away
+//! (the kinetic energy of a truncated node scales by t²), counted in [`DatStats`].
+//!
+//! Pairs farther than `r_q` at the start are not listed; they cannot meet while no node
+//! moves more than `0.5·γ·r_q` a step. A node that does is counted (`over_step`), never
+//! clamped: the step is then not covered, and the count says so.
+
+use super::ExplicitBeamsWorld;
+use crate::explicit_beams::{ExplicitBeams, NODE_IMMOVABLE, STEP};
+use glam::Vec3;
+use std::collections::HashMap;
+
+/// The continuous mode's setting and counters (on [`ExplicitBeamsWorld::continuous`]).
+#[derive(Clone, Debug)]
+pub struct Dat {
+    /// Query radius (m): pairs closer than this at a step's start get a plane.
+    pub r_q: f32,
+    /// The fraction of the room to its plane a node may use (Newton's γ_r, 0.85).
+    pub gamma: f32,
+    /// Rounds of the speculative inelastic contact before the truncation (0: none).
+    pub iters: u32,
+    /// `DAT_WHO=1` (a measurement): per (vehicle, node), the steps it moved past the cover
+    /// and the steps it was frozen.
+    pub who: Option<HashMap<(usize, u32), [u32; 2]>>,
+    /// The last step's counts and every step's, summed.
+    pub last: DatStats,
+    pub total: DatStats,
+}
+
+/// What the truncation did (the mode's health: how often it binds and what it removes).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DatStats {
+    pub steps: u64,
+    /// Point-triangle and edge-edge pairs given a plane.
+    pub pairs_vt: u64,
+    pub pairs_ee: u64,
+    /// Nodes whose step was cut (t < 1), and frozen for want of a separating plane (t = 0:
+    /// a pair touching or crossed at the start).
+    pub truncated: u64,
+    pub uncertified: u64,
+    /// Of those: the closest points within 2ε (touching), and the gap (m) of every listed
+    /// pair at the start, smallest.
+    pub touching: u64,
+    pub min_gap: f32,
+    /// Nodes that moved more than `0.5·γ·r_q` (the step not covered for unlisted pairs).
+    pub over_step: u64,
+    /// The smallest fraction taken, the kinetic energy (J) and momentum (N·s, summed
+    /// magnitudes) the cuts removed.
+    pub min_t: f32,
+    pub ke_removed: f64,
+    pub p_removed: f64,
+    /// The kinetic energy change (J) of the speculative contact (≤ 0: it only removes approach).
+    pub spec_ke: f64,
+}
+
+impl DatStats {
+    fn add(&mut self, o: &DatStats) {
+        self.steps += o.steps;
+        self.pairs_vt += o.pairs_vt;
+        self.pairs_ee += o.pairs_ee;
+        self.truncated += o.truncated;
+        self.uncertified += o.uncertified;
+        self.touching += o.touching;
+        self.min_gap = self.min_gap.min(o.min_gap);
+        self.over_step += o.over_step;
+        self.min_t = self.min_t.min(o.min_t);
+        self.ke_removed += o.ke_removed;
+        self.p_removed += o.p_removed;
+        self.spec_ke += o.spec_ke;
+    }
+}
+
+impl Dat {
+    /// `CONTACT_MODE=continuous` turns it on (`DAT_RQ`, `DAT_GAMMA` its settings); None
+    /// otherwise (discrete contact, as before).
+    pub fn from_env() -> Option<Self> {
+        let on = std::env::var("CONTACT_MODE").is_ok_and(|v| v == "continuous");
+        let f = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        on.then(|| Self { iters: f("DAT_ITERS", 8.0) as u32, ..Self::new(f("DAT_RQ", 0.08), f("DAT_GAMMA", 0.85)) })
+    }
+
+    pub fn new(r_q: f32, gamma: f32) -> Self {
+        Self { r_q, gamma, iters: 8, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+    }
+}
+
+/// A vehicle's live collision surface: its triangles (not torn, not anti-clip only) and
+/// their edges, each once.
+pub(crate) struct Surface {
+    pub tris: Vec<[u32; 3]>,
+    pub edges: Vec<[u32; 2]>,
+    pub nodes: Vec<u32>,
+}
+
+pub(crate) fn surface(v: &ExplicitBeams) -> Surface {
+    let mut tris = Vec::new();
+    for (t, tri) in v.triangles.iter().enumerate() {
+        let dead = v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t);
+        if !dead && !tri.nodes.iter().any(|&i| v.is_retired(i as usize)) {
+            tris.push(tri.nodes);
+        }
+    }
+    let mut edges: Vec<[u32; 2]> = tris
+        .iter()
+        .flat_map(|t| [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]])
+        .map(|[a, b]| [a.min(b), a.max(b)])
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut nodes: Vec<u32> = tris.iter().flatten().copied().collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    Surface { tris, edges, nodes }
+}
+
+/// A uniform grid of primitives' boxes (cell `h`), each primitive in every cell its box
+/// grown by `grow` touches.
+pub(crate) struct Grid {
+    h: f32,
+    cells: HashMap<(i32, i32, i32), Vec<u32>>,
+}
+
+impl Grid {
+    pub fn new(h: f32) -> Self {
+        Self { h, cells: HashMap::new() }
+    }
+    fn cell(&self, p: Vec3) -> (i32, i32, i32) {
+        let q = (p / self.h).floor();
+        (q.x as i32, q.y as i32, q.z as i32)
+    }
+    pub fn insert(&mut self, id: u32, lo: Vec3, hi: Vec3) {
+        let (a, b) = (self.cell(lo), self.cell(hi));
+        for x in a.0..=b.0 {
+            for y in a.1..=b.1 {
+                for z in a.2..=b.2 {
+                    self.cells.entry((x, y, z)).or_default().push(id);
+                }
+            }
+        }
+    }
+    /// Every primitive in the cells a box touches, each once, ascending.
+    pub fn query(&self, lo: Vec3, hi: Vec3, out: &mut Vec<u32>) {
+        out.clear();
+        let (a, b) = (self.cell(lo), self.cell(hi));
+        for x in a.0..=b.0 {
+            for y in a.1..=b.1 {
+                for z in a.2..=b.2 {
+                    if let Some(c) = self.cells.get(&(x, y, z)) {
+                        out.extend_from_slice(c);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+/// The closest point to `p` on triangle `a b c` (Ericson, Real-Time Collision Detection
+/// §5.1.5).
+pub(crate) fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return a + ab * (d1 / (d1 - d3));
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return a + ac * (d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    }
+    let den = 1.0 / (va + vb + vc);
+    a + ab * (vb * den) + ac * (vc * den)
+}
+
+/// The closest points of segments `p1 q1` and `p2 q2` (Ericson §5.1.9).
+pub(crate) fn closest_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
+    let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    const EPS: f32 = 1e-12;
+    let (s, t);
+    if a <= EPS && e <= EPS {
+        return (p1, p2);
+    }
+    if a <= EPS {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.dot(r);
+        if e <= EPS {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = d1.dot(d2);
+            let den = a * e - b * b;
+            let mut s0 = if den > 0.0 { ((b * f - c * e) / den).clamp(0.0, 1.0) } else { 0.0 };
+            let mut t0 = (b * s0 + f) / e;
+            if t0 < 0.0 {
+                t0 = 0.0;
+                s0 = (-c / a).clamp(0.0, 1.0);
+            } else if t0 > 1.0 {
+                t0 = 1.0;
+                s0 = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            s = s0;
+            t = t0;
+        }
+    }
+    (p1 + d1 * s, p2 + d2 * t)
+}
+
+/// A listed pair: its nodes (vehicle, node), the first `nn` on the negative side, with the
+/// closest points' weights; the unit normal from the negative side's closest point `cn`
+/// to the positive side's at the start, the gap `g` and the paint thickness `d` (the two
+/// sides' contact offsets at their closest points: where the drawn surfaces meet).
+struct Rec {
+    k: [(usize, u32); 4],
+    w: [f32; 4],
+    nn: usize,
+    len: usize,
+    n: Vec3,
+    cn: Vec3,
+    g: f32,
+    d: f32,
+}
+
+impl Rec {
+    fn new(neg: &[(usize, u32)], wn: &[f32], pos: &[(usize, u32)], wp: &[f32], cn: Vec3, cp: Vec3, off: &[Vec<f32>]) -> Self {
+        let (mut k, mut w) = ([(0, 0); 4], [0.0; 4]);
+        for (j, (&x, &y)) in neg.iter().chain(pos).zip(wn.iter().chain(wp)).enumerate() {
+            k[j] = x;
+            w[j] = y;
+        }
+        let len = neg.len() + pos.len();
+        let d = (0..len).map(|j| w[j] * off[k[j].0].get(k[j].1 as usize).copied().unwrap_or(0.0)).sum();
+        let g = (cp - cn).length();
+        Self { k, w, nn: neg.len(), len, n: (cp - cn) / g.max(f32::MIN_POSITIVE), cn, g, d }
+    }
+    fn sign(&self, j: usize) -> f32 {
+        if j < self.nn { -1.0 } else { 1.0 }
+    }
+}
+
+/// The speculative inelastic contact: Jacobi with mass splitting over the pairs, `iters`
+/// rounds, on velocities. Each pair's closing speed along its normal is cut to what
+/// brings its gap to its paint thickness by the step's end (to zero closing speed when it
+/// is already closer): an inelastic impulse by the nodes' inverse masses, so momentum
+/// passes to the struck side. It removes approach and never adds separation. Each change
+/// of velocity moves the node by h times it (as the node update would have).
+fn speculative(recs: &[Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
+    let h = STEP;
+    let mut acc: Vec<Vec<(Vec3, u32)>> = v.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
+    for _ in 0..iters {
+        let mut any = false;
+        for r in recs {
+            let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
+            let c = rel + (r.g - r.d).max(0.0) / h;
+            if c >= 0.0 {
+                continue;
+            }
+            let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize]).sum();
+            if wsum <= 0.0 {
+                continue;
+            }
+            let l = -c / wsum;
+            for j in 0..r.len {
+                let (q, i) = r.k[j];
+                let m = im[q][i as usize];
+                if m > 0.0 && r.w[j] > 0.0 {
+                    let e = &mut acc[q][i as usize];
+                    e.0 += r.n * (r.sign(j) * r.w[j] * m * l);
+                    e.1 += 1;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+        for (x, a) in v.iter_mut().zip(acc.iter_mut()) {
+            for (p, e) in x.iter_mut().zip(a.iter_mut()) {
+                if e.1 > 0 {
+                    *p += e.0 / e.1 as f32;
+                    *e = (Vec3::ZERO, 0);
+                }
+            }
+        }
+    }
+}
+
+struct Pass<'a> {
+    x0: &'a [Vec<Vec3>],
+    x1: &'a [Vec<Vec3>],
+    t: &'a mut [Vec<f32>],
+    gamma: f32,
+    stats: &'a mut DatStats,
+}
+
+impl Pass<'_> {
+    /// One pair's plane, placed by each side's approach, and each node's fraction.
+    fn pair(&mut self, r: &Rec) {
+        let (g, n, cn) = (r.g, r.n, r.cn);
+        let ks = &r.k[..r.len];
+        let scale = cn.abs().max_element().max(1.0) + g;
+        let eps = 4.0 * f32::EPSILON * scale;
+        self.stats.min_gap = self.stats.min_gap.min(g);
+        if g <= 2.0 * eps {
+            self.stats.touching += 1;
+            self.freeze(r);
+            return;
+        }
+        let dx = |&(v, i): &(usize, u32)| self.x1[v][i as usize] - self.x0[v][i as usize];
+        let dpos = ks[r.nn..].iter().map(|k| -dx(k).dot(n)).fold(0.0f32, f32::max);
+        let dneg = ks[..r.nn].iter().map(|k| dx(k).dot(n)).fold(0.0f32, f32::max);
+        let lambda = if dpos + dneg > 0.0 { (dneg / (dpos + dneg)).clamp(0.05, 0.95) } else { 0.5 };
+        let p = cn + n * (lambda * g);
+        // Certify the plane: every node strictly on its side at the start.
+        let s0 = |j: usize| r.sign(j) * (self.x0[ks[j].0][ks[j].1 as usize] - p).dot(n);
+        if (0..r.len).any(|j| s0(j) <= eps) {
+            self.freeze(r);
+            return;
+        }
+        for j in 0..r.len {
+            let (a, k) = (s0(j), ks[j]);
+            let b = r.sign(j) * (self.x1[k.0][k.1 as usize] - p).dot(n);
+            if b < 0.0 {
+                let t = &mut self.t[k.0][k.1 as usize];
+                *t = t.min(self.gamma * a / (a - b));
+            }
+        }
+    }
+
+    /// No plane can be certified (the gap within rounding): each node that moves toward
+    /// the other side along the normal stays where it is; one moving away keeps its step
+    /// (its distance only grows), so the pair can part.
+    fn freeze(&mut self, r: &Rec) {
+        self.stats.uncertified += 1;
+        for j in 0..r.len {
+            let k = r.k[j];
+            let dx = self.x1[k.0][k.1 as usize] - self.x0[k.0][k.1 as usize];
+            if r.g <= 0.0 || r.sign(j) * dx.dot(r.n) < 0.0 {
+                self.t[k.0][k.1 as usize] = 0.0;
+            }
+        }
+    }
+}
+
+/// The barycentric weights of point `p` (on the triangle) in `a b c`.
+fn barycentric(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
+    let (v0, v1, v2) = (b - a, c - a, p - a);
+    let (d00, d01, d11, d20, d21) = (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+    let den = d00 * d11 - d01 * d01;
+    if den <= 0.0 {
+        return [1.0 / 3.0; 3];
+    }
+    let v = ((d11 * d20 - d01 * d21) / den).clamp(0.0, 1.0);
+    let w = ((d00 * d21 - d01 * d20) / den).clamp(0.0, 1.0 - v);
+    [1.0 - v - w, v, w]
+}
+
+/// The parameter of point `c` (on the segment) along `p q`.
+fn along(c: Vec3, p: Vec3, q: Vec3) -> f32 {
+    let d = q - p;
+    let l = d.length_squared();
+    if l <= 0.0 { 0.0 } else { ((c - p).dot(d) / l).clamp(0.0, 1.0) }
+}
+
+fn bounds(ps: impl IntoIterator<Item = Vec3>) -> (Vec3, Vec3) {
+    ps.into_iter()
+        .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(l, h), p| (l.min(p), h.max(p)))
+}
+
+impl ExplicitBeamsWorld {
+    /// The continuous mode's start of a step: every node's World position (None: off).
+    pub(super) fn dat_start(&self) -> Option<Vec<Vec<Vec3>>> {
+        self.continuous.as_ref()?;
+        (self.contact && self.vehicles.len() > 1).then(|| world_positions(&self.vehicles))
+    }
+
+    /// After the node update and the work guard: the planes and the truncation.
+    pub(super) fn dat_truncate(&mut self, x0: Option<Vec<Vec<Vec3>>>) {
+        let (Some(x0), Some(dat)) = (x0, self.continuous.as_mut()) else {
+            return;
+        };
+        let x1p = world_positions(&self.vehicles);
+        let mut x1 = x1p.clone();
+        let off: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.contact_offset.clone()).collect();
+        let im: Vec<Vec<f32>> = self
+            .vehicles
+            .iter()
+            .map(|v| (0..v.nodes.len()).map(|i| if v.nodes[i].has(NODE_IMMOVABLE) || v.is_retired(i) { 0.0 } else { 1.0 / v.nodes[i].mass }).collect())
+            .collect();
+        let mut recs: Vec<Rec> = Vec::new();
+        let mut t: Vec<Vec<f32>> = x0.iter().map(|x| vec![1.0; x.len()]).collect();
+        let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
+        let (r_q, cap) = (dat.r_q, 0.5 * dat.gamma * dat.r_q);
+        let surf: Vec<Surface> = self.vehicles.iter().map(surface).collect();
+        for (v, s) in surf.iter().enumerate() {
+            for &i in s.nodes.iter().filter(|&&i| (x1[v][i as usize] - x0[v][i as usize]).length() > cap) {
+                st.over_step += 1;
+                if let Some(w) = dat.who.as_mut() {
+                    w.entry((v, i)).or_default()[0] += 1;
+                }
+            }
+        }
+        let boxes: Vec<(Vec3, Vec3)> =
+            surf.iter().enumerate().map(|(v, s)| bounds(s.nodes.iter().map(|&i| x0[v][i as usize]))).collect();
+        let mut found = Vec::new();
+        let nv = self.vehicles.len();
+        for a in 0..nv {
+            for b in 0..nv {
+                let ((alo, ahi), (blo, bhi)) = (boxes[a], boxes[b]);
+                let r = Vec3::splat(r_q);
+                if a == b || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
+                    continue;
+                }
+                // a's nodes against b's triangles (both orders run: every node of both).
+                let (sa, sb) = (&surf[a], &surf[b]);
+                let mut grid = Grid::new(r_q.max(0.02));
+                for (k, tri) in sb.tris.iter().enumerate() {
+                    let (lo, hi) = bounds(tri.map(|i| x0[b][i as usize]));
+                    grid.insert(k as u32, lo - r, hi + r);
+                }
+                for &i in &sa.nodes {
+                    let p = x0[a][i as usize];
+                    grid.query(p, p, &mut found);
+                    for &k in &found {
+                        let tri = sb.tris[k as usize];
+                        let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
+                        let c = closest_on_triangle(p, q0, q1, q2);
+                        if (p - c).length_squared() < r_q * r_q {
+                            st.pairs_vt += 1;
+                            let neg = tri.map(|j| (b, j));
+                            recs.push(Rec::new(&neg, &barycentric(c, q0, q1, q2), &[(a, i)], &[1.0], c, p, &off));
+                        }
+                    }
+                }
+                // Edge pairs once (a < b).
+                if a > b {
+                    continue;
+                }
+                let mut grid = Grid::new(r_q.max(0.02));
+                for (k, e) in sb.edges.iter().enumerate() {
+                    let (lo, hi) = bounds(e.map(|i| x0[b][i as usize]));
+                    grid.insert(k as u32, lo - r, hi + r);
+                }
+                for e in &sa.edges {
+                    let [p1, q1] = e.map(|i| x0[a][i as usize]);
+                    let (lo, hi) = bounds([p1, q1]);
+                    grid.query(lo, hi, &mut found);
+                    for &k in &found {
+                        let f = sb.edges[k as usize];
+                        let [p2, q2] = f.map(|j| x0[b][j as usize]);
+                        let (c1, c2) = closest_segments(p1, q1, p2, q2);
+                        if (c2 - c1).length_squared() < r_q * r_q {
+                            st.pairs_ee += 1;
+                            let (s1, s2) = (along(c1, p1, q1), along(c2, p2, q2));
+                            recs.push(Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off));
+                        }
+                    }
+                }
+            }
+        }
+        if dat.iters > 0 {
+            let v0: Vec<Vec<Vec3>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
+            let mut v1 = v0.clone();
+            speculative(&recs, &mut v1, &im, dat.iters);
+            for (v, veh) in v1.iter().enumerate() {
+                for (i, &u) in veh.iter().enumerate() {
+                    x1[v][i] += (u - v0[v][i]) * STEP;
+                }
+            }
+        }
+        let mut pass = Pass { x0: &x0, x1: &x1, t: &mut t, gamma: dat.gamma, stats: &mut st };
+        for r in &recs {
+            pass.pair(r);
+        }
+        for (v, veh) in self.vehicles.iter_mut().enumerate() {
+            let o = veh.origin;
+            for (i, n) in veh.nodes.iter_mut().enumerate() {
+                let c = x1[v][i] - x1p[v][i];
+                if c != Vec3::ZERO {
+                    let v1 = n.vel + c / STEP;
+                    st.spec_ke += 0.5 * n.mass as f64 * (v1.length_squared() as f64 - n.vel.length_squared() as f64);
+                    n.vel = v1;
+                    n.pos = x1[v][i] - o;
+                }
+            }
+            for (i, &f) in t[v].iter().enumerate() {
+                let n = &mut veh.nodes[i];
+                if f >= 1.0 || n.has(NODE_IMMOVABLE) {
+                    continue;
+                }
+                st.truncated += 1;
+                st.min_t = st.min_t.min(f);
+                if f == 0.0 {
+                    if let Some(w) = dat.who.as_mut() {
+                        w.entry((v, i as u32)).or_default()[1] += 1;
+                    }
+                }
+                st.ke_removed += 0.5 * n.mass as f64 * n.vel.length_squared() as f64 * (1.0 - (f as f64).powi(2));
+                st.p_removed += n.mass as f64 * n.vel.length() as f64 * (1.0 - f as f64);
+                n.pos = x0[v][i] + (x1[v][i] - x0[v][i]) * f - o;
+                n.vel *= f;
+            }
+        }
+        dat.last = st;
+        dat.total.add(&st);
+    }
+
+    /// Edges of one vehicle crossing live triangles of another, at the current positions
+    /// (the invariant's test: zero in continuous mode from a start with none).
+    pub fn mesh_crossings(&self) -> usize {
+        let x = world_positions(&self.vehicles);
+        let surf: Vec<Surface> = self.vehicles.iter().map(surface).collect();
+        let mut n = 0;
+        let mut found = Vec::new();
+        for a in 0..surf.len() {
+            for b in 0..surf.len() {
+                if a == b {
+                    continue;
+                }
+                let mut grid = Grid::new(0.05);
+                for (k, tri) in surf[b].tris.iter().enumerate() {
+                    let (lo, hi) = bounds(tri.map(|i| x[b][i as usize]));
+                    grid.insert(k as u32, lo, hi);
+                }
+                for e in &surf[a].edges {
+                    let [p, q] = e.map(|i| x[a][i as usize]);
+                    let (lo, hi) = bounds([p, q]);
+                    grid.query(lo, hi, &mut found);
+                    n += found
+                        .iter()
+                        .filter(|&&k| {
+                            let [t0, t1, t2] = surf[b].tris[k as usize].map(|j| x[b][j as usize]);
+                            seg_crosses(p, q, t0, t1, t2)
+                        })
+                        .count();
+                }
+            }
+        }
+        n
+    }
+}
+
+fn world_positions(vs: &[ExplicitBeams]) -> Vec<Vec<Vec3>> {
+    vs.iter().map(|v| v.nodes.iter().map(|n| v.origin + n.pos).collect()).collect()
+}
+
+/// Whether segment `p q` passes through triangle `a b c` (signed volumes in f64).
+pub(crate) fn seg_crosses(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+    let d = |v: Vec3| v.as_dvec3();
+    let vol = |w: glam::DVec3, x: glam::DVec3, y: glam::DVec3, z: glam::DVec3| (x - w).cross(y - w).dot(z - w);
+    let (p, q, a, b, c) = (d(p), d(q), d(a), d(b), d(c));
+    let (sp, sq) = (vol(a, b, c, p), vol(a, b, c, q));
+    if sp * sq >= 0.0 {
+        return false;
+    }
+    let (s1, s2, s3) = (vol(p, q, a, b), vol(p, q, b, c), vol(p, q, c, a));
+    (s1 > 0.0 && s2 > 0.0 && s3 > 0.0) || (s1 < 0.0 && s2 < 0.0 && s3 < 0.0)
+}

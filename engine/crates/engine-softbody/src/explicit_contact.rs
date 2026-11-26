@@ -25,6 +25,9 @@ use glam::Vec3;
 
 mod edge;
 mod residual;
+mod wheels;
+mod dat;
+pub use dat::{Dat, DatStats};
 use residual::*;
 pub(crate) use edge::self_edge_hits;
 
@@ -351,6 +354,8 @@ pub struct ExplicitBeamsWorld {
     pub vv_range: Option<f32>,
     /// Scratch: each vehicle's live skin edges this contact pass (edge contact on).
     skin: Vec<Option<Vec<edge::SkinEdge>>>,
+    /// Continuous contact (None: discrete, the default; `CONTACT_MODE=continuous`).
+    pub continuous: Option<Dat>,
 }
 
 impl ExplicitBeamsWorld {
@@ -388,6 +393,7 @@ impl ExplicitBeamsWorld {
             edge_first: [0; 7],
             vv_range: std::env::var("VV_RANGE").ok().and_then(|v| v.parse().ok()),
             skin: Vec::new(),
+            continuous: Dat::from_env(),
         }
     }
 
@@ -518,10 +524,12 @@ impl ExplicitBeamsWorld {
         for _ in 0..steps {
             let v0 = self.staged_velocities();
             let wheels = self.wheels_begin(Some(&awake));
+            let x0 = self.dat_start();
             for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
                 v.step_nodes();
             }
             self.guard_final(&v0, None);
+            self.dat_truncate(x0);
             for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
                 v.step_rest();
             }
@@ -560,11 +568,13 @@ impl ExplicitBeamsWorld {
     pub fn step(&mut self) {
         let v0 = self.staged_velocities();
         let wheels = self.wheels_begin(None);
+        let x0 = self.dat_start();
         let Some(mut ledger) = self.ledger.take() else {
             for v in &mut self.vehicles {
                 v.step_nodes();
             }
             self.guard_final(&v0, None);
+            self.dat_truncate(x0);
             for v in &mut self.vehicles {
                 v.step_rest();
             }
@@ -592,6 +602,7 @@ impl ExplicitBeamsWorld {
             v.step_nodes();
         }
         self.guard_final(&v0, Some((&mut ledger, &mut before)));
+        self.dat_truncate(x0);
         for (k, v) in self.vehicles.iter_mut().enumerate() {
             v.step_rest();
             ledger.account(k, v, &before[k]);
@@ -607,76 +618,6 @@ impl ExplicitBeamsWorld {
         }
         if let Some(l) = self.ledger.as_mut() {
             l.refresh(&self.vehicles);
-        }
-    }
-
-    /// Raycast wheels on other vehicles (`DriveConfig::see_bodies`, with vehicle contact
-    /// on): at a step's start, every vehicle's live collision triangles as they stand
-    /// (World positions, velocities, inverse masses) for the wheels' rays of every vehicle
-    /// stepped (`awake`: those; None every one). False: no vehicle's wheels look (nothing
-    /// set, every step as without it).
-    fn wheels_begin(&mut self, awake: Option<&[bool]>) -> bool {
-        let nv = self.vehicles.len();
-        let on = |v: &ExplicitBeams| v.drive.as_ref().is_some_and(|d| d.config.see_bodies && !d.config.wheels.is_empty());
-        if !self.contact || nv < 2 || !self.vehicles.iter().any(on) {
-            return false;
-        }
-        let mut sc = crate::explicit_drive::PartnerScene::default();
-        for (j, v) in self.vehicles.iter().enumerate() {
-            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-            for n in &v.nodes {
-                let x = v.origin + n.pos;
-                lo = lo.min(x);
-                hi = hi.max(x);
-            }
-            let t0 = sc.tris.len() as u32;
-            for (t, tri) in v.triangles.iter().enumerate() {
-                let dead = v.tri_dead.get(t).copied().unwrap_or(false) || v.tri_anti_only(t);
-                if dead {
-                    continue;
-                }
-                let n = tri.nodes.map(|i| v.nodes[i as usize]);
-                sc.tris.push(crate::explicit_drive::PartnerTri {
-                    vehicle: j as u32,
-                    nodes: tri.nodes,
-                    x: n.map(|n| v.origin + n.pos),
-                    v: n.map(|n| n.vel),
-                    im: n.map(|n| if n.has(NODE_IMMOVABLE) { 0.0 } else { 1.0 / n.mass }),
-                });
-            }
-            sc.vehicles.push((lo, hi, t0, sc.tris.len() as u32));
-        }
-        let sc = std::sync::Arc::new(sc);
-        for (j, v) in self.vehicles.iter_mut().enumerate() {
-            if awake.is_some_and(|a| !a[j]) {
-                continue;
-            }
-            if let Some(d) = v.drive.as_mut().filter(|d| d.config.see_bodies) {
-                d.partners = Some(sc.clone());
-                d.owner = j as u32;
-            }
-        }
-        true
-    }
-
-    /// After a step's contact pass: the wheels' reactions on other vehicles' triangles
-    /// onto those nodes' contact sums (consumed by the next step's node pass, as vehicle
-    /// contact's), and the scene dropped.
-    fn wheels_end(&mut self) {
-        let mut all = Vec::new();
-        for v in &mut self.vehicles {
-            if let Some(d) = v.drive.as_mut() {
-                d.partners = None;
-                all.append(&mut d.reactions);
-            }
-        }
-        for r in all {
-            let v = &mut self.vehicles[r.vehicle as usize];
-            for k in 0..3 {
-                if r.w[k] > 0.0 {
-                    crate::explicit_drive::apply_contact(v, r.nodes[k], r.force * r.w[k]);
-                }
-            }
         }
     }
 
