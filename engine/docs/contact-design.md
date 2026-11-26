@@ -691,3 +691,9 @@ its centre over the last 0.25 s (`JITTER`, `vehicle_paint_overlap`), 4 runs, wor
 - Head 60 pressed with the fade: still 1.95; with it and the residual off 1.68, depth 50 mm 0.98, 30 mm
   1.19, node-edge off 1.84. Its fastest nodes: the braked car's crushed front bumper and radiator
   (4.6-7.6 m/s about the car's centre): light crushed parts trapped between the cars.
+- Without throttle the edge contact calms hard hits (worst, m/s, edge on / off): head 130 0.83 / 0.76,
+  side 100 0.09 / 0.50, side 130 0.15 / 1.64. The jitter needs a car pressing on at full throttle.
+- Head 60 pressed: the braked car's front bumper corner (bf_o16) swings at about 62 Hz, peak 12 m/s
+  about the car's centre (31 reversals in 0.25 s; JITTER_FREQ=car:node): a steady oscillation, not
+  step-to-step chatter. Not friction (EDGE_NO_FRICTION=1: 0.98), not the contact throttle
+  (THROTTLE_OFF=1: unchanged 1.18), not the residual (1.68), not the depth (fade 1.95).

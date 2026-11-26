@@ -13,6 +13,7 @@ use glam::Vec3;
 use std::collections::HashMap;
 
 pub type Tri = [Vec3; 3];
+thread_local!(static FREQ: std::cell::RefCell<(Vec3, bool, u32, f32)> = const { std::cell::RefCell::new((Vec3::ZERO, false, 0, 0.0)) });
 
 
 
@@ -402,6 +403,11 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(d, at + Vec3::Y * lift, vel, settings()).expect("spawn");
         s.surface_contact = true;
         s.edge_contact = edge;
+        // (THROTTLE_OFF=1, a measurement: no contact throttle, every triangle tested every step.)
+        if std::env::var("THROTTLE_OFF").is_ok_and(|x| x == "1") {
+            s.settings.triangle_throttle = false;
+            s.fixed_contact = true;
+        }
         // (SELF_OFF=1, the control of a car's own measures: one self group, so no self contact.)
         if std::env::var("SELF_OFF").is_ok_and(|x| x == "1") {
             s.self_groups = vec![1; s.nodes.len()];
@@ -561,6 +567,19 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
             w.step();
             if s >= steps.saturating_sub(500) && s % 20 == 0 {
                 jitter = jitter.max(shake(&w));
+            }
+            // (JITTER_FREQ=car:node: that node's velocity about its car's centre along its first value,
+            // its reversals over the last 0.25 s: the frequency of the shake.)
+            if k == 0 && s >= steps.saturating_sub(500) {
+                if let Some((c, name)) = std::env::var("JITTER_FREQ").ok().and_then(|x| x.split_once(':').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.to_string()))) {
+                    let x = &w.vehicles[c];
+                    let i = d.nodes.iter().position(|n| n.name == name).unwrap_or(0);
+                    let m: f32 = x.nodes.iter().map(|n| n.mass).sum();
+                    let vc = x.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
+                    let v = x.nodes[i].vel - vc;
+                    FREQ.with(|f| { let mut f = f.borrow_mut(); if f.0 == Vec3::ZERO { f.0 = v.normalize_or_zero(); } let sgn = v.dot(f.0) > 0.0; if s > steps - 500 && sgn != f.1 { f.2 += 1; } f.1 = sgn; f.3 = f.3.max(v.length()); });
+                    if s == steps { FREQ.with(|f| { let f = f.borrow(); println!("{name}: {} reversals in 0.25 s ({:.0} Hz), peak {:.2} m/s", f.2, f.2 as f32 / 2.0 / 0.25, f.3); }); }
+                }
             }
             if k == 0 && s == steps && std::env::var("JITTER_NODES").is_ok() {
                 for (c, x) in w.vehicles.iter().enumerate() {
