@@ -49,6 +49,9 @@ pub struct Dat {
     /// Rounds of non-rigid impact zones before the rigid ones (0: rigid only; `DAT_SOFT`, a
     /// comparison, `ccd::resolve`).
     pub soft_zones: u32,
+    /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
+    /// velocity change; 0 today, `DAT_E`, [`restitute`]).
+    pub restitution: f32,
     pub min_gap: f32,
     /// A car against itself too (`DAT_SELF=0`: only car against car).
     pub self_contact: bool,
@@ -108,6 +111,8 @@ pub struct DatStats {
     /// The vehicles' kinetic energy at the first step (J): the scale of what the response may
     /// remove (AGENTS.md, "Contact never stands in for metal").
     pub ke_start: f64,
+    /// The restitution's guard: the steps it scaled e down to keep kinetic energy from rising.
+    pub guarded: u64,
 }
 
 impl DatStats {
@@ -115,6 +120,7 @@ impl DatStats {
         if self.steps == 0 {
             self.ke_start = o.ke_start;
         }
+        self.guarded += o.guarded;
         self.steps += o.steps;
         self.pairs_vt += o.pairs_vt;
         self.pairs_ee += o.pairs_ee;
@@ -156,7 +162,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -597,6 +603,9 @@ impl ExplicitBeamsWorld {
         for r in &recs {
             pass.pair(r);
         }
+        if let Some(f) = vfinal.as_mut() {
+            restitute(&self.vehicles, f, dat.restitution, &mut st);
+        }
         for (v, veh) in self.vehicles.iter_mut().enumerate() {
             let o = veh.origin;
             for (i, n) in veh.nodes.iter_mut().enumerate() {
@@ -958,4 +967,45 @@ pub(crate) fn seg_crosses(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
 /// The share of a pair's thickness the CCD keeps (0.5; `DAT_XI`, a measurement).
 fn xi_share() -> f32 {
     std::env::var("DAT_XI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)
+}
+
+
+/// Moreau's impact law over the response (owner: contact must not absorb a crash's energy,
+/// AGENTS.md; `docs/continuous-response-parallel-design.md`): the response's velocity change
+/// Δ = v_p − v⁻ (from equal and opposite impulses: momentum kept) is given back e times,
+/// v⁺ = v_p + θ·Δ with θ = e, or less where that would raise the vehicles' kinetic energy above
+/// what it was before the pass: the guard's θ is the largest with
+/// Σm|v_p + θΔ|² ≤ Σm|v⁻|² (a quadratic), so no energy is created. Sums over vehicles and
+/// nodes in order.
+fn restitute(vehicles: &[ExplicitBeams], vp: &mut [Vec<Vec3>], e: f32, st: &mut DatStats) {
+    if e <= 0.0 {
+        return;
+    }
+    let (mut a, mut b, mut k0, mut kp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (v, veh) in vehicles.iter().enumerate() {
+        for (i, n) in veh.nodes.iter().enumerate() {
+            let (m, vm, p) = (n.mass as f64, n.vel.as_dvec3(), vp[v][i].as_dvec3());
+            let d = p - vm;
+            a += m * p.dot(d);
+            b += m * d.length_squared();
+            k0 += m * vm.length_squared();
+            kp += m * p.length_squared();
+        }
+    }
+    if b <= 0.0 {
+        return;
+    }
+    // kp + 2θa + θ²b ≤ k0: the larger root.
+    let disc = (a * a - b * (kp - k0)).max(0.0);
+    let most = (-a + disc.sqrt()) / b;
+    let theta = (e as f64).min(most.max(0.0));
+    if theta < e as f64 {
+        st.guarded += 1;
+    }
+    for (v, veh) in vehicles.iter().enumerate() {
+        for (i, n) in veh.nodes.iter().enumerate() {
+            let d = vp[v][i] - n.vel;
+            vp[v][i] += d * theta as f32;
+        }
+    }
 }

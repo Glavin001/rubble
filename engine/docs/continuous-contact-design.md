@@ -358,6 +358,25 @@ bending the panel round the impact. Against the owner's rule (AGENTS.md, "Contac
 stands in for metal"): a bug to fix, not a compromise. (The run without continuous contact
 has 52 crossings, so it is not a perfect reference.)
 
+## Moreau's impact law, e = 1 (CPU, `DAT_E=1`, measured 2026-11-26)
+
+`dat::restitute`: the response's velocity change Δ = v_p − v⁻ (equal and opposite impulses) is
+given back e times, v⁺ = v_p + θΔ, θ = e unless the vehicles' kinetic energy would rise above
+its value before the pass (an exact quadratic guard). Positions stay non-penetrating.
+
+| | inelastic (today) | e = 1 |
+|---|---|---|
+| removed by contact, head 100 (2 runs) | 26 % | 2.5-3.1 % |
+| removed by contact, side 60 | 8.5 % | 0.1 % |
+| head 100, 8 runs | pass, 20 mm | pass, 21 mm |
+| side 60, 8 runs | pass | pass, 0 mm |
+| offset 100, 8 runs | fail, 56 mm | pass, 36 mm |
+| jitter head 100 / offset 100 (m/s) | 0.64 / 0.73 | 0.81 / 1.01 |
+
+0 crossings, momentum to rounding. Off by default until the GPU has it (GPU == CPU). Left: the
+guard is one sum over the world (per group on the GPU); rigid proxies (the ball) are not in
+Δ yet, so e > 0 there would not keep momentum; the head-on's remaining 3 %.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
