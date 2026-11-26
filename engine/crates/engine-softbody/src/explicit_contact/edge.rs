@@ -421,8 +421,9 @@ impl ExplicitBeamsWorld {
                     if mode == 1 && (ma < 0.0 || mb < 0.0 || !e.convex || !f.convex) {
                         continue;
                     }
-                    if mode == 2 {
-                        if !e.convex || !f.convex {
+                    // (3: as 2 without skipping concave edges or pairs whose cones do not meet.)
+                    if mode >= 2 {
+                        if mode == 2 && (!e.convex || !f.convex) {
                             continue;
                         }
                         if ma < 0.0 {
@@ -431,7 +432,7 @@ impl ExplicitBeamsWorld {
                         if cone_margin(f, -n) < 0.0 {
                             n = -cone_clamp(f, -n);
                         }
-                        if cone_margin(e, n) < -1e-3 {
+                        if mode == 2 && cone_margin(e, n) < -1e-3 {
                             continue;
                         }
                     }

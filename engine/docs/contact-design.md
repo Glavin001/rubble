@@ -721,3 +721,12 @@ statics, the skin with them.)
   0/5/9 -> 0/0/1 mm (re-measured here). But side impact: jitter 0.10 -> 0.25 median, paint 26-27 mm
   left at the end in 2 of 4 runs. `EDGE_CONE=1` (skip pairs outside a cone) loses the penetration
   resistance. Next: the clamp without the concave skip on the side scene; the 0.97 run; the energy ledger.
+- **EDGE_CONE=2 against today (4 runs; jitter median, m/s / depth from 0.3 s on, worst mm):** head 60
+  pressed 1.07/9 -> 0.11/1; side 100 pressed 1.30/74 -> 0.17/61; side 60 pressed 0.38/34 -> 0.82/22;
+  side 90 1.68/0 -> 2.02/0. Mode 3 (no concave skip, no skip when the cones do not meet): head 60
+  pressed one run 337 mm locked: not that. Mode 2 with the suites: every energy row 0.0 J rise (today
+  up to 2 kJ), cars part 9.33 m as with contact off, scrape slides 13.4 m (>= 50 %), slow push ends
+  1 mm apart; acceptance (8 runs): side 30, side 60, head 60 and head 60 pressed pass; side 90 and head
+  100 only past 5 cm during the hit (0 from 0.3 s on); head 30 pressed 11 mm and side 60 pressed 22 mm
+  from 0.3 s on (today 7 and 34). The adoption candidate; it needs the GPU port (the edge pass's
+  normal) and GPU == CPU before it can be a default.
