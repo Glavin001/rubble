@@ -105,10 +105,16 @@ pub struct DatStats {
     pub p_removed: f64,
     /// The kinetic energy change (J) of the speculative contact (≤ 0: it only removes approach).
     pub spec_ke: f64,
+    /// The vehicles' kinetic energy at the first step (J): the scale of what the response may
+    /// remove (AGENTS.md, "Contact never stands in for metal").
+    pub ke_start: f64,
 }
 
 impl DatStats {
     fn add(&mut self, o: &DatStats) {
+        if self.steps == 0 {
+            self.ke_start = o.ke_start;
+        }
         self.steps += o.steps;
         self.pairs_vt += o.pairs_vt;
         self.pairs_ee += o.pairs_ee;
@@ -489,6 +495,14 @@ impl ExplicitBeamsWorld {
             .collect();
         let mut t: Vec<Vec<f32>> = x0.iter().map(|x| vec![1.0; x.len()]).collect();
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
+        if dat.total.steps == 0 {
+            st.ke_start = self.vehicles.iter().flat_map(|v| v.nodes.iter()).map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
+            // (and the rigid bodies the vehicles hold as proxies: a ball fired into a car)
+            st.ke_start += self.vehicles.iter().filter_map(|v| v.rigid.as_ref()).flat_map(|r| r.bodies.iter()).filter(|b| b.inv_mass > 0.0).map(|b| {
+                let w = b.rot.inverse() * b.ang_vel;
+                0.5 * (b.vel.length_squared() / b.inv_mass) as f64 + 0.5 * [w.x, w.y, w.z].iter().zip(b.inv_inertia.to_array()).map(|(w, i)| if i > 0.0 { (w * w / i) as f64 } else { 0.0 }).sum::<f64>()
+            }).sum::<f64>();
+        }
         let cap = 0.5 * dat.gamma * dat.r_q;
         let surf: Vec<Surface> = self.vehicles.iter().map(surface).collect();
         for (v, s) in surf.iter().enumerate() {

@@ -65,3 +65,28 @@ fn continuous_probe() {
     println!("PROBE {scene} {kmh} soft {} | worst {:.1} mm, after 0.3 s {:.1} mm, crossings {}, jitter {:.2} m/s | zones {} ({} nodes), soft rounds {} rows {} left {}, unresolved {}, energy {:.0} J, dp {:.1e}, dl {:.1e} | {:.0} s",
         e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, t.elapsed().as_secs_f32());
 }
+
+/// Contact never stands in for metal (AGENTS.md): over a crash the contact response (the
+/// speculative pass and the CCD response together) removes at most 1 % of the vehicles'
+/// starting kinetic energy; the crash's energy goes into the beams. 2 runs.
+fn energy(scene: &str, kmh: f32, secs: f32) {
+    let r = crash_mode(scene, kmh, secs, 2, true, false, true, false, false, Some(true)).expect("the scene");
+    let mut worst = 0.0f64;
+    for (k, x) in r.iter().enumerate() {
+        let d = x.2.expect("continuous");
+        let share = -d.spec_ke / d.ke_start.max(1.0);
+        println!("| energy | {scene} {kmh} km/h run {k} | start {:.0} kJ, contact removed {:.1} kJ ({:.1} %; CCD response {:.1} kJ) |", d.ke_start * 1e-3, -d.spec_ke * 1e-3, 100.0 * share, -d.ccd.ke * 1e-3);
+        worst = worst.max(share);
+    }
+    assert!(worst <= 0.01, "{scene} {kmh}: contact removed {:.1} % of the starting kinetic energy (at most 1 %)", 100.0 * worst);
+}
+
+/// FAILS today (2026-11-26): the inelastic impacts delete the struck nodes' closing energy.
+#[test]
+fn continuous_energy_head_100() { energy("head", 100.0, 0.6); }
+/// FAILS today (2026-11-26), as `continuous_energy_head_100`.
+#[test]
+fn continuous_energy_side_60() { energy("side", 60.0, 0.6); }
+/// FAILS today (2026-11-26), as `continuous_energy_head_100`.
+#[test]
+fn continuous_energy_ball_100() { energy("ball", 100.0, 0.5); }

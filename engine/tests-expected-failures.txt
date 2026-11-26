@@ -48,3 +48,10 @@ generated_vehicle_lint::every_other_design_passes_every_rule
 # up to 85 cm away (feL_r0, in no collision triangle), so it is drawn off the contact surface as the
 # fender crumples. Head 130 passes since the door fix (18 mm worst, 0 from 0.3 s).
 continuous_contact::continuous_offset_100
+
+# Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): the contact response
+# removes 26 % (head 100) and 8.5 % (side 60) of the starting kinetic energy by its counter (which
+# also counts the speed beams give a pressed node; the ledger split is next); bar 1 %.
+continuous_contact::continuous_energy_head_100
+continuous_contact::continuous_energy_side_60
+continuous_contact::continuous_energy_ball_100
