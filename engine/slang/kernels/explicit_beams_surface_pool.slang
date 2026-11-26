@@ -110,7 +110,7 @@ void surfBigFind(uint v, uint slot, uint lane)
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 sr = gStatic[gP.surfSeg + v];
-    float r = asfloat(gStatic[v * 4u + 3u].z);
+    float r = selfRangeOf(v, asfloat(gStatic[v * 4u + 3u].z));
     float3 origin = asfloat(gMisc[v].xyz);
     uint4 tn = surfPairNodes(code, r0, r1, sr);
     uint at = cplShape(v, k);
@@ -328,7 +328,7 @@ void surfPoolFind(uint v, uint gid, uint lane)
         gSurfPoolAt = gsSurfPoolAt[owner];
     }
     float3 origin = asfloat(gMisc[v].xyz);
-    float r = asfloat(gStatic[v * 4u + 3u].z);
+    float r = selfRangeOf(v, asfloat(gStatic[v * 4u + 3u].z));
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 sr = gStatic[gP.surfSeg + v];

@@ -218,7 +218,7 @@ void explicit_surface_prep(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint nodeCount = mine ? r0.y : 0u;
     uint triCount = mine ? r1.y : 0u;
     float3 origin = asfloat(gMisc[v].xyz);
-    float r = asfloat(r3.z);
+    float r = selfRangeOf(v, asfloat(r3.z));
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
@@ -309,7 +309,7 @@ void explicit_surface_cull(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
     uint4 r3 = gStatic[v * 4u + 3u];
-    float r = asfloat(r3.z);
+    float r = selfRangeOf(v, asfloat(r3.z));
     uint4 sr = gStatic[gP.surfSeg + v];
     uint triCount = r1.y;
     uint segCount = sr.y;
@@ -373,7 +373,7 @@ void surfSpreadKind(uint v, uint first, bool apply)
     uint nodeCount = mine ? r0.y : 0u;
     uint triCount = mine ? r1.y : 0u;
     float3 origin = asfloat(gMisc[v].xyz);
-    float r = asfloat(r3.z);
+    float r = selfRangeOf(v, asfloat(r3.z));
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint4 rec = gMisc[segRec(v)];
@@ -466,7 +466,7 @@ void surfPipeKind(uint v, uint lane, bool apply)
     uint nodeCount = mine ? r0.y : 0u;
     uint triCount = mine ? r1.y : 0u;
     float3 origin = asfloat(gMisc[v].xyz);
-    float r = asfloat(r3.z);
+    float r = selfRangeOf(v, asfloat(r3.z));
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint4 rec = gMisc[segRec(v)];

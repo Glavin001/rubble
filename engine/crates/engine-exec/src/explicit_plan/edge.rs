@@ -169,3 +169,46 @@ pub(super) fn contact_flags(flags: u32, edge: bool, offset: bool) -> u32 {
         flags
     }
 }
+
+/// The wide passes' vehicle table: the records with each vehicle's own range (`collision_range`,
+/// as self contact reads it; the records hold the car-to-car band, `ExplicitBeams::vv_band`).
+pub(super) fn own_ranges(vehicles: &[ExplicitBeams], mut recs: Vec<[u32; 4]>) -> Vec<[u32; 4]> {
+    for (k, v) in vehicles.iter().enumerate() {
+        recs[4 * k + 3][2] = v.collision_range.to_bits();
+    }
+    recs
+}
+
+/// Params word: edge vehicle contact's tables in gStatic (0: none; [`ExplicitUpload`]'s
+/// `edge_base`, explicit_beams_vv_edges.slang).
+pub const W_EDGE: usize = 106;
+/// Params word: contact offsets' tables in gStatic (0: none; `ExplicitBeams::contact_offset`,
+/// explicit_beams_members.slang contactOffsets).
+pub const W_OFFSET: usize = 107;
+/// Params word: self contact's bands in gStatic where a vehicle's car-to-car band differs from
+/// its collision range (the vehicle record holds the car-to-car band, `ExplicitBeams::vv_band`;
+/// [`self_range_table`]; 0: none; selfRangeOf).
+pub const W_SELF_RANGE: usize = 108;
+
+/// Self contact's bands ([`W_SELF_RANGE`]) when some vehicle's car-to-car band differs
+/// from its collision range: per vehicle (its collision range's bits, 0, 0, 0); 0 otherwise.
+pub(super) fn self_range_table(vehicles: &[ExplicitBeams], statics: &mut Vec<[u32; 4]>) -> u32 {
+    if vehicles.iter().all(|v| v.vv_band().to_bits() == v.collision_range.to_bits()) {
+        return 0;
+    }
+    let base = statics.len() as u32;
+    statics.extend(vehicles.iter().map(|v| [v.collision_range.to_bits(), 0, 0, 0]));
+    base
+}
+
+/// The contact offsets' tables (with `offsets`: [`offset_tables`]) and the self ranges'
+/// ([`self_range_table`]): their bases.
+pub(super) fn offset_and_self_tables(
+    vehicles: &[ExplicitBeams],
+    offsets: bool,
+    statics: &mut Vec<[u32; 4]>,
+    lists: &mut Vec<u32>,
+    beams: &mut Vec<[f32; 4]>,
+) -> (u32, u32) {
+    (if offsets { offset_tables(vehicles, statics, lists, beams) } else { 0 }, self_range_table(vehicles, statics))
+}

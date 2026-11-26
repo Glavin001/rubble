@@ -251,7 +251,7 @@ impl ExplicitBeamsWorld {
     }
 
     fn edge_hits(&mut self, a: usize, b: usize, ea: &[SkinEdge], eb: &[SkinEdge]) -> Vec<EdgeHit> {
-        let r = self.vv_band(a, b, self.vv_range.unwrap_or(self.vehicles[a].collision_range.max(self.vehicles[b].collision_range)));
+        let r = self.vv_range.unwrap_or(self.vehicles[a].vv_band().max(self.vehicles[b].vv_band()));
         let travel = |v: &ExplicitBeams| v.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max) * STEP;
         let pad = r + edge_depth() + travel(&self.vehicles[a]) + travel(&self.vehicles[b]);
         // A's edges in the grid, by their padded boxes.
@@ -384,7 +384,7 @@ impl ExplicitBeamsWorld {
     /// opposite corner c and its foot f on the edge's line. Over a face the node is the
     /// face's (the node pass); so no two contacts push the same point two ways.
     fn vertex_edge_hits(&mut self, o: usize, x: usize, eo: &[SkinEdge]) -> Vec<EdgeHit> {
-        let r = self.vv_band(o, x, self.vv_range.unwrap_or(self.vehicles[o].collision_range.max(self.vehicles[x].collision_range)));
+        let r = self.vv_range.unwrap_or(self.vehicles[o].vv_band().max(self.vehicles[x].vv_band()));
         let travel = |v: &ExplicitBeams| {
             if crate::explicit_contact::speculative() {
                 v.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max) * STEP
@@ -612,4 +612,12 @@ pub(crate) fn contact_offset_vectors(v: &ExplicitBeams) -> Vec<Vec3> {
         .enumerate()
         .map(|(i, s)| s.normalize_or_zero() * v.contact_offset.get(i).copied().unwrap_or(0.0))
         .collect()
+}
+
+impl ExplicitBeams {
+    /// The band against other vehicles (`vehicle_contact_range`, or `collision_range`, which self
+    /// and surface contact keep; an edge pair's is the larger of the two's).
+    pub fn vv_band(&self) -> f32 {
+        self.vehicle_contact_range.unwrap_or(self.collision_range)
+    }
 }

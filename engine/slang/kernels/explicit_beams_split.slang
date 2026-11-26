@@ -679,7 +679,7 @@ uint memberRestStepHead(uint v, uint lane, uint s, out MemberTail t)
     uint hitsOn = gsUniformHits;
     // (The tail, memberTail, in the entry: its hits applied, the slide nodes, the list.)
     t.origin = origin;
-    t.range = asfloat(r3.z);
+    t.range = selfRangeOf(v, asfloat(r3.z));
     t.beamOff = r0.z;
     t.groupOff = r2.z;
     t.groupCount = r2.w;

@@ -75,7 +75,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint groupCount = r2.w;
     uint flagsV = r3.x;
     float ground = asfloat(r3.y);
-    float range = asfloat(r3.z);
+    float range = selfRangeOf(v, asfloat(r3.z));
     float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
 #ifdef EB_AERO

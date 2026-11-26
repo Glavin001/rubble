@@ -435,9 +435,15 @@ fn a_browser_host_compiles_the_edge_pass() {
 
 /// The car the lab drives (the generated sedan, rigged from code, raycast wheels, surface contact
 /// and contact offsets on, as `surface=1`): two of them head on at 60 km/h each with edge contact,
-/// through the hit (0.4 s, the lab's 34-step frames), GPU == CPU bit for bit.
+/// through the hit (0.4 s, the lab's 34-step frames), GPU == CPU bit for bit; with each car's own
+/// band and with a 50 mm car-to-car band (`ExplicitBeams::vehicle_contact_range`).
 #[test]
 fn edge_contact_generated_sedans_head_on_step_like_the_cpu() {
+    generated_sedans_head_on(None);
+    generated_sedans_head_on(Some(0.05));
+}
+
+fn generated_sedans_head_on(band: Option<f32>) {
     use engine_softbody_authoring::authoring::rig;
     let built = rig::rig_vehicle("sedan", None, None).expect("rig the generated sedan");
     let files = rig::mod_files(&built);
@@ -453,6 +459,7 @@ fn edge_contact_generated_sedans_head_on_step_like_the_cpu() {
         let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(d, Vec3::new(0.0, 0.02 - ext(d, 1).0, z), Vec3::Z * v, settings).expect("spawn");
         s.surface_contact = true;
         s.edge_contact = true;
+        s.vehicle_contact_range = band;
         s.finish();
         s
     };
@@ -472,10 +479,10 @@ fn edge_contact_generated_sedans_head_on_step_like_the_cpu() {
         let pos = g.positions();
         for k in 0..2 {
             let dd = rms(&pos[k], &w.vehicles[k].positions());
-            assert_eq!(dd, 0.0, "sedan {k}: GPU–CPU {dd} m after frame {f} ({} steps); edge hits {:?}", w.steps, w.edge_stats);
+            assert_eq!(dd, 0.0, "band {band:?}, sedan {k}: GPU–CPU {dd} m after frame {f} ({} steps); edge hits {:?}", w.steps, w.edge_stats);
         }
     }
     g.contact_status().unwrap();
-    eprintln!("edge pass stats {:?}; node hits {}", w.edge_stats, w.total.hits);
+    eprintln!("band {band:?}: edge pass stats {:?}; node hits {}", w.edge_stats, w.total.hits);
     assert!(w.edge_stats[5] > 100, "the cars met: edge hits {:?}", w.edge_stats);
 }

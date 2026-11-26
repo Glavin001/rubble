@@ -129,7 +129,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     uint groupCount = on ? r2.w : 0u;
     uint flagsV = r3.x;
     float ground = asfloat(r3.y);
-    float range = asfloat(r3.z);
+    float range = selfRangeOf(v, asfloat(r3.z));
     float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
 #ifdef EB_AERO

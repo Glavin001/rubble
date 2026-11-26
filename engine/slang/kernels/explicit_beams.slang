@@ -312,6 +312,10 @@ struct Params
     uint edgeBase;
     // Contact offsets' tables (explicit_plan's W_OFFSET; 0: none; contactOffsets).
     uint offsetBase;
+    // Self contact's bands where a vehicle's car-to-car band differs (explicit_plan's
+    // W_SELF_RANGE: gStatic per vehicle (its collision range's bits, 0, 0, 0); 0: none, the
+    // vehicle record's range is both).
+    uint selfRange;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -340,6 +344,8 @@ struct Surface
 
 [[vk::binding(0, 0)]] ConstantBuffer<Params> gP;
 [[vk::binding(1, 0)]] StructuredBuffer<uint4> gStatic;
+// Vehicle v's own band (self contact, surface contact) from its record's range `rec`.
+float selfRangeOf(uint v, float rec) { return gP.selfRange != 0u ? asfloat(gStatic[gP.selfRange + v].x) : rec; }
 [[vk::binding(2, 0)]] StructuredBuffer<uint> gLists;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> gNodes;
 [[vk::binding(4, 0)]] RWStructuredBuffer<float4> gBeams;

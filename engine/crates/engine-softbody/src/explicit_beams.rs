@@ -875,6 +875,8 @@ pub struct ExplicitBeams {
     pub ground: f32,
     /// Self-collision range r (m).
     pub collision_range: f32,
+    /// The band against other vehicles (m; None: `collision_range`; [`Self::vv_band`]).
+    pub vehicle_contact_range: Option<f32>,
     /// Soft tyres built from a `.truck` file's `wheels` (for [`Self::roll_tyres`]).
     pub tyres: Vec<Tyre>,
     /// Pressure wheels' parking brakes (JBeam `parkingTorque`, spec §25.1), in
@@ -961,15 +963,10 @@ pub struct ExplicitBeams {
     /// triangle, is caught from the side it came from (a swept test, whatever its
     /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
     pub anti_clip: bool,
-    /// Outward skin (a Rubble setting, off by default): this vehicle's collision
-    /// triangles face out of the solids they bound (checked by the authoring), so
-    /// another vehicle's node always belongs on a triangle's normal side. With it,
-    /// vehicle contact against this vehicle's triangles takes that side for every
-    /// partner node, in place of anti-clip's memory, swept crossing and side vote:
-    /// a node that got inside (through a hole, an edge or past CLIP_DEPTH) is never
-    /// held there, and one leaving from inside is not caught as having come from
-    /// the inside (the lock of two cars that cannot back apart). Self contact keeps
-    /// anti-clip's rule.
+    /// Outward skin (off by default): vehicle contact against this vehicle's triangles takes
+    /// their normal side for every partner node, in place of anti-clip's memory, swept
+    /// crossing and side vote (the triangles face out: the authoring checks). Self contact
+    /// keeps anti-clip's rule.
     pub outward_skin: bool,
     /// With [`Self::outward_skin`]: the triangles it applies to (the outer skin's,
     /// whose front faces out of the whole vehicle at rest); the others keep
@@ -982,7 +979,7 @@ pub struct ExplicitBeams {
     /// edge's wedge), so two skins cannot cross between their nodes, and (3) the pair's
     /// residual pass may take back force (the accumulated clamp: a hit's normal force is
     /// moved toward the stop at the forces now, never below zero), which halves the
-    /// edges' energy rise. CPU reference; the GPU's kernels next.
+    /// edges' energy rise.
     pub edge_contact: bool,
     /// Per node, its outward contact offset (m; empty: none): in vehicle contact this
     /// vehicle's triangles and skin edges are at the nodes pushed out along their vertex
@@ -1747,6 +1744,7 @@ impl ExplicitBeams {
             origin: Vec3::ZERO,
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
+            vehicle_contact_range: None,
             last_contacts: 0,
             last_self_pairs: 0,
             tyres: Vec::new(),

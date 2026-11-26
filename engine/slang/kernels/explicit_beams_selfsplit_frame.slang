@@ -171,7 +171,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     uint candCount = r2.y;
     uint groupOff = r2.z;
     uint groupCount = r2.w;
-    float range = asfloat(r3.z);
+    float range = selfRangeOf(v, asfloat(r3.z));
     float cell = asfloat(r3.w);
     uint4 misc = gMisc[v];
     float3 origin = asfloat(misc.xyz);
@@ -468,7 +468,7 @@ void explicit_beams_solo_rest(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         if (hitsOn == 2u)
             selfApplyLocalKeep(v, lane, r0.z, r2.z, r2.w, parity);
         else
-            selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
+            selfApply(v, true, lane, LANES, lane, origin, selfRangeOf(v, asfloat(r3.z)), r0.z, r2.z, r2.w, parity);
     }
     sync();
     soloStepSave(v, lane);

@@ -204,13 +204,8 @@ pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
-pub const PARAM_WORDS: usize = 108;
-/// Params word: edge vehicle contact's tables in gStatic (0: none; [`ExplicitUpload`]'s
-/// `edge_base`, explicit_beams_vv_edges.slang).
-pub const W_EDGE: usize = 106;
-/// Params word: contact offsets' tables in gStatic (0: none; `ExplicitBeams::contact_offset`,
-/// explicit_beams_members.slang contactOffsets).
-pub const W_OFFSET: usize = 107;
+pub const PARAM_WORDS: usize = 109;
+pub use edge::{W_EDGE, W_OFFSET, W_SELF_RANGE};
 /// gBeams float4 per skin edge of edge contact's step scratch (its ends, outward normal
 /// and flags, its faces' opposite corners).
 pub const EDGE_SCRATCH: usize = 5;
@@ -1500,7 +1495,7 @@ impl ExplicitUpload {
             vehicle_recs.push([
                 flags,
                 v.ground.to_bits(),
-                v.collision_range.to_bits(),
+                v.vv_band().to_bits(),
                 grid_cell(v).to_bits(),
             ]);
             for (i, n) in v.nodes.iter().enumerate() {
@@ -2561,7 +2556,7 @@ impl ExplicitUpload {
         // The beam phase's records sorted by kind ([`W_BEAM_ORDER`]), from the beam records
         // as uploaded (filters patched).
         let beam_order = beam_order_records(&spans, &node_info, &beam_recs, &slots, &ext_index, &ext_recs);
-        let table_recs = vehicle_recs.clone();
+        let table_recs = edge::own_ranges(vehicles, vehicle_recs.clone());
         let mut statics = vehicle_recs;
         statics.extend(node_info);
         statics.extend(beam_recs);
@@ -2619,7 +2614,7 @@ impl ExplicitUpload {
             0
         };
         let edge_base = if any_edge { edge::edge_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { 0 };
-        let offset_base = if any_offset { edge::offset_tables(vehicles, &mut statics, &mut lists, &mut beams) } else { 0 };
+        let (offset_base, self_range_base) = edge::offset_and_self_tables(vehicles, any_offset, &mut statics, &mut lists, &mut beams);
         let beam_order_base = if beam_order_default() && total_beams > 0 {
             let base = statics.len() as u32;
             statics.extend(beam_order);
@@ -2750,7 +2745,7 @@ impl ExplicitUpload {
         words[W_VV_FLEET_BOX] = vv_fleet_box;
         words[W_VV_ROOM] = vv_room(nv) as u32;
         words[W_EDGE] = edge_base;
-        words[W_OFFSET] = offset_base;
+        (words[W_OFFSET], words[W_SELF_RANGE]) = (offset_base, self_range_base);
         let total = [
             total_nodes as u32,
             total_beams as u32,
