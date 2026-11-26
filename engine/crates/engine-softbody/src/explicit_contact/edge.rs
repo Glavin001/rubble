@@ -155,6 +155,11 @@ fn closing(va: &ExplicitBeams, a: [u32; 2], s: f32, vb: &ExplicitBeams, b: [u32;
 /// adopted: docs/contact-design.md): a pair's band `r` widened by k
 /// times its closing speed over a step, at most `SPEED_BAND_MAX` (m, default 0.075): thin at rest,
 /// as thick as a fast pair needs to be stopped inside it.
+pub(crate) fn edge_fade() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("EDGE_FADE").is_ok_and(|v| v == "1"))
+}
+
 pub(crate) fn speed_band() -> (f32, f32) {
     static K: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
@@ -388,7 +393,10 @@ impl ExplicitBeamsWorld {
                 if g < 0.0 {
                     self.edge_stats[6] += 1;
                 }
-                out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p: (r - g).max(0.0).min(r), spec, behind: (-g).max(0.0) });
+                // (EDGE_FADE=1, a measurement: a pair crossed past the band pushes less the deeper it is, to
+                // nothing at EDGE_DEPTH, instead of full until it and then none.)
+                let p = if edge_fade() && g < -r { r * (1.0 - (-g - r) / (edge_depth() - r).max(1e-6)).max(0.0) } else { (r - g).max(0.0).min(r) };
+                out.push(EdgeHit { a: [e.i, e.j], b: [f.i, f.j], s, t, n, p, spec, behind: (-g).max(0.0) });
             }
         }
         out

@@ -365,14 +365,14 @@ fn self_pairs(t: &[(u32, Tri)]) -> Vec<((u32, u32), f32)> {
 /// the largest from 0.3 s after the hit (the 25 cm between the cars closed) on, and the seconds
 /// past 1 cm before that.
 #[allow(clippy::too_many_arguments)]
-pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 12]>, String> {
+pub fn crash(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool) -> Result<Vec<[f32; 13]>, String> {
     crash_measuring(scene, kmh, secs, runs, edge, press, contact, true, true)
 }
 
 /// [`crash`] with only some measures: a car's own paint crossing itself (`own`, the slowest by
 /// far) and the length of one car's paint cutting the other's (`line`); those off read 0.
 #[allow(clippy::too_many_arguments)]
-pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool) -> Result<Vec<[f32; 12]>, String> {
+pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool) -> Result<Vec<[f32; 13]>, String> {
     let built = rig::rig_vehicle("sedan", None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> =
@@ -436,7 +436,7 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
         println!("paint carried by its collision panel: {} of {n} vertices", on.at.iter().filter(|x| x.is_some()).count());
     }
-    let run = |k: usize| -> [f32; 12] {
+    let run = |k: usize| -> [f32; 13] {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
         let aa = spawn(&d, Vec3::new(0.0, 0.0, -0.125 - za), Vec3::Z * speed);
@@ -548,10 +548,29 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let start = now(&w);
         let steps = (secs * 2000.0) as usize;
         let (mut worst, mut last) = (0.0f32, 0.0f32);
+        // Jitter: each car's nodes' rms speed about its centre of mass (m/s), the largest over the last 0.25 s.
+        let shake = |w: &ExplicitBeamsWorld| w.vehicles.iter().map(|x| {
+            let m: f32 = x.nodes.iter().map(|n| n.mass).sum();
+            let vc = x.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
+            (x.nodes.iter().map(|n| n.mass * (n.vel - vc).length_squared()).sum::<f32>() / m).sqrt()
+        }).fold(0.0f32, f32::max);
+        let mut jitter = 0.0f32;
         let (mut deep, mut deep_last, mut lasting, mut brief) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         let settled = 0.3 + 0.25 / (speed * if scene == "side" { 1.0 } else { 2.0 });
         for s in 1..=steps {
             w.step();
+            if s >= steps.saturating_sub(500) && s % 20 == 0 {
+                jitter = jitter.max(shake(&w));
+            }
+            if k == 0 && s == steps && std::env::var("JITTER_NODES").is_ok() {
+                for (c, x) in w.vehicles.iter().enumerate() {
+                    let m: f32 = x.nodes.iter().map(|n| n.mass).sum();
+                    let vc = x.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
+                    let mut l: Vec<(f32, usize)> = x.nodes.iter().enumerate().map(|(i, n)| ((n.vel - vc).length(), i)).collect();
+                    l.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    println!("car {c} fastest nodes about its centre: {:?}", l.iter().take(12).map(|&(v, i)| format!("{} {:.1}", d.nodes[i].name, v)).collect::<Vec<_>>());
+                }
+            }
             if s % 40 == 0 || s == steps {
                 last = now(&w);
                 worst = worst.max(last);
@@ -810,9 +829,9 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
                 if dd > b + 0.01 { solid = solid.max(dd); solid_n += 1; }
             }
         }
-        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32]
+        [start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32, jitter]
     };
-    let res: Vec<[f32; 12]> = std::thread::scope(|t| {
+    let res: Vec<[f32; 13]> = std::thread::scope(|t| {
         let run = &run;
         let js: Vec<_> = (0..runs).map(|k| t.spawn(move || run(k))).collect();
         js.into_iter().map(|j| j.join().expect("run")).collect()

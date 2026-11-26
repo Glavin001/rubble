@@ -677,3 +677,17 @@ band (lab control `car-to-car band`) the same to 0.01 ms.
   side windows: glass is visual only), but side 90's failure is the parked car's door top front, at
   the window frame: paint no contact surface covers. The vehicle lint's `skin_coverage` passes on its
   p99 and misses this 1 %. The fix belongs in the authoring (frames and lips covered), not the band.
+
+### Edge contact's jitter after hard hits (2026-11-25, night)
+
+The owner saw cars vibrating violently after hard hits. Measure: each car's nodes' rms speed about
+its centre over the last 0.25 s (`JITTER`, `vehicle_paint_overlap`), 4 runs, worst (m/s), pressing on:
+- side 100: edge on 2.06, off 0.31; head 60: edge on 1.18, off 0.13. Edge contact makes it.
+- Side 100: `EDGE_DEPTH_M` 0.005 0.11, 0.01 0.11, 0.015 2.09 (one run), 0.1 (default) 2.06; the smooth
+  fade (`EDGE_FADE=1`: a pair crossed past the band pushes less the deeper it is, to nothing at
+  EDGE_DEPTH) 0.17. Cutting the depth to 5-10 mm loses the settled state (head 60 pressed 47 mm,
+  head 100 one run 107 mm left from 0.3 s on); the fade keeps it (all scenes as before but head 100,
+  one run 26 mm).
+- Head 60 pressed with the fade: still 1.95; with it and the residual off 1.68, depth 50 mm 0.98, 30 mm
+  1.19, node-edge off 1.84. Its fastest nodes: the braked car's crushed front bumper and radiator
+  (4.6-7.6 m/s about the car's centre): light crushed parts trapped between the cars.
