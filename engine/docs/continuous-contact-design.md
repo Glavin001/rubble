@@ -344,3 +344,59 @@ Then the CPU tests (`continuous_contact.rs`) are rerun to show the change kept t
 9. The scenario-matrix A/B on CUDA, then Chrome's WGSL check.
 10. The cost table.
 11. The lab control.
+
+## GPU cost, measured (2026-11-26)
+
+Two generated sedans head on at 60 km/h each, M3 Max (Metal, native), fast arithmetic. One
+frame is 34 steps. Times are ms a frame, including the readback
+(`continuous_cost`, ignored test).
+
+| | ms a frame |
+|---|---|
+| Split path, continuous off | ~29 |
+| Continuous on, first GPU port | ~700 |
+| Continuous on, now | ~92 |
+
+Where the ~63 ms of continuous contact goes. Each block was run twice in one step: prep
+resets the step's state, so the second run gives the same results, and the time it adds is
+that block's cost.
+
+| block | ms a frame | per step |
+|---|---|---|
+| prep | ~1.5 | ~45 µs, about one dispatch's cost |
+| grid (count, prefix, fill) | ~7 | ~200 µs, mostly three dispatches |
+| listing | ~13.5 | ~400 µs |
+| response (one workgroup a group) | ~38 | ~1.1 ms |
+| the member step cut in two | ~3 | |
+
+**What did not help** (each measured, each lossless, none kept):
+
+- 128 listing workgroups a vehicle instead of 32.
+- 8 cell classes a query instead of 64.
+- 16,384 grid buckets instead of 4,096.
+- A compacted list of the pairs to test again, alone or with a flattened ACCD loop pulling
+  pairs from a shared cursor.
+- Zones walked as runs of a list sorted by zone.
+- The round flag in workgroup memory.
+
+**What the response's time is.** About 130 barrier-separated phases a step. Each is a short
+chain of dependent device loads, run by one workgroup:
+
+- An extra empty phase costs ~4 µs.
+- An extra full ACCD pass over the CCD list costs ~60 µs.
+- Capping ACCD at 4 iterations (lossy, measured only) saves ~13 ms a frame.
+- Barriers alone cost nothing measurable.
+
+A group of two cars uses one of the GPU's cores. Many groups run side by side at the same
+cost, so a derby's throughput scales; one crash's latency does not.
+
+**What is left:**
+
+- **Lossless.**
+  - A Verlet candidate list: pairs within the reach plus a skin, the exact tests rerun each
+    step, rebuilt when the nodes' motion relative to their vehicle's first node passes half
+    the skin. This takes most of the grid and listing, about 15 of their 20 ms.
+  - One-dispatch grid builds.
+- **Lossy (owner's decision).**
+  - Fewer rounds, or a coloured Gauss-Seidel response that converges in fewer rounds. This
+    is the response's cost.

@@ -294,20 +294,22 @@ void ccGridPrefix(uint v, uint lane)
     uint per = CC_GRID_BUCKETS / LANES;
     int sum = 0;
     for (uint j = 0u; j < per; j++) sum += gAcc[ba + lane * per + j].load();
-    gAcc[ba + CC_GRID_BUCKETS + lane * per].store(sum);
+    // (The lanes' sums scanned in workgroup memory: lane 0's walk over them costs no device
+    // round trips.)
+    gsPart[lane] = uint(sum);
     sync();
     if (lane == 0u)
     {
-        int run = 0;
+        uint run = 0u;
         for (uint l = 0u; l < LANES; l++)
         {
-            int c = gAcc[ba + CC_GRID_BUCKETS + l * per].load();
-            gAcc[ba + CC_GRID_BUCKETS + l * per].store(run);
+            uint c = gsPart[l];
+            gsPart[l] = run;
             run += c;
         }
     }
     sync();
-    int run = gAcc[ba + CC_GRID_BUCKETS + lane * per].load();
+    int run = int(gsPart[lane]);
     for (uint j = 0u; j < per; j++)
     {
         uint b = lane * per + j;
