@@ -884,7 +884,7 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
                 out.extend((0..SURF_FAST_PASSES.len()).map(|i| GroupOp::Surf { copy: s, pass: i as u8, groups: planner.vehicles() }));
             }
         } else {
-            out.push(GroupOp::Member(s));
+            super::continuous::member_ops(planner, sw, kind, steps, s, &mut out);
         }
         if sw.group_split_tests && fleet & PERF_FLEET_FRONT != 0 {
             // The front and the tests as fleet-wide dispatches (explicit_beams_fleet.slang),
@@ -1039,8 +1039,7 @@ fn frame_with(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         // Copy steps + 1: the groups' frame start (the kernel's SPLIT_BEGIN); with the
         // tests split, copy steps + 2 + s step s's second phase (SPLIT_LEVELS) and copy
         // 2 steps + 2 + s its first group dispatch and walk (SPLIT_TESTS). The
-        // vehicles' steps read copy s (the step alone).
-        // (The members' rest dispatches read the SPLIT_LEVELS copies too.)
+        // vehicles' steps read copy s (the step alone; the members' rest, SPLIT_LEVELS's).
         let rest = member_rest_on(planner, vv);
         let extra = if sw.group_split_tests { 2 * steps + 1 } else if rest { steps + 1 } else { 1 };
         // (The levels across the GPU: after those, four copies a level slot, then the
@@ -1089,6 +1088,7 @@ fn frame_with(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
             put(base + 4 * slots + 1, SPLIT_LV | LV_PLAN << 8 | slots);
             put(base + 4 * slots + 2, SPLIT_LV | LV_END << 8 | slots);
         }
+        super::continuous::copies(planner, sw, &kind, steps, &mut bytes);
         bytes
     } else {
         let used = cmds

@@ -30,6 +30,7 @@ pub mod coupling;
 pub mod drive;
 pub mod portable;
 pub mod schedule;
+pub mod continuous;
 mod loop_cap;
 pub use loop_cap::{explicit_loop_cap_hit, EXPLICIT_LOOP_CAP, EXPLICIT_LOOP_CAP_TAG};
 mod surface_fast;
@@ -2952,6 +2953,8 @@ pub struct FramePlanner {
     loop_unit: u64,
     vv_wide: bool,
     vv_seen: Option<u32>,
+    /// Continuous contact (the split path's members in two halves: [`continuous`]).
+    pub continuous: bool,
 }
 
 impl FramePlanner {
@@ -2979,6 +2982,7 @@ impl FramePlanner {
             loop_unit: layout.loop_unit,
             vv_wide: false,
             vv_seen: None,
+            continuous: false,
         }
     }
 

@@ -842,3 +842,5 @@ fn anti_clip_scene_with(extra: usize, dissipative: bool, own_travel: bool) {
 
 #[path = "explicit_contact_gpu/edge.rs"]
 mod edge;
+#[path = "explicit_contact_gpu/continuous.rs"]
+mod continuous;

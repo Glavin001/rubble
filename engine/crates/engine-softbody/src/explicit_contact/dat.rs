@@ -479,12 +479,9 @@ impl ExplicitBeamsWorld {
             .iter()
             .map(|v| (0..v.nodes.len()).map(|i| if v.nodes[i].has(NODE_IMMOVABLE) || v.is_retired(i) { 0.0 } else { 1.0 / v.nodes[i].mass }).collect())
             .collect();
-        let mut recs: Vec<Rec> = Vec::new();
-        // Pairs are listed within r_q of their paint (the gap less the two sides' offsets).
-        let mo: Vec<f32> = off.iter().map(|o| o.iter().map(|v| v.length()).fold(0.0f32, f32::max)).collect();
         let mut t: Vec<Vec<f32>> = x0.iter().map(|x| vec![1.0; x.len()]).collect();
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
-        let (r_q, cap) = (dat.r_q, 0.5 * dat.gamma * dat.r_q);
+        let cap = 0.5 * dat.gamma * dat.r_q;
         let surf: Vec<Surface> = self.vehicles.iter().map(surface).collect();
         for (v, s) in surf.iter().enumerate() {
             for &i in s.nodes.iter().filter(|&&i| (x1[v][i as usize] - x0[v][i as usize]).length() > cap) {
@@ -494,100 +491,7 @@ impl ExplicitBeamsWorld {
                 }
             }
         }
-        let boxes: Vec<(Vec3, Vec3)> =
-            surf.iter().enumerate().map(|(v, s)| bounds(s.nodes.iter().map(|&i| x0[v][i as usize]))).collect();
-        let mut found = Vec::new();
-        let nv = self.vehicles.len();
-        let none: Vec<Vec<Vec3>> = vec![Vec::new(); nv];
-        if dat.self_contact {
-            dat.rest_excl.resize(nv, None);
-            for v in 0..nv {
-                if dat.rest_excl[v].is_none() {
-                    dat.first.resize(nv, Vec::new());
-                    dat.first[v] = x0[v].clone();
-                    let near = close_pairs(&x0[v], &surf[v], dat.self_gap);
-                    dat.rest_excl[v] = Some(near.into_iter().map(|p| p.0).collect());
-                }
-            }
-        }
-        let excl = |v: usize, k: [u32; 4]| dat.rest_excl.get(v).and_then(|e| e.as_ref()).is_some_and(|e| e.contains(&k));
-        for a in 0..nv {
-            for b in 0..nv {
-                let ((alo, ahi), (blo, bhi)) = (boxes[a], boxes[b]);
-                // A car against itself: its own pairs sharing no node, at thickness 0 (its
-                // collision surface never passes through itself).
-                let own = a == b;
-                let (mo_a, mo_b) = if own { (0.0, 0.0) } else { (mo[a], mo[b]) };
-                let off = if own { &none } else { &off };
-                let r = Vec3::splat(r_q + mo_a + mo_b);
-                if (own && !dat.self_contact) || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
-                    continue;
-                }
-                // a's nodes against b's triangles (both orders run: every node of both).
-                let (sa, sb) = (&surf[a], &surf[b]);
-                let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
-                for (k, tri) in sb.tris.iter().enumerate() {
-                    let (lo, hi) = bounds(tri.map(|i| x0[b][i as usize]));
-                    grid.insert(k as u32, lo - r, hi + r);
-                }
-                for &i in &sa.nodes {
-                    let p = x0[a][i as usize];
-                    grid.query(p, p, &mut found);
-                    for &k in &found {
-                        let tri = sb.tris[k as usize];
-                        if own && (tri.contains(&i) || excl(a, [i, tri[0], tri[1], tri[2]])) {
-                            continue;
-                        }
-                        let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
-                        let (c, cw) = fq::closest_on_triangle(p, q0, q1, q2);
-                        if (p - c).length_squared() < (r_q + mo_a + mo_b).powi(2) {
-                            let neg = tri.map(|j| (b, j));
-                            let mut rec = Rec::new(&neg, &cw, &[(a, i)], &[1.0], c, p, &off);
-                            if own {
-                                rec.d = dat.self_gap;
-                            }
-                            if rec.g < rec.d + r_q {
-                                st.pairs_vt += 1;
-                                recs.push(rec);
-                            }
-                        }
-                    }
-                }
-                // Edge pairs once (a < b).
-                if a > b {
-                    continue;
-                }
-                let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
-                for (k, e) in sb.edges.iter().enumerate() {
-                    let (lo, hi) = bounds(e.map(|i| x0[b][i as usize]));
-                    grid.insert(k as u32, lo - r, hi + r);
-                }
-                for (ke, e) in sa.edges.iter().enumerate() {
-                    let [p1, q1] = e.map(|i| x0[a][i as usize]);
-                    let (lo, hi) = bounds([p1, q1]);
-                    grid.query(lo, hi, &mut found);
-                    for &k in &found {
-                        let f = sb.edges[k as usize];
-                        if own && (k as usize <= ke || f.iter().any(|x| e.contains(x)) || excl(a, [e[0], e[1], f[0], f[1]])) {
-                            continue;
-                        }
-                        let [p2, q2] = f.map(|j| x0[b][j as usize]);
-                        let (s1, s2) = fq::closest_seg_seg(p1, q1, p2, q2);
-                        let (c1, c2) = (p1 + (q1 - p1) * s1, p2 + (q2 - p2) * s2);
-                        if (c2 - c1).length_squared() < (r_q + mo_a + mo_b).powi(2) {
-                            let mut rec = Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off);
-                            if own {
-                                rec.d = dat.self_gap;
-                            }
-                            if rec.g < rec.d + r_q {
-                                st.pairs_ee += 1;
-                                recs.push(rec);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let mut recs = list_pairs(dat, &x0, &surf, &off, &mut st);
         // How far each node can close on anything this step (its step, or its speed times h,
         // whichever is longer: the speculative pass works on speeds). A pair whose two sides
         // together cannot cover its gap cannot meet and is left out of either pass.
@@ -842,6 +746,112 @@ fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
         }
     }
     out
+}
+
+/// Every listed pair at the step's start `x0` (point-triangle, edge-edge; between vehicles
+/// within r_q of their paint, within one vehicle sharing no node and not excluded at spawn),
+/// in a fixed order: vehicle a, vehicle b, then a's nodes or edges ascending, b's primitives
+/// ascending.
+fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3>], st: &mut DatStats) -> Vec<Rec> {
+    let r_q = dat.r_q;
+    let mut recs: Vec<Rec> = Vec::new();
+    // Pairs are listed within r_q of their paint (the gap less the two sides' offsets).
+    let mo: Vec<f32> = off.iter().map(|o| o.iter().map(|v| v.length()).fold(0.0f32, f32::max)).collect();
+    let boxes: Vec<(Vec3, Vec3)> =
+        surf.iter().enumerate().map(|(v, s)| bounds(s.nodes.iter().map(|&i| x0[v][i as usize]))).collect();
+    let mut found = Vec::new();
+    let nv = x0.len();
+    let none: Vec<Vec<Vec3>> = vec![Vec::new(); nv];
+    if dat.self_contact {
+        dat.rest_excl.resize(nv, None);
+        for v in 0..nv {
+            if dat.rest_excl[v].is_none() {
+                dat.first.resize(nv, Vec::new());
+                dat.first[v] = x0[v].clone();
+                let near = close_pairs(&x0[v], &surf[v], dat.self_gap);
+                dat.rest_excl[v] = Some(near.into_iter().map(|p| p.0).collect());
+            }
+        }
+    }
+    let excl = |v: usize, k: [u32; 4]| dat.rest_excl.get(v).and_then(|e| e.as_ref()).is_some_and(|e| e.contains(&k));
+    for a in 0..nv {
+        for b in 0..nv {
+            let ((alo, ahi), (blo, bhi)) = (boxes[a], boxes[b]);
+            // A car against itself: its own pairs sharing no node, at thickness 0 (its
+            // collision surface never passes through itself).
+            let own = a == b;
+            let (mo_a, mo_b) = if own { (0.0, 0.0) } else { (mo[a], mo[b]) };
+            let off: &[Vec<Vec3>] = if own { &none } else { off };
+            let r = Vec3::splat(r_q + mo_a + mo_b);
+            if (own && !dat.self_contact) || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
+                continue;
+            }
+            // a's nodes against b's triangles (both orders run: every node of both).
+            let (sa, sb) = (&surf[a], &surf[b]);
+            let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
+            for (k, tri) in sb.tris.iter().enumerate() {
+                let (lo, hi) = bounds(tri.map(|i| x0[b][i as usize]));
+                grid.insert(k as u32, lo - r, hi + r);
+            }
+            for &i in &sa.nodes {
+                let p = x0[a][i as usize];
+                grid.query(p, p, &mut found);
+                for &k in &found {
+                    let tri = sb.tris[k as usize];
+                    if own && (tri.contains(&i) || excl(a, [i, tri[0], tri[1], tri[2]])) {
+                        continue;
+                    }
+                    let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
+                    let (c, cw) = fq::closest_on_triangle(p, q0, q1, q2);
+                    if (p - c).length_squared() < (r_q + mo_a + mo_b).powi(2) {
+                        let neg = tri.map(|j| (b, j));
+                        let mut rec = Rec::new(&neg, &cw, &[(a, i)], &[1.0], c, p, off);
+                        if own {
+                            rec.d = dat.self_gap;
+                        }
+                        if rec.g < rec.d + r_q {
+                            st.pairs_vt += 1;
+                            recs.push(rec);
+                        }
+                    }
+                }
+            }
+            // Edge pairs once (a < b).
+            if a > b {
+                continue;
+            }
+            let mut grid = Grid::new((r_q + mo_a + mo_b).max(0.02));
+            for (k, e) in sb.edges.iter().enumerate() {
+                let (lo, hi) = bounds(e.map(|i| x0[b][i as usize]));
+                grid.insert(k as u32, lo - r, hi + r);
+            }
+            for (ke, e) in sa.edges.iter().enumerate() {
+                let [p1, q1] = e.map(|i| x0[a][i as usize]);
+                let (lo, hi) = bounds([p1, q1]);
+                grid.query(lo, hi, &mut found);
+                for &k in &found {
+                    let f = sb.edges[k as usize];
+                    if own && (k as usize <= ke || f.iter().any(|x| e.contains(x)) || excl(a, [e[0], e[1], f[0], f[1]])) {
+                        continue;
+                    }
+                    let [p2, q2] = f.map(|j| x0[b][j as usize]);
+                    let (s1, s2) = fq::closest_seg_seg(p1, q1, p2, q2);
+                    let (c1, c2) = (p1 + (q1 - p1) * s1, p2 + (q2 - p2) * s2);
+                    if (c2 - c1).length_squared() < (r_q + mo_a + mo_b).powi(2) {
+                        let mut rec = Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, off);
+                        if own {
+                            rec.d = dat.self_gap;
+                        }
+                        if rec.g < rec.d + r_q {
+                            st.pairs_ee += 1;
+                            recs.push(rec);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    recs
 }
 
 fn world_positions(vs: &[ExplicitBeams]) -> Vec<Vec<Vec3>> {

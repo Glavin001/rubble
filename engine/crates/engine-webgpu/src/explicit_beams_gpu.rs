@@ -50,6 +50,7 @@ pub use state_diff::state_differences;
 use surface_gpu::{split_entries, surface_split_for, Split};
 #[path = "explicit_vv_wide_gpu.rs"]
 mod vv_wide_gpu;
+#[path = "explicit_continuous_gpu.rs"] mod continuous_gpu;
 
 pub struct ExplicitBeamsGpu {
     device: wgpu::Device,

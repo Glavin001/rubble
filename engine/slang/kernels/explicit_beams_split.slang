@@ -168,7 +168,7 @@ void splitWheelsAhead(uint v, uint lane, uint s)
 
 // Vehicle v's step s (parameter copy s) when it is a member of a contact group this
 // frame; any other vehicle returns at once.
-uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
+uint splitMemberHead(uint v, uint lane, uint s, uint phase, out MemberTail t)
 {
     t.v = v;
     t.s = s;
@@ -201,18 +201,22 @@ uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
     uint surfOn = surfaceOn();
     sync();
     uint stepBase = gMisc[vvMember(off, 0u)].w;
-    splitCoupleStep(v, rank, k, lane, s, coupleOn);
-    // (PERF_SPLIT_WHEELS_AHEAD: this step's rays and bars ran in the last step's rest
-    // dispatch; uniform.)
-    splitDrive(v, lane, s, driveOn, s > 0u && splitWheelsAheadOn());
+    // (The coupling and the drive before the node update: not in the rest's half.)
+    if (phase != 2u)
+    {
+        splitCoupleStep(v, rank, k, lane, s, coupleOn);
+        // (PERF_SPLIT_WHEELS_AHEAD: this step's rays and bars ran in the last step's rest
+        // dispatch; uniform.)
+        splitDrive(v, lane, s, driveOn, s > 0u && splitWheelsAheadOn());
+    }
     // Every member on the whole of its workgroup with the one member step
     // (contactMemberStep), whatever the group's size: the same results as a small
     // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which
     // this module no longer holds), bit for bit (group_split_gpu, self_split_gpu).
     // (contactMemberStep up to its tail: the entry runs memberTail, then splitMemberEnd.)
-    uint how = contactMemberStepHead(v, lane, s, rank == 0u, t);
+    uint how = contactMemberStepHeadPhase(v, lane, s, rank == 0u, phase, t);
     t.stepBase = stepBase;
-    return how | MT_STEPPED;
+    return phase == 1u ? 0u : how | MT_STEPPED;
 }
 // Member t.v's step's end after its tail (splitMemberHead's caller): the surface pass and
 // vehicle sleep's motion.
@@ -292,7 +296,11 @@ void splitGroupBegin(uint g, uint lane)
 // of them (the listed pairs).
 static const uint SPLIT_TESTS = 0x20000000u;
 static const uint SPLIT_LEVELS = 0x40000000u;
-static const uint SPLIT_STEP = 0x0FFFFFFFu;
+static const uint SPLIT_STEP = 0x03FFFFFFu;
+// Continuous contact's seam (the members' step in two dispatches, the continuous passes
+// between): the node update's half and the rest's.
+static const uint SPLIT_CC_NODES = 0x08000000u;
+static const uint SPLIT_CC_REST = 0x04000000u;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
 static const uint SPLIT_TEST_WGS = 64u;
 
@@ -743,7 +751,8 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
         how = memberRestStepHead(vid.x, lid.x, gP.pad2 & SPLIT_STEP, t);
     else
 #endif
-        how = splitMemberHead(vid.x, lid.x, gP.pad2, t);
+        how = splitMemberHead(vid.x, lid.x, gP.pad2 & SPLIT_STEP,
+                              (gP.pad2 & SPLIT_CC_NODES) != 0u ? 1u : ((gP.pad2 & SPLIT_CC_REST) != 0u ? 2u : 0u), t);
     if ((how & MT_TAIL) != 0u) memberTail(t, how, lid.x);
 #ifdef EB_SELF_SPLIT
     if (rest) memberRestEnd(vid.x, lid.x);

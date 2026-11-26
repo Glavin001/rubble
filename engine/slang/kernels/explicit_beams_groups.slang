@@ -102,7 +102,15 @@ void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, u
 
 // Member v's step s up to its tail (memberTail, which t and the MT_* bits returned
 // describe; 0: no tail here).
+// `phase` (continuous contact's seam, docs/continuous-contact-design.md): 0 the whole step;
+// 1 up to the node update and its box (returns 0: no tail, not stepped); 2 the rest after
+// them (the node update not run again).
 uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail t)
+{
+    return contactMemberStepHeadPhase(v, lane, s, first, 0u, t);
+}
+
+uint contactMemberStepHeadPhase(uint v, uint lane, uint s, bool first, uint phase, out MemberTail t)
 {
     t.v = v;
     t.s = s;
@@ -155,6 +163,7 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
 #endif
     }
     sync();
+    if (phase != 2u)
     {
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(139, i, nodeCount, LANES); i < iStop; i += LANES)
@@ -170,11 +179,12 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
         if (lane < 6u) gAcc[vvBoxKey(v, parity ^ 1u) + lane].store(lane < 3u ? VV_INT_MAX : VV_INT_MIN);
         memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
-    if (gP.centredDv != 0u)
+    if (gP.centredDv != 0u && phase != 2u)
     {
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if ((flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
+    if (phase == 1u) return 0u;
 #ifdef EB_SOLO_STEP
     if (keep) pairReuseTrack(nodeOff, nodeCount, lane);
 #endif
