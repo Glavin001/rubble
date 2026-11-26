@@ -372,7 +372,8 @@ void ccMeasure(uint v, uint lane)
     }
 }
 // (Marked once a pass in the node's count word, ccMarkSurface; cleared after the listing.)
-bool ccOnSurface(uint v, uint gi) { return gAcc[ccA(gi, 8u)].load() != 0; }
+// (Word 8: the node's vehicle << 1, bit 0 its surface mark.)
+bool ccOnSurface(uint v, uint gi) { return (gAcc[ccA(gi, 8u)].load() & 1) != 0; }
 void ccMarkSurface(uint v, uint lane)
 {
     uint4 r1 = gStatic[v * 4u + 1u];
@@ -380,9 +381,9 @@ void ccMarkSurface(uint v, uint lane)
     {
         if (!ccTriLive(r1.x + t)) continue;
         uint4 tn = gStatic[gP.triBase + r1.x + t];
-        gAcc[ccA(tn.x, 8u)].store(1);
-        gAcc[ccA(tn.y, 8u)].store(1);
-        gAcc[ccA(tn.z, 8u)].store(1);
+        gAcc[ccA(tn.x, 8u)].store(int(v << 1) | 1);
+        gAcc[ccA(tn.y, 8u)].store(int(v << 1) | 1);
+        gAcc[ccA(tn.z, 8u)].store(int(v << 1) | 1);
     }
 }
 
@@ -577,7 +578,7 @@ void ccPrep(uint off, uint k, uint lane)
             gBeams[ccB(gi, 2u)] = float4(x, 0.0);
             gBeams[ccB(gi, 3u)] = float4(vel, 0.0);
             gBeams[ccB(gi, 4u)] = float4(vel, 0.0);
-            for (uint w = 0u; w < CC_ACC_NODE; w++) gAcc[ccA(gi, w)].store(w == 7u ? -1 : 0);
+            for (uint w = 0u; w < CC_ACC_NODE; w++) gAcc[ccA(gi, w)].store(w == 7u ? -1 : (w == 8u ? int(v << 1) : 0));
         }
         if (lane < CC_VEH_WORDS) gAcc[ccVW(v, lane)].store(lane >= 3u && lane < 6u ? VV_INT_MAX : (lane >= 6u && lane < 9u ? VV_INT_MIN : 0));
     }
@@ -669,13 +670,27 @@ float ccCollide(CcPair q, float xi)
 float ccXi(CcRec r) { return max(smul(0.5, r.d), CC_MIN_GAP); }
 
 // Applies every group node's sums (velocity; position too with `pos`) and clears them.
+// The nodes a round's pairs touched (their count went from 0 to 1), a list a vehicle after
+// its two pair lists (its word 11 the count): only those have sums to apply.
+uint ccTouchedAt(uint v) { return ccListAt(v, 2u); }
+void ccCountNode(uint gi)
+{
+    if (gAcc[ccA(gi, 6u)].add(1) == 0)
+    {
+        uint v = asuint(gAcc[ccA(gi, 8u)].load()) >> 1;
+        gNext[ccTouchedAt(v) + asuint(gAcc[ccVW(v, 11u)].add(1))] = gi;
+    }
+}
 void ccApplyAll(uint off, uint k, bool pos, uint lane)
 {
     for (uint m = 0u; m < k; m++)
     {
-        uint4 r0 = gStatic[vvMember(off, m) * 4u];
-        for (uint i = lane, iStop = EB_END(899, i, r0.y, LANES); i < iStop; i += LANES) ccApply(r0.x + i, pos);
+        uint v = vvMember(off, m);
+        uint n = asuint(gAcc[ccVW(v, 11u)].load());
+        for (uint i = lane, iStop = EB_END(899, i, n, LANES); i < iStop; i += LANES) ccApply(gNext[ccTouchedAt(v) + i], pos);
     }
+    sync();
+    if (lane < k) gAcc[ccVW(vvMember(off, lane), 11u)].store(0);
     sync();
 }
 
@@ -818,7 +833,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
                     ccFlagSet(v, p, CC_F_ACT);
                     gAcc[ccC(CC_C_FLAG)].store(1);
                     for (uint j = 0u; j < 4u; j++)
-                        if (r.w[j] > 0.0 && ccIm(q.k[j]) > 0.0) gAcc[ccA(q.k[j], 6u)].add(1);
+                        if (r.w[j] > 0.0 && ccIm(q.k[j]) > 0.0) ccCountNode(q.k[j]);
                 }
                 else ccFlagClear(v, p, CC_F_ACT);
             }
@@ -921,7 +936,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
                 if (all(n == float3(0.0, 0.0, 0.0)) || !(vr < 0.0)) continue;
                 ccFlagSet(v, p, CC_F_ACT);
                 for (uint j = 0u; j < 4u; j++)
-                    if (w[j] != 0.0 && ccIm(q.k[j]) > 0.0) gAcc[ccA(q.k[j], 6u)].add(1);
+                    if (w[j] != 0.0 && ccIm(q.k[j]) > 0.0) ccCountNode(q.k[j]);
             }
         }
         sync();

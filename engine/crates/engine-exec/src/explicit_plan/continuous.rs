@@ -147,7 +147,8 @@ pub(super) fn cc_tables(
     for ((v, p), &(n0, _)) in vehicles.iter().zip(&per).zip(&firsts) {
         let cap = CC_PAIRS_PER_ITEM * (v.nodes.len() + p.len());
         let list_at = next_init.len() as u32;
-        next_init.extend(std::iter::repeat_n(0, (CC_PAIR_WORDS + 2) * cap));
+        // (Then its two pair lists and its touched nodes.)
+        next_init.extend(std::iter::repeat_n(0, (CC_PAIR_WORDS + 2) * cap + v.nodes.len()));
         let grid_cap = 64 * (v.triangles.len() + p.len());
         let grid_at = next_init.len() as u32;
         next_init.extend(std::iter::repeat_n(0, 2 * grid_cap + 2 * CC_GRID_BUCKETS));
