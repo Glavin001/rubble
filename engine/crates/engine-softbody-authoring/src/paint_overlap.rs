@@ -408,7 +408,7 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
 /// through the other's collision triangles at any 20 ms check (checked in continuous mode or
 /// with `DAT_CHECK`; 0 otherwise).
 #[allow(clippy::too_many_arguments)]
-pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool, continuous: Option<bool>) -> Result<Vec<([f32; 13], usize)>, String> {
+pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, press: bool, contact: bool, own_on: bool, line_on: bool, continuous: Option<bool>) -> Result<Vec<([f32; 13], usize, Option<engine_softbody::explicit_contact::DatStats>)>, String> {
     let built = rig::rig_vehicle("sedan", None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> =
@@ -477,7 +477,7 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
         let n = v.material.iter().filter(|&&m| m == mat::PAINT).count();
         println!("paint carried by its collision panel: {} of {n} vertices", on.at.iter().filter(|x| x.is_some()).count());
     }
-    let run = |k: usize| -> ([f32; 13], usize) {
+    let run = |k: usize| -> ([f32; 13], usize, Option<engine_softbody::explicit_contact::DatStats>) {
         let (za, speed) = (ext(&d, 2).1, kmh / 3.6);
         // (25 cm apart: the paint reaches past the nodes.)
         // ("ball": car A at rest, a 0.15 m steel ball into its left door at `kmh`.)
@@ -952,9 +952,9 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
                 if dd > b + 0.01 { solid = solid.max(dd); solid_n += 1; }
             }
         }
-        ([start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32, jitter], crossed_max)
+        ([start, worst, last, if pole { 0.0 } else { centre(&w.vehicles[0]).distance(centre(&w.vehicles[1])) }, own_worst, own_last, deep, deep_last, lasting, brief, solid, solid_n as f32, jitter], crossed_max, w.continuous.as_ref().map(|d| d.total))
     };
-    let res: Vec<([f32; 13], usize)> = std::thread::scope(|t| {
+    let res: Vec<([f32; 13], usize, Option<engine_softbody::explicit_contact::DatStats>)> = std::thread::scope(|t| {
         let run = &run;
         let js: Vec<_> = (0..runs).map(|k| t.spawn(move || run(k))).collect();
         js.into_iter().map(|j| j.join().expect("run")).collect()

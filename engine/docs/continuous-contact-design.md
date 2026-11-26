@@ -270,3 +270,77 @@ rebuilds hash grids every step and runs ACCD on every listed pair.
 - The Slang GPU port, bit exact.
 - The cost on CUDA and in Chrome.
 - The lab control.
+
+## The GPU port (design, 2026-11-26)
+
+**Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
+frame's steps inside one workgroup. Continuous contact needs every node's step finished before
+any pair is solved: a cross-vehicle sync point each step. Only the split group path has a
+dispatch boundary per step (`schedule::group_split_ops`, `explicit_plan/schedule.rs:846`). So
+continuous mode runs on that path, and each step's `Member(s)` splits in two at the CPU's
+`dat_start` and `dat_truncate` point:
+
+- **nodes:** the drive and the node update with the centred correction, i.e.
+  `contactMemberStepHead`'s node loop;
+- **rest:** everything after it.
+
+A new step-word bit selects the half, as `SPLIT_LEVELS` does.
+
+**The passes between the halves**, each a dispatch in a new module `"continuous"` in
+`split_modules()`. The positions at the step's start are kept in a snapshot buffer.
+
+1. **`cc_list`.** One thread per surface node, and one per edge. They search a grid built
+   from the step's start positions (the edge pass's hash-grid pattern) and write
+   point-triangle and edge-edge pairs within r_q of the paint into fixed-capacity per-item
+   lists. The lists are kept in ascending candidate order. Overflow sets a flag that fails
+   the frame with an error; nothing is ever dropped. This covers pairs between vehicles and
+   within one, excludes pairs sharing a node, and applies the spawn exclusion as a per-vehicle
+   bitset built once on the host.
+2. **`cc_spec_count`, then `cc_spec_solve`, k rounds.** These are the speculative inelastic
+   contact.
+   - The count pass gives each active pair's nodes an atomic count.
+   - The solve pass computes each pair's impulse with the split masses and adds it per node
+     into fixed-point accumulators (`gAcc`, like `shiftAdd`). Integer sums are the same in any
+     order, so the result is bit exact.
+   - A per-node apply pass then follows.
+3. **`cc_ccd`, then the impulse rounds.** One thread per listed pair runs ACCD, with a fixed
+   32-iteration cap and strict float helpers. Impacts are accumulated as in pass 2, split
+   into a velocity part and a position-only part. Up to 8 rounds run; a dirty flag skips
+   rounds with no impact.
+4. **`cc_zone`.** Label propagation gives each still-colliding pair's nodes the smallest label
+   in their component, in about log n passes. Each zone's mass, centre, momentum, angular
+   momentum and inertia are fixed-point sums per label. A per-node pass then sets the rigid
+   motion. It runs only when the previous rounds left an impact.
+5. **`cc_detect`.** It counts would-be crossings and unresolved impacts into counters the host
+   reads back once a frame. This is the health readout and the test hook.
+
+**The CPU reference changes first**, so that GPU == CPU bit for bit:
+
+- the same candidate order, the per-item lists;
+- the same fixed-point per-node sums in place of float accumulation;
+- zones sorted by label, their sums in fixed point;
+- the same strict float operation order.
+
+Then the CPU tests (`continuous_contact.rs`) are rerun to show the change kept the physics.
+
+**Cost expectations, to measure:**
+
+- About 6 to 10 dispatches a step, 17 steps a 120 Hz frame.
+- The pair passes are proportional to the listed pairs. At head 100 that is about 200 a step
+  between the cars, plus the cars' own pairs near contact.
+- A frame with no contact runs `cc_list` and early-outs.
+
+**Order of work:**
+
+1. The deterministic CPU reference.
+2. The split seam, with an empty pass between the halves. It must be bit exact against today's
+   split path.
+3. `cc_list`, checked against the CPU lists.
+4. The speculative pass.
+5. CCD and the impulses.
+6. The zones.
+7. The detector.
+8. The bit-exact test on the generated sedan head-on.
+9. The scenario-matrix A/B on CUDA, then Chrome's WGSL check.
+10. The cost table.
+11. The lab control.
