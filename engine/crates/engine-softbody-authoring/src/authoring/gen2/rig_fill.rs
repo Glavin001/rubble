@@ -5,6 +5,44 @@
 use super::*;
 
 /// Whether segment p→q passes through triangle (a, b, c) (Möller–Trumbore, ends included).
+/// The least distance between two triangles (nodes `ia`, `ib`) over their point-face and
+/// edge-edge pairs that share no node (as contact pairs them), at the nodes' positions.
+pub(super) fn tri_tri_gap(r: &Rig, ia: [usize; 3], ib: [usize; 3]) -> f32 {
+    use engine_softbody::explicit_contact::{closest_on_triangle as ct, closest_segments as cs};
+    let (a, b) = (ia.map(|i| r.g(i)), ib.map(|i| r.g(i)));
+    let mut d = f32::MAX;
+    for (p, ip, t, it) in [(a, ia, b, ib), (b, ib, a, ia)] {
+        for k in 0..3 {
+            if !it.contains(&ip[k]) {
+                d = d.min((p[k] - ct(p[k], t[0], t[1], t[2])).length());
+            }
+        }
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            let (e, f) = ([ia[i], ia[(i + 1) % 3]], [ib[j], ib[(j + 1) % 3]]);
+            if e.iter().any(|x| f.contains(x)) {
+                continue;
+            }
+            let (c1, c2) = cs(a[i], a[(i + 1) % 3], b[j], b[(j + 1) % 3]);
+            d = d.min((c2 - c1).length());
+        }
+    }
+    d
+}
+
+/// The least clearance between a car's own collision triangles that share no node: continuous
+/// contact keeps a car's own surfaces this far apart and cannot separate closer ones (m).
+pub(super) const SKIN_CLEARANCE: f32 = 0.002;
+
+/// Whether triangle `t` lies within [`SKIN_CLEARANCE`] of a placed triangle it shares no
+/// node with (a seam bridge folded onto the skin).
+pub(super) fn near_skin(r: &Rig, t: [usize; 3], tris: &[Tri]) -> bool {
+    let q = t.map(|i| r.g(i));
+    let _ = q;
+    tris.iter().any(|x| tri_tri_gap(r, t, x.n) < SKIN_CLEARANCE)
+}
+
 pub(super) fn seg_tri_cross(p: Vec3, q: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
     let d = q - p;
     let (e1, e2) = (b - a, c - a);
@@ -253,10 +291,18 @@ fn cap_hole(r: &Rig, lp: &[usize], k0: usize, max: f32, add: &mut Vec<Tri>) {
             })
         })
     };
+    // A cap lying within the skin's clearance of a triangle it shares no node with (a fold
+    // onto the skin at a seam) is not taken either.
+    let near_skin = |n: [usize; 3]| {
+        let q = n.map(|i| r.g(i));
+        let _ = q;
+        r.car.tris.iter().any(|xt| tri_tri_gap(r, n, xt.n) < SKIN_CLEARANCE)
+    };
     // (A slit closes with a thin triangle: slivers are taken, crossings are not.)
     let mut push = |add: &mut Vec<Tri>, n: [usize; 3]| {
         let [a, b, c] = n.map(|i| r.g(i));
-        if (b - a).cross(c - a).length() < 1e-7 || crosses_skin(n) {
+        let folds = add.iter().any(|x: &Tri| tri_tri_gap(r, n, x.n) < SKIN_CLEARANCE);
+        if (b - a).cross(c - a).length() < 1e-7 || crosses_skin(n) || near_skin(n) || folds {
             return;
         }
         add.push(Tri { n, part, group: None, sub: sub.clone(), inner });
@@ -478,7 +524,7 @@ fn belly_faces(r: &mut Rig) {
             }
             let mut key = n;
             key.sort_unstable();
-            if have.contains(&key) || tri_crosses(&pos, n, &skin_now) {
+            if have.contains(&key) || tri_crosses(&pos, n, &skin_now) || r.car.tris.iter().chain(&add).any(|x| tri_tri_gap(r, n, x.n) < SKIN_CLEARANCE) {
                 continue;
             }
             // Not on top of the skin already there (a doubled layer): its centre clear of

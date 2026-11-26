@@ -61,6 +61,8 @@ pub struct Dat {
     /// Per vehicle, its own pairs closer than `self_gap` at its first step (neighbours across
     /// a seam, as self contact's spawn exclusion, spec §10.1): left out of both passes.
     pub rest_excl: Vec<Option<std::collections::HashSet<[u32; 4]>>>,
+    /// Each vehicle's positions at its first step (the exclusion's).
+    pub first: Vec<Vec<Vec3>>,
     /// The last step's counts and every step's, summed.
     pub last: DatStats,
     pub total: DatStats,
@@ -138,7 +140,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), rest_excl: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), rest_excl: Vec::new(), first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -216,7 +218,7 @@ impl Grid {
 
 /// The closest point to `p` on triangle `a b c` (Ericson, Real-Time Collision Detection
 /// §5.1.5).
-pub(crate) fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+pub fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let (ab, ac, ap) = (b - a, c - a, p - a);
     let (d1, d2) = (ab.dot(ap), ac.dot(ap));
     if d1 <= 0.0 && d2 <= 0.0 {
@@ -249,7 +251,7 @@ pub(crate) fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 }
 
 /// The closest points of segments `p1 q1` and `p2 q2` (Ericson §5.1.9).
-pub(crate) fn closest_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
+pub fn closest_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
     let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
     let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
     const EPS: f32 = 1e-12;
@@ -585,6 +587,8 @@ impl ExplicitBeamsWorld {
             dat.rest_excl.resize(nv, None);
             for v in 0..nv {
                 if dat.rest_excl[v].is_none() {
+                    dat.first.resize(nv, Vec::new());
+                    dat.first[v] = x0[v].clone();
                     let near = close_pairs(&x0[v], &surf[v], dat.self_gap);
                     dat.rest_excl[v] = Some(near.into_iter().map(|p| p.0).collect());
                 }
@@ -774,6 +778,37 @@ impl ExplicitBeamsWorld {
         let veh = &self.vehicles[v];
         let x: Vec<Vec3> = veh.nodes.iter().map(|n| veh.origin + n.pos).collect();
         close_pairs(&x, &surface(veh), eps)
+    }
+
+    /// Vehicle `v`'s own crossings now (edge, triangle) with their distance at its first
+    /// step (`Dat::first`; NaN without): under the self gap, a seam pair left out.
+    pub fn own_crossings_at(&self, v: usize) -> Vec<([u32; 2], [u32; 3], f32)> {
+        let veh = &self.vehicles[v];
+        let x: Vec<Vec3> = veh.nodes.iter().map(|n| veh.origin + n.pos).collect();
+        let s = surface(veh);
+        let first = self.continuous.as_ref().and_then(|d| d.first.get(v)).filter(|f| !f.is_empty());
+        let mut out = Vec::new();
+        for e in &s.edges {
+            for t in &s.tris {
+                if t.iter().any(|j| e.contains(j)) {
+                    continue;
+                }
+                let [p, q] = e.map(|i| x[i as usize]);
+                let [a, b, c] = t.map(|j| x[j as usize]);
+                if !seg_crosses(p, q, a, b, c) {
+                    continue;
+                }
+                let gap = first.map_or(f32::NAN, |f| {
+                    let [p, q] = e.map(|i| f[i as usize]);
+                    let [a, b, c] = t.map(|j| f[j as usize]);
+                    let vt = [p, q].iter().map(|&y| (y - closest_on_triangle(y, a, b, c)).length()).fold(f32::MAX, f32::min);
+                    let ee = [(a, b), (b, c), (c, a)].iter().map(|&(u, w)| { let (c1, c2) = closest_segments(p, q, u, w); (c2 - c1).length() }).fold(f32::MAX, f32::min);
+                    vt.min(ee)
+                });
+                out.push((*e, *t, gap));
+            }
+        }
+        out
     }
 
     /// Each vehicle's edges crossing its own live triangles that share no node with them.

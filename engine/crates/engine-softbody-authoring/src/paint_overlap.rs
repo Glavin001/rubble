@@ -597,6 +597,11 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
             let mut l = w.close_self_pairs(0, 0.002);
             l.sort_by(|a, b| a.1.total_cmp(&b.1));
             println!("DAT_CLOSE {} own pairs within 2 mm at the start: {:?}", l.len(), l.iter().take(30).map(|(n, g)| format!("{:?} {:.2} mm", n.map(|i| d.nodes[i as usize].name.clone()), g * 1e3)).collect::<Vec<_>>());
+            for (n, _) in l.iter().take(4) {
+                let v0 = &w.vehicles[0];
+                let has = |a: u32, b: u32| v0.triangles.iter().enumerate().filter(|(_, t)| t.nodes.contains(&a) && t.nodes.contains(&b)).map(|(k, t)| format!("{k}:{:?} outer {}", t.nodes.map(|i| d.nodes[i as usize].name.clone()), v0.tri_outer.get(k).copied().unwrap_or(true))).collect::<Vec<_>>();
+                println!("  edge {:?} in {:?}", [n[0], n[1]].map(|i| d.nodes[i as usize].name.clone()), has(n[0], n[1]));
+            }
         }
         for s in 1..=steps {
             w.step();
@@ -604,6 +609,13 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
                 // (a car's own crossings past those it was built with: the sedan has none)
                 let own_x: usize = w.self_crossings().iter().zip(&self_x0).map(|(a, b)| a.saturating_sub(*b)).sum();
                 self_max = self_max.max(own_x);
+                if k == 0 && own_x > 0 && std::env::var("DAT_OWN").is_ok() {
+                    for v in 0..w.vehicles.len() {
+                        for (e, t, g) in w.own_crossings_at(v) {
+                            println!("DAT_OWN t {:.2} car {v}: edge {:?} through {:?}, {:.1} mm apart at the start", s as f32 / 2000.0, e.map(|i| d.nodes[i as usize].name.clone()), t.map(|i| d.nodes[i as usize].name.clone()), g * 1e3);
+                        }
+                    }
+                }
                 let c = if pole { 0 } else { w.mesh_crossings() } + own_x;
                 crossed_max = crossed_max.max(c);
                 crossed_steps += (c > 0) as usize;

@@ -1172,7 +1172,7 @@ fn bridge_seams(
             let edges: Vec<(usize, usize)> = (0..3)
                 .map(|e| (t[e].min(t[(e + 1) % 3]), t[e].max(t[(e + 1) % 3])))
                 .collect();
-            if edges.iter().any(|e| uses.get(e).copied().unwrap_or(0) >= 2) || bridge_folds_or_crosses(r, t, nn.dot(nr) < 0.0, tris) {
+            if edges.iter().any(|e| uses.get(e).copied().unwrap_or(0) >= 2) || bridge_folds_or_crosses(r, t, nn.dot(nr) < 0.0, tris) || near_skin(r, t, tris) {
                 return false;
             }
             let cen = (qa + qb + qc) / 3.0;
