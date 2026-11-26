@@ -402,6 +402,10 @@ pub fn crash_measuring(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool
         let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(d, at + Vec3::Y * lift, vel, settings()).expect("spawn");
         s.surface_contact = true;
         s.edge_contact = edge;
+        // (SELF_OFF=1, the control of a car's own measures: one self group, so no self contact.)
+        if std::env::var("SELF_OFF").is_ok_and(|x| x == "1") {
+            s.self_groups = vec![1; s.nodes.len()];
+        }
         s.finish();
         // (SELF_EXCL=0: the pairs excluded from self contact for starting in range take part;
         // PAINT_PARTS=1 counts them.)
