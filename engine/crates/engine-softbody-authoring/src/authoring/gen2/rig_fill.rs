@@ -514,3 +514,93 @@ pub(super) fn cover_bare(r: &mut Rig, inp: &dyn RigInput) {
     }
     r.car.tris.extend(add);
 }
+
+/// The floor as one surface (`RIG_SINGLE_FLOOR=0`: as before). The hull's underbody ran straight
+/// from the tunnel's foot to the rocker's, over the floor pan's outer edge (`sh_c1_*o*`, 1 cm under
+/// that line and more than the hull's 3 cm from the drawn skin), so the pan's inner faces crossed
+/// it at rest (38 of the sedan's crossings). Here the hull triangles a floor-pan face crosses go, the
+/// pan's faces become the outer floor (facing down), and a strip joins each side's pan edge to the
+/// rocker's nodes those triangles ran to.
+pub(super) fn single_floor(r: &mut Rig) {
+    if std::env::var("RIG_SINGLE_FLOOR").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let pos: Vec<Vec3> = (0..r.car.nodes.len()).map(|i| r.g(i)).collect();
+    let name = |i: usize| r.car.nodes[i].name.clone();
+    let pan = |t: &Tri| t.inner && t.sub.is_none() && t.n.iter().all(|&i| { let n = name(i); n.starts_with("sh_c1_") && (n.contains('o') || n.contains('t')) })
+        && t.n.iter().any(|&i| name(i).contains('o')) && t.n.iter().any(|&i| name(i).contains('t'));
+    let pans: Vec<[usize; 3]> = r.car.tris.iter().filter(|t| pan(t)).map(|t| t.n).collect();
+    if pans.is_empty() {
+        return;
+    }
+    // The outer triangles a pan face crosses, and the rocker nodes (not the shell's) they ran to.
+    // (Against the shell's inner faces at the floor: the pan's and the sill's.)
+    let shell: Vec<[usize; 3]> = r.car.tris.iter().filter(|t| t.inner && t.sub.is_none() && t.n.iter().all(|&i| name(i).starts_with("sh_c"))).map(|t| t.n).collect();
+    let crossed: Vec<usize> = (0..r.car.tris.len())
+        .filter(|&k| !r.car.tris[k].inner && tri_crosses(&pos, r.car.tris[k].n, &shell))
+        .collect();
+    if crossed.is_empty() {
+        return;
+    }
+    let mut rocker: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+    for &k in &crossed {
+        for &i in &r.car.tris[k].n {
+            if !name(i).starts_with("sh_") {
+                let s = (pos[i].x < 0.0) as usize;
+                if !rocker[s].contains(&i) {
+                    rocker[s].push(i);
+                }
+            }
+        }
+    }
+    let mut keep = vec![true; r.car.tris.len()];
+    crossed.iter().for_each(|&k| keep[k] = false);
+    let mut k = 0;
+    r.car.tris.retain(|_| { k += 1; keep[k - 1] });
+    // The pan's faces: the outer floor, facing down.
+    for t in r.car.tris.iter_mut().filter(|t| pan(t)) {
+        t.inner = false;
+        let [a, b, c] = t.n.map(|i| pos[i]);
+        if (b - a).cross(c - a).y > 0.0 {
+            t.n = [t.n[0], t.n[2], t.n[1]];
+        }
+    }
+    // The tunnel's foot across, between its two rows (the removed underbody spanned it).
+    let have: std::collections::HashSet<[usize; 3]> = r.car.tris.iter().map(|t| { let mut k = t.n; k.sort_unstable(); k }).collect();
+    let foot = |tag: char| { let mut v: Vec<usize> = (0..r.car.nodes.len()).filter(|&i| { let n = name(i); n.starts_with("sh_c1_") && n.ends_with(&format!("t{tag}")) }).collect(); v.sort_by(|&a, &b| pos[a].z.total_cmp(&pos[b].z)); v };
+    let (fl, fr) = (foot('l'), foot('r'));
+    for k in 0..fl.len().min(fr.len()).saturating_sub(1) {
+        for mut n in [[fl[k], fl[k + 1], fr[k + 1]], [fl[k], fr[k + 1], fr[k]]] {
+            let mut key = n;
+            key.sort_unstable();
+            if have.contains(&key) {
+                continue;
+            }
+            let [a, b, c] = n.map(|x| pos[x]);
+            if (b - a).cross(c - a).y > 0.0 {
+                n = [n[0], n[2], n[1]];
+            }
+            r.car.tris.push(Tri { n, part: Part::Body, group: None, sub: None, inner: false });
+        }
+    }
+    // Each side: the pan's outer edge to the rocker, a zipper along the car.
+    for (s, tag) in [(0usize, 'l'), (1, 'r')] {
+        let mut edge: Vec<usize> = (0..r.car.nodes.len()).filter(|&i| { let n = name(i); n.starts_with("sh_c1_") && n.ends_with(&format!("o{tag}")) }).collect();
+        let mut rk = rocker[s].clone();
+        if edge.len() < 2 || rk.is_empty() {
+            continue;
+        }
+        edge.sort_by(|&a, &b| pos[a].z.total_cmp(&pos[b].z));
+        rk.sort_by(|&a, &b| pos[a].z.total_cmp(&pos[b].z));
+        let (mut i, mut j) = (0usize, 0usize);
+        while i + 1 < edge.len() || j + 1 < rk.len() {
+            let take_edge = j + 1 >= rk.len() || (i + 1 < edge.len() && pos[edge[i + 1]].z <= pos[rk[j + 1]].z);
+            let mut n = if take_edge { i += 1; [edge[i - 1], edge[i], rk[j]] } else { j += 1; [edge[i], rk[j], rk[j - 1]] };
+            let [a, b, c] = n.map(|x| pos[x]);
+            if (b - a).cross(c - a).y > 0.0 {
+                n = [n[0], n[2], n[1]];
+            }
+            r.car.tris.push(Tri { n, part: Part::Body, group: None, sub: None, inner: false });
+        }
+    }
+}

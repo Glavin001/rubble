@@ -41,6 +41,5 @@ gen_sedan_paint::accept_side_60_pressed
 # The vehicle lint on every generated design (tests/generated_vehicle_lint.rs, 2026-11-24): the
 # collision skin's defects, found by hand in the S4 crash study, now caught at build time.
 generated_vehicle_lint::generated_designs_collision_skin_faces_out
-generated_vehicle_lint::generated_designs_collision_skin_does_not_cross_itself
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule

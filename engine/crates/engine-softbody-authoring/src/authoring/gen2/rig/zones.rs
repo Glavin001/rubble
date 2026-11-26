@@ -532,6 +532,8 @@ pub(super) fn interior_skins(r: &mut Rig, inp: &dyn RigInput) {
     r.car.tris.extend(add);
     fill_holes(r);
     belly_cap(r);
+    single_floor(r);
+    fill_holes(r);
     cover_bare(r, inp);
 }
 
