@@ -21,6 +21,7 @@
 
 use super::ExplicitBeamsWorld;
 use crate::explicit_beams::{ExplicitBeams, NODE_IMMOVABLE, STEP};
+use engine_schema::feature_query as fq;
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -112,6 +113,7 @@ impl DatStats {
         self.ccd.zones += o.ccd.zones;
         self.ccd.zone_nodes += o.ccd.zone_nodes;
         self.ccd.unresolved += o.ccd.unresolved;
+        self.ccd.zone_spin += o.ccd.zone_spin;
         self.ccd.ke += o.ccd.ke;
         self.ccd.dp = self.ccd.dp.max(o.ccd.dp);
         self.ccd.dl = self.ccd.dl.max(o.ccd.dl);
@@ -216,74 +218,16 @@ impl Grid {
     }
 }
 
-/// The closest point to `p` on triangle `a b c` (Ericson, Real-Time Collision Detection
-/// §5.1.5).
+/// The closest point to `p` on triangle `a b c` (Ericson §5.1.5; the kernels' twin,
+/// `engine_schema::feature_query`, so the GPU computes the same bits).
 pub fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
-    let (ab, ac, ap) = (b - a, c - a, p - a);
-    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
-    if d1 <= 0.0 && d2 <= 0.0 {
-        return a;
-    }
-    let bp = p - b;
-    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
-    if d3 >= 0.0 && d4 <= d3 {
-        return b;
-    }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        return a + ab * (d1 / (d1 - d3));
-    }
-    let cp = p - c;
-    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
-    if d6 >= 0.0 && d5 <= d6 {
-        return c;
-    }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        return a + ac * (d2 / (d2 - d6));
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
-    }
-    let den = 1.0 / (va + vb + vc);
-    a + ab * (vb * den) + ac * (vc * den)
+    fq::closest_on_triangle(p, a, b, c).0
 }
 
-/// The closest points of segments `p1 q1` and `p2 q2` (Ericson §5.1.9).
+/// The closest points of segments `p1 q1` and `p2 q2` (Ericson §5.1.9, the kernels' twin).
 pub fn closest_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
-    let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
-    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
-    const EPS: f32 = 1e-12;
-    let (s, t);
-    if a <= EPS && e <= EPS {
-        return (p1, p2);
-    }
-    if a <= EPS {
-        s = 0.0;
-        t = (f / e).clamp(0.0, 1.0);
-    } else {
-        let c = d1.dot(r);
-        if e <= EPS {
-            t = 0.0;
-            s = (-c / a).clamp(0.0, 1.0);
-        } else {
-            let b = d1.dot(d2);
-            let den = a * e - b * b;
-            let mut s0 = if den > 0.0 { ((b * f - c * e) / den).clamp(0.0, 1.0) } else { 0.0 };
-            let mut t0 = (b * s0 + f) / e;
-            if t0 < 0.0 {
-                t0 = 0.0;
-                s0 = (-c / a).clamp(0.0, 1.0);
-            } else if t0 > 1.0 {
-                t0 = 1.0;
-                s0 = ((b - c) / a).clamp(0.0, 1.0);
-            }
-            s = s0;
-            t = t0;
-        }
-    }
-    (p1 + d1 * s, p2 + d2 * t)
+    let (s, t) = fq::closest_seg_seg(p1, q1, p2, q2);
+    (p1 + (q1 - p1) * s, p2 + (q2 - p2) * t)
 }
 
 /// A listed pair: its nodes (vehicle, node), the first `nn` on the negative side, with the
@@ -353,7 +297,7 @@ fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) 
                 }
             }
         }
-        let mut dv: Vec<(usize, u32, Vec3)> = Vec::new();
+        let mut sums = super::ccd::FixedSums::new(v);
         for &(r, c) in &act {
             let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize] * count[r.k[j].0][r.k[j].1 as usize] as f32).sum();
             if wsum <= 0.0 {
@@ -364,13 +308,13 @@ fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) 
                 let (q, i) = r.k[j];
                 let m = im[q][i as usize];
                 if m > 0.0 && r.w[j] > 0.0 {
-                    dv.push((q, i, r.n * (r.sign(j) * r.w[j] * m * l)));
+                    sums.add_v(q, i, r.n * (r.sign(j) * r.w[j] * m * l));
                 }
             }
         }
-        for (q, i, d) in dv {
-            v[q][i as usize] += d;
-            count[q][i as usize] = 0;
+        sums.apply(v, None);
+        for c in count.iter_mut() {
+            c.iter_mut().for_each(|c| *c = 0);
         }
     }
 }
@@ -489,34 +433,6 @@ impl Pass<'_> {
     }
 }
 
-/// The barycentric weights of point `p` (on the triangle) in `a b c`.
-pub(super) fn barycentric_pub(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
-    barycentric(p, a, b, c)
-}
-
-pub(super) fn along_pub(c: Vec3, p: Vec3, q: Vec3) -> f32 {
-    along(c, p, q)
-}
-
-fn barycentric(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
-    let (v0, v1, v2) = (b - a, c - a, p - a);
-    let (d00, d01, d11, d20, d21) = (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
-    let den = d00 * d11 - d01 * d01;
-    if den <= 0.0 {
-        return [1.0 / 3.0; 3];
-    }
-    let v = ((d11 * d20 - d01 * d21) / den).clamp(0.0, 1.0);
-    let w = ((d00 * d21 - d01 * d20) / den).clamp(0.0, 1.0 - v);
-    [1.0 - v - w, v, w]
-}
-
-/// The parameter of point `c` (on the segment) along `p q`.
-fn along(c: Vec3, p: Vec3, q: Vec3) -> f32 {
-    let d = q - p;
-    let l = d.length_squared();
-    if l <= 0.0 { 0.0 } else { ((c - p).dot(d) / l).clamp(0.0, 1.0) }
-}
-
 fn bounds(ps: impl IntoIterator<Item = Vec3>) -> (Vec3, Vec3) {
     ps.into_iter()
         .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(l, h), p| (l.min(p), h.max(p)))
@@ -623,10 +539,10 @@ impl ExplicitBeamsWorld {
                             continue;
                         }
                         let [q0, q1, q2] = tri.map(|j| x0[b][j as usize]);
-                        let c = closest_on_triangle(p, q0, q1, q2);
+                        let (c, cw) = fq::closest_on_triangle(p, q0, q1, q2);
                         if (p - c).length_squared() < (r_q + mo_a + mo_b).powi(2) {
                             let neg = tri.map(|j| (b, j));
-                            let mut rec = Rec::new(&neg, &barycentric(c, q0, q1, q2), &[(a, i)], &[1.0], c, p, &off);
+                            let mut rec = Rec::new(&neg, &cw, &[(a, i)], &[1.0], c, p, &off);
                             if own {
                                 rec.d = dat.self_gap;
                             }
@@ -656,9 +572,9 @@ impl ExplicitBeamsWorld {
                             continue;
                         }
                         let [p2, q2] = f.map(|j| x0[b][j as usize]);
-                        let (c1, c2) = closest_segments(p1, q1, p2, q2);
+                        let (s1, s2) = fq::closest_seg_seg(p1, q1, p2, q2);
+                        let (c1, c2) = (p1 + (q1 - p1) * s1, p2 + (q2 - p2) * s2);
                         if (c2 - c1).length_squared() < (r_q + mo_a + mo_b).powi(2) {
-                            let (s1, s2) = (along(c1, p1, q1), along(c2, p2, q2));
                             let mut rec = Rec::new(&e.map(|i| (a, i)), &[1.0 - s1, s1], &f.map(|j| (b, j)), &[1.0 - s2, s2], c1, c2, &off);
                             if own {
                                 rec.d = dat.self_gap;

@@ -9,9 +9,59 @@
 //! body over the step with its linear and angular momentum (Bridson 2002 §7.4): inelastic
 //! within the zone, kinetic energy never rises. Nothing is scaled or truncated.
 
-use glam::{DMat3, DVec3, Vec3};
+use glam::{DVec3, Vec3};
 
-use super::dat::{closest_on_triangle, closest_segments};
+use crate::explicit_beams::{to_fixed_shift, SHIFT_FIXED};
+
+/// Velocity changes summed per node in fixed point: units per m/s, 2²² (±476 m/s in an i32),
+/// so the GPU's atomic integer sums give the same bits in any order.
+pub const VEL_FIXED: f32 = 4_194_304.0;
+
+/// A velocity-change component in [`VEL_FIXED`] units, rounded to nearest with ties to even
+/// (as [`to_fixed_shift`]; the kernels' twin spells it out).
+pub fn to_fixed_vel(x: f32) -> i32 {
+    (x * VEL_FIXED).clamp(-2.0e9, 2.0e9).round_ties_even() as i32
+}
+
+/// Per-node fixed-point sums of a round's velocity changes and position steps.
+pub(super) struct FixedSums {
+    pub dv: Vec<Vec<[i32; 3]>>,
+    pub dx: Vec<Vec<[i32; 3]>>,
+}
+
+impl FixedSums {
+    pub fn new(shape: &[Vec<Vec3>]) -> Self {
+        Self { dv: shape.iter().map(|x| vec![[0; 3]; x.len()]).collect(), dx: shape.iter().map(|x| vec![[0; 3]; x.len()]).collect() }
+    }
+    pub fn add_v(&mut self, v: usize, i: u32, d: Vec3) {
+        let e = &mut self.dv[v][i as usize];
+        for (k, c) in d.to_array().into_iter().enumerate() {
+            e[k] = e[k].wrapping_add(to_fixed_vel(c));
+        }
+    }
+    pub fn add_x(&mut self, v: usize, i: u32, d: Vec3) {
+        let e = &mut self.dx[v][i as usize];
+        for (k, c) in d.to_array().into_iter().enumerate() {
+            e[k] = e[k].wrapping_add(to_fixed_shift(c));
+        }
+    }
+    /// Applies the sums (velocities and, if given, positions) and clears them.
+    pub fn apply(&mut self, vel: &mut [Vec<Vec3>], mut x: Option<&mut [Vec<Vec3>]>) {
+        for v in 0..vel.len() {
+            for i in 0..vel[v].len() {
+                let a = std::mem::take(&mut self.dv[v][i]);
+                if a != [0; 3] {
+                    vel[v][i] += Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / VEL_FIXED);
+                }
+                let b = std::mem::take(&mut self.dx[v][i]);
+                if let (Some(x), true) = (x.as_deref_mut(), b != [0; 3]) {
+                    x[v][i] += Vec3::new(b[0] as f32, b[1] as f32, b[2] as f32) * (1.0 / SHIFT_FIXED);
+                }
+            }
+        }
+    }
+}
+
 
 /// A pair for the response: its four nodes (vehicle, node), the first `nn` one side.
 pub(super) struct CcdPair {
@@ -33,6 +83,8 @@ pub struct CcdStats {
     /// Kinetic energy change of the response (J; ≤ 0), and the largest change in a step of
     /// the vehicles' total linear (N·s) and angular (N·m·s) momentum (0 but rounding).
     pub ke: f64,
+    /// Zones that would turn more than 1 rad in a step (an error: not moved).
+    pub zone_spin: u64,
     pub dp: f64,
     pub dl: f64,
 }
@@ -40,14 +92,13 @@ pub struct CcdStats {
 /// The closest points of a pair at positions `p` (four points): their weights (signed by
 /// side: + on the second side) and the gap vector from the first side to the second.
 fn closest(nn: usize, p: [Vec3; 4]) -> ([f32; 4], Vec3) {
+    use engine_schema::feature_query as fq;
     if nn == 3 {
-        let c = closest_on_triangle(p[3], p[0], p[1], p[2]);
-        let w = super::dat::barycentric_pub(c, p[0], p[1], p[2]);
+        let (c, w) = fq::closest_on_triangle(p[3], p[0], p[1], p[2]);
         ([-w[0], -w[1], -w[2], 1.0], p[3] - c)
     } else {
-        let (c1, c2) = closest_segments(p[0], p[1], p[2], p[3]);
-        let s = super::dat::along_pub(c1, p[0], p[1]);
-        let t = super::dat::along_pub(c2, p[2], p[3]);
+        let (s, t) = fq::closest_seg_seg(p[0], p[1], p[2], p[3]);
+        let (c1, c2) = (p[0] + (p[1] - p[0]) * s, p[2] + (p[3] - p[2]) * t);
         ([-(1.0 - s), -s, 1.0 - t, t], c2 - c1)
     }
 }
@@ -186,7 +237,7 @@ pub(super) fn resolve(
                 }
             }
         }
-        let mut dx: Vec<(usize, u32, Vec3, Vec3)> = Vec::new();
+        let mut sums = FixedSums::new(x1);
         for &(q, n, w, vr, vv) in &act {
             let k = pairs[q].k;
             let wsum: f32 = (0..4).map(|j| w[j] * w[j] * im[k[j].0][k[j].1 as usize] * count[k[j].0][k[j].1 as usize] as f32).sum();
@@ -197,14 +248,14 @@ pub(super) fn resolve(
             for j in 0..4 {
                 let mi = im[k[j].0][k[j].1 as usize];
                 if mi > 0.0 && w[j] != 0.0 {
-                    dx.push((k[j].0, k[j].1, n * (w[j] * mi * l * h), n * (w[j] * mi * lv)));
+                    sums.add_x(k[j].0, k[j].1, n * (w[j] * mi * l * h));
+                    sums.add_v(k[j].0, k[j].1, n * (w[j] * mi * lv));
                 }
             }
         }
-        for (v, i, d, dv) in dx {
-            x1[v][i as usize] += d;
-            vel[v][i as usize] += dv;
-            count[v][i as usize] = 0;
+        sums.apply(vel, Some(x1));
+        for c in count.iter_mut() {
+            c.iter_mut().for_each(|c| *c = 0);
         }
     }
     // Impact zones: the nodes of still-colliding pairs, merged; each moves rigidly. A pair
@@ -253,47 +304,100 @@ pub(super) fn resolve(
             zones.entry(z).or_default().push(key);
         }
         st.zones += zones.len() as u64;
-        for nodes in zones.values() {
+        for nodes in zones.values_mut() {
+            nodes.sort_unstable();
             st.zone_nodes += nodes.len() as u64;
-            rigid_zone(nodes, x0, x1, vel, m, im, h);
+            if !rigid_zone(nodes, x0, x1, vel, m, im, h) {
+                st.zone_spin += 1;
+            }
         }
     }
     st.unresolved += collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).count() as u64;
     finish(st, x1, vel);
 }
 
-/// One impact zone moved as a rigid body over the step: its centre at the start, its linear
-/// and angular momentum (ω = I⁻¹L) from the nodes' path velocities, each node's end the
-/// zone's exact rotation and translation of its start (Bridson 2002 §7.4). An immovable node
-/// pins the zone: it then stays where it started.
-fn rigid_zone(nodes: &[(usize, u32)], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], m: &[Vec<f32>], im: &[Vec<f32>], h: f32) {
-    let at = |x: &[Vec<Vec3>], k: &(usize, u32)| x[k.0][k.1 as usize].as_dvec3();
+/// sin and cos of `t` (|t| ≤ 1) by their Taylor series to the t¹¹ and t¹⁰ terms, Horner in a
+/// fixed order: below 2⁻²³ relative error there, and the same bits on the CPU and the kernels
+/// (the hardware's sin and cos differ between GPUs).
+pub(super) fn sin_cos(t: f32) -> (f32, f32) {
+    let t2 = t * t;
+    let s = t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362_880.0 + t2 * (-1.0 / 39_916_800.0))))));
+    let c = 1.0 + t2 * (-0.5 + t2 * (1.0 / 24.0 + t2 * (-1.0 / 720.0 + t2 * (1.0 / 40_320.0 + t2 * (-1.0 / 3_628_800.0)))));
+    (s, c)
+}
+
+/// The inverse of the symmetric 3×3 matrix `m` (rows) by its adjugate, or None when singular.
+pub(super) fn inverse3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+    let c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2];
+    let c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+    let det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02;
+    if det.abs() <= 1e-12 {
+        return None;
+    }
+    let r = 1.0 / det;
+    let c10 = m[0][2] * m[2][1] - m[0][1] * m[2][2];
+    let c11 = m[0][0] * m[2][2] - m[0][2] * m[2][0];
+    let c12 = m[0][1] * m[2][0] - m[0][0] * m[2][1];
+    let c20 = m[0][1] * m[1][2] - m[0][2] * m[1][1];
+    let c21 = m[0][2] * m[1][0] - m[0][0] * m[1][2];
+    let c22 = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    Some([[c00 * r, c10 * r, c20 * r], [c01 * r, c11 * r, c21 * r], [c02 * r, c12 * r, c22 * r]])
+}
+
+/// One impact zone moved as a rigid body over the step (Bridson 2002 §7.4): its centre of mass
+/// at the start, its momentum and angular momentum from the nodes' velocities (a projection
+/// onto rigid motion: kinetic energy cannot rise), each node's end the exact rotation
+/// (Rodrigues) and translation of its start. f32 sums over the nodes in ascending order, as
+/// the kernel's. An immovable node pins the zone where it started. Returns false when the zone
+/// would turn more than 1 rad in the step (an error, counted; the zone is not moved).
+fn rigid_zone(nodes: &[(usize, u32)], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], m: &[Vec<f32>], im: &[Vec<f32>], h: f32) -> bool {
+    use engine_schema::feature_query::{cross3, dot3};
+    let at = |k: &(usize, u32)| x0[k.0][k.1 as usize];
+    let ms = |k: &(usize, u32)| m[k.0][k.1 as usize];
+    let vs = |vel: &[Vec<Vec3>], k: &(usize, u32)| vel[k.0][k.1 as usize];
     if nodes.iter().any(|k| im[k.0][k.1 as usize] == 0.0) {
         for k in nodes {
             vel[k.0][k.1 as usize] = Vec3::ZERO;
-            x1[k.0][k.1 as usize] = x0[k.0][k.1 as usize];
+            x1[k.0][k.1 as usize] = at(k);
         }
-        return;
+        return true;
     }
-    let hh = h as f64;
-    let mass: f64 = nodes.iter().map(|k| m[k.0][k.1 as usize] as f64).sum();
-    let c = nodes.iter().map(|k| at(x0, k) * m[k.0][k.1 as usize] as f64).sum::<DVec3>() / mass;
-    // The zone's momentum and angular momentum from the nodes' velocities (a projection onto
-    // rigid motion: kinetic energy never rises).
-    let v = |k: &(usize, u32)| vel[k.0][k.1 as usize].as_dvec3();
-    let vc = nodes.iter().map(|k| v(k) * m[k.0][k.1 as usize] as f64).sum::<DVec3>() / mass;
-    let (mut l, mut i) = (DVec3::ZERO, DMat3::ZERO);
+    let (mut mass, mut cm, mut p) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
     for k in nodes {
-        let (r, mm) = (at(x0, k) - c, m[k.0][k.1 as usize] as f64);
-        l += r.cross(v(k) - vc) * mm;
-        i += (DMat3::IDENTITY * r.length_squared() - DMat3::from_cols(r * r.x, r * r.y, r * r.z)) * mm;
+        mass += ms(k);
+        cm += at(k) * ms(k);
+        p += vs(vel, k) * ms(k);
     }
-    let w = if i.determinant().abs() > 1e-18 { i.inverse() * l } else { DVec3::ZERO };
-    let ang = w.length() * hh;
-    let rot = if ang > 0.0 { glam::DQuat::from_axis_angle(w / w.length(), ang) } else { glam::DQuat::IDENTITY };
+    let (c, vc) = (cm / mass, p / mass);
+    let (mut l, mut i) = (Vec3::ZERO, [[0.0f32; 3]; 3]);
     for k in nodes {
-        let r = at(x0, k) - c;
-        x1[k.0][k.1 as usize] = (c + vc * hh + rot * r).as_vec3();
-        vel[k.0][k.1 as usize] = (vc + w.cross(r)).as_vec3();
+        let (r, mm) = (at(k) - c, ms(k));
+        l += cross3(r, vs(vel, k) - vc) * mm;
+        let rr = dot3(r, r);
+        let ra = r.to_array();
+        for a in 0..3 {
+            for b in 0..3 {
+                i[a][b] += mm * (if a == b { rr } else { 0.0 } - ra[a] * ra[b]);
+            }
+        }
     }
+    let w = inverse3(i).map_or(Vec3::ZERO, |n| {
+        let row = |a: usize| n[a][0] * l.x + n[a][1] * l.y + n[a][2] * l.z;
+        Vec3::new(row(0), row(1), row(2))
+    });
+    let wl = dot3(w, w).sqrt();
+    let ang = wl * h;
+    if ang > 1.0 {
+        return false;
+    }
+    let (sn, cs) = sin_cos(ang);
+    let axis = if wl > 0.0 { w / wl } else { Vec3::ZERO };
+    for k in nodes {
+        let r = at(k) - c;
+        let rot = r * cs + cross3(axis, r) * sn + axis * (dot3(axis, r) * (1.0 - cs));
+        x1[k.0][k.1 as usize] = c + vc * h + rot;
+        vel[k.0][k.1 as usize] = vc + cross3(w, r);
+    }
+    true
 }

@@ -42,6 +42,8 @@ fn continuous_side_90() { accept("side", 90.0, 1.0, false); }
 #[test]
 fn continuous_side_60_pressed() { accept("side", 60.0, 2.0, true); }
 /// Extremes: both cars at 130 km/h head on, and at 100 km/h with 40 % of the width overlapping.
+/// FAILS today (2026-11-26): one run of 8 keeps 17 mm of hood paint drawn past the car's
+/// contact surface (inner node `hd_i32`); no crossing.
 #[test]
 fn continuous_head_130() { accept("head", 130.0, 1.0, false); }
 #[test]

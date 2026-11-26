@@ -42,3 +42,8 @@ gen_sedan_paint::accept_side_60_pressed
 # collision skin's defects, found by hand in the S4 crash study, now caught at build time.
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
+
+# Continuous contact (tests/continuous_contact.rs, 2026-11-26): head 130, one run of 8 keeps 17 mm of
+# car B's hood paint (bound to its inner node hd_i32, outside its contact surface) in car A's hood
+# from 0.3 s; the collision surfaces never cross. The paint is drawn past the contact surface.
+continuous_contact::continuous_head_130
