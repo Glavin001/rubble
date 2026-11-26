@@ -91,3 +91,32 @@ fn continuous_pairs_list_like_the_cpu() {
         assert_eq!(total, cpu.pairs_vt + cpu.pairs_ee, "step {f}: GPU pairs {pairs:?}, CPU vt {} ee {}", cpu.pairs_vt, cpu.pairs_ee);
     }
 }
+
+/// The same at the lab's frames (34 steps), 12 frames (0.2 s) through the crash.
+#[test]
+fn continuous_head_on_lab_frames_like_the_cpu() {
+    let fleet = sedans_head_on();
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_bit_exact(true);
+    g.set_vehicle_contact(true);
+    g.set_group_split(true);
+    g.set_continuous(true);
+    let mut w = ExplicitBeamsWorld::new(fleet.clone());
+    w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
+    for f in 0..12 {
+        let t = std::time::Instant::now();
+        g.frame(34);
+        let pos = g.positions();
+        let gpu_ms = t.elapsed().as_secs_f64() * 1e3;
+        w.frame(34);
+        for k in 0..2 {
+            let d = rms(&pos[k], &w.vehicles[k].positions());
+            assert_eq!(d, 0.0, "frame {f}, sedan {k}: GPU-CPU {d} m");
+        }
+        let (_, c) = g.continuous_counts().unwrap();
+        eprintln!("frame {f}: {gpu_ms:.1} ms (with readback), counters {c:?}");
+    }
+}
