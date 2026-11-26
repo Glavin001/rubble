@@ -697,3 +697,13 @@ its centre over the last 0.25 s (`JITTER`, `vehicle_paint_overlap`), 4 runs, wor
   about the car's centre (31 reversals in 0.25 s; JITTER_FREQ=car:node): a steady oscillation, not
   step-to-step chatter. Not friction (EDGE_NO_FRICTION=1: 0.98), not the contact throttle
   (THROTTLE_OFF=1: unchanged 1.18), not the residual (1.68), not the depth (fade 1.95).
+
+### Impact cost by pass (CUDA T4, 2026-11-25, `PROFILE_SPLIT=1 run.sh --cuda perf=0 ROWS`)
+
+ms a frame of 34 steps: head-on mid-crush 11.7 (members' step 8.9, edge pass 1.0); side mid-crush
+17.0 (members 9.7, edge 3.7); pile of 8 86.6 (edge 58.2, members 12.7, groups 5.6, tests 4.2).
+For two or three cars the members' step is most of an impact; the edge pass only dominates piles.
+A pile rebuilds the group's edge candidates whenever any node moves a skin (12 cm) about the
+group's mean; per-owner rebuilds (lossless when the two cars' motions sum under two skins) are the
+lever. (`RUBBLE_EDGE_SKIN` cannot be A/B'd on the portable fixtures: they carry the upload's
+statics, the skin with them.)
