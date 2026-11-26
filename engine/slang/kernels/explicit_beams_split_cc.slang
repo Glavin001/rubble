@@ -214,6 +214,30 @@ void ccPrimBox(uint v, uint kind, uint id, out float3 lo, out float3 hi)
         hi = max(a, b);
     }
 }
+// A primitive's nodes' largest contact offset (m): a pair's thickness is at most its two
+// primitives' (Rec::new's d, a weighted sum of offsets along the normal).
+// (Bounds only, never a pair's own value: grown by 0.1 % and 10 µm against the thickness's
+// rounding, so the candidates stay a superset of the pairs listed.)
+float ccSlack(float o) { return o * 1.001 + 1e-5; }
+float ccNodeOff(uint gi) { return gBeams[ccB(gi, 5u)].w; }
+float ccPrimOff(uint kind, uint id)
+{
+    if (kind == 0u)
+    {
+        uint4 tn = gStatic[gP.triBase + id];
+        return ccSlack(max(max(ccNodeOff(tn.x), ccNodeOff(tn.y)), ccNodeOff(tn.z)));
+    }
+    uint4 r = gStatic[ccRec(1).x + id];
+    return ccSlack(max(ccNodeOff(r.x), ccNodeOff(r.y)));
+}
+// The primitive's box at the start grown by its offset: what the grid holds it by.
+void ccPrimBoxOff(uint v, uint kind, uint id, out float3 lo, out float3 hi, out float o)
+{
+    ccPrimBox(v, kind, id, lo, hi);
+    o = ccPrimOff(kind, id);
+    lo = ssub3(lo, float3(o, o, o));
+    hi = sadd3(hi, float3(o, o, o));
+}
 void ccGridBuild(uint v, uint lane)
 {
     uint g0 = ccVeh(v, 1u).x;
@@ -235,7 +259,8 @@ void ccGridBuild(uint v, uint lane)
             if (kind == 0u ? !ccTriLive(id) : !ccEdgeLive(id)) continue;
             float3 lo;
             float3 hi;
-            ccPrimBox(v, kind, id, lo, hi);
+            float o;
+            ccPrimBoxOff(v, kind, id, lo, hi, o);
             int3 c0 = ccCell(lo, CC_CELL);
             int3 c1 = ccCell(hi, CC_CELL);
             for (int x = c0.x; x <= c1.x; x++)
@@ -282,12 +307,19 @@ void ccGridBuild(uint v, uint lane)
             sync();
         }
     }
+    // The buckets' ranges into plain memory (after the entries: the queries read them often).
+    for (uint b = lane; b < CC_GRID_BUCKETS; b += LANES)
+    {
+        gNext[g0 + 2u * cap + 2u * b] = asuint(gAcc[ba + b].load());
+        gNext[g0 + 2u * cap + 2u * b + 1u] = min(asuint(gAcc[ba + CC_GRID_BUCKETS + b].load()), cap);
+    }
+    sync();
 }
 // A bucket's entries: from its start to its cursor (where the fill left it).
 uint2 ccBucket(uint v, uint h)
 {
-    uint ba = ccVeh(v, 2u).x;
-    return uint2(asuint(gAcc[ba + h].load()), min(asuint(gAcc[ba + CC_GRID_BUCKETS + h].load()), ccVeh(v, 1u).y));
+    uint at = ccVeh(v, 1u).x + 2u * ccVeh(v, 1u).y + 2u * h;
+    return uint2(gNext[at], gNext[at + 1u]);
 }
 bool ccExcluded(uint v, uint k0, uint k1, uint k2, uint k3)
 {
@@ -380,8 +412,12 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
         if (!ccOnSurface(a, gi)) continue;
         float3 p = ccX0(a, gi);
         if (any(p < blo) || any(p > bhi)) continue;
-        int3 c0 = ccCell(ssub3(p, r3), CC_CELL);
-        int3 c1 = ccCell(sadd3(p, r3), CC_CELL);
+        // (The query grown by the reach and, between cars, the point's own offset.)
+        float oq = own ? 0.0 : ccSlack(ccNodeOff(gi));
+        float rp = nf(rq + oq);
+        float3 q3 = float3(rp, rp, rp);
+        int3 c0 = ccCell(ssub3(p, q3), CC_CELL);
+        int3 c1 = ccCell(sadd3(p, q3), CC_CELL);
         for (int x = c0.x; x <= c1.x; x++)
             for (int y = c0.y; y <= c1.y; y++)
                 for (int z = c0.z; z <= c1.z; z++)
@@ -396,15 +432,19 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
                         uint gt = ent & 0x7FFFFFFFu;
                         float3 tlo;
                         float3 thi;
-                        ccPrimBox(b, 0u, gt, tlo, thi);
+                        float ot;
+                        ccPrimBoxOff(b, 0u, gt, tlo, thi, ot);
                         if (any(c != max(c0, ccCell(tlo, CC_CELL)))) continue;
-                        if (any(tlo > p + r3) || any(thi < p - r3)) continue;
+                        if (any(tlo > p + q3) || any(thi < p - q3)) continue;
                         uint4 tn = gStatic[gP.triBase + gt];
                         if (own && (tn.x == gi || tn.y == gi || tn.z == gi)) continue;
                         float3 w;
                         float3 cp = fqClosestTri(p, ccX0(b, tn.x), ccX0(b, tn.y), ccX0(b, tn.z), w);
                         float3 dv = ssub3(p, cp);
-                        if (!(sdot(dv, dv) < r2)) continue;
+                        // (Between cars the pair's own bound, under the vehicles': the same pairs pass
+                        // the thickness test below.)
+                        float rt = own ? rq : nf(rp + ot);
+                        if (!(sdot(dv, dv) < smul(rt, rt))) continue;
                         if (own && ccExcluded(a, gi, tn.x, tn.y, tn.z)) continue;
                         CcPair q;
                         q.k[0] = tn.x; q.k[1] = tn.y; q.k[2] = tn.z; q.k[3] = gi;
@@ -425,8 +465,11 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
         if (!ccEdgeLive(ge)) continue;
         float3 p1 = ccX0(a, er.x);
         float3 q1 = ccX0(a, er.y);
-        float3 elo = ssub3(min(p1, q1), r3);
-        float3 ehi = sadd3(max(p1, q1), r3);
+        float oe = own ? 0.0 : ccSlack(max(ccNodeOff(er.x), ccNodeOff(er.y)));
+        float re = nf(rq + oe);
+        float3 e3 = float3(re, re, re);
+        float3 elo = ssub3(min(p1, q1), e3);
+        float3 ehi = sadd3(max(p1, q1), e3);
         if (any(ehi < blo) || any(elo > bhi)) continue;
         int3 c0 = ccCell(elo, CC_CELL);
         int3 c1 = ccCell(ehi, CC_CELL);
@@ -445,7 +488,8 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
                         if (own && gf <= ge) continue;
                         float3 flo;
                         float3 fhi;
-                        ccPrimBox(b, 1u, gf, flo, fhi);
+                        float of;
+                        ccPrimBoxOff(b, 1u, gf, flo, fhi, of);
                         if (any(c != max(c0, ccCell(flo, CC_CELL)))) continue;
                         if (any(flo > ehi) || any(fhi < elo)) continue;
                         uint4 fr = gStatic[ccRec(1).x + gf];
@@ -454,7 +498,8 @@ void ccList(uint a, uint b, float rq, float moA, float moB, uint lane, uint slic
                         float3 q2 = ccX0(b, fr.y);
                         float2 st = fqSegSeg(p1, q1, p2, q2);
                         float3 dv = ssub3(sadd3(p2, sscale(ssub3(q2, p2), st.y)), sadd3(p1, sscale(ssub3(q1, p1), st.x)));
-                        if (!(sdot(dv, dv) < r2)) continue;
+                        float rt = own ? rq : nf(re + of);
+                        if (!(sdot(dv, dv) < smul(rt, rt))) continue;
                         if (own && ccExcluded(a, er.x, er.y, fr.x, fr.y)) continue;
                         CcPair q;
                         q.k[0] = er.x; q.k[1] = er.y; q.k[2] = fr.x; q.k[3] = fr.y;
@@ -528,7 +573,7 @@ void ccPrep(uint off, uint k, uint lane)
             float3 x = nf3(o + gNodes[gi * 3u].xyz);
             float3 vel = gNodes[gi * 3u + 1u].xyz;
             gBeams[ccB(gi, 1u)] = float4(x, ccImOf(gi));
-            gBeams[ccB(gi, 5u)] = float4(ccX0Snap(v, gi), 0.0);
+            gBeams[ccB(gi, 5u)] = float4(ccX0Snap(v, gi), ccLen(contactOff(gi)));
             gBeams[ccB(gi, 2u)] = float4(x, 0.0);
             gBeams[ccB(gi, 3u)] = float4(vel, 0.0);
             gBeams[ccB(gi, 4u)] = float4(vel, 0.0);
@@ -1012,7 +1057,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
 // The pass's listing (dispatch B): workgroup g lists vehicle g / CC_SLICES's points and edges
 // (its slice g % CC_SLICES of them) against every member of its contact group. No barriers:
 // the grids and measures are the prep's, the pairs appended atomically.
-static const uint CC_SLICES = 8u;
+static const uint CC_SLICES = 32u;
 void ccListWide(uint g, uint lane)
 {
     uint a = g / CC_SLICES;

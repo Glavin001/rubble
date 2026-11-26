@@ -16,7 +16,7 @@ pub const SPLIT_CC_REST: u32 = 0x0400_0000;
 pub const SPLIT_CC_A: u32 = 0x0200_0000;
 pub const SPLIT_CC_B: u32 = 0x0100_0000;
 /// The listing's workgroups a vehicle (each a slice of its points and edges).
-pub const CC_SLICES: u32 = 8;
+pub const CC_SLICES: u32 = 32;
 /// Parameter copies a step: the node update's half, the pass's prep, listing and response,
 /// the rest's half.
 const PER_STEP: u32 = 5;
@@ -150,7 +150,7 @@ pub(super) fn cc_tables(
         next_init.extend(std::iter::repeat_n(0, (CC_PAIR_WORDS + 2) * cap));
         let grid_cap = 64 * (v.triangles.len() + p.len());
         let grid_at = next_init.len() as u32;
-        next_init.extend(std::iter::repeat_n(0, 2 * grid_cap));
+        next_init.extend(std::iter::repeat_n(0, 2 * grid_cap + 2 * CC_GRID_BUCKETS));
         let buckets_at = acc_init.len() as u32;
         acc_init.extend(std::iter::repeat_n(0, 2 * CC_GRID_BUCKETS));
         // The own pairs under the clearance at spawn (seam neighbours: never paired).

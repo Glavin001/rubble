@@ -64,7 +64,7 @@ fn continuous_head_on_steps_like_the_cpu() {
 
 /// The pass's pair list against the CPU's, every step through the hit: as many pairs
 /// (point-triangle and edge-edge, between the cars and each car's own) as the CPU lists,
-/// nothing overflowed. (The pass does not move anything yet: the states stay the same.)
+/// nothing overflowed.
 #[test]
 fn continuous_pairs_list_like_the_cpu() {
     let fleet = sedans_head_on();
@@ -77,10 +77,8 @@ fn continuous_pairs_list_like_the_cpu() {
     g.set_group_split(true);
     g.set_continuous(true);
     let mut w = ExplicitBeamsWorld::new(fleet);
-    // (The CPU's listing alone: no response, as the GPU's pass so far.)
-    let mut d = engine_softbody::explicit_contact::Dat::new(0.08, 0.85);
-    (d.iters, d.ccd_rounds) = (0, 0);
-    w.continuous = Some(d);
+    // (Both with their response: the states stay equal, so the listings must too.)
+    w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
     for f in 0..60 {
         g.frame(1);
         w.frame(1);
