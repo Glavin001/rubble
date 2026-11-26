@@ -700,9 +700,9 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
                     let [a, b] = [0, 1].map(|k| &w.vehicles[k]);
                     deep_last = depth(&paint(&v, &rest, a), &surface(b, &gap)).max(depth(&paint(&v, &rest, b), &surface(a, &gap)));
                     deep = deep.max(deep_last);
-                    // (PAINT_WHERE=1, run 0: the deepest paint of each car in the other, and the parts.)
+                    // (PAINT_WHERE=1, run 0: the deepest paint of each car in the other, and the parts, once settled; 2: during the hit too.)
                     let at_mm = std::env::var("PAINT_WHERE_MM").ok().and_then(|x| x.parse::<f32>().ok()).unwrap_or(45.0) * 1e-3;
-                    if deep_last > at_mm && s as f32 / 2000.0 >= settled && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1") {
+                    if deep_last > at_mm && (s as f32 / 2000.0 >= settled || std::env::var("PAINT_WHERE").is_ok_and(|x| x == "2")) && std::env::var("PAINT_WHERE").is_ok_and(|x| x == "1" || x == "2") {
                         for (n, x, y) in [("A in B", a, b), ("B in A", b, a)] {
                             let (dd, at) = deepest(&paint(&v, &rest, x), &surface(y, &gap));
                             if dd < at_mm { continue; }

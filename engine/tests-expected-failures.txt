@@ -43,7 +43,8 @@ gen_sedan_paint::accept_side_60_pressed
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
 
-# Continuous contact (tests/continuous_contact.rs, 2026-11-26): head 130, one run of 8 keeps 17 mm of
-# car B's hood paint (bound to its inner node hd_i32, outside its contact surface) in car A's hood
-# from 0.3 s; the collision surfaces never cross. The paint is drawn past the contact surface.
-continuous_contact::continuous_head_130
+# Continuous contact (tests/continuous_contact.rs, 2026-11-26): offset 100, 8 runs, worst 56 mm during
+# the hit (bar 50 mm; 0 mm from 0.3 s, 0 crossings): a front fender's corner paint is bound to nodes
+# up to 85 cm away (feL_r0, in no collision triangle), so it is drawn off the contact surface as the
+# fender crumples. Head 130 passes since the door fix (18 mm worst, 0 from 0.3 s).
+continuous_contact::continuous_offset_100

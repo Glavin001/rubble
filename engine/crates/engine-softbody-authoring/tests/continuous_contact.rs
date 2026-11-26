@@ -17,7 +17,7 @@ fn accept(scene: &str, kmh: f32, secs: f32, press: bool) {
     // vehicles' total momentum changes by rounding only (N·s and N·m·s in a step).
     for (k, x) in r.iter().enumerate() {
         let c = x.2.expect("continuous").ccd;
-        println!("|   run {k} | unresolved {}, zones {} ({} nodes), soft rounds {} rows {} left {}, response energy {:.0} J, momentum {:.1e} N*s, {:.1e} N*m*s |", c.unresolved, c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.ke, c.dp, c.dl);
+        println!("|   run {k} | depth {:.1} mm (own {:.1}), above 1 cm {:.2} s | unresolved {}, zones {} ({} nodes), soft rounds {} rows {} left {}, response energy {:.0} J, momentum {:.1e} N*s, {:.1e} N*m*s |", x.0[6] * 1e3, x.0[4] * 1e3, x.0[9], c.unresolved, c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.ke, c.dp, c.dl);
         assert_eq!(c.unresolved, 0, "run {k}");
         assert!(c.ke <= 1e-3, "run {k}: {} J", c.ke);
         assert!(c.dp < 0.01 && c.dl < 2.0, "run {k}: {} {}", c.dp, c.dl);
@@ -42,10 +42,10 @@ fn continuous_side_90() { accept("side", 90.0, 1.0, false); }
 #[test]
 fn continuous_side_60_pressed() { accept("side", 60.0, 2.0, true); }
 /// Extremes: both cars at 130 km/h head on, and at 100 km/h with 40 % of the width overlapping.
-/// FAILS today (2026-11-26): one run of 8 keeps 17 mm of hood paint drawn past the car's
-/// contact surface (inner node `hd_i32`); no crossing.
 #[test]
 fn continuous_head_130() { accept("head", 130.0, 1.0, false); }
+/// FAILS today (2026-11-26): 56 mm worst during the hit in one run of 8 (bar 50): fender paint
+/// bound to nodes up to 85 cm away is drawn off the contact surface; 0 crossings, 0 from 0.3 s.
 #[test]
 fn continuous_offset_100() { accept("offset", 100.0, 1.0, false); }
 /// A fast rigid body into a car: a 0.15 m steel ball (111 kg) into the door at 100 km/h.
