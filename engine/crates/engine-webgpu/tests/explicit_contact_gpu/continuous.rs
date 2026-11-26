@@ -26,32 +26,39 @@ fn sedans_head_on() -> Vec<ExplicitBeams> {
     vec![make(&d, -0.125 - ext(&d, 2).1, speed), make(&turned, 0.125 - ext(&turned, 2).0, -speed)]
 }
 
-/// The seam alone: the split path's members in two halves (node update, rest) with nothing
-/// between them steps exactly as in one, bit for bit, through the hit.
+/// Continuous contact through the generated sedans' head-on, GPU == CPU bit for bit every
+/// step (the pass's listing, speculative contact, CCD impulses and impact zones), with the
+/// split path's tests split off and on.
 #[test]
-fn continuous_seam_alone_steps_as_one_member_dispatch() {
+fn continuous_head_on_steps_like_the_cpu() {
     let fleet = sedans_head_on();
     for tests in [false, true] {
-        let (Some(mut a), Some(mut b)) = (gpu(&fleet), gpu(&fleet)) else {
+        let Some(mut g) = gpu(&fleet) else {
             eprintln!("no GPU: skipped");
             return;
         };
-        for g in [&mut a, &mut b] {
-            g.set_bit_exact(true);
-            g.set_vehicle_contact(true);
-            g.set_group_split(true);
-            g.set_group_split_tests(tests);
-        }
-        a.set_continuous(true);
-        for f in 0..6 {
-            a.frame(34);
-            b.frame(34);
-            let (pa, pb) = (a.positions(), b.positions());
+        g.set_bit_exact(true);
+        g.set_vehicle_contact(true);
+        g.set_group_split(true);
+        g.set_group_split_tests(tests);
+        g.set_continuous(true);
+        let mut w = ExplicitBeamsWorld::new(fleet.clone());
+        w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
+        for f in 0..80 {
+            g.frame(1);
+            w.frame(1);
+            let pos = g.positions();
+            let (_, c) = g.continuous_counts().expect("continuous tables");
+            let cpu = w.continuous.as_ref().unwrap().total.ccd;
             for k in 0..2 {
-                assert_eq!(rms(&pa[k], &pb[k]), 0.0, "tests split {tests}, sedan {k}, frame {f}");
+                let d = rms(&pos[k], &w.vehicles[k].positions());
+                assert_eq!(d, 0.0, "tests split {tests}, step {f}, sedan {k}: GPU-CPU {d} m; GPU counters {c:?}, CPU impacts {} zones {}", cpu.hits, cpu.zones);
             }
         }
-        a.contact_status().unwrap();
+        let cpu = w.continuous.as_ref().unwrap().total;
+        let (_, c) = g.continuous_counts().unwrap();
+        eprintln!("tests split {tests}: GPU counters {c:?}; CPU impacts {} zones {} unresolved {}", cpu.ccd.hits, cpu.ccd.zones, cpu.ccd.unresolved);
+        assert!(cpu.ccd.hits > 0, "the cars met");
     }
 }
 
