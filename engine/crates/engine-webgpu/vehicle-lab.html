@@ -178,7 +178,7 @@
         <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label>
         <label title="With the torn pieces labelled, the rigid bodies in the car's window are those near some piece, not everything between the car and a piece far away (the same contacts). Applies as it runs."><input type="checkbox" id="pieceWindows" data-opt="live" checked /> a coupling window per piece</label>
         <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" checked /> self-collision across the GPU</label>
-        <label title="Continuous contact: every step, contact pairs that could meet are found and stopped by momentum-conserving inelastic impulses and continuous collision checks, so car surfaces never pass through each other or themselves. Not yet real time (about 2 frames a second). Turns on touching cars across the GPU and turns off self-collision across the GPU and the wide passes. Applies as it runs."><input type="checkbox" id="continuous" data-opt="live" /> continuous contact (slow)</label>
+        <label title="Continuous contact: every step, contact pairs that could meet are found and stopped by momentum-conserving inelastic impulses and continuous collision checks, so car surfaces never pass through each other or themselves. Not yet real time (about 2 frames a second). Turns on edge contact and touching cars across the GPU, and turns off self-collision across the GPU and the wide passes. Rebuilds the cars."><input type="checkbox" id="continuous" data-opt="build" /> continuous contact (slow)</label>
         <label title="Cars touching each other are stepped each in its own GPU thread group, with their contact tests across the whole GPU, instead of every touching group on one thread group (the same results bit for bit). Applies as it runs."><input type="checkbox" id="groupSplit" data-opt="live" checked /> touching cars across the GPU</label>
         <label title="Self-collision's hit forces: each hit's four node beam forces are summed once on idle GPU threads instead of three times in a row (the same results bit for bit). Applies as it runs."><input type="checkbox" id="hitCache" data-opt="live" checked /> hit forces summed once</label>
         <label title="Self-collision's hits applied with each hit's four nodes on GPU threads of their own (the adds, the nodes' accelerations and the residual pass's shares), instead of one thread a hit doing its four nodes in a row (the same results bit for bit). Needs hit forces summed once. Applies as it runs."><input type="checkbox" id="hitRoles" data-opt="live" checked /> hits a node a thread</label>
@@ -472,10 +472,6 @@
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
-        else if (c.id === 'continuous') {
-          cmd({ continuous: get('continuous') });
-          if (get('continuous')) { for (const [id, on] of [['groupSplit', true], ['selfSplit', false], ['wide', false]]) { const el = document.getElementById(id); if (el) el.checked = on; } }
-        }
         else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
         else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront' || c.id === 'fleetAny' || c.id === 'fleetPost' || c.id === 'fleetLevels' || c.id === 'fleetHitLat' || c.id === 'levelsOnce' || c.id === 'fleetFuse' || c.id === 'fleetKeep' || c.id === 'aheadApart' || c.id === 'tyreAhead' || c.id === 'hitsLocal' || c.id === 'tyreEarly' || c.id === 'wheelsApart' || c.id === 'selfHitsLocal' || c.id === 'splitWheelsAhead' || c.id === 'hitSlotMap') cmd({ perfFlags: perfFlags() });
         else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
@@ -664,6 +660,14 @@
         }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
+        // (Continuous contact: edge contact and touching cars across the GPU on, self-collision
+        // across the GPU and the wide passes off; the World applies the same.)
+        if (get('continuous')) {
+          for (const [id, on] of [['edge', true], ['groupSplit', true], ['selfSplit', false], ['wide', false]]) {
+            const el = document.getElementById(id);
+            if (el) el.checked = on;
+          }
+        }
         const spec = {
           ...(used > 1 ? { vehicles: entries.slice(0, used).map((e) => e.vehicle) } : { vehicle: car.vehicle }), drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), edge: get('edge'), vvBandMm: get('vvBandMm') === 25 ? 0 : get('vvBandMm'), ownTravel: get('ownTravel'), wheelsHitBodies: get('wheelsHitBodies'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), continuous: get('continuous'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), vehicleSleep: sleepSpec(), bitExact: get('bitExact'), parked: get('parked') && !derby, cars: nCars, mountain: mountainSpec(), shapes: get('shapes'), derby: derbySpec(),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.

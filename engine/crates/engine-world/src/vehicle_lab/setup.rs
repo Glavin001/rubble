@@ -143,7 +143,8 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
     car.surface_contact = opts.surface_contact;
     car.own_travel_reach = opts.own_travel_reach;
     // (Edge contact runs on two-body dissipative contact: the BeamNG profile's.)
-    car.edge_contact = opts.edge_contact && car.two_body_contact && car.dissipative_contact;
+    // (Continuous contact's tables come with edge contact's: it turns it on.)
+    car.edge_contact = (opts.edge_contact || opts.continuous) && car.two_body_contact && car.dissipative_contact;
     car.vehicle_contact_range = opts.vehicle_contact_range;
     car
 }
