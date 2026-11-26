@@ -2624,7 +2624,6 @@ impl ExplicitUpload {
         } else {
             0
         };
-
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
         // Two parities of group slots.
