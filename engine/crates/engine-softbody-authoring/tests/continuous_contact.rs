@@ -30,6 +30,8 @@ fn accept(scene: &str, kmh: f32, secs: f32, press: bool) {
         assert!(c.ke <= 1e-3, "run {k}: {} J", c.ke);
         assert!(c.dp < 0.01 && c.dl < 2.0, "run {k}: {} {}", c.dp, c.dl);
     }
+    // No fixed-point sum past its range anywhere in the run (counted, not wrapped silently).
+    assert_eq!(engine_softbody::explicit_contact::fixed_overflows(), 0, "fixed-point sums overflowed");
     assert!(pass);
 }
 

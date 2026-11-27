@@ -31,7 +31,7 @@ mod ccd_rows;
 mod ccd_vel;
 mod dat;
 mod restitute;
-pub use ccd::CcdStats;
+pub use ccd::{fixed_overflows, CcdStats};
 pub use dat::{close_pairs_at, closest_on_triangle, own_clearance, closest_segments, Dat, DatStats};
 pub use restitute::{CONTACT_RESTITUTION, RESTITUTION_STRIPES};
 use residual::*;

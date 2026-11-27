@@ -20,7 +20,28 @@ pub const VEL_FIXED: f32 = 4_194_304.0;
 /// A velocity-change component in [`VEL_FIXED`] units, rounded to nearest with ties to even
 /// (as [`to_fixed_shift`]; the kernels' twin spells it out).
 pub fn to_fixed_vel(x: f32) -> i32 {
+    if !(x * VEL_FIXED).abs().le(&2.0e9) {
+        FIXED_OVERFLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     (x * VEL_FIXED).clamp(-2.0e9, 2.0e9).round_ties_even() as i32
+}
+
+/// Fixed-point sums past their range (a velocity change past ±476 m/s in one term or one node's
+/// sum, a position step past the shift's): an error, counted here rather than wrapped silently
+/// (the result is then wrong, and momentum is not kept). Tests assert it stays 0.
+pub static FIXED_OVERFLOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`FIXED_OVERFLOWS`] so far.
+pub fn fixed_overflows() -> u64 {
+    FIXED_OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn add_counted(a: i32, b: i32) -> i32 {
+    let (r, o) = a.overflowing_add(b);
+    if o {
+        FIXED_OVERFLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    r
 }
 
 /// Per-node fixed-point sums of a round's velocity changes and position steps.
@@ -36,13 +57,13 @@ impl FixedSums {
     pub fn add_v(&mut self, v: usize, i: u32, d: Vec3) {
         let e = &mut self.dv[v][i as usize];
         for (k, c) in d.to_array().into_iter().enumerate() {
-            e[k] = e[k].wrapping_add(to_fixed_vel(c));
+            e[k] = add_counted(e[k], to_fixed_vel(c));
         }
     }
     pub fn add_x(&mut self, v: usize, i: u32, d: Vec3) {
         let e = &mut self.dx[v][i as usize];
         for (k, c) in d.to_array().into_iter().enumerate() {
-            e[k] = e[k].wrapping_add(to_fixed_shift(c));
+            e[k] = add_counted(e[k], to_fixed_shift(c));
         }
     }
     /// Applies the sums (velocities and, if given, positions) and clears them.
