@@ -27,6 +27,7 @@ mod edge;
 mod residual;
 mod wheels;
 mod ccd;
+mod ccd_rows;
 mod dat;
 mod restitute;
 pub use ccd::CcdStats;

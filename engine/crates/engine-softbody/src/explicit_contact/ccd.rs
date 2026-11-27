@@ -96,7 +96,7 @@ pub struct CcdStats {
 
 /// The closest points of a pair at positions `p` (four points): their weights (signed by
 /// side: + on the second side) and the gap vector from the first side to the second.
-fn closest(nn: usize, p: [Vec3; 4]) -> ([f32; 4], Vec3) {
+pub(super) fn closest(nn: usize, p: [Vec3; 4]) -> ([f32; 4], Vec3) {
     use engine_schema::feature_query as fq;
     if nn == 3 {
         let (c, w) = fq::closest_on_triangle(p[3], p[0], p[1], p[2]);
@@ -211,6 +211,13 @@ pub(super) fn resolve(
     // impulse is then applied in full on both sides, equal and opposite (its signed weights
     // sum to zero), so momentum is exact.
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
+    // (DAT_RESPONSE=rows: the rows' response, `ccd_rows`, in place of these rounds.)
+    if std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "rows") {
+        if super::ccd_rows::rows_rounds(pairs, x0, x1, vel, im, rounds, st, &collide) {
+            finish(st, x1, vel);
+            return;
+        }
+    } else {
     for _ in 0..rounds {
         let hit = collide(x1);
         st.rounds += 1;
@@ -263,6 +270,7 @@ pub(super) fn resolve(
         for c in count.iter_mut() {
             c.iter_mut().for_each(|c| *c = 0);
         }
+    }
     }
     // Non-rigid impact zones first (`soft` rounds, [`soft_rounds`]), then the rigid ones.
     if soft > 0 && soft_rounds(pairs, x0, x1, vel, im, soft, st, &collide) {

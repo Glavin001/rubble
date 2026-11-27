@@ -432,6 +432,26 @@ rest and never creates energy (`DAT_E` = the cap). 8 runs (energy 2):
 trend. 1.25 is the smallest cap that puts every energy test under 1 %; it needs the paint guard
 during a hit at 8 cm: the owner's decision.
 
+## Rows with accumulated impulses, CPU reference, first measurements (2026-11-26)
+
+`explicit_contact/ccd_rows.rs`, `DAT_RESPONSE=rows` (off by default): the CCD rounds replaced by
+rows (design C of `continuous-response-parallel-design.md`), mass-split Jacobi to a fixed point
+a round, e = 1, zones unchanged. The speculative pass still runs before it, apart.
+
+| | today | rows, position row at the impact gap | rows, position row on the path |
+|---|---|---|---|
+| energy removed, head 100 (2 runs) | 2.8-2.9 % | 1.4-1.5 % | 3.8-4.1 % |
+| zones, head 100 | ~700-1,700 | ~3,800-4,700 | ~1,200-1,900 |
+| 8-run crashes (head 100/130, offset 100, side 90) | pass | pass, 0 crossings | not run |
+
+- More iterations change nothing (128 and 512 a round: 1.3-1.6 %): not convergence.
+- Holding a pair at its impact gap leaves its path closing, so it is hit again every round
+  and ends in a zone; removing the path's closing (as today's rounds) keeps zones rare but the
+  guard binds in two thirds of the steps: the velocity change is still not one projection,
+  because the speculative pass's inelastic changes are in it.
+- Next: the speculative constraints as rows in the same solve (design C step 1), so the
+  velocity change is one projection and e = 1 returns it whole.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
