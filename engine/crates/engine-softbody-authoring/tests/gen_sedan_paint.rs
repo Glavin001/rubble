@@ -67,7 +67,7 @@ fn accept_side_60() { accept("side", 60.0, 1.0, false); }
 fn accept_head_30_pressed() { accept("head", 30.0, 2.0, true); }
 #[test]
 fn accept_head_60_pressed() { accept("head", 60.0, 2.0, true); }
-/// FAILS today (2026-11-25): 52 mm at the hood's front edge.
+/// Passes since 2026-11-27 (37 mm, the doors' 2 cm edge columns).
 #[test]
 fn accept_head_60() { accept("head", 60.0, 1.0, false); }
 /// FAILS today (2026-11-25): 54 mm at the hood's front edge.
