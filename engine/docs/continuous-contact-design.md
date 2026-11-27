@@ -1149,6 +1149,32 @@ Head 100 for 0.1 s, `DAT_BARRIER_TOL=5e-7`:
 - **What it shows meanwhile**, apart from convergence: 148 mm of paint during the crush and 8 m/s
   of jitter. It does not yet meet the paint guard.
 
+## The exact cluster solve with torque-free rows (2026-11-27, late; `DAT_EXACT=1 DAT_LEVER=1`, off)
+
+The one lever measured to remove most zones, with the torque-free rows that answer its angular
+momentum. Head 100 for 0.3 s:
+
+| | zones | angular momentum, worst step | linear momentum | crossings | paint during / from 0.3 s |
+|---|---|---|---|---|---|
+| default | 5,858 | 0.85 N·m·s | 5.5e-4 N·s | 0 | 0 / 0 mm |
+| exact | 532 | 10 N·m·s | 1.1e-3 | 0 | 2.9 / 0 mm |
+| exact, torque-free rows | 1,151 | 0.29 N·m·s | 5.6e-4 | 0 | 6.5 / 0 mm |
+
+Contact's work (rule 8), 2 runs each:
+
+| crash | default | exact, torque-free | the rows' part | the zones' part |
+|---|---|---|---|---|
+| ball 100 | 16.1–18.8 % | 8.1 % | −3.5 kJ | ~0 (0–4 zones) |
+| side 60 | 4.6–4.7 % | 5.8 % | −7.3 kJ | −4.3 kJ (58–127 zones) |
+| head 100 | 12.5–12.7 % | 17.2–23.1 % | −48 kJ (4.3 %) | −144 to −210 kJ (1,172–1,575 zones) |
+
+- **What it fixes:** the rows' own removal at head 100 falls from 115 kJ to 48 kJ (4.3 %), and
+  angular momentum is within its bar.
+- **What it does not:** the zones left are fewer but larger, and they remove more. The ball's
+  paint reaches 131 mm during the hit (guard 70 mm): the door's paint does not follow the skin
+  where the zones used to hold it rigid (a generator fix).
+- **Next:** why 16–67 cluster solves a run are still left unsettled, and the zones they leave.
+
 ## Velocity contact on the GPU (design, 2026-11-27)
 
 The CPU reference (`ccd_vel.rs`, `dat_vel.rs`) is the spec. It takes the position response's
