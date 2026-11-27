@@ -1,4 +1,4 @@
-// Crash-test lab UI for softbody.html ?solver=explicit: time control (slow motion,
+// Crash-test lab UI for crash-lab.html: time control (slow motion,
 // pause, frame and physics-step stepping, restart), impact detection and the time
 // readout, a recorded run to scrub back through, the studio HUD (scene pills, node
 // and beam counts, strain legend), view toggles, camera presets, a clean recording
@@ -63,7 +63,7 @@ body.lab-on .rb-card { left: calc(50% + 150px); min-width: min(560px, calc(100vw
 `;
 
 /**
- * The lab's frame before the engine loads (softbody.html calls it at once in lab mode): the
+ * The lab's frame before the engine loads (crash-lab.html calls it at once in lab mode): the
  * HUD's places, the panels (crash-lab-ui.mjs) with a line saying what they will hold, the
  * raw page panels hidden. `createCrashLab({ shell })` fills it. `title`: the scene's name
  * when known.
@@ -243,8 +243,8 @@ export function createCrashLab(ctx) {
     if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
     if (kind === 'r') { location.href = ctx.refUrl(k); return; }
     if (kind === 'f') { location.href = ctx.familyUrl(k); return; }
-    // The page's vehicle and options (softbody.html keepVehicle) carry across.
-    const u = new URL(location.href); const s = new URLSearchParams(); window.__keepVehicle?.(s); s.set('solver', 'explicit'); s.set('preset', k); u.search = s.toString(); location.href = u.href;
+    // The page's vehicle and options carry across (crash-lab-config.mjs urls.preset).
+    location.href = ctx.presetUrl(k);
   };
   $('labPlay').onclick = (e) => { playPause(); blur(e); };
   $('labFrame').onclick = (e) => { frameStep(); blur(e); };

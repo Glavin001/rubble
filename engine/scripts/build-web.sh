@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
-# demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), Broadside (broadside.html), the timber yard (timber.html), the large-maps city (city.html), the motion demo (motion.html:
+# demo (vehicle.html), soft-body vehicles (softbody.html: the soft AVBD solver), the crash lab (crash-lab.html: the explicit 2 kHz solver), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), Broadside (broadside.html), the timber yard (timber.html), the large-maps city (city.html), the motion demo (motion.html:
 # CCD, characters, bullets), the fracture lab (fracture/), the generated vehicle models viewer (models/), the live vehicle designer (vehicle-designer.html), Rubble's generated sedan
 # (__mods/<design>_new for every registered vehicle design, made by running its generator) and a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
@@ -363,7 +363,7 @@ else
     done
   done
 fi
-cp "$WEB"/index.html "$WEB"/play.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/vehicle-lab.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$WEB"/three.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/play.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/crash-lab.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/vehicle-lab.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$WEB"/three.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rubble · crash lab (explicit node–beam solver)</title>
+  <!--
+    The crash lab: soft-body vehicles on the explicit 2 kHz node–beam solver (engine-world-wasm
+    ExplicitSim), with the lab's panels (Scene, View, Playback, Results), reference crashes
+    (?crashRef=), scenario families (?crashFamily=), one-click presets (?preset=) and scenes
+    (?xscene=). softbody.html?solver=explicit... redirects here, its parameters kept. The
+    soft (AVBD) solver stays on softbody.html. docs/crash-reference.md has the panels and the
+    URL parameters.
+
+    This page is a shell and a bootstrap; everything is in modules, each owning one thing:
+      crash-lab-state.mjs     the one page state object (every module reads and writes it)
+      crash-lab-config.mjs    the URL: scene, preset, reference crash, modes, options, links
+      crash-lab-vehicle.mjs   the vehicle's source and its pickers
+      crash-lab-controls.mjs  the page's own controls and readouts; the plain views' panels
+      world-device.mjs        the World, the GPU device and the canvas
+      crash-lab-sim.mjs       the explicit sim: spawn, restart, respawn, steps, reads
+      crash-lab-draw.mjs      the renderer set-up and each frame's drawing
+        crash-lab-shader.mjs, crash-lab-body.mjs, crash-lab-render.mjs (the lab's renderer)
+      crash-lab-camera.mjs    camera and input
+      crash-lab-loop.mjs      the frame loop, HUD and status line
+      crash-lab-mount.mjs     the lab (crash-lab.mjs, crash-ref.mjs, crash-lab-scene.mjs) in
+                              its panels (crash-lab-ui.mjs)
+      crash-lab-hooks.mjs     the automation hooks (window.__*)
+  -->
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0e14; color: #e6e9ef; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: absolute; background: rgba(12, 16, 24, 0.78); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 12px; }
+    #info { top: 10px; left: 10px; max-width: 470px; }
+    #hud { right: 10px; top: 10px; min-width: 230px; text-align: right; }
+    #speed { font-size: 32px; font-weight: 700; }
+    #speed small { font-size: 14px; font-weight: 400; color: #9aa4b2; }
+    .muted { color: #9aa4b2; }
+    .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
+    .row input[type=number] { width: 58px; background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 2px 4px; font: inherit; }
+    .row label.p { color: #9aa4b2; }
+    .row label.p:has(input[type=range]) { display: flex; align-items: center; gap: 6px; width: 100%; }
+    .row input[type=range] { flex: 1; min-width: 120px; accent-color: #5b9cff; }
+    .row .pv { min-width: 40px; text-align: right; color: #e6e9ef; font-variant-numeric: tabular-nums; }
+    button, select, label.file, a.btn { background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    a.btn { display: inline-block; text-decoration: none; }
+    button:hover, label.file:hover, a.btn:hover { background: #26324a; }
+    #status { bottom: 10px; left: 10px; font: 12px ui-monospace, monospace; }
+    #err { position: absolute; bottom: 40px; left: 10px; right: 10px; color: #ff8a80; white-space: pre-wrap; font: 12px ui-monospace, monospace; }
+    .damage { font: 12px ui-monospace, monospace; }
+    kbd { background: #222b3a; border-radius: 3px; padding: 0 4px; font: 11px ui-monospace, monospace; }
+    .lab-page #info, .lab-page #hud, .lab-page #status { display: none !important; }
+  </style>
+  <script>
+    // The lab's view, except the plain views (the arena, the traffic derby, ?lab=0): its
+    // panel shell is built as the first module starts (crash-lab.mjs createLabShell).
+    { const q = new URLSearchParams(location.search);
+      window.__labPage = q.get('lab') !== '0' && !['arena', 'traffic'].includes(q.get('xscene') ?? (q.get('scene') === 'traffic' ? 'traffic' : ''));
+      if (window.__labPage) document.documentElement.classList.add('lab-page'); }
+  </script>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="panel" id="status">loading…</div>
+  <div id="caption" style="position:absolute;left:50%;bottom:64px;transform:translateX(-50%);font:600 24px system-ui,sans-serif;color:#fff;text-shadow:0 2px 6px #000;display:none"></div>
+  <div id="err"></div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
+  <script type="module">
+    // The lab's frame at once (crash-lab.mjs: no engine import), before the engine's modules
+    // have loaded; the bootstrap below fills it.
+    import { createLabShell } from './crash-lab.mjs';
+    if (window.__labPage) window.__labShell = createLabShell();
+  </script>
+  <script type="module">
+    // Bootstrap: read the URL, start the engine and the sim, build the renderer, camera and
+    // loop, mount the lab, install the automation hooks, run.
+    import { errorText } from './rubble-world.mjs';
+    import { createLoading, showFatal } from './load-progress.mjs';
+    import { createPageState } from './crash-lab-state.mjs';
+    import { readConfig, readOptions } from './crash-lab-config.mjs';
+    import { loadVehicle } from './crash-lab-vehicle.mjs';
+    import { makeControls, plainPanels } from './crash-lab-controls.mjs';
+    import { startSim } from './crash-lab-sim.mjs';
+    import { createDraw } from './crash-lab-draw.mjs';
+    import { createCamera } from './crash-lab-camera.mjs';
+    import { createLoop } from './crash-lab-loop.mjs';
+    import { mountLab } from './crash-lab-mount.mjs';
+    import { installHooks } from './crash-lab-hooks.mjs';
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    // Loading: each stage named where it runs (load-progress.mjs draws the card); its Cancel
+    // while kernels compile is set once the options are read (crash-lab-sim.mjs).
+    const loadCancel = { label: '', hint: '', run: () => {} };
+    const loading = createLoading({ title: 'Loading Rubble', cancel: loadCancel });
+    loading.stage('Reading the scene');
+    const fail = (e) => {
+      if (!errEl.textContent) errEl.textContent = errorText(e);
+      statusEl.textContent = 'stopped';
+      window.__failed = String((e && e.message) || e);
+      // While loading: the card stays, with the kernels' states and a retry.
+      if (loading.active()) loading.fail({ detail: String((e && e.message) || e) });
+      else showFatal({ title: 'The simulation stopped', detail: String((e && e.message) || e), hint: 'Reload to start again. The full error is in the console and at the bottom of the page.' });
+    };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    const page = createPageState({ loading, loadCancel, fail });
+    await readConfig(page);
+    await loadVehicle(page);
+    readOptions(page);
+    makeControls(page);
+    if (!page.cfg.lab) plainPanels(page);
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    await startSim(page);
+    loading.stage('Building the renderers');
+    await loading.paint();
+    await createDraw(page);
+    createCamera(page);
+    createLoop(page);
+    if (page.cfg.lab) await mountLab(page);
+    installHooks(page);
+    statusEl.textContent = `scene ready · ${page.world.bodyCount()} bodies`;
+    page.startLoop();
+  </script>
+</body>
+</html>

@@ -1,13 +1,13 @@
-// The crash lab's layout (softbody.html ?solver=explicit): its panels, where they sit,
+// The crash lab's layout (crash-lab.html): its panels, where they sit,
 // how they collapse and the focus mode. Layout only: no control here does anything by
-// itself; crash-lab.mjs, crash-ref.mjs and softbody.html put their controls in the panels.
+// itself; crash-lab.mjs, crash-ref.mjs and crash-lab-mount.mjs put their controls in the panels.
 //
 // One responsibility per panel, and each control in exactly one panel:
 //   Scene    (left, Shift+S)  what is simulated: the scene picker (reference crashes,
 //            crash-test presets, scenes); a reference crash's contact setting and run; for
 //            the free scenes the vehicle (car picker, converted BeamNG vehicles, skin
 //            binding, Load .truck, Load JBeam folder), the scene's knobs, the solver's
-//            options and the solver switch. What does not apply to a reference crash is
+//            options and the link to the soft solver's page. What does not apply to a reference crash is
 //            hidden there, not disabled.
 //   View     (left, Shift+V)  how and from where it is drawn: the one camera group (the
 //            scenario's own cameras, side, top, ¾, front, follow, auto-orbit and the
@@ -54,9 +54,10 @@ const CSS = `
 .lab-body .r { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 5px 0; }
 .lab-body .lbl { color: #9fb0cf; min-width: 52px; }
 .lab-body .sub { margin: 8px 0 2px; color: #9fb0cf; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
-.lab-dock button, .lab-dock select, .lab-dock label.file { box-sizing: border-box; min-height: 26px; background: #18233a; color: #e6ecf7; border: 1px solid #2c3b5c; border-radius: 6px; padding: 3px 8px; font: 12px/1.3 system-ui, sans-serif; cursor: pointer; }
+.lab-dock button, .lab-dock select, .lab-dock label.file, .lab-dock a.btn { box-sizing: border-box; min-height: 26px; background: #18233a; color: #e6ecf7; border: 1px solid #2c3b5c; border-radius: 6px; padding: 3px 8px; font: 12px/1.3 system-ui, sans-serif; cursor: pointer; }
 .lab-dock select { max-width: 100%; }
-.lab-dock button:hover, .lab-dock label.file:hover { background: #22324f; }
+.lab-dock button:hover, .lab-dock label.file:hover, .lab-dock a.btn:hover { background: #22324f; }
+.lab-dock a.btn { display: inline-block; color: #e6ecf7; text-decoration: none; }
 .lab-dock button.on, .lab-dock select.on { background: #2b4f8a; border-color: #4a78c4; }
 .lab-dock .lab-toggle { background: none; border: 0; min-height: 30px; }
 .lab-dock label { color: #9fb0cf; }
