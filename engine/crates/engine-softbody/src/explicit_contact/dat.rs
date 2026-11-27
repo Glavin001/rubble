@@ -931,7 +931,7 @@ fn xi_share() -> f32 {
     std::env::var("DAT_XI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)
 }
 
-/// Velocity-only impulse contact (`DAT_RESPONSE=vel`, `ccd_rows::velocity_rounds`): its rows take
+/// Velocity-only impulse contact (`DAT_RESPONSE=vel`, `ccd_vel::velocity_rounds`): its rows take
 /// the speculative pass's place too, so every contact goes through one law.
 fn vel_mode() -> bool {
     std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel")

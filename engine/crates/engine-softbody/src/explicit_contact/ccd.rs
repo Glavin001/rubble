@@ -215,11 +215,11 @@ pub(super) fn resolve(
     // impulse is then applied in full on both sides, equal and opposite (its signed weights
     // sum to zero), so momentum is exact.
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
-    // (DAT_RESPONSE=vel: velocity-only impulse contact, `ccd_rows::velocity_rounds`, in place of
+    // (DAT_RESPONSE=vel: velocity-only impulse contact, `ccd_vel::velocity_rounds`, in place of
     // these rounds and with no non-rigid zones (they move positions alone).)
     let vel_only = std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel");
     if vel_only {
-        if super::ccd_rows::velocity_rounds(pairs, x0, x1, vel, m, im, h, rounds, st, &collide, vpre, e) {
+        if super::ccd_vel::velocity_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide, vpre, e) {
             finish(st, x1, vel);
             return;
         }
