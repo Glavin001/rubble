@@ -60,6 +60,11 @@ fn every_body_paint_vertex_binds_to_the_collision_skin() {
                     sum += off;
                 }
                 amp = amp.max(flexskin::amplification(v));
+                // (AMP_WHERE=mesh: its vertices past amplification 3, where and on what.)
+                if design == "sedan" && std::env::var("AMP_WHERE").is_ok_and(|w| w == m.name) && flexskin::amplification(v) > 3.0 {
+                    let w: Vec<String> = v.w.iter().filter(|e| e.1.abs() > 0.2).map(|e| format!("{} {:.2}", car.nodes[e.0 as usize].name, e.1)).collect();
+                    println!("AMP {:.2} at {x:.3}: {w:?}", flexskin::amplification(v));
+                }
                 rest = rest.max(flexskin::eval(&v.w, v.off, v.nrm, &q).0.distance(*x));
             }
             println!(

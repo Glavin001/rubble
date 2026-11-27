@@ -344,7 +344,7 @@ fn a_sheet_fit_follows_its_surface_and_keeps_the_height_in_the_offset() {
     // curvature gives it a third direction, then reaches the paint's height with
     // weights of both signs.
     let free = bind(&ids, &p, &v, &n);
-    let (sk, _) = bind_sheet(&ids, &p, &v, &n).unwrap();
+    let (sk, _) = bind_sheet(&ids, &p, &v, &n, None).unwrap();
     println!(
         "amplification: volume fit {}, sheet fit {:.2}",
         free.as_ref().map_or("no fit".to_string(), |f| format!("{:.2}", amp(&f.0))),

@@ -46,6 +46,12 @@ pub const MIN_NODES: usize = 5;
 /// The frame's kernels: this multiple of the position's radii.
 pub const FRAME_SCALE: f64 = 1.6;
 pub const EIG_MIN: f64 = 0.012;
+/// A sheet's fit ([`Pool::sheet`]) reproduces affine motion only along directions its
+/// nodes spread in by well over this (m, an RMS spread): a panel's curvature within a
+/// kernel (a door's edge column bows 2–4 cm) is its shape, not a direction to fit, and
+/// fitting it made paint 15 cm off the skin (a door's jamb) weigh its nodes −2 and +2.4.
+/// The skin's nodes are 0.2–0.4 m apart, far past it.
+pub const SHEET_SPREAD: f64 = 0.05;
 
 /// One vertex's skin.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -555,8 +561,8 @@ pub struct Pool {
     pub radius: Vec<f64>,
     /// A sheet's fit ([`bind_sheet`]): the nodes may lie in one surface, so the fit
     /// reproduces affine motion along the directions the nodes spread in and leaves
-    /// the others to the offset (M⁻¹ damped to (M² + τ²)⁻¹ M, τ = `EIG_MIN`²·W), and
-    /// it is well posed where they spread in two directions.
+    /// the others to the offset (M⁻¹ damped to (M² + τ²)⁻¹ M, τ = `SHEET_SPREAD`²·W), and
+    /// it is well posed where they spread in two directions (by `EIG_MIN`).
     pub sheet: bool,
 }
 
@@ -603,11 +609,12 @@ impl Pool {
         let e = x - ps;
         let tau = EIG_MIN * EIG_MIN * w;
         let g = if self.sheet {
-            // Along a direction the nodes spread in (eigenvalue μ ≫ τ) μ/(μ² + τ²) is
-            // 1/μ, the affine fit; across the sheet (μ ≪ τ) it goes to 0, so the
+            // Along a direction the nodes spread in (eigenvalue μ ≫ τₛ) μ/(μ² + τₛ²) is
+            // 1/μ, the affine fit; across the sheet (μ ≪ τₛ) it goes to 0, so the
             // vertex's height off the nodes' surface is the offset's, not weights of
-            // both signs on the nodes' few millimetres out of it. Smooth in x.
-            (m * m + DMat3::IDENTITY * (tau * tau)).inverse() * (m * e)
+            // both signs on the nodes' few centimetres out of it. Smooth in x.
+            let ts = SHEET_SPREAD * SHEET_SPREAD * w;
+            (m * m + DMat3::IDENTITY * (ts * ts)).inverse() * (m * e)
         } else {
             m.inverse() * e
         };
@@ -829,13 +836,15 @@ pub fn bind_with(
 /// [`bind`] over nodes that lie in one surface (a panel's nodes on its collision
 /// skin, [`Pool::sheet`]): the fit follows the surface's motion and the vertex keeps
 /// its rest height off it in the offset. Rest and rigid motion exact as [`bind`].
+/// `amp_max` as [`bind_with`]'s.
 pub fn bind_sheet(
     ids: &[u32],
     pos: &[Vec3],
     verts: &[Vec3],
     nrms: &[Vec3],
+    amp_max: Option<f64>,
 ) -> Result<(Vec<Vert>, f64), String> {
-    bind_opts(ids, pos, verts, nrms, None, true)
+    bind_opts(ids, pos, verts, nrms, amp_max, true)
 }
 
 fn bind_opts(

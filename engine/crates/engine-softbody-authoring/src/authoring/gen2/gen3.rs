@@ -182,10 +182,11 @@ impl SkinUnder {
         SkinUnder { tris, grid }
     }
 
-    /// The nodes of the outer collision triangle nearest each of `verts` (within
-    /// [`UNDER_REACH`]) that a paint mesh may follow: a part's structural nodes, as
-    /// [`pool_with`] takes them, on any part. In first-found order (deterministic).
-    fn nodes_under(&self, car: &Car, verts: &[Vec3]) -> Vec<u32> {
+    /// Where the outer collision triangle nearest a vertex of a paint mesh (within
+    /// [`UNDER_REACH`]) has no node of `own` (the mesh's own skin), that triangle's nodes
+    /// a paint mesh may follow: a part's structural nodes, as [`pool_with`] takes them, on
+    /// any part. In first-found order (deterministic).
+    fn nodes_under(&self, car: &Car, verts: &[Vec3], own: &[bool]) -> Vec<u32> {
         let usable = |i: usize| {
             let n = &car.nodes[i];
             !n.contact && !n.no_group && n.sub.is_none() && !n.name.starts_with("hub")
@@ -209,7 +210,7 @@ impl SkinUnder {
                     }
                 }
             }
-            if best.1 == usize::MAX {
+            if best.1 == usize::MAX || self.tris[best.1].iter().any(|&i| own[i]) {
                 continue;
             }
             for i in self.tris[best.1] {
@@ -264,10 +265,13 @@ pub fn skins_with(
         let sheet = binds_to_skin(glb, m, rigid) && !std::env::var("RIG_PAINT_ANY_NODE").is_ok_and(|v| v == "1");
         if sheet {
             ids.retain(|&i| on_skin[i as usize]);
-            // The skin the paint lies over where it is another part's (a B-pillar's paint
-            // between the doors, whose own nodes are inside the doors' skin).
+            // Where the skin a vertex lies over is another part's: a B-pillar's paint between
+            // the doors (the pillar's own nodes are inside the doors' skin), a door's paint
+            // past its own skin's edge (its top rear corner by the pillar).
             let u = under.get_or_insert_with(|| SkinUnder::new(car));
-            for i in u.nodes_under(car, &vp) {
+            let mut own = vec![false; car.nodes.len()];
+            ids.iter().for_each(|&i| own[i as usize] = true);
+            for i in u.nodes_under(car, &vp, &own) {
                 if !ids.contains(&i) {
                     ids.push(i);
                 }
@@ -282,7 +286,7 @@ pub fn skins_with(
         } else if m.name.starts_with("glass_") {
             flexskin::bind_with(&ids, &pos, &vp, &vn, Some(GLASS_AMP_MAX))
         } else if sheet {
-            flexskin::bind_sheet(&ids, &pos, &vp, &vn)
+            flexskin::bind_sheet(&ids, &pos, &vp, &vn, None)
         } else {
             flexskin::bind(&ids, &pos, &vp, &vn)
         }
