@@ -68,9 +68,11 @@ pub struct Param {
     pub kind: ParamKind,
 }
 
-/// The designs a design parameter may name: every generated design with a crash template
-/// (`engine-softbody-authoring` `crash_templates`).
-pub const DESIGNS: [&str; 7] = ["sedan", "wagon", "suv_4x4", "mach1", "truck_cab", "box_trailer", "mdb214"];
+/// The designs a design parameter may name: every registered generated design
+/// (`engine_vehiclegen::designs::names`) and the FMVSS 214 barrier, each with a crash template
+/// (`engine-softbody-authoring` `crash_templates`). This crate cannot see the generator's
+/// registry; `engine-softbody-authoring/tests/crash_designs.rs` holds this list to it.
+pub const DESIGNS: [&str; 9] = ["sedan", "police_sedan", "wagon", "mach1_1969", "mach1_gasser", "suv_4x4", "truck_cab", "box_trailer", "mdb214"];
 
 /// A number parameter (`unit` as shown).
 pub fn num(key: &str, label: &str, unit: &str, default: f64, min: f64, max: f64, step: f64) -> Param {
