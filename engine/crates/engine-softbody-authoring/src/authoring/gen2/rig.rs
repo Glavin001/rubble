@@ -181,14 +181,16 @@ fn bounds(v: &[Vec3]) -> (Vec3, Vec3) {
     )
 }
 
-/// A door skin column's z at height `y`: the edge columns (`k` 0 the front, 2 the rear) 3 cm
+/// A door skin column's z at height `y`: the edge columns (`k` 0 the front, 2 the rear) 2 cm
 /// inside the door's own outline `pts` at that height, so a shut line that slants (the rear
 /// door's along the C-pillar) does not put the column's node over the body's skin beyond it.
+/// 2 cm: the least of 1, 2, 3 cm keeping every design's skin 2 mm apart (1 cm: the wagon's 0.9 mm).
+/// 3 cm left slots at the shut lines a scraping car caught in (5.0 m along against 14.8 m).
 fn door_column_z(pts: &[Vec3], k: usize, z: f32, y: f32) -> f32 {
     let edge = |rear: bool| pts.iter().filter(|q| (q.y - y).abs() < 0.04).map(|q| q.z).reduce(if rear { f32::min } else { f32::max });
     match k {
-        0 => edge(false).map_or(z, |e| z.min(e - 0.03)),
-        2 => edge(true).map_or(z, |e| z.max(e + 0.03)),
+        0 => edge(false).map_or(z, |e| z.min(e - 0.02)),
+        2 => edge(true).map_or(z, |e| z.max(e + 0.02)),
         _ => z,
     }
 }
