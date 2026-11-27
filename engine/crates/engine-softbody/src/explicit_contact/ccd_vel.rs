@@ -276,11 +276,28 @@ impl Ctx<'_> {
         self.velocities(rows, &l, 1.0, base, vel);
         let mut ok = self.settled(rows, &l, vel);
         let mut used = 0u32;
+        // (`DAT_RESTART=adaptive`, a measurement: O'Donoghue and Candès's gradient restart, the
+        // momentum reset when the step and the last move disagree, Σ (y − next)(next − λ) > 0;
+        // `k` the iterations since the restart, capped at APGD_RESTART.)
+        let adaptive = std::env::var("DAT_RESTART").is_ok_and(|v| v == "adaptive");
+        let mut k = 0u32;
         while !ok && used < self.iters {
             used += 1;
+            k += 1;
             self.velocities(rows, &y, 1.0, base, &mut vy);
             let next: Vec<f32> = rows.iter().zip(&y).zip(&d).map(|((r, &y), &d)| if d > 0.0 { (y - (Self::normal(r, &vy) + r.b) / d).max(0.0) } else { 0.0 }).collect();
-            if used % APGD_RESTART == 0 {
+            if adaptive {
+                let test: f64 = y.iter().zip(&next).zip(&l).map(|((&y, &n), &o)| (y - n) as f64 * (n - o) as f64).sum();
+                if test > 0.0 || k % APGD_RESTART == 0 {
+                    k = 0;
+                    y.clone_from(&next);
+                } else {
+                    let beta = f32::from_bits(APGD_BETA_BITS[k as usize - 1]);
+                    for ((y, &n), &o) in y.iter_mut().zip(&next).zip(&l) {
+                        *y = n + beta * (n - o);
+                    }
+                }
+            } else if used % APGD_RESTART == 0 {
                 y.clone_from(&next);
             } else {
                 let beta = f32::from_bits(APGD_BETA_BITS[(used % APGD_RESTART) as usize - 1]);

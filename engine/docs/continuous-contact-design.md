@@ -1065,6 +1065,10 @@ Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
 | duplicate rows inactive (`DAT_DEDUP=1`) | 2,115 | 759 | 23,665 |
 | PGS, 128 iterations | 2,452 | | |
 | duplicates inactive, Jacobi-scaled Gershgorin | 2,434 | | |
+| adaptive restart (O'Donoghue–Candès gradient test, `DAT_RESTART=adaptive`) | 2,320 | | |
+| adaptive restart, duplicates inactive | 2,332 | | |
+
+Every inner-solver change measured so far removes 5–16 % of the zones, none more.
 
 (A PGS-at-128 row once read as identical to the default: zsh had passed `$cfg` unsplit, so neither
 switch was set. Rerun with each switch its own argument.)
