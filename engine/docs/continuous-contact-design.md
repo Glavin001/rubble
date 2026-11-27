@@ -1031,6 +1031,34 @@ sphere's velocity in the group's node arrays after the vehicles'.
 three crashes, then the 11. Every float operation in the CPU's order (strict helpers), and the
 sums in integers.
 
+**Where it plugs in** (mapped 2026-11-27):
+- **The switch.** The GPU's switch is one bool, `ExplicitBeamsGpu::set_continuous`
+  (`engine-webgpu/src/explicit_continuous_gpu.rs:12`; CUDA `engine-cuda/src/explicit/continuous.rs:11`)
+  setting `FramePlanner::continuous`. No `Dat` setting reaches the GPU: r_q, the clearance and
+  the restitution are baked into gStatic by `cc_tables` (`engine-exec/src/explicit_plan/continuous.rs:146,165`),
+  and the rounds are Slang constants (`explicit_beams_split_cc.slang:17-21`).
+- **The velocity mode bit.** It goes in the free `.z`/`.w` of the statics record `ccVeh(v, 2)`
+  (`continuous.rs:165`), which changes neither the params layout (`PARAM_WORDS` 111) nor the
+  fixtures. Not `W_PERF_FLAGS`: that word is for lossless switches only.
+- **Routing.** Part 0 of the continuous passes (`explicit_beams_split_edges.slang:25-46`) calls
+  `ccRespondPass` (`explicit_beams_split_cc.slang:681`), which calls `ccRespond`. The velocity
+  response is its own function in its own file, behind an early return there.
+- **Buffers.**
+  - `gAcc` (`Atomic<int>`) has 9 slots a node: 0–2 velocity sums (2²²), 3–5 position sums
+    (2²⁴), 6 the pair count, 7 the zone label, 8 the surface mark. The two-word 64-bit sums need
+    6 more: `CC_ACC_NODE` 9 → 15, sized at `continuous.rs:143,157`.
+  - The 16-word pair record (`ccPairAt`, `split_cc.slang:89-150`) has the row's weights,
+    normal and gap already. λ, s0 and the bound need words of their own: the record grows, or
+    a row list sits beside the compact lists (`continuous.rs:149-155`).
+  - The per-node scratch in `gBeams` (6 float4s) holds x0, x1, the velocities and x1 before
+    the pass.
+- **Parity tests.** `engine-webgpu/tests/explicit_contact_gpu/continuous.rs` has three tests,
+  bit exact every step against `Dat::new(0.08, 0.85)`. Velocity copies of them come first.
+  fast-check and `vehicle_lab --ab-switch` have no continuous case yet. CUDA's
+  `engine-cuda/tests/continuous.rs` checks cost and tolerance only.
+- **Atomics.** No 64-bit atomics anywhere in the kernels. Every target lowers `Atomic<int>`
+  through `slang/physics/atomics.slang` (WGSL methods; Interlocked* on Metal, SPIR-V and CUDA).
+
 **Cost to expect:** each APGD iteration is a row pass plus a node pass. A head 100 crush runs up
 to 32 iterations × 8 rounds a step (CPU counters: `row_iters`). Real time needs the measured
 counts per step on the scenario matrix's rows; it is the first number to take once the kernel
