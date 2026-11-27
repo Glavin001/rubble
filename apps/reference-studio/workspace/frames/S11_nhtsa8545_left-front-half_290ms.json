@@ -1,0 +1,27 @@
+{
+ "id": "S11_nhtsa8545_left-front-half_290ms",
+ "shot": "S11_nhtsa8545",
+ "image": {
+  "file": "S11_nhtsa8545/S11_nhtsa8545_left-front-half_290ms.jpg",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "f66b595b24eddf91afe61a4324ea98a7e0730f65484e989d805c9d2de8466bf1"
+ },
+ "moment": {
+  "label": "end of film",
+  "after_impact_ms": 290.0
+ },
+ "time": {
+  "video_s": 13.6,
+  "approximate": false
+ },
+ "view": "side",
+ "notes": "Camera No. 3 - Left Front Half.avi (v08545C009.avi), file frame 340; +290 ms after first contact. Camera: camera 3, left front half: from the car's left (9.5 m), level with the hood; wall at the left of the image, the car moves left.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:44:07.000Z"
+}

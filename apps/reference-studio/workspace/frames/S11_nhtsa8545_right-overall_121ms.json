@@ -1,0 +1,27 @@
+{
+ "id": "S11_nhtsa8545_right-overall_121ms",
+ "shot": "S11_nhtsa8545",
+ "image": {
+  "file": "S11_nhtsa8545/S11_nhtsa8545_right-overall_121ms.jpg",
+  "width": 1024,
+  "height": 1056,
+  "sha256": "2f9aa3a233dba391cd3e9e2cbd5e989260e7a2092b4e14bf092dc8357f0cd379"
+ },
+ "moment": {
+  "label": "separation (lab)",
+  "after_impact_ms": 121.0
+ },
+ "time": {
+  "video_s": 6.84,
+  "approximate": false
+ },
+ "view": "side",
+ "notes": "Camera No. 7 - Right Overall.avi (v08545C013.avi), file frame 171; +121 ms after first contact. Camera: camera 7, right overall: the whole car from the right (9.1 m); wall at the right of the image.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:44:07.000Z"
+}
