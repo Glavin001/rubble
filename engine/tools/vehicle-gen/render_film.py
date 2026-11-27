@@ -4,7 +4,7 @@ reference's skinned cars, frame by frame) and encode it with ffmpeg.
     Blender -b --python render_film.py -- <film dir> <out.mp4> [--samples 16]
         [--size 1280x720] [--orbit SECONDS] [--stills DIR] [--every N]
 
---orbit renders the film's last frame from a camera circling the car once
+--close puts the side camera 2.2 m from the meeting point. --orbit renders the film's last frame from a camera circling the car once
 (SECONDS long, 30 fps) instead of the film. --stills writes every Nth frame's
 PNG (default: the first, middle and last) to DIR. Frames are kept beside the
 film (<film dir>/png*), so a rerun resumes.
@@ -179,7 +179,11 @@ else:
                 # Toward the impact (the car travels along Blender -Y; two
                 # cars meet at their centroid).
                 ahead = 0.0 if scene['scene'] == 'c2c' else 1.4
-                if scene['scene'] == 'pole':
+                if '--close' in argv:
+                    # (--close: 2.2 m from the cars' meeting point, a little above: the contact
+                    # zone up close.)
+                    look((c0[0], c0[1] - ahead, 0.55), (c0[0] + 1.9, c0[1] - ahead - 0.9, 1.3))
+                elif scene['scene'] == 'pole':
                     look((c0[0], c0[1] - 0.4, 0.7), (c0[0] + 6.0, c0[1] - 6.0, 2.6))
                 else:
                     look((c0[0], c0[1] - ahead, 0.6), (c0[0] + 7.0, c0[1] - ahead - 4.0, 2.4))
