@@ -398,7 +398,7 @@ fn soft_project(rows: &[Row], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &
     let s: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * mi(r.k[j])).sum()).collect();
     for part in [true, false] {
         let mut lam = vec![0.0f32; rows.len()];
-        for _ in 0..SOFT_SWEEPS {
+        for _ in 0..std::env::var("DAT_SOFT_SWEEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(SOFT_SWEEPS) {
             let mut moved = false;
             for (q, r) in rows.iter().enumerate() {
                 if s[q] <= 0.0 {

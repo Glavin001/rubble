@@ -34,6 +34,9 @@ pub(super) fn rows_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
     let mi = |k: (usize, u32)| im[k.0][k.1 as usize];
     let mut rows: Vec<Row> = Vec::new();
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
+    // (The state before the solve: every iteration of every round rebuilds from it with all
+    // the rows' impulses.)
+    let (xb, vb) = (x1.to_vec(), vel.to_vec());
     for _ in 0..rounds {
         let hit = collide(x1);
         st.rounds += 1;
@@ -66,11 +69,16 @@ pub(super) fn rows_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
             }
         }
         let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * mi(r.k[j]) * count[r.k[j].0][r.k[j].1 as usize] as f32).sum()).collect();
+        // Each iteration rebuilds every node's change from all the rows' whole impulses, from
+        // the state before the solve, so fixed-point rounding never accumulates over iterations
+        // (each row's push is rounded once a node: momentum to that one rounding).
         let mut sums = FixedSums::new(x1);
         for _ in 0..iters {
             let mut changed = false;
-            for (r, &dr) in rows.iter_mut().zip(&d) {
+            let mut next: Vec<(f32, f32)> = Vec::with_capacity(rows.len());
+            for (r, &dr) in rows.iter().zip(&d) {
                 if dr <= 0.0 {
+                    next.push((r.lx, r.lv));
                     continue;
                 }
                 let (mut cx, mut cv) = (0.0f32, 0.0f32);
@@ -79,21 +87,27 @@ pub(super) fn rows_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
                     cx += r.w[j] * r.n.dot(x1[v][i] - r.at[j]);
                     cv += r.w[j] * r.n.dot(vel[v][i]);
                 }
-                let (lx, lv) = ((r.lx - cx / dr).max(0.0), (r.lv - cv / dr).max(0.0));
-                let (dx, dv) = (lx - r.lx, lv - r.lv);
-                if dx == 0.0 && dv == 0.0 {
+                let l = ((r.lx - cx / dr).max(0.0), (r.lv - cv / dr).max(0.0));
+                changed |= l != (r.lx, r.lv);
+                next.push(l);
+            }
+            for (r, l) in rows.iter_mut().zip(next) {
+                (r.lx, r.lv) = l;
+            }
+            for (r, &dr) in rows.iter().zip(&d) {
+                if dr <= 0.0 || (r.lx == 0.0 && r.lv == 0.0) {
                     continue;
                 }
-                changed = true;
-                (r.lx, r.lv) = (lx, lv);
                 for j in 0..4 {
                     let m = mi(r.k[j]);
                     if m > 0.0 && r.w[j] != 0.0 {
-                        sums.add_x(r.k[j].0, r.k[j].1, r.n * (r.w[j] * m * dx));
-                        sums.add_v(r.k[j].0, r.k[j].1, r.n * (r.w[j] * m * dv));
+                        sums.add_x(r.k[j].0, r.k[j].1, r.n * (r.w[j] * m * r.lx));
+                        sums.add_v(r.k[j].0, r.k[j].1, r.n * (r.w[j] * m * r.lv));
                     }
                 }
             }
+            x1.clone_from_slice(&xb);
+            vel.clone_from_slice(&vb);
             sums.apply(vel, Some(x1));
             if !changed {
                 break;

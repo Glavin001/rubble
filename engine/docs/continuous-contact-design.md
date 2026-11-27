@@ -467,6 +467,20 @@ a round, e = 1, zones unchanged. The speculative pass still runs before it, apar
   a third), the rigid zones and the projections' remaining inexactness. The energy-exact θ per
   group (the cap above 1, measured above) is what removes it.
 
+## The accurate path, first steps (2026-11-26, CPU, behind switches)
+
+Owner: no cap above 1; validate against physics, not today's solver. Measured (head 100,
+e = 1): the rows rebuild every node's change from all rows' whole impulses each iteration
+(no rounding build-up: linear momentum to 0.0002 N·s a step); rows, no speculative pass
+(`DAT_ITERS=0`), 8 non-rigid zone rounds, 256 iterations:
+
+- energy removed: head 100 1.1-1.9 %, ball 100 0.0 %; rigid zones 190-340 (from 560-760);
+- 8-run head 100, head 130, side 60: 0 crossings, within the paint guard;
+- angular momentum: 2.1-2.5 N·m·s a step (bar 2): a row's impulse acts along its impact
+  normal on nodes that moved on to the step's end, so its two sides are not collinear;
+- rigid zones switched off (`DAT_ZONES=0`, a measurement) remove more (3.1-3.4 %): the zones
+  are not the main loss.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
