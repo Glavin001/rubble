@@ -117,6 +117,99 @@ impl From<CrashFeelIn> for CrashFeel {
     }
 }
 
+/// The front crash structure's rules (`engine/docs/sedan-front-audit.md` §6, the six changes
+/// the owner approved on 2026-11-27; derivations and measurements in
+/// `engine/docs/generated-vehicles-lessons.md` §25). Each is a named switch so a vehicle can
+/// be generated with any combination and compared with the car before it: with every switch
+/// off the generated files are byte for byte the earlier ones. A rule finds the members it
+/// acts on by their names (the body-in-white's crash boxes and rails, the front subframe, the
+/// closures): a design without them (a truck, a trailer) is unchanged.
+///
+/// In a design's physics block: `"front_rules": {"crash_box_stroke": true, ...}` (fields left
+/// out are off).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FrontRules {
+    /// §25.1: the front subframe's mounts land on the rail at the subframe's own corners, not
+    /// on the crash boxes' rear nodes (whose beams spanned the rail's first bay at 157 kN each).
+    pub subframe_mounts_off_crash_box: bool,
+    /// §25.2: the crash box's bay carries the crash box alone: the shell's bracing beams that
+    /// cross it (from the box's front nodes to the radiator support, rail, upper rail, towers)
+    /// yield at a share of the box's own force ([`CRASH_BOX_BAY_BRACE_SHARE`]).
+    pub crash_box_bay_alone: bool,
+    /// §25.3: the crash box's chords crush flat (`deformLimitStress` = their yield) to
+    /// `deformLimit` 0.73 ([`crate::thin_wall::crush::EFFECTIVE_CRUSH_FRACTION`]), or to the
+    /// solver's least rest length where the chord is too short for that.
+    pub crash_box_stroke: bool,
+    /// §25.4: the SUPPORT stops and seals in the front crush zone (bumper cover, hood, fender
+    /// seams) yield at the yield of the weakest sheet beam they bear on, instead of never.
+    pub yielding_stops: bool,
+    /// §25.5: a hood fold row near its front edge ([`HOOD_FOLD_ROW_M`] behind the front row),
+    /// and the hood's and fenders' lengthwise beams at their panel's buckling force (Winter's
+    /// effective width, [`crate::thin_wall::crush::winter_effective_width`]).
+    pub hood_fold_row: bool,
+    /// §25.6: in the `real_crash` character (front multiple 1), the crush members' chords at
+    /// their section's mean crush force times the crash-rate factor at [`CRASH_RATE_SPEED`]
+    /// ([`crate::thin_wall::crush::dynamic_factor`], the Camry deck's constants); the other
+    /// characters keep their own multiple.
+    pub crush_from_section: bool,
+}
+
+/// [`FrontRules::crash_box_bay_alone`]: the braces across a crash box's bay together carry
+/// this share of the box's own chords' yield, in their axial direction. Engineering estimate
+/// (the sheet-metal brackets between a crash box's front flange and the radiator support or
+/// the upper rail fold at a small fraction of the box's force; a tenth is our estimate, not a
+/// measurement); see the lessons doc §25.2.
+pub const CRASH_BOX_BAY_BRACE_SHARE: f64 = 0.10;
+/// [`FrontRules::hood_fold_row`]: the fold row's distance behind the hood's front row (m), the
+/// middle of the 0.15–0.25 m where a hood's crush beads are pressed (audit §6.5; engineering
+/// estimate).
+pub const HOOD_FOLD_ROW_M: f32 = 0.20;
+/// [`FrontRules::crush_from_section`]: the crush speed the crash-rate factor is taken at (m/s):
+/// the NCAP full-frontal 56 km/h. The solver has no strain-rate law, so a rate has to be
+/// chosen; the factor at a slower crash is lower (1.39 at 8 m/s against 1.52 at 15.6 m/s on the
+/// crash box).
+pub const CRASH_RATE_SPEED: f64 = 15.6;
+
+impl FrontRules {
+    /// Every rule off: the car as before the audit.
+    pub fn is_off(&self) -> bool {
+        *self == Self::default()
+    }
+    /// The rules a design takes when its physics block does not say: [`FrontRules::default`],
+    /// or `RUBBLE_FRONT_RULES` when set (`all`, `none`, or rule names joined by commas), a
+    /// measurement switch to run the gates and tests on another set without editing code (an
+    /// unknown name panics, so a typo cannot pass as the default).
+    pub fn from_env_or_default() -> Self {
+        let Ok(v) = std::env::var("RUBBLE_FRONT_RULES") else { return Self::default() };
+        let mut r = Self { subframe_mounts_off_crash_box: false, crash_box_bay_alone: false, crash_box_stroke: false, yielding_stops: false, hood_fold_row: false, crush_from_section: false };
+        for n in v.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != "none") {
+            match n {
+                "all" => r = Self::all(),
+                "subframe_mounts_off_crash_box" => r.subframe_mounts_off_crash_box = true,
+                "crash_box_bay_alone" => r.crash_box_bay_alone = true,
+                "crash_box_stroke" => r.crash_box_stroke = true,
+                "yielding_stops" => r.yielding_stops = true,
+                "hood_fold_row" => r.hood_fold_row = true,
+                "crush_from_section" => r.crush_from_section = true,
+                _ => panic!("RUBBLE_FRONT_RULES: no rule {n}"),
+            }
+        }
+        r
+    }
+    /// Every rule on.
+    pub fn all() -> Self {
+        Self {
+            subframe_mounts_off_crash_box: true,
+            crash_box_bay_alone: true,
+            crash_box_stroke: true,
+            yielding_stops: true,
+            hood_fold_row: true,
+            crush_from_section: true,
+        }
+    }
+}
+
 /// The editable physics of a design: masses, zone yields, hardware and the
 /// lattice's reach. Every field has the census / 2011 Accord default gen3 was
 /// calibrated with, so an empty block gives a valid car; a vehicle-gen
@@ -207,6 +300,9 @@ pub struct Physics {
     /// nose-down past its design. Written to the JBeam as `rubbleSuspensionByLoad`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub suspension_by_load: bool,
+    /// The front crash structure's rules ([`FrontRules`]).
+    #[serde(skip_serializing_if = "FrontRules::is_off")]
+    pub front_rules: FrontRules,
 }
 
 impl Default for Physics {
@@ -264,6 +360,7 @@ impl Default for Physics {
             drag_cd: 0.30,
             crash: CrashFeel::default(),
             suspension_by_load: false,
+            front_rules: FrontRules::from_env_or_default(),
         }
     }
 }

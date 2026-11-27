@@ -140,6 +140,9 @@ pub struct VgInput {
     /// (`engine_vehiclegen::RigSpec`), when it defines them.
     pub structure: Option<engine_vehiclegen::structure::Structure>,
     pub mechanical: Vec<engine_vehiclegen::mechanical::MechPart>,
+    /// [`Self::mechanical`] with the physics block's front rules on it (`front_rules`), made
+    /// the first time the rigger asks for the definitions (after any change of `physics`).
+    ruled: std::cell::OnceCell<Vec<engine_vehiclegen::mechanical::MechPart>>,
 }
 
 impl VgInput {
@@ -204,6 +207,7 @@ impl VgInput {
             crease: String::new(),
             structure: None,
             mechanical: Vec::new(),
+            ruled: Default::default(),
         };
         // The section rays start between the sill and the belt at mid car.
         me.ray_y = 0.5 * (me.key("sill", 0.0)[1] + me.key("belt", 0.0)[1]);
@@ -576,7 +580,7 @@ impl RigInput for VgInput {
     fn definitions(&self) -> Option<super::body2::Defs<'_>> {
         self.structure.as_ref().map(|s| super::body2::Defs {
             structure: s,
-            parts: &self.mechanical,
+            parts: self.ruled.get_or_init(|| super::front_rules::mechanical(&self.physics.front_rules, &self.mechanical)),
         })
     }
     fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {

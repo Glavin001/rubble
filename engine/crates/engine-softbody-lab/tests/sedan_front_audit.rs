@@ -27,14 +27,18 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 fn sedan() -> (Template, ExplicitBeams, Vec<String>) {
-    let t = engine_softbody_authoring::crash_templates::template("sedan").expect("sedan");
+    // (`RUBBLE_DESIGN_PARAMS=sedan=FILE`: the sedan from those parameters)
+    let p = engine_softbody_authoring::crash_templates::params_from_env().expect("params");
+    let p = p.iter().find(|x| x.0 == "sedan").map(|x| x.1.as_str());
+    let t = engine_softbody_authoring::crash_templates::template_with("sedan", p).expect("sedan");
     let (s, _) = ExplicitBeams::from_desc_jbeam_raycast(&t.desc, Vec3::ZERO, Vec3::ZERO, t.settings).expect("spawn");
     let names = t.desc.nodes.iter().map(|n| n.name.clone()).collect();
     (t, s, names)
 }
 
 fn out_dir() -> std::path::PathBuf {
-    let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/sections");
+    // (`AUDIT_OUT=DIR`: another folder, one per variant)
+    let d = std::env::var("AUDIT_OUT").map_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/sections"), std::path::PathBuf::from);
     std::fs::create_dir_all(&d).expect("out dir");
     d
 }
@@ -328,11 +332,13 @@ fn sedan_front_push() {
     let rad: Vec<usize> = ["rad_ul", "rad_ur", "rad_dl", "rad_dr"].map(id).to_vec();
     let cb = (id("sh_a1_ul"), id("sh_a2_ul"));
     let rails = (id("sh_a2_dl"), id("sh_a4_l"), id("sh_a5_l"));
+    let cbd = (id("sh_a1_dl"), id("sh_a2_dl"));
     // where the displacement goes, along z: the impact beam, the crash boxes' fronts, the
     // firewall, the cabin's held part
     let beam: Vec<usize> = names.iter().enumerate().filter(|(_, n)| n.starts_with("impbf_")).map(|(i, _)| i).collect();
     let cb_front: Vec<usize> = ["sh_a1_ul", "sh_a1_dl", "sh_a1_ur", "sh_a1_dr"].map(id).to_vec();
     let mut w = ExplicitBeamsWorld::new(vec![s]);
+    let yl0 = [w.vehicles[0].nodes[cbd.0].pos.y, w.vehicles[0].nodes[rails.2].pos.y];
     for &(i, f) in &lift_n {
         w.vehicles[0].nodes[i].force.y += f;
     }
@@ -341,7 +347,7 @@ fn sedan_front_push() {
     let momentum = |w: &ExplicitBeamsWorld| w.vehicles[0].nodes.iter().map(|n| f64::from(n.mass) * f64::from(n.vel.z)).sum::<f64>();
     let mut p_prev = momentum(&w);
     let z_held0 = mean_z(&w.vehicles[0], &held);
-    let mut csv = String::from("t_s,disp_m,wall_kN,cabin_v_mps,engine_rear_to_firewall_m,engine_front_to_radiator_m,crash_box_len_m,rail_a2_a4_m,rail_a4_a5_m,elastic_kJ,plastic_kJ,beam_to_crash_box_m,crash_box_front_to_firewall_m,firewall_to_held_m\n");
+    let mut csv = String::from("t_s,disp_m,wall_kN,cabin_v_mps,engine_rear_to_firewall_m,engine_front_to_radiator_m,crash_box_len_m,rail_a2_a4_m,rail_a4_a5_m,elastic_kJ,plastic_kJ,beam_to_crash_box_m,crash_box_front_to_firewall_m,firewall_to_held_m,crash_box_low_len_m,z_a1_a2_m,z_a2_a4_m,z_a4_a5_m,z_a5_firewall_m,a1_drop_m,a5_drop_m\n");
     let (mut fw_acc, mut nacc) = (0.0f64, 0);
     let mut snaps = String::new();
     let mut marks = [0.10f32, 0.25, 0.39, 0.55, 0.70];
@@ -377,9 +383,10 @@ fn sedan_front_push() {
             let el: f64 = stored_by_class(veh, &names).values().sum();
             let pl: f64 = plastic.iter().flatten().map(|p| p.work).sum();
             let n = veh.nodes.as_slice();
+            let (zl, yl) = (|i: usize| n[i].pos.z, |i: usize| n[i].pos.y);
             writeln!(
                 csv,
-                "{tnow:.4},{disp:.4},{:.2},{:.4},{gap_fw:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.4},{:.4},{:.4}",
+                "{tnow:.4},{disp:.4},{:.2},{:.4},{gap_fw:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
                 fw_acc / nacc as f64 / 1e3,
                 held.iter().map(|&i| veh.nodes[i].vel.z).sum::<f32>() / held.len() as f32,
                 mean_z(veh, &rad) - mean_z(veh, &eng_front),
@@ -390,7 +397,14 @@ fn sedan_front_push() {
                 pl / 1e3,
                 mean_z(veh, &beam) - mean_z(veh, &cb_front),
                 mean_z(veh, &cb_front) - mean_z(veh, &fw),
-                mean_z(veh, &fw) - mean_z(veh, &held)
+                mean_z(veh, &fw) - mean_z(veh, &held),
+                n[cbd.0].pos.distance(n[cbd.1].pos),
+                zl(cbd.0) - zl(cbd.1),
+                zl(rails.0) - zl(rails.1),
+                zl(rails.1) - zl(rails.2),
+                zl(rails.2) - mean_z(veh, &fw),
+                yl0[0] - yl(cbd.0),
+                yl0[1] - yl(rails.2)
             )
             .ok();
             (fw_acc, nacc) = (0.0, 0);
@@ -425,7 +439,10 @@ fn sedan_front_push() {
 #[ignore = "diagnostic: S11 on the CPU with the elastic energy by member at maximum crush"]
 fn sedan_s11_stored_energy() {
     let s = cr::get("S11").expect("S11");
-    let templates = engine_softbody_authoring::crash_templates::templates_for(&s).expect("templates");
+    let params = engine_softbody_authoring::crash_templates::params_from_env().expect("params");
+    let scene = std::env::var("AUDIT_SCENE").unwrap_or_else(|_| "S11".into());
+    let s = if scene == "S11" { s } else { cr::get(&scene).expect("scene") };
+    let templates = engine_softbody_authoring::crash_templates::templates_for_with(&s, &params).expect("templates");
     let built = s.build(&templates, Jitter::run(0), Contact::Edge).expect("build");
     let names: Vec<String> = templates["sedan"].desc.nodes.iter().map(|n| n.name.clone()).collect();
     let mut r = CpuRunner::new(&built);
@@ -449,6 +466,7 @@ fn sedan_s11_stored_energy() {
     let spans = |v: &ExplicitBeams| [nose(v) - mean_z(v, &beam), mean_z(v, &beam) - mean_z(v, &cb_front), mean_z(v, &cb_front) - mean_z(v, &fw), mean_z(v, &fw) - mean_z(v, &rear)];
     let spans0 = spans(&r.0.vehicles[0]);
     let mut min_gap = gap0;
+    let (mut min_gap_ms, mut touch_ms) = (0.0f32, None::<f32>);
     let mut at_stop = false;
     let mut min_v = f64::MAX;
     let mut st_tm: BTreeMap<String, f64> = BTreeMap::new();
@@ -459,8 +477,14 @@ fn sedan_s11_stored_energy() {
         let w = &r.0;
         let (vz, _) = com_vz(w);
         let veh = &w.vehicles[0];
-        min_gap = min_gap.min(mean_z(veh, &eng_rear) - mean_z(veh, &fw));
         let t = (k + 1) as f32 * cr::DT;
+        let g = mean_z(veh, &eng_rear) - mean_z(veh, &fw);
+        if g < min_gap {
+            (min_gap, min_gap_ms) = (g, (t - built.layout.impact_s) * 1e3);
+        }
+        if touch_ms.is_none() && g < 0.03 {
+            touch_ms = Some((t - built.layout.impact_s) * 1e3);
+        }
         if !at_stop && t > built.layout.impact_s && vz <= 0.0 {
             at_stop = true;
             let st = stored_by_class(veh, &names);
@@ -492,7 +516,7 @@ fn sedan_s11_stored_energy() {
     std::fs::write(out_dir().join("sedan_s11_elastic_by_class.csv"), csv).expect("write");
     writeln!(o, "elastic energy: largest {:.1} kJ at {:.0} ms; 0.3 s after contact {:.1} kJ", el_max.0 / 1e3, el_max.1, st_end.values().sum::<f64>() / 1e3).ok();
     let ke_out = 0.5 * mass * min_v * min_v;
-    writeln!(o, "rebound: COM {min_v:.2} m/s, ½mv² {:.1} kJ = {:.1} % of the impact's; engine rear to firewall, least {min_gap:.3} m", ke_out / 1e3, 100.0 * ke_out / ke0).ok();
+    writeln!(o, "rebound: COM {min_v:.2} m/s, ½mv² {:.1} kJ = {:.1} % of the impact's; engine rear to firewall, least {min_gap:.3} m at {min_gap_ms:.0} ms, within 3 cm at {touch_ms:?} ms", ke_out / 1e3, 100.0 * ke_out / ke0).ok();
     println!("{o}");
     std::fs::write(out_dir().join("sedan_s11_energy.txt"), o).expect("write");
 }

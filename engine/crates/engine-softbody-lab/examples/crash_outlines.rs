@@ -2,7 +2,7 @@
 //! with the reference footage (`engine_softbody::crash_reference::outline`,
 //! `engine/tools/crash-reference/outlines.py`).
 //!
-//! `crash_outlines -- ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render] [--cameras FILE]`
+//! `crash_outlines -- ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render] [--cameras FILE] [--params design=FILE]`
 //!
 //! Runs scenario ID (run 0, nominal) to each of its moments (ms after first contact, at the
 //! exact solver step the web recorder stops on) and writes `DIR/outlines.json`: per moment,
@@ -244,7 +244,8 @@ fn main() -> Result<(), String> {
     ));
     let render = !a.iter().any(|x| x == "--no-render");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
+    let params = flag("--params").map_or(Ok(Vec::new()), |v| engine_softbody_authoring::crash_templates::params_from_list(&v))?;
+    let templates = engine_softbody_authoring::crash_templates::templates_for_with(&s, &params)?;
     let built = s.build(&templates, Jitter::run(0), contact)?;
     let mut runner = CpuRunner::new(&built);
     // Per body: its template, groups, start state.

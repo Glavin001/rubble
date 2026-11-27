@@ -2582,7 +2582,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4),
-        );
+        ); let rows_z = super::front_rules::hood_rows(rows_z, ph);
         let mut grid = Vec::new();
         let mut inner = Vec::new();
         for (kr, &z) in rows_z.iter().enumerate() {
@@ -4353,7 +4353,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         r.car.beams[j].deform = f.deform;
         r.car.beams[j].deform_limit = 0.0;
     }
-    r
+    super::front_rules::apply(&mut r, inp); r
 }
 
 fn edge_nodes(

@@ -5,6 +5,7 @@
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- <design> [--params FILE] [--in DIR] [--out DIR] [--lite H]
+//! cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- <design> --defaults   # its parameters as JSON
 //! cargo run --release -p engine-softbody-lab --example vehicle_gen_rig -- --list | --list-json
 //! ```
 //! A Rust-generator design also gets a lighter render (`<design>.lite.glb` and
@@ -55,6 +56,7 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     let design = a.first().cloned().unwrap_or_else(|| "sedan".into());
+    if a.iter().any(|x| x == "--defaults") { println!("{}", engine_vehiclegen::default_params_json(&design)?); return Ok(()); } // (its parameters, for `--params`)
     let opt = |k: &str| {
         a.iter()
             .position(|x| x == k)

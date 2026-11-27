@@ -824,7 +824,178 @@ sedan) and S06 (a sedan crushed between the tractor and the trailer). Design
   lens tints are not drawn in the studio renders. The cargo box's walls are mass and stiffness
   only (no panel to dent: `members` 80 / 160 kN a beam, *estimate*).
 
+## 25. The front crash structure's rules (2026-11-27, `crash-ref/front-fixes`)
+
+The audit [sedan-front-audit.md](sedan-front-audit.md) found the sedan's front 4–9 × its own
+sections in the lattice and proposed six generator changes; the owner approved all six. Each is
+now a rule of the generator, a switch of the design's physics block
+(`engine_vehiclegen::physics::FrontRules`, `"front_rules": {...}`), so a car can be generated
+with any combination and compared with the car before. **With every switch off every design's
+files are byte for byte the earlier ones** (8 designs, 465 files, SHA-256 against the kept
+`~/Development/rubble-artifacts/sections/gen-before-33b57f525/`). The definitions' side is
+`engine-vehiclegen/src/front_rules.rs`, the rigger's `gen2/front_rules.rs`. Every measurement
+below: CPU reference, the generated sedan (`beamng_feel` unless marked), S11/S12 run 0 with edge
+contact, the slow push of the audit; the full tables are the audit's §8.
+
+Tools (from `engine/`): `tools/sections/front_ab.sh TAG [rule ...] [crash=PRESET]` generates the
+sedan with those rules into `out/gen/sedan_<TAG>/` and measures it (lattice cuts, push, S11, S12,
+elastic energy by member); `front_ab.py TAG ...` prints them side by side (`--plot DIR`);
+`front_ab_all.sh` runs the study's variants; `front_hard_rules.sh` the hard rules (8 runs × 3
+contact settings × S11, S12, S01, S02, S08); `front_files.sh` which generated files a rule
+changes on every design; `front_gates.sh` the gates under `RUBBLE_FRONT_RULES` (a measurement
+switch: the designs' default rules for one run). `crash_ref --params design=FILE`,
+`vehicle_gen_rig DESIGN --defaults`.
+
+**25.1 The subframe mounts on the rail at its own corners** (`subframe_mounts_off_crash_box`).
+- **(Fact)** `mechanical::sedan_parts` mounted the front subframe (16 beams a side, 157 kN
+  yield, 400 kN strength) on the crash boxes' rear nodes too (`sh_a2_d*`, `sh_a2_u*`): beams
+  from its front corners 0.38 m forward and up, across the rail's whole first bay, 277 kN a
+  side beside a rail chord of 111 kN (audit §1). A front subframe bolts to the rails under its
+  own corners (`sh_a4_*`, which the mount already lists). The rule takes the crash boxes' rear
+  nodes off the mount's list; the mount keeps its 16 beams among the rest.
+- **(Measurement)** The rails' bay loses 346 kN of yield (subframe–crash box beams 553 → 0 kN,
+  both sides) and the rail's second chord shortens 48 mm by 0.39 m of push (19 mm before). Not as
+  the audit predicted: the push's plateau stays at 520–530 kN from 0.3 to 0.4 m and S11's t_m,
+  crush and peak do not move (restitution 0.342 → 0.322; peak 661 → 721 kN). The rails can
+  shorten now, but the rest of the bay (braces, panels and the never-yielding stops, ~1.9 MN of
+  yield and 1.3 MN of springs across the plane) still holds the front up.
+
+**25.2 The crash box's bay carries the crash box alone** (`crash_box_bay_alone`).
+- **(Fact)** The shell's bracing joins each crash box's front nodes to the radiator support,
+  the rail station behind the box and the upper rail (`shell::lattice_defined`'s nearest-node
+  bracing and the rail chain's skip beam `a1_d`–`a4`): five beams a node at the zone's 18.9 kN,
+  224 kN across the bay against the boxes' own 194 kN. The rule sets every beam with one end on
+  a box's front nodes and the other behind its rear nodes so that together they carry, along the
+  car, [`CRASH_BOX_BAY_BRACE_SHARE`] = 0.10 of the box's chords (equal axial force each;
+  **engineering estimate**: the brackets between a box's front flange and the radiator support
+  fold at a small fraction of the box).
+- **(Measurement)** Braces 224 → 18 kN; the push drops to 254 and 235 kN at 0.2 and 0.3 m (the
+  Camry's first plateau is 200–300 kN); S11 t_m 44 → 53 ms, crush 0.39 → 0.47 m, residual 0.20 →
+  0.29 m, restitution 0.342 → 0.306; S12 restitution 0.48 → 0.33.
+- **(Finding) Those numbers come from a mechanism, not from the box folding.** At 0.39 m of push
+  the crash box's chords are 0.19 m long (rest 0.18) while its front has moved 0.25 m back
+  along the car: the box swings about its rear nodes. Its lattice cell is four nodes in one
+  vertical plane (x = 0.43 m, `structure::unibody`): it has no depth across the car, so only the
+  braces this rule weakens hold it in line. The same swing happens in the car before the rules,
+  later (the box's span along the car reaches 0 at 0.55 m of push; 0.45 m with the braces along
+  the car weakened alone, `FRONT_RULE2_ALONG=0.7`, a measurement). **Proper fix (proposal):** the
+  crash box's cell at its section's four corners (70 × 110 mm, chords on both side walls), so
+  its bending is its own and the braces can be weakened without leaving a hinge
+  (section-matching.md §2: chords at the section's points). It adds 4 shell nodes a side.
+- **(Measurement) It also breaks a hard rule:** S08 with edge contact creates more energy than
+  its bar (340 J) in 5 of 8 runs (up to 2.8 kJ; 0 of 8 before, worst 203 J). That is the edge
+  contact's known energy fault (`crash-reference.md`, S03/S14), which the swinging fronts' edges
+  reach; it stays off until the fault or the cell is fixed.
+
+**25.3 The crash box's stroke** (`crash_box_stroke`).
+- **(Fact)** The rule gives the crash box's four chords `deformLimit` 0.73
+  ([`thin_wall::crush::EFFECTIVE_CRUSH_FRACTION`], *to be verified* for the stroke use) and
+  `deformLimitStress` = their yield, so the force is flat over the stroke (the solver's
+  `min(limit_k.max(tc))`: no 1/L hardening). Defined beams can now carry both
+  (`Car::fixed_limits`, written by `export::jbeam_files`).
+- **(Deviation from the approved design, for the owner.)** The approved rule also asked for
+  chords of at least 0.37 m, so the solver's `MIN_REST` of 0.1 m allows 73 %. The crash box is
+  0.18 m long in its definition (and in the drawn car), and its nodes are its ends: no chord of
+  the box can be 0.37 m without (a) a longer box, which changes the approved look, or (b) moving
+  its rear nodes 0.19 m into the rail, which makes the rail's first bay 0.19 m long (it then
+  loses its own stroke to `MIN_REST`) and gives the box's force to 0.19 m of rail. Neither was
+  built. The chords lock at `MIN_REST`: 0.08 m of stroke (44 %) instead of 0.13 m; the
+  shortfall is 0.05 m a box.
+- **(Measurement)** Small, as the audit expected: the upper chord shortens to 0.115 m by 0.39 m
+  of push (0.128 before), the push's force at 0.3 m 538 → 514 kN; S11 restitution 0.342 →
+  0.355, elastic at the stop 47.3 → 50.2 kJ (not lower: the flat chords lock at their yield,
+  not 1.8 × it, but the box still swings, §25.2). **S08 with edge contact creates 674 J in one
+  of 8 runs** (bar 340 J): a hard rule that held before. Off.
+
+**25.4 Stops in the crush zone yield** (`yielding_stops`).
+- **(Fact)** The rigger's SUPPORT stops and seals (`Role::EdgeStop`, `Role::Bearing`: deform ∞,
+  strength 150 kN) across the bumper cover's, hood's and fenders' seams never yield, so they give
+  back all they hold. The rule gives each such stop ahead of the firewall (its midpoint ahead of
+  the `sh_b1_*` nodes) the yield of **the strongest panel or frame beam at its weaker end**: a
+  stop cannot press harder than the sheet it bears on before that sheet gives way, so the stop's
+  yield comes from the panels' own definitions, not from a new constant. On the sedan it gives
+  2–17 kN (the bumper cover's 6 stops 7.2 kN, the hood's 32 2.1–7.9 kN, each fender's 7
+  7.2–16.8 kN): the audit's "a few kN".
+  Confidence: the rule is a bound by construction; a real clip or rubber stop is weaker still.
+- **(Measurement)** Never-yielding capacity across the crash-box bay 1,606 → 229 kN and across
+  the rails' bay 1,334 → 129 kN; S11 restitution 0.342 → 0.282, elastic at the stop 47.3 → 35.3
+  kJ, t_m 44 → 50 ms, residual 0.20 → 0.24 m; the 4 ms peak 50 → 55 g (the stops no longer
+  cushion the first 10 cm). As the audit expected for the rebound (3–5 kJ less released: 12 kJ
+  less held at the stop).
+
+**25.5 The hood's fold row and the panels' buckling force** (`hood_fold_row`).
+- **(Fact)** A row of hood nodes [`HOOD_FOLD_ROW_M`] = 0.20 m behind its front row (a crush
+  bead's line, 0.15–0.25 m in the audit, *estimate*); its nodes are named `hd_o3*` and the front
+  row becomes `hd_o4*` (5 rows of 5). The hood's and both fenders' beams that run along the car
+  (|cos| ≥ 0.5) are scaled together so the largest cut across the panel carries no more than its
+  sheet's buckling force × the character's panel multiple: Σ over the strips between the panel's
+  lengthwise node lines of σ_y·t·b_e, b_e Winter's effective width
+  (`thin_wall::crush::winter_effective_width`, AISI S100 / EN 1993-1-5 §4.4, confident), each
+  line a stiffener (`engine_vehiclegen::front_rules::panel_buckling_force`). The sheet is an
+  **estimate** (no closure has a defined gauge yet): mild steel 180 MPa at 0.7 mm, the hood two
+  skins (outer and inner: 2 × 0.7 mm over 1.6 m² is 17.6 kg against the design's 17.9 kg), a
+  fender one. A thin strip keeps about b_e ≈ 1.9 t √(E/σ_y) ≈ 44 mm whatever its width: the
+  hood's four 0.33 m strips carry 44 kN (× 2 in `beamng_feel`: 89 kN against the 272 kN the
+  lattice held), a fender's one 0.23 m strip 5.5 kN (11 kN against 151 kN).
+- **(Measurement)** Hood and fenders across the crash-box bay 401 → 92 kN; S11 restitution 0.342
+  → 0.247 (the only rule alone that meets the cited ≤ 0.25 in run 0), elastic at the stop 30 kJ,
+  t_m 49 ms, residual 0.25 m, the cabin's share of the plastic work 6.1 % → 1.5 % and the front
+  door opening's change at the peak 151 → 97 mm (the firewall-to-cabin span shortens 36 mm by 0.39
+  m of push, 109 mm before): the panels no longer push the cabin. The audit expected "little in
+  S11 (the hood lifts)": the hood and fenders together were a larger share than that. The rest
+  pose's collision surface and the drawn car do not change (`crash_outlines` stills, the GLB
+  byte for byte; the skins `.rskin` do, they bind the new nodes).
+
+**25.6 The crush members at crash rate in `real_crash`** (`crush_from_section`).
+- **(Fact)** With the character's front multiple at 1 (`real_crash`), the crash boxes' and
+  front rails' chords take their section's mean crush force × the crash-rate factor
+  (`engine_vehiclegen::front_rules::crash_rate_factor`: `thin_wall::crush::dynamic_factor` at
+  [`CRASH_RATE_SPEED`] = 15.6 m/s, the Camry deck's C = 8,000 s⁻¹, p = 8): ε̇ = 0.33 V/C = 57 s⁻¹
+  (the 0.33 is *to be verified*), × 1.54 for both (70 × 110 mm, C 0.09 m): crash box 45.4 → 69.9
+  kN, rail 61.6 → 94.8 kN. `beamng_feel`'s 1.8 stays (the owner's choice, §13), and the rule
+  changes nothing in it (the generated files are byte for byte the same). The solver has no rate
+  law, so the rate is fixed at the NCAP speed: a slower crash sees the 56 km/h force.
+- **(Measurement, `real_crash`)** S11 restitution 0.235 → 0.225, crush 0.480 → 0.477 m, peak 508
+  → 519 kN; the push's chords crush as before. The rear rails are not included (not measured).
+
+**25.7 Not as the audit predicted, and what is left.**
+- The plateau after the crash boxes did not fall to 200–300 kN with the subframe's mounts alone;
+  it fell with the bay's braces (§25.2), by a mechanism. With rules 1, 4 and 5 (those whose
+  crash box does not swing early) the push is 363–527 kN from 0.2 to 0.4 m.
+- **The engine never reaches the firewall** in any variant (S11: 0.22–0.25 m left), so the
+  Camry's 830–920 kN peak at 30 ms has no counterpart; the front still stops the car at 0.43–0.49
+  m (Camry 0.66–0.69). The audit's item 8 (the engine's place) is next, with the crash box's
+  four-corner cell (§25.2).
+- **The crash box swings in every variant** (§25.2): its cell is planar. This is the largest
+  remaining defect of the front and blocks rules 2 and 3.
+- Unverified: the folding coefficient 0.33 V/C, the 0.73 stroke fraction, the closures' sheet
+  (gauge, grade, skins), the brace share 0.10 and the fold row's 0.20 m are estimates; one S11
+  run per variant in the tables (8 runs in the hard-rule tables).
+
+**25.8 Defaults (decided from the measurements, 2026-11-27): every rule stays off.** The bar
+was the coordinator's: a rule is on by default only if, alone and with the others, it holds
+every hard rule (`deciding-tradeoffs`) and every gate that passed before. None does:
+
+| rule | breaks (held before) | before → with the rule |
+|---|---|---|
+| 1 subframe mounts | `every_design` (parked drift ≤ 5 mm) | the 4x4's front bumper row `bf_g2` 4.9 → 5.5 mm (the stability bound re-spreads the springs; the row was 0.1 mm under its bar, §22) |
+| 2 bay alone | no energy created, S08 edge | 0 of 8 → 5 of 8 runs over 340 J (up to 2.8 kJ); and the box swings (§25.2) |
+| 3 stroke | no energy created, S08 edge | 0 of 8 → 1 of 8 (674 J) |
+| 4 yielding stops | paint inside the other car, head 60 pressed (`gen_sedan_paint`, bar 50 mm) | 21 → 53 mm (head 100: 61 → 117 mm, already failing) |
+| 5 hood row, panels | paint, head 30 pressed (bar 10 mm from 0.3 s) | 8 → 21 mm; S08 continuous "turns the same sense" (angular momentum) 0 → 1 of 8 |
+| 6 crash rate | `real_crash` only: momentum along and across the road, S08 edge | 0 → 1 of 8 each (it also removes `real_crash`'s own energy creation: S11 edge 717 J and S08 discrete 387 J before) |
+
+What each gains is in the audit's §8 (rule 5 alone: S11 restitution 0.342 → 0.247, the S02 hood
+folds; rule 4: paint side 60 pressed 16 → 2 mm; rule 5: paint side 90 55 → 22 mm). Every
+failure above is either the solver's (the edge contact's energy, the paint's binding to a
+collision skin that now folds more) or a margin that was 0.1 mm from its bar; none is fixed here
+by working around it. Next, in order: the crash box's four-corner cell (§25.2), which rules 2
+and 3 need; the paint's guard in the folded hood (rule 5) and the softer seams (rule 4); the
+4x4's bumper row (rule 1, §22's open item).
+
 ## Changelog
+
+- 2026-11-27: section 25, the front crash structure's rules (six switches, measured alone and together; defaults; the crash box's planar cell).
 
 - 2026-11-27: section 24, the parked 53 ft dry van `box_trailer` (sources, the FMVSS 223/224 guard and its strength test), the laden tractor, the hull's ear fix.
 - 2026-11-27: section 22, the 4x4's mass built up part by part (1,410 → 1,897 kg of nodes; the lint's `mass` passes), the axle split, strengths checked, S02 at the new mass.

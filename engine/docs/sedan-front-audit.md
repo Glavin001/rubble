@@ -218,3 +218,345 @@ measured with the push and S11 (8 runs), as `deciding-tradeoffs` asks.
   member whose nodes it joins; a brace crossing two bays counts in both.
 - The stated sections are the generator's (the study's starting values), not the Camry's; the
   Camry rail (92 × 166, 1.69–2.65 mm) is larger than ours (70 × 110, 1.8 mm).
+
+## 8. Fixes applied (2026-11-27, `crash-ref/front-fixes`)
+
+The six changes of §6 (1–6; 7 and 8 were not changes) are rules of the generator, each a switch
+of the design's physics block (`Physics::front_rules`; derivations, confidence and findings in
+[generated-vehicles-lessons.md](generated-vehicles-lessons.md) §25). **The car before is kept**:
+with every switch off the generated files are byte for byte those of commit `33b57f525` (8
+designs, 465 files), kept in `~/Development/rubble-artifacts/sections/gen-before-33b57f525/`
+(`SHA256SUMS`, every file). SHA-256 of each design's JBeam set (its `.jbeam` files and `.pc`,
+concatenated in name order) at that commit:
+
+| design | JBeam set SHA-256 |
+|---|---|
+| sedan | 5932630e77a6d90bdd949b9423e21f284e0ea2d7d7a963f6e72f5f44a2423533 |
+| police_sedan | 505b05d23324ad189db4136390880504df71249517bc977cefad9e4edba9a631 |
+| wagon | 3ff174b71bede14697cbd3b304d68730661fdc90073048d7a47bad0a9cb4e069 |
+| mach1_1969 | a8f56cf838f8859e3006314eb38324c19ceb097eb9b0ef3bf9028f5b775f36f0 |
+| mach1_gasser | ae0dc5008a1697551d8826a2436e07c9cad5acbc53c03fd2f513bbb20f15b37c |
+| suv_4x4 | 57b3323a5d7314bc5fa85051dec8d38e768c61ccd09d219f36789519ece837e1 |
+| truck_cab | c75ad80119930bf70cd172135634acd857d8775e0d0b13b834c0b2507e970525 |
+| box_trailer | 5c827e032edf0e9bd532d60426b4459aae246d4edc0885c0b1d157c3d0117a61 |
+
+Reproduce (from `engine/`): `tools/sections/front_ab_all.sh` (every variant below into
+`out/gen/sedan_<tag>/`), `python3 -I tools/sections/front_ab.py TAG ...` (the tables, `--plot`),
+`tools/sections/front_hard_rules.sh TAG rule ...` and `front_hard_rules.py` (8 runs × 3 contact
+settings), `front_spans.py`, `front_gates.sh`, `front_files.sh`. Plots in `out/sections/fixes/`,
+copies in `~/Development/rubble-artifacts/sections/fixes/`.
+
+Tags: `off` every rule off (the car before); `r1`–`r5` one rule alone (`r6` changes nothing in
+`beamng_feel`: byte for byte the car before); `c12`, `c123`, … the rules cumulative in §6's
+order; `c145`/`c1456` rules 1, 4, 5 (and 6); `all`; `rc_*` the `real_crash` character. CPU
+reference, generated sedan 1,448 kg, S11 and S12 run 0 with edge contact, the push of §2. The
+cut rows are the lattice cut of §4 (both sides): yielding beams at their threshold, never-yielding
+ones at their strength.
+
+### 8.1 Each rule alone
+
+| | off | r1 | r2 | r3 | r4 | r5 |
+|---|---|---|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 1010 / 1606 | 1007 / 1606 | 804 / 1606 | 1010 / 1606 | 1077 / 229 | 701 / 1600 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 194 / 224 / 401 | 194 / 224 / 398 | 194 / 18 / 401 | 194 / 224 / 401 | 194 / 224 / 469 | 194 / 224 / 92 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 2236 / 1334 | 1890 / 1334 | 2126 / 1334 | 2236 / 1334 | 2291 / 129 | 1959 / 1035 |
+|   of which rail chords and braces / subframe–crash box (kN) | 348 / 553 | 348 / 0 | 290 / 553 | 348 / 553 | 348 / 553 | 348 / 553 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 162 / 394 / 538 / 509 | 165 / 362 / 523 / 531 | 141 / 254 / 235 / 375 | 162 / 394 / 514 / 518 | 127 / 396 / 517 / 414 | 162 / 379 / 515 / 341 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.128 / 0.371, 0.434 | 0.157 / 0.368, 0.386 | 0.193 / 0.373, 0.449 | 0.115 / 0.372, 0.438 | 0.131 / 0.370, 0.438 | 0.119 / 0.373, 0.430 |
+| push at 0.39 m: elastic / plastic (kJ) | 40.5 / 78.0 | 41.2 / 77.4 | 27.4 / 35.3 | 41.4 / 75.4 | 34.0 / 79.5 | 28.8 / 81.9 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 255 / 538 / 644 / – | 253 / 519 / 706 / – | 243 / 470 / 471 / 419 | 255 / 535 / 623 / – | 229 / 539 / 645 / 406 | 240 / 516 / 580 / 529 |
+| S11 t_m (ms) | 44.4 | 44.1 | 52.9 | 44.1 | 49.6 | 48.6 |
+| S11 dynamic crush (m) | 0.394 | 0.398 | 0.471 | 0.397 | 0.406 | 0.415 |
+| S11 rebound (m/s) / restitution | 5.34 / 0.342 | 5.02 / 0.322 | 4.77 / 0.306 | 5.54 / 0.355 | 4.40 / 0.282 | 3.85 / 0.247 |
+| S11 residual crush (m) | 0.199 | 0.210 | 0.288 | 0.196 | 0.239 | 0.252 |
+| S11 peak wall force (kN) at (ms) | 661 at 20.0 | 721 at 24.0 | 549 at 16.0 | 644 at 20.0 | 672 at 20.0 | 620 at 16.0 |
+| S11 4 ms / CFC 60 peak (g) | 50.0 / 59.1 | 51.6 / 57.4 | 44.6 / 53.7 | 47.9 / 59.0 | 55.1 / 60.9 | 48.5 / 60.8 |
+| S11 cabin: door opening change peak / residual (mm) | 151 / -24 | 170 / -32 | 166 / -27 | 150 / -26 | 151 / -24 | 97 / 0 |
+| S11 plastic work: cabin share | 0.061 | 0.087 | 0.107 | 0.062 | 0.058 | 0.015 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 47.3 / 9.7 | 42.6 / 7.4 | 45.0 / 11.4 | 50.2 / 9.0 | 35.3 / 7.6 | 30.1 / 7.7 |
+| S11 released by zone (kJ) | cabin 16.6, front lower 8.2, front lower+upper 5.8, front upper 4.9, other 2.1 | cabin 18.6, front lower+upper 6.4, front lower 5.3, front upper 4.2, other 0.8 | cabin 18.1, front lower 5.8, front upper 4.8, front lower+upper 3.4, other 1.5 | cabin 17.1, front lower 9.6, front lower+upper 6.7, front upper 5.5, other 2.3 | cabin 14.8, front upper 4.3, front lower+upper 4.2, front lower 2.9, other 1.5 | cabin 8.8, front lower+upper 6.4, front lower 3.9, front upper 2.8, other 0.6 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.227 at 166; None | 0.228 at 156; None | 0.250 at -94; None | 0.227 at 180; None | 0.228 at 173; None | 0.244 at 266; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 39.5 / 0.275 / 0.484 / 0.099 | 41.0 / 0.284 / 0.489 / 0.104 | 60.8 / 0.348 / 0.330 / 0.172 | 39.9 / 0.276 / 0.466 / 0.104 | 39.6 / 0.281 / 0.445 / 0.091 | 40.7 / 0.283 / 0.452 / 0.111 |
+| S12 peak wall force (kN) at (ms) | 576 at 32.0 | 546 at 32.0 | 449 at 24.0 | 562 at 32.0 | 593 at 32.0 | 538 at 32.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.4; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 1.4; 0.000 | 0.0 / 1.4; 0.000 | 0.0 / 1.4; 0.000 | 0.0 / 0.0; 0.000 |
+
+![each rule alone](../out/sections/fixes/front_ab_off_r1_r2_r3_r4_r5.png)
+
+### 8.2 Cumulative, in the audit's order
+
+| | off | r1 | c12 | c123 | c1234 | c12345 | all |
+|---|---|---|---|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 1010 / 1606 | 1007 / 1606 | 801 / 1606 | 801 / 1606 | 868 / 229 | 552 / 229 | 552 / 229 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 194 / 224 / 401 | 194 / 224 / 398 | 194 / 18 / 398 | 194 / 18 / 398 | 194 / 18 / 465 | 194 / 18 / 148 | 194 / 18 / 148 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 2236 / 1334 | 1890 / 1334 | 1780 / 1334 | 1780 / 1334 | 1835 / 129 | 1542 / 129 | 1542 / 129 |
+|   of which rail chords and braces / subframe–crash box (kN) | 348 / 553 | 348 / 0 | 290 / 0 | 290 / 0 | 290 / 0 | 290 / 0 | 290 / 0 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 162 / 394 / 538 / 509 | 165 / 362 / 523 / 531 | 144 / 242 / 234 / 376 | 144 / 242 / 234 / 377 | 118 / 250 / 212 / 380 | 115 / 251 / 143 / 374 | 115 / 251 / 143 / 374 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.128 / 0.371, 0.434 | 0.157 / 0.368, 0.386 | 0.193 / 0.375, 0.450 | 0.193 / 0.375, 0.450 | 0.187 / 0.373, 0.449 | 0.188 / 0.371, 0.447 | 0.188 / 0.371, 0.447 |
+| push at 0.39 m: elastic / plastic (kJ) | 40.5 / 78.0 | 41.2 / 77.4 | 27.1 / 34.8 | 27.1 / 34.8 | 23.4 / 35.4 | 17.9 / 31.0 | 17.9 / 31.0 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 255 / 538 / 644 / – | 253 / 519 / 706 / – | 243 / 463 / 505 / 355 | 243 / 461 / 498 / 375 | 219 / 457 / 524 / 369 | 208 / 433 / 454 / 365 | 208 / 433 / 454 / 365 |
+| S11 t_m (ms) | 44.4 | 44.1 | 53.5 | 53.4 | 52.9 | 54.0 | 54.0 |
+| S11 dynamic crush (m) | 0.394 | 0.398 | 0.475 | 0.473 | 0.473 | 0.492 | 0.492 |
+| S11 rebound (m/s) / restitution | 5.34 / 0.342 | 5.02 / 0.322 | 4.69 / 0.300 | 4.61 / 0.295 | 4.68 / 0.299 | 4.35 / 0.278 | 4.35 / 0.278 |
+| S11 residual crush (m) | 0.199 | 0.210 | 0.291 | 0.286 | 0.292 | 0.344 | 0.344 |
+| S11 peak wall force (kN) at (ms) | 661 at 20.0 | 721 at 24.0 | 562 at 44.0 | 556 at 44.0 | 558 at 44.0 | 560 at 44.0 | 560 at 44.0 |
+| S11 4 ms / CFC 60 peak (g) | 50.0 / 59.1 | 51.6 / 57.4 | 43.4 / 50.9 | 44.5 / 50.8 | 44.8 / 51.8 | 46.7 / 54.0 | 46.7 / 54.0 |
+| S11 cabin: door opening change peak / residual (mm) | 151 / -24 | 170 / -32 | 159 / -18 | 161 / -19 | 160 / -21 | 106 / -1 | 106 / -1 |
+| S11 plastic work: cabin share | 0.061 | 0.087 | 0.090 | 0.092 | 0.087 | 0.024 | 0.024 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 47.3 / 9.7 | 42.6 / 7.4 | 41.0 / 10.4 | 41.1 / 10.0 | 38.9 / 7.6 | 30.1 / 5.7 | 30.1 / 5.7 |
+| S11 released by zone (kJ) | cabin 16.6, front lower 8.2, front lower+upper 5.8, front upper 4.9, other 2.1 | cabin 18.6, front lower+upper 6.4, front lower 5.3, front upper 4.2, other 0.8 | cabin 17.2, front lower 5.0, front upper 3.9, front lower+upper 3.1, other 1.3 | cabin 17.7, front lower 5.3, front upper 4.0, front lower+upper 2.8, other 1.3 | cabin 17.0, front lower 6.1, front upper 4.2, front lower+upper 2.2, other 1.8 | cabin 11.0, front lower 7.1, other 2.6, front lower+upper 2.3, front upper 1.5 | cabin 11.0, front lower 7.1, other 2.6, front lower+upper 2.3, front upper 1.5 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.227 at 166; None | 0.228 at 156; None | 0.250 at -94; None | 0.250 at -94; None | 0.247 at 79; None | 0.226 at 78; None | 0.226 at 78; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 39.5 / 0.275 / 0.484 / 0.099 | 41.0 / 0.284 / 0.489 / 0.104 | 60.6 / 0.347 / 0.342 / 0.149 | 60.2 / 0.347 / 0.344 / 0.166 | 60.1 / 0.350 / 0.347 / 0.180 | 68.5 / 0.378 / 0.265 / 0.232 | 68.5 / 0.378 / 0.265 / 0.232 |
+| S12 peak wall force (kN) at (ms) | 576 at 32.0 | 546 at 32.0 | 449 at 24.0 | 444 at 24.0 | 467 at 24.0 | 431 at 24.0 | 431 at 24.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.4; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.005 | 0.0 / 0.0; 0.002 | 0.0 / 0.0; 0.001 | 0.0 / 0.0; 0.001 |
+
+![cumulative](../out/sections/fixes/front_ab_off_r1_c12_c123_c1234_c12345_all.png)
+
+### 8.3 `real_crash`, rule 6, and the rules that hold together
+
+| | rc_off | rc_r6 | rc_all |
+|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 627 / 1606 | 676 / 1606 | 447 / 229 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 108 / 125 / 204 | 157 / 125 / 204 | 157 / 16 / 84 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 1756 / 1334 | 1823 / 1334 | 1308 / 129 |
+|   of which rail chords and braces / subframe–crash box (kN) | 193 / 553 | 260 / 553 | 229 / 0 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 157 / 299 / 330 / 301 | 157 / 313 / 305 / 312 | 106 / 138 / 113 / 261 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.160 / 0.377, 0.435 | 0.163 / 0.376, 0.431 | 0.185 / 0.375, 0.449 |
+| push at 0.39 m: elastic / plastic (kJ) | 25.8 / 60.3 | 25.8 / 60.3 | 10.9 / 28.0 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 245 / 436 / 477 / 501 | 245 / 454 / 497 / 482 | 194 / 372 / 380 / 380 |
+| S11 t_m (ms) | 57.3 | 57.5 | 61.4 |
+| S11 dynamic crush (m) | 0.480 | 0.477 | 0.553 |
+| S11 rebound (m/s) / restitution | 3.67 / 0.235 | 3.51 / 0.225 | 3.16 / 0.203 |
+| S11 residual crush (m) | 0.333 | 0.324 | 0.421 |
+| S11 peak wall force (kN) at (ms) | 508 at 32.0 | 519 at 16.0 | 431 at 16.0 |
+| S11 4 ms / CFC 60 peak (g) | 39.4 / 41.4 | 40.0 / 43.2 | 35.4 / 42.0 |
+| S11 cabin: door opening change peak / residual (mm) | 131 / -23 | 135 / -26 | 74 / -4 |
+| S11 plastic work: cabin share | 0.031 | 0.035 | 0.007 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 28.0 / 7.3 | 29.0 / 6.9 | 21.9 / 4.0 |
+| S11 released by zone (kJ) | cabin 11.0, front lower+upper 3.8, front upper 3.4, front lower 1.7, other 1.0 | cabin 11.4, front lower+upper 4.3, front upper 3.8, front lower 1.8, other 0.8 | cabin 7.0, front lower 4.1, other 3.7, front lower+upper 2.5, front upper 0.7 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.234 at 77; None | 0.241 at 85; None | 0.224 at 55; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 50.3 / 0.317 / 0.366 / 0.156 | 48.7 / 0.311 / 0.345 / 0.159 | 77.5 / 0.430 / 0.244 / 0.311 |
+| S12 peak wall force (kN) at (ms) | 427 at 24.0 | 449 at 24.0 | 351 at 24.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.3; 0.000 | 0.0 / 1.3; 0.000 | 0.0 / 0.0; 0.000 |
+
+| | off | c145 | rc_off | rc_c1456 |
+|---|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 1010 / 1606 | 757 / 229 | 627 / 1606 | 556 / 229 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 194 / 224 / 401 | 194 / 224 / 148 | 108 / 125 / 204 | 157 / 125 / 84 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 2236 / 1334 | 1652 / 129 | 1756 / 1334 | 1366 / 129 |
+|   of which rail chords and braces / subframe–crash box (kN) | 348 / 553 | 348 / 0 | 193 / 553 | 260 / 0 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 162 / 394 / 538 / 509 | 123 / 363 / 468 / 527 | 157 / 299 / 330 / 301 | 116 / 262 / 309 / 372 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.128 / 0.371, 0.434 | 0.150 / 0.367, 0.384 | 0.160 / 0.377, 0.435 | 0.174 / 0.370, 0.375 |
+| push at 0.39 m: elastic / plastic (kJ) | 40.5 / 78.0 | 30.0 / 79.0 | 25.8 / 60.3 | 17.1 / 59.3 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 255 / 538 / 644 / – | 214 / 497 / 602 / 502 | 245 / 436 / 477 / 501 | 200 / 410 / 471 / 420 |
+| S11 t_m (ms) | 44.4 | 48.6 | 57.3 | 56.6 |
+| S11 dynamic crush (m) | 0.394 | 0.428 | 0.480 | 0.507 |
+| S11 rebound (m/s) / restitution | 5.34 / 0.342 | 4.24 / 0.271 | 3.67 / 0.235 | 3.84 / 0.246 |
+| S11 residual crush (m) | 0.199 | 0.274 | 0.333 | 0.347 |
+| S11 peak wall force (kN) at (ms) | 661 at 20.0 | 622 at 20.0 | 508 at 32.0 | 483 at 16.0 |
+| S11 4 ms / CFC 60 peak (g) | 50.0 / 59.1 | 47.3 / 58.1 | 39.4 / 41.4 | 37.4 / 42.3 |
+| S11 cabin: door opening change peak / residual (mm) | 151 / -24 | 115 / -4 | 131 / -23 | 81 / -7 |
+| S11 plastic work: cabin share | 0.061 | 0.019 | 0.031 | 0.009 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 47.3 / 9.7 | 29.8 / 7.4 | 28.0 / 7.3 | 22.7 / 5.1 |
+| S11 released by zone (kJ) | cabin 16.6, front lower 8.2, front lower+upper 5.8, front upper 4.9, other 2.1 | cabin 10.2, front lower 5.3, front lower+upper 4.1, front upper 1.9, other 0.8 | cabin 11.0, front lower+upper 3.8, front upper 3.4, front lower 1.7, other 1.0 | cabin 7.0, front lower+upper 4.2, front lower 4.1, other 1.2, front upper 1.1 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.227 at 166; None | 0.250 at -94; None | 0.234 at 77; None | 0.223 at 181; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 39.5 / 0.275 / 0.484 / 0.099 | 42.0 / 0.294 / 0.442 / 0.124 | 50.3 / 0.317 / 0.366 / 0.156 | 53.0 / 0.344 / 0.326 / 0.210 |
+| S12 peak wall force (kN) at (ms) | 576 at 32.0 | 530 at 24.0 | 427 at 24.0 | 405 at 32.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.4; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 1.3; 0.000 | 3.8 / 0.0; 0.000 |
+
+### 8.4 Where the push's 0.39 m goes (z shortening of each bay, m)
+
+| variant | crash box a1–a2: z shortening (m) | chords' length upper / lower (m, from 0.180) | rail a2–a4 (z) | rail a4–a5 (z) | a5 to firewall (z) | firewall to cabin rear | crash box front's rise (m) |
+|---|---|---|---|---|---|---|---|
+| off | 0.100 | 0.128 / 0.111 | 0.029 | 0.023 | -0.023 | 0.109 | -0.017 |
+| r1 | 0.054 | 0.157 / 0.126 | 0.020 | 0.081 | -0.010 | 0.093 | -0.018 |
+| r2 | 0.251 | 0.193 / 0.182 | 0.024 | 0.007 | -0.021 | 0.047 | 0.041 |
+| r2a | 0.172 | 0.137 / 0.124 | 0.033 | 0.009 | -0.021 | 0.065 | 0.012 |
+| r3 | 0.106 | 0.115 / 0.097 | 0.025 | 0.019 | -0.022 | 0.110 | -0.017 |
+| r4 | 0.107 | 0.131 / 0.123 | 0.030 | 0.019 | -0.024 | 0.105 | 0.004 |
+| r5 | 0.134 | 0.119 / 0.118 | 0.029 | 0.034 | 0.004 | 0.036 | -0.018 |
+| c12 | 0.244 | 0.193 / 0.182 | 0.028 | 0.006 | -0.019 | 0.044 | 0.046 |
+| c123 | 0.244 | 0.193 / 0.182 | 0.028 | 0.006 | -0.020 | 0.044 | 0.047 |
+| c1234 | 0.229 | 0.187 / 0.182 | 0.022 | 0.008 | -0.020 | 0.048 | 0.026 |
+| c12345 | 0.236 | 0.188 / 0.184 | 0.026 | 0.008 | -0.013 | 0.037 | 0.008 |
+| all | 0.236 | 0.188 / 0.184 | 0.026 | 0.008 | -0.013 | 0.037 | 0.008 |
+| rc_off | 0.160 | 0.161 / 0.155 | 0.044 | 0.022 | -0.013 | 0.052 | -0.000 |
+| rc_r6 | 0.163 | 0.163 / 0.149 | 0.043 | 0.025 | -0.012 | 0.051 | 0.002 |
+| rc_all | 0.216 | 0.185 / 0.184 | 0.039 | 0.005 | -0.006 | 0.021 | -0.001 |
+
+The crash box's span along the car shortens by more than its chords: **it swings about its rear
+nodes** (its lattice cell is four nodes in one vertical plane, no depth across the car), in the
+car before too (its span reaches 0 at 0.55 m of push) and from 0.25 m once its braces are
+weakened (rule 2). `r2a`: rule 2 on the braces along the car only (`FRONT_RULE2_ALONG=0.7`, a
+measurement): the swing comes at 0.45 m, not never. Lessons §25.2.
+
+### 8.5 Hard rules, 8 runs in each contact setting
+
+| variant | scenario | contact | runs | energy created, max (J) | its band | into the wall, max (m) | finite | crossings, max | asserted failures | restitution | dyn. crush (m) | residual (m) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| off | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.302–0.346 | 0.385–0.403 | 0.188–0.221 |
+| off | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.302–0.346 | 0.385–0.403 | 0.188–0.221 |
+| off | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.295–0.356 | 0.381–0.403 | 0.190–0.228 |
+| off | S12 | discrete | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.466–0.497 | 0.270–0.280 | 0.092–0.101 |
+| off | S12 | edge | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.466–0.497 | 0.270–0.280 | 0.092–0.101 |
+| off | S12 | continuous | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.463–0.496 | 0.269–0.278 | 0.091–0.099 |
+| off | S01 | discrete | 8 | 12.8 | ≤ 230.0 | 0.000 | 1 | – | none | 0.231–0.261 | 0.569–0.596 | 0.062–0.071 |
+| off | S01 | edge | 8 | 12.8 | ≤ 230.0 | 0.000 | 1 | – | none | 0.231–0.261 | 0.569–0.596 | 0.062–0.071 |
+| off | S01 | continuous | 8 | 90.2 | ≤ 230.0 | 0.000 | 1 | – | none | 0.242–0.284 | 0.560–0.585 | 0.060–0.067 |
+| off | S02 | discrete | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.275–0.300 | 0.285–0.296 | -0.158–-0.090 |
+| off | S02 | edge | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.275–0.300 | 0.285–0.296 | -0.158–-0.090 |
+| off | S02 | continuous | 8 | 0.0 |  | 0.000 | 1 | – | none | 0.303–0.328 | 0.279–0.290 | -0.185–-0.131 |
+| off | S08 | discrete | 8 | 153.6 | ≤ 340.0 | 0.000 | 1 | 169.0 | the common centre of mass stays still 2/8 | 0.055–0.132 | 0.773–0.819 | -0.011–0.056 |
+| off | S08 | edge | 8 | 202.6 | ≤ 340.0 | 0.000 | 1 | 31.0 | momentum across the road 1/8, momentum along the road 1/8, the common centre of mass stays still 2/8 | 0.121–0.205 | 0.696–0.737 | -0.009–0.059 |
+| off | S08 | continuous | 8 | 442.9 | ≤ 340.0 | 0.000 | 1 | 0.0 | momentum along the road 2/8, no energy created 1/8, the common centre of mass stays still 8/8 | 0.125–0.173 | 0.649–0.730 | -0.012–0.048 |
+| r1 | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.314–0.328 | 0.391–0.407 | 0.201–0.216 |
+| r1 | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.314–0.328 | 0.391–0.407 | 0.201–0.216 |
+| r1 | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.331–0.348 | 0.385–0.400 | 0.202–0.218 |
+| r1 | S12 | discrete | 8 | 3.4 | ≤ 89.0 | 0.000 | 1 | – | none | 0.478–0.496 | 0.278–0.288 | 0.098–0.109 |
+| r1 | S12 | edge | 8 | 3.4 | ≤ 89.0 | 0.000 | 1 | – | none | 0.478–0.496 | 0.278–0.288 | 0.098–0.109 |
+| r1 | S12 | continuous | 8 | 3.4 | ≤ 89.0 | 0.000 | 1 | – | none | 0.466–0.497 | 0.276–0.285 | 0.097–0.108 |
+| r1 | S01 | discrete | 8 | 4.7 | ≤ 230.0 | 0.000 | 1 | – | none | 0.261–0.281 | 0.577–0.601 | 0.067–0.073 |
+| r1 | S01 | edge | 8 | 4.7 | ≤ 230.0 | 0.000 | 1 | – | none | 0.261–0.281 | 0.577–0.601 | 0.067–0.073 |
+| r1 | S01 | continuous | 8 | 56.5 | ≤ 230.0 | 0.000 | 1 | – | none | 0.285–0.298 | 0.571–0.589 | 0.064–0.070 |
+| r1 | S02 | discrete | 8 | 0.0 |  | 0.000 | 1 | – | none | 0.278–0.294 | 0.275–0.288 | -0.151–-0.032 |
+| r1 | S02 | edge | 8 | 0.0 |  | 0.000 | 1 | – | none | 0.278–0.294 | 0.275–0.288 | -0.151–-0.032 |
+| r1 | S02 | continuous | 8 | 0.0 |  | 0.000 | 1 | – | none | 0.305–0.332 | 0.270–0.284 | -0.193–0.014 |
+| r1 | S08 | discrete | 8 | 183.4 | ≤ 340.0 | 0.000 | 1 | 159.0 | the common centre of mass stays still 1/8 | 0.073–0.166 | 0.761–0.813 | 0.003–0.055 |
+| r1 | S08 | edge | 8 | 121.7 | ≤ 340.0 | 0.000 | 1 | 31.0 | momentum across the road 2/8, momentum along the road 1/8, the common centre of mass stays still 4/8 | 0.148–0.208 | 0.700–0.741 | -0.022–0.055 |
+| r1 | S08 | continuous | 8 | 282.8 | ≤ 340.0 | 0.000 | 1 | 0.0 | momentum along the road 3/8, the common centre of mass stays still 8/8, turns the same sense as the other 3/8 | 0.119–0.178 | 0.660–0.734 | -0.021–0.053 |
+| r4 | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.271–0.298 | 0.394–0.417 | 0.224–0.253 |
+| r4 | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.271–0.298 | 0.394–0.417 | 0.224–0.253 |
+| r4 | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.269–0.301 | 0.390–0.411 | 0.223–0.259 |
+| r4 | S12 | discrete | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.432–0.453 | 0.277–0.286 | 0.084–0.099 |
+| r4 | S12 | edge | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.432–0.453 | 0.277–0.286 | 0.084–0.099 |
+| r4 | S12 | continuous | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.432–0.450 | 0.276–0.285 | 0.084–0.097 |
+| r4 | S01 | discrete | 8 | 0.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.258–0.277 | 0.574–0.601 | 0.085–0.093 |
+| r4 | S01 | edge | 8 | 0.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.258–0.277 | 0.574–0.601 | 0.085–0.093 |
+| r4 | S01 | continuous | 8 | 3.7 | ≤ 230.0 | 0.000 | 1 | – | none | 0.271–0.293 | 0.570–0.597 | 0.081–0.089 |
+| r4 | S02 | discrete | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.235–0.285 | 0.298–0.310 | -0.126–-0.015 |
+| r4 | S02 | edge | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.235–0.285 | 0.298–0.310 | -0.126–-0.015 |
+| r4 | S02 | continuous | 8 | 0.0 |  | 0.001 | 1 | – | none | 0.282–0.302 | 0.293–0.305 | -0.149–-0.047 |
+| r4 | S08 | discrete | 8 | 169.7 | ≤ 340.0 | 0.000 | 1 | 152.0 | the common centre of mass stays still 4/8 | 0.071–0.138 | 0.751–0.817 | -0.006–0.067 |
+| r4 | S08 | edge | 8 | 272.4 | ≤ 340.0 | 0.000 | 1 | 78.0 | none | 0.143–0.202 | 0.737–0.777 | 0.003–0.037 |
+| r4 | S08 | continuous | 8 | 126.8 | ≤ 340.0 | 0.000 | 1 | 0.0 | momentum along the road 1/8 | 0.164–0.231 | 0.713–0.751 | 0.013–0.051 |
+| r5 | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 2/8 | 0.227–0.276 | 0.404–0.425 | 0.235–0.266 |
+| r5 | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 2/8 | 0.227–0.276 | 0.404–0.425 | 0.235–0.266 |
+| r5 | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.004 | 1 | – | restitution within the 56 km/h sedan fleet's 2/8 | 0.209–0.277 | 0.404–0.425 | 0.235–0.264 |
+| r5 | S12 | discrete | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.444–0.461 | 0.278–0.288 | 0.106–0.117 |
+| r5 | S12 | edge | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.444–0.461 | 0.278–0.288 | 0.106–0.117 |
+| r5 | S12 | continuous | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.443–0.463 | 0.278–0.288 | 0.106–0.117 |
+| r5 | S01 | discrete | 8 | 81.9 | ≤ 230.0 | 0.000 | 1 | – | none | 0.208–0.231 | 0.595–0.618 | 0.033–0.042 |
+| r5 | S01 | edge | 8 | 81.9 | ≤ 230.0 | 0.000 | 1 | – | none | 0.208–0.231 | 0.595–0.618 | 0.033–0.042 |
+| r5 | S01 | continuous | 8 | 77.1 | ≤ 230.0 | 0.000 | 1 | – | none | 0.216–0.225 | 0.593–0.617 | 0.031–0.039 |
+| r5 | S02 | discrete | 8 | 8.2 |  | 0.002 | 1 | – | none | 0.219–0.255 | 0.304–0.316 | -0.009–0.138 |
+| r5 | S02 | edge | 8 | 8.2 |  | 0.002 | 1 | – | none | 0.219–0.255 | 0.304–0.316 | -0.009–0.138 |
+| r5 | S02 | continuous | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.233–0.275 | 0.304–0.317 | -0.015–0.053 |
+| r5 | S08 | discrete | 8 | 233.5 | ≤ 340.0 | 0.000 | 1 | 200.0 | the common centre of mass stays still 3/8 | 0.057–0.113 | 0.838–0.898 | -0.050–0.003 |
+| r5 | S08 | edge | 8 | 76.0 | ≤ 340.0 | 0.000 | 1 | 36.0 | the common centre of mass stays still 1/8 | 0.116–0.155 | 0.767–0.814 | -0.034–0.049 |
+| r5 | S08 | continuous | 8 | 3.0 | ≤ 340.0 | 0.000 | 1 | 0.0 | turns the same sense as the other 1/8 | 0.101–0.161 | 0.764–0.802 | 0.001–0.040 |
+| rc_off | S11 | discrete | 8 | 717.1 | ≤ 177.0 | 0.001 | 1 | – | no energy created 1/8 | 0.223–0.249 | 0.466–0.496 | 0.310–0.346 |
+| rc_off | S11 | edge | 8 | 717.1 | ≤ 177.0 | 0.001 | 1 | – | no energy created 1/8 | 0.223–0.249 | 0.466–0.496 | 0.310–0.346 |
+| rc_off | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 4/8 | 0.228–0.259 | 0.462–0.490 | 0.307–0.328 |
+| rc_off | S12 | discrete | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.362–0.374 | 0.309–0.325 | 0.153–0.165 |
+| rc_off | S12 | edge | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.362–0.374 | 0.309–0.325 | 0.153–0.165 |
+| rc_off | S12 | continuous | 8 | 322.9 | ≤ 89.0 | 0.000 | 1 | – | no energy created 1/8 | 0.367–0.384 | 0.306–0.320 | 0.153–0.161 |
+| rc_off | S01 | discrete | 8 | 9.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.170–0.183 | 0.639–0.670 | -0.018–0.069 |
+| rc_off | S01 | edge | 8 | 9.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.170–0.183 | 0.639–0.670 | -0.018–0.069 |
+| rc_off | S01 | continuous | 8 | 11.5 | ≤ 230.0 | 0.000 | 1 | – | none | 0.190–0.206 | 0.631–0.658 | 0.060–0.072 |
+| rc_off | S02 | discrete | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.205–0.244 | 0.340–0.360 | -0.057–0.221 |
+| rc_off | S02 | edge | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.205–0.244 | 0.340–0.360 | -0.057–0.221 |
+| rc_off | S02 | continuous | 8 | 907.6 |  | 0.003 | 1 | – | none | 0.236–0.255 | 0.333–0.356 | -0.043–0.163 |
+| rc_off | S08 | discrete | 8 | 387.0 | ≤ 340.0 | 0.000 | 1 | 152.0 | momentum along the road 1/8, no energy created 2/8, the common centre of mass stays still 2/8 | 0.108–0.143 | 0.848–0.901 | -0.050–0.077 |
+| rc_off | S08 | edge | 8 | 0.0 | ≤ 340.0 | 0.000 | 1 | 53.0 | none | 0.107–0.136 | 0.823–0.898 | -0.067–-0.039 |
+| rc_off | S08 | continuous | 8 | 105.3 | ≤ 340.0 | 0.000 | 1 | 0.0 | momentum across the road 2/8, momentum along the road 1/8, the common centre of mass stays still 4/8, turns the same sense as the other 5/8 | 0.093–0.149 | 0.794–0.850 | -0.059–0.053 |
+| rc_r6 | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 1/8 | 0.224–0.255 | 0.465–0.490 | 0.307–0.336 |
+| rc_r6 | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 1/8 | 0.224–0.255 | 0.465–0.490 | 0.307–0.336 |
+| rc_r6 | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.001 | 1 | – | restitution within the 56 km/h sedan fleet's 2/8 | 0.237–0.255 | 0.461–0.486 | 0.306–0.327 |
+| rc_r6 | S12 | discrete | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.337–0.370 | 0.303–0.318 | 0.149–0.167 |
+| rc_r6 | S12 | edge | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.337–0.370 | 0.303–0.318 | 0.149–0.167 |
+| rc_r6 | S12 | continuous | 8 | 2.8 | ≤ 89.0 | 0.000 | 1 | – | none | 0.358–0.387 | 0.300–0.314 | 0.144–0.162 |
+| rc_r6 | S01 | discrete | 8 | 3.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.171–0.190 | 0.635–0.665 | 0.060–0.067 |
+| rc_r6 | S01 | edge | 8 | 3.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.171–0.190 | 0.635–0.665 | 0.060–0.067 |
+| rc_r6 | S01 | continuous | 8 | 14.9 | ≤ 230.0 | 0.000 | 1 | – | none | 0.190–0.204 | 0.625–0.652 | 0.057–0.072 |
+| rc_r6 | S02 | discrete | 8 | 659.4 |  | 0.003 | 1 | – | none | 0.211–0.249 | 0.342–0.359 | -0.066–0.215 |
+| rc_r6 | S02 | edge | 8 | 659.4 |  | 0.003 | 1 | – | none | 0.211–0.249 | 0.342–0.359 | -0.066–0.215 |
+| rc_r6 | S02 | continuous | 8 | 7.7 |  | 0.002 | 1 | – | none | 0.229–0.258 | 0.333–0.353 | -0.097–0.227 |
+| rc_r6 | S08 | discrete | 8 | 96.4 | ≤ 340.0 | 0.000 | 1 | 178.0 | the common centre of mass stays still 4/8 | 0.092–0.131 | 0.857–0.907 | -0.058–0.076 |
+| rc_r6 | S08 | edge | 8 | 1.4 | ≤ 340.0 | 0.000 | 1 | 32.0 | momentum across the road 1/8, momentum along the road 1/8, the common centre of mass stays still 1/8, turns the same sense as the other 4/8 | 0.110–0.145 | 0.820–0.894 | -0.069–-0.051 |
+| rc_r6 | S08 | continuous | 8 | 290.2 | ≤ 340.0 | 0.000 | 1 | 0.0 | momentum across the road 1/8, the common centre of mass stays still 7/8, turns the same sense as the other 7/8 | 0.079–0.145 | 0.798–0.858 | -0.054–0.068 |
+| all | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.001 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.278–0.283 | 0.485–0.500 | 0.333–0.349 |
+| all | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.001 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.278–0.283 | 0.485–0.500 | 0.333–0.349 |
+| all | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.002 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.276–0.285 | 0.485–0.499 | 0.336–0.347 |
+| all | S12 | discrete | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.249–0.285 | 0.369–0.388 | 0.227–0.243 |
+| all | S12 | edge | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.249–0.285 | 0.369–0.388 | 0.227–0.243 |
+| all | S12 | continuous | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.222–0.287 | 0.369–0.387 | 0.226–0.243 |
+| all | S01 | discrete | 8 | 2.7 | ≤ 230.0 | 0.000 | 1 | – | none | 0.174–0.204 | 0.637–0.659 | -0.025–0.067 |
+| all | S01 | edge | 8 | 2.7 | ≤ 230.0 | 0.000 | 1 | – | none | 0.174–0.204 | 0.637–0.659 | -0.025–0.067 |
+| all | S01 | continuous | 8 | 0.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.181–0.223 | 0.634–0.657 | 0.062–0.067 |
+| all | S02 | discrete | 8 | 4.9 |  | 0.002 | 1 | – | none | 0.209–0.221 | 0.394–0.402 | -0.016–0.134 |
+| all | S02 | edge | 8 | 4.9 |  | 0.002 | 1 | – | none | 0.209–0.221 | 0.394–0.402 | -0.016–0.134 |
+| all | S02 | continuous | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.210–0.232 | 0.393–0.402 | 0.054–0.193 |
+| all | S08 | discrete | 8 | 219.8 | ≤ 340.0 | 0.000 | 1 | 199.0 | none | 0.059–0.137 | 0.860–0.910 | -0.053–-0.006 |
+| all | S08 | edge | 8 | 466.5 | ≤ 340.0 | 0.000 | 1 | 40.0 | no energy created 1/8 | 0.114–0.168 | 0.888–0.926 | -0.011–0.033 |
+| all | S08 | continuous | 8 | 30.4 | ≤ 340.0 | 0.000 | 1 | 0.0 | none | 0.102–0.140 | 0.879–0.930 | -0.009–0.011 |
+
+S08 with edge contact, energy created in each of the 8 runs (J; the bar 340 J): before 0–203
+(holds); rule 1 alone 4–122; rule 2 alone 10–2,818 (**5 of 8 fail**); rule 3 alone 0–674 (**1
+of 8 fails**); rule 4 alone 1–272; rule 5 alone 0–76; 1+2 16–1,415 (5 of 8); 1+2+3 585–2,262 (8
+of 8); 1–4 0–2,686 (3 of 8); 1–5 and all six 0–467 (1 of 8). It is the edge contact's known
+position step (crash-reference.md, S03/S14), which the swinging crash boxes' edges reach.
+
+### 8.6 Gates and tests whose result changed
+
+Every gate on the car before (`RUBBLE_FRONT_RULES=none`) and with each set (`front_gates.sh`;
+`gen3_rig` with `GEN3_RIG_DESIGN=sedan`). Unchanged everywhere: `engine-vehiclegen` (lib 63,
+`crash_zones`, `mechanical`), authoring `crash_zones`, `truck_cab`, `box_trailer` (their files
+byte for byte with every rule), `sedan_energy` 6/6, `crash_invariants` 9/9, `gen_sedan_contact`
+(the six listed failures), `continuous_contact` (the three listed), `generated_vehicle_lint` (the
+two listed), `gen3_rig` (`rest_fidelity_at_spawn_and_parked` fails before and with every rule on
+the generated sedan: parked normal 1.090° before, 1.089° with rule 5, 1.102° with all six; spawn
+0.05° → 0.08°, vertex 0.105 mm; bar 1°, not in the expected-failures list because CI runs it on
+the gen2 car).
+
+| test (bar) | before | changes with |
+|---|---|---|
+| `every_design` (every part ≤ 5 mm parked) | passes; 4x4 `bf_g2` 4.9 mm | rule 1: **fails**, 5.5 mm (rules 2–5 alone 4.7–4.9; rules 1+4+5+6 5.8, all six 5.8) |
+| `gen_sedan_paint::accept_head_30_pressed` (10 mm from 0.3 s) | passes, 8 mm | rule 5: **fails**, 21 mm |
+| `gen_sedan_paint::accept_head_60_pressed` (50 mm) | passes, 21 mm | rule 4: **fails**, 53 mm; rule 5 18 mm; rules 1+4+5+6: fails |
+| `gen_sedan_paint::accept_side_90` (50 mm; listed failing) | fails, 55 mm | rule 5: passes, 22 mm (would need removing from `tests-expected-failures.txt`) |
+| `gen_sedan_paint::accept_side_60_pressed` (10 mm; listed failing) | fails, 16 mm | rule 4: passes, 2 mm; rule 5 17 mm |
+| `gen_sedan_paint::accept_head_100` (listed failing) | fails, 61 mm | rule 4 117 mm; rule 5 54 mm |
+| S11 restitution (cited ≤ 0.25), 8 runs × 3 settings | 0 of 24 pass | rule 4 0; rule 5 6 of 8 a setting; `real_crash` alone 8 of 8 (edge; it creates 717 J in one run), with rule 6 7 of 8 and no energy created |
+
+Bands were not edited. The paint bars are the owner's (2026-11-25, independent targets, not
+ratchets); the parked drift's 5 mm is the gate's own bar.
+
+### 8.7 Shape (S02, the 4x4 into the wall; `crash_outlines` + `outlines.py`, peak crush)
+
+| | real test | BeamNG | before | rules 1, 4, 5, 6 | all six |
+|---|---|---|---|---|---|
+| hood fold height (/ hood length) | 0.135 | 0.208 | 0.015 | 0.120 | 0.149 |
+| hood length after / before | 0.833 | 0.832 | 1.001 | 0.935 | 0.879 |
+| hood creases (turn > 20°) | 1 | 2 | 0 | 1 | 1 |
+
+Stills of the collision surface (CPU, `crash_outlines S11`): before the hit, at the peak, at
+maximum crush and at rest, rules off beside all six: `out/sections/fixes/stills_S11_side_off_vs_all.png`
+and `stills_S11_top_off_vs_all.png` (copies in the artifacts). The pose before the hit is the
+same; at rest the hood is tented and the fenders folded with the rules. The drawn car (GLB) is
+byte for byte the same with every rule; the skins (`.rskin`) change with rule 5 only.
+
+### 8.8 Against the audit's predictions
+
+| audit §6 item | predicted | measured |
+|---|---|---|
+| 1 subframe mounts | rails fold; plateau ~500 → 200–300 kN; crush toward 0.6 m; t_m longer | rails' bay −346 kN, second rail chord −48 mm (was −19); **plateau unchanged** (520–530 kN), crush 0.394 → 0.398 m, t_m unchanged: not as predicted (the bay's other members hold it) |
+| 2 bay alone | first plateau ≈ 2 × 70 kN + beam and cover, near 200–250 kN | 254 / 235 kN at 0.2 / 0.3 m, **but by the box swinging**, and S08 edge creates energy |
+| 3 stroke | 0.13 m of travel at a flat force; less elastic energy | flat, but the chord still locks at `MIN_REST` (0.08 m, the 0.37 m chord not buildable: a deviation, lessons §25.3); elastic at the stop 47 → 50 kJ (not lower) |
+| 4 stops yield | rebound −3–5 kJ (0.6 m/s); force −0–100 kN early | elastic at the stop −12 kJ, rebound 5.34 → 4.40 m/s; push −35 kN at 0.1 m; as predicted |
+| 5 hood and fenders | 100–300 kN less in the cut; little in S11 | −309 kN in the cut; **much in S11** (restitution 0.342 → 0.247, cabin's plastic share 6 % → 1.5 %) |
+| 6 crash rate | boxes 97 → 76 kN a side (with 2), rails 111 → 92 kN | `real_crash`: boxes 54 → 79 kN a side (with diagonals), the rails' chords and braces 193 → 260 kN (both sides, cut); in `beamng_feel` nothing (byte for byte) |
+| 7 cabin carries the force elastically | fixed by 1–3 | the cabin's released energy 16.6 → 8.8 kJ with rule 5 alone, 11.0 kJ with all six; firewall-to-cabin span 0.109 → 0.036 m (rule 5) |
+| (§2) engine stacks | second peak near the Camry's depth | **the engine never reaches the firewall** in any variant (0.22–0.25 m left) |
+
+**Defaults: every rule stays off** (lessons §25.8: each breaks a hard rule or a gate that held
+before). Rules 4 and 5 together come nearest (S11 restitution 0.271, run 0); rule 5 is the
+single largest improvement against the real tests.

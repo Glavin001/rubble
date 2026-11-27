@@ -1,12 +1,14 @@
 //! The crash reference suite on the CPU reference (`engine_softbody::crash_reference`).
 //!
 //! `crash_ref -- [ID ...] [--runs N | --run K] [--contact discrete|edge|continuous] [--json]
-//! [--out DIR]` (no id: every scenario; `--list`: their ids; `--run K`: run K alone, the
+//! [--out DIR] [--params design=FILE[,design=FILE]]` (no id: every scenario; `--list`: their ids; `--run K`: run K alone, the
 //! jitter of `Jitter::run(K)`; `--out DIR`: each run's report, without its time histories, as
 //! `DIR/ID-contact-run.json`).
 //! One report a run, then each scenario's verdict (`crash_reference::verdict`): exit code 1
 //! when a tier 0 or tier 1 criterion fails that is not a known failure, or a known failure
 //! recorded for every run passes in all of them (remove the entry).
+//! `--params`: a design's parameters (e.g. a physics block with other front rules): the
+//! scenarios as written, their designs generated from those parameters.
 
 use engine_softbody::crash_reference::{self as cr, Contact, CpuRunner, Jitter};
 
@@ -26,10 +28,11 @@ fn main() -> Result<(), String> {
     let contact = flag("--contact").map_or(Ok(Contact::Edge), |x| Contact::from_name(&x).ok_or(format!("no contact setting {x}")))?;
     let json = a.iter().any(|x| x == "--json");
     let out = flag("--out");
+    let params = flag("--params").map_or(Ok(Vec::new()), |v| engine_softbody_authoring::crash_templates::params_from_list(&v))?;
     let ids: Vec<&String> = a.iter().take_while(|x| !x.starts_with("--")).collect();
     let mut failed = Vec::new();
     for s in cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(s.id))) {
-        let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
+        let templates = engine_softbody_authoring::crash_templates::templates_for_with(&s, &params)?;
         let mut reports = Vec::new();
         for &run in &runs {
             let built = s.build(&templates, Jitter::run(run), contact)?;
