@@ -1,0 +1,17 @@
+{
+ "id": "8560_S14_camry",
+ "title": "8560: NHTSA Ncap Side - 2014.5 Toyota Camry Le 4-Dr Sedan (S14)",
+ "source": {
+  "kind": "video",
+  "url": "https://nrd.api.nhtsa.dot.gov/nhtsa/vehicle/api/v1/vehicle-database-test-results/get-multimedia-files/8560",
+  "note": "High-speed films at 1,000 fps; times are ms after first contact from the burned-in caption (exact to the frame)."
+ },
+ "rubble": {
+  "scenario": "S14",
+  "contact": "discrete",
+  "run": 0
+ },
+ "before_frame": "8560_C001_m010",
+ "notes": "Camry side test 8560 beside S14; engine/docs/crash-reference/camry-side-comparison.md.",
+ "updated": "2026-11-27T19:50:42.000Z"
+}

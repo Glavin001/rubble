@@ -1,0 +1,24 @@
+{
+ "id": "8560_C006_t040",
+ "shot": "8560_S14_camry",
+ "image": {
+  "file": "8560_S14_camry/8560_C006_t040.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "2300a0bbb09bdc3de9a1ce4ea9be26edbff7e2f032e527290485617ac7bb6d3f"
+ },
+ "moment": {
+  "label": "peak",
+  "after_impact_ms": 40
+ },
+ "time": null,
+ "view": "front oblique",
+ "notes": "NHTSA 8560 film C006 (front oblique), 40 ms after first contact (film frame 91 at 1,000 fps).",
+ "rubble": {
+  "moment": "peak",
+  "camera": "front three-quarter"
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}

@@ -1,0 +1,39 @@
+{
+ "title": "S13 beside NHTSA 7523 and 8558: front ground level, ms after first contact",
+ "times_ms": [
+  -10,
+  0,
+  10,
+  20,
+  30,
+  40,
+  60,
+  80,
+  100,
+  150,
+  200,
+  300
+ ],
+ "cell": [
+  400,
+  267
+ ],
+ "columns": [
+  {
+   "label": "7523 C002 front ground level",
+   "path": "out/camry-side/real/7523/v07523C002/{ms}.jpg"
+  },
+  {
+   "label": "8558 C002 front ground level",
+   "path": "out/camry-side/real/8558/v08558C002/{ms}.jpg"
+  },
+  {
+   "label": "Rubble gen sedan, edge",
+   "path": "out/camry-side/rubble/S13-film-edge/t{ms}-film front.png"
+  },
+  {
+   "label": "Rubble ETK K-series, edge",
+   "path": "out/camry-side/rubble/S13-etk-film-edge/t{ms}-film front.png"
+  }
+ ]
+}

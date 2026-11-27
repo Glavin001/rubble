@@ -1,0 +1,24 @@
+{
+ "id": "8558_C002_t040",
+ "shot": "8558_S13_camry",
+ "image": {
+  "file": "8558_S13_camry/8558_C002_t040.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "577bb7aa7077c7c81d89ead65e411c0d91625f673f669eea46c9581d9c5efdbe"
+ },
+ "moment": {
+  "label": "peak",
+  "after_impact_ms": 40
+ },
+ "time": null,
+ "view": "front ground level",
+ "notes": "NHTSA 8558 film C002 (front ground level), 40 ms after first contact (film frame 91 at 1,000 fps).",
+ "rubble": {
+  "moment": "peak",
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}

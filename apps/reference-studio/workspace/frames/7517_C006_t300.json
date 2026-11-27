@@ -1,0 +1,24 @@
+{
+ "id": "7517_C006_t300",
+ "shot": "7517_S14_camry",
+ "image": {
+  "file": "7517_S14_camry/7517_C006_t300.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "a24dd1db348917f31f392cae6e1ab2a583130ba5835e52b78bf6e2309e5a4f68"
+ },
+ "moment": {
+  "label": "300 ms",
+  "after_impact_ms": 300
+ },
+ "time": null,
+ "view": "front oblique",
+ "notes": "NHTSA 7517 film C006 (front oblique), 300 ms after first contact (film frame 351 at 1,000 fps).",
+ "rubble": {
+  "moment": null,
+  "camera": "front three-quarter"
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}

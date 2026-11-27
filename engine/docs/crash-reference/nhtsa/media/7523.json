@@ -1,0 +1,1176 @@
+{
+ "test": 7523,
+ "source": "NHTSA Vehicle Crash Test Database (public domain, US government)",
+ "scenario": "S13",
+ "summary": "2012 Camry LE (1,566 kg), NCAP oblique pole: carried at 75 deg into a rigid 254 mm pole at 32.1 km/h, the pole on the driver's head CG, 1,101 mm aft of the front axle (front door). The pulse lasts about 150 ms (CG half of its 10.3 m/s change by 62 ms; 16.5 g peak at 34 ms); pole force 191 kN at 44 ms. The side wraps around the pole: maximum crush 394 mm (mid-door, at the pole), wheelbase 129 mm and left side 135 mm shorter, B-pillar width 111 mm less; windshield cracked, front door glass broken. Small yaw (nose-left about 4 deg by 150 ms); the car stays at the pole.",
+ "sources": [
+  "report v07523R001.pdf p.6 summary",
+  "p.17 camera table (1,000 fps; note: vehicle at 15 deg to the pole, i.e. 75 deg travel)",
+  "p.18 accelerometer positions",
+  "p.20-21 observations, impact point and speed",
+  "p.22 profile measurements",
+  "p.23-24 exterior crush levels and grid",
+  "EV5 curves v07523.017-.042 (CG, A/B-post, engine, firewall, roof, sill, trunk, 8 pole load cells)"
+ ],
+ "items": [
+  {
+   "kind": "photo",
+   "file": "photos/v07523P001.jpg",
+   "name": "No. 001 As Delivered Right Front 3-4 View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P001.jpg",
+   "bytes": 1645051,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "right front"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P002.jpg",
+   "name": "No. 002 As Delivered Left Rear 3-4 View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P002.jpg",
+   "bytes": 1948326,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "left rear"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P003.jpg",
+   "name": "No. 003 Pre-Test Frontal View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P003.jpg",
+   "bytes": 3014339,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "frontal"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P004.jpg",
+   "name": "No. 004 Post-Test Frontal View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P004.jpg",
+   "bytes": 3000705,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "frontal",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P005.jpg",
+   "name": "No. 005 Pre-Test Left Front 3-4 View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P005.jpg",
+   "bytes": 900097,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "left front"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P006.jpg",
+   "name": "No. 006 Post-Test Left Front 3-4 View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P006.jpg",
+   "bytes": 874725,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "left front",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P007.jpg",
+   "name": "No. 007 Pre-Test Left Side View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P007.jpg",
+   "bytes": 848825,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "left side"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P008.jpg",
+   "name": "No. 008 Post-Test Left Side View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P008.jpg",
+   "bytes": 879691,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "left side",
+    "structure": true,
+    "remark": "final shape: V wrap around the pole at the front door, roof rail and A-to-B roof bent in"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P009.jpg",
+   "name": "No. 009 Pre-Test Left Rear 3-4 View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P009.jpg",
+   "bytes": 757910,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "left rear"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P010.jpg",
+   "name": "No. 010 Post-Test Left Rear 3-4 View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P010.jpg",
+   "bytes": 958695,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "left rear",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P011.jpg",
+   "name": "No. 011 Pre-Test Rear View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P011.jpg",
+   "bytes": 3172761,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "rear view"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P012.jpg",
+   "name": "No. 012 Post-Test Rear View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P012.jpg",
+   "bytes": 891208,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "rear view",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P013.jpg",
+   "name": "No. 013 Pre-Test Right Side View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P013.jpg",
+   "bytes": 895119,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "right side"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P014.jpg",
+   "name": "No. 014 Post-Test Right Side View of Test Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P014.jpg",
+   "bytes": 1022970,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "right side"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P015.jpg",
+   "name": "No. 015 Pre-Test Overhead View of Test Area.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P015.jpg",
+   "bytes": 819551,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "pre",
+    "view": "overhead"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P016.jpg",
+   "name": "No. 016 Post-Test Overhead View of Test Area.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P016.jpg",
+   "bytes": 947199,
+   "note": {
+    "group": "exterior",
+    "by": "name",
+    "phase": "post",
+    "view": "overhead",
+    "structure": true,
+    "remark": "final position: car still at the pole"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P017.jpg",
+   "name": "No. 017 Pre-Test Left Side View of Pole Positioned Against Side of Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P017.jpg",
+   "bytes": 706192,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P018.jpg",
+   "name": "No. 018 Pre-Test Right Side View of Pole Positioned Against Side of Vehicle.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P018.jpg",
+   "bytes": 879031,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P019.jpg",
+   "name": "No. 019 Pre-Test Close-Up View of Impact Point Target.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P019.jpg",
+   "bytes": 865818,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P020.jpg",
+   "name": "No. 020 Post-Test Close-Up View of Impact Point Target Showing Impact Location.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P020.jpg",
+   "bytes": 852017,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "post",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P021.jpg",
+   "name": "No. 021 Pre-Test Front Close-Up View of Dummy Head and Chest.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P021.jpg",
+   "bytes": 2427709,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P022.jpg",
+   "name": "No. 022 Post-Test Front Close-Up View of Dummy.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P022.jpg",
+   "bytes": 1058556,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P023.jpg",
+   "name": "No. 023 Pre-Test Left Side View of Dummy Showing Belt and Chalking.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P023.jpg",
+   "bytes": 1041789,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P024.jpg",
+   "name": "No. 024 Pre-Test Left Side View of Dummy Shoulder and Door Top View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P024.jpg",
+   "bytes": 788752,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P025.jpg",
+   "name": "No. 025 Post-Test Left Side View of Dummy Shoulder and Door Top View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P025.jpg",
+   "bytes": 938454,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P026.jpg",
+   "name": "No. 026 Pre-Test Frontal View of Seat Back Prior to Dummy Positioning.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P026.jpg",
+   "bytes": 1203053,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P027.jpg",
+   "name": "No. 027 Pre-Test Frontal Close-Up View of Dummy Head and Shoulders in Relation to Head Restraint.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P027.jpg",
+   "bytes": 692464,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P028.jpg",
+   "name": "No. 028 Pre-Test Frontal View of Seat Pan Prior to Dummy Positioning.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P028.jpg",
+   "bytes": 1129692,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P029.jpg",
+   "name": "No. 029 Pre-Test Overhead View of Dummy Thighs on Seat Pan.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P029.jpg",
+   "bytes": 666322,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P030.jpg",
+   "name": "No. 030 Pre-Test Left Side View of Dummy Neck Showing Position of Adjustable Neck Bracket.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P030.jpg",
+   "bytes": 851816,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P031.jpg",
+   "name": "No. 031 Pre-Test Left Side View of Dummy Head Showing Dummy Head is Level.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P031.jpg",
+   "bytes": 789033,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P032.jpg",
+   "name": "No. 032 Pre-Test Placement of Dummy Feet.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P032.jpg",
+   "bytes": 713683,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P033.jpg",
+   "name": "No. 033 Pre-Test View of Belt Anchorage for Dummy.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P033.jpg",
+   "bytes": 513271,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P034.jpg",
+   "name": "No. 034 Pre-Test Left Side View of Steering Wheel.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P034.jpg",
+   "bytes": 2773627,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P035.jpg",
+   "name": "No. 035 Pre-Test View of Disengaged Parking Brake.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P035.jpg",
+   "bytes": 2483515,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P036.jpg",
+   "name": "No. 036 Pre-Test View of Parking Brake.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P036.jpg",
+   "bytes": 2515604,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P037.jpg",
+   "name": "No. 037 Pre-Test Close-Up Left Side View of Driver Seat Track.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P037.jpg",
+   "bytes": 1057801,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P038.jpg",
+   "name": "No. 038 Pre-Test Close-Up Left Side View of Driver Seat Back.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P038.jpg",
+   "bytes": 884064,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P039.jpg",
+   "name": "No. 040 Pre-Test Dummy and Door Clearance View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P039.jpg",
+   "bytes": 784988,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P040.jpg",
+   "name": "No. 039 Pre-Test Close-Up View of Driver Seat Back or Head Restraint.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P040.jpg",
+   "bytes": 2775051,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P041.jpg",
+   "name": "No. 041 Post-Test Dummy and Door Clearance View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P041.jpg",
+   "bytes": 1059473,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P042.jpg",
+   "name": "No. 042 Pre-Test Right Side View of Dummy and Front Seat of Occupant Compartment.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P042.jpg",
+   "bytes": 2675528,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P043.jpg",
+   "name": "No. 043 Post-Test Right Side View of Dummy and Front Seat of Occupant Compartment.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P043.jpg",
+   "bytes": 956723,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P044.jpg",
+   "name": "No. 044 Pre-Test Inner Door Panel View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P044.jpg",
+   "bytes": 844772,
+   "note": {
+    "group": "interior door panel",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P045.jpg",
+   "name": "No. 045 Post-Test Inner Door Panel View Showing Dummy Contact Locations.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P045.jpg",
+   "bytes": 1059122,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P046.jpg",
+   "name": "No. 046 Post-Test Dummy Close-Up Head Contact with Vehicle Interior View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P046.jpg",
+   "bytes": 2470871,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P047.jpg",
+   "name": "No. 047 Post-Test Dummy Close-Up Head Contact with Side Air Bag View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P047.jpg",
+   "bytes": 810041,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P048.jpg",
+   "name": "No. 048 Post-Test Dummy Close-Up Torso Contact with Vehicle Interior View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P048.jpg",
+   "bytes": 888231,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P049.jpg",
+   "name": "No. 049 Post-Test Dummy Close-Up Torso Contact with Side Air Bag View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P049.jpg",
+   "bytes": 1046204,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P050.jpg",
+   "name": "No. 050 Post-Test Dummy Close-Up Pelvis Contact with Vehicle Interior View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P050.jpg",
+   "bytes": 918855,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P051.jpg",
+   "name": "No. 051 Post-Test Dummy Close-Up Pelvis Contact with Side Air Bag View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P051.jpg",
+   "bytes": 1157858,
+   "note": {
+    "group": "dummy",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P052.jpg",
+   "name": "No. 052 Pre-Test View of Fuel Filler Cap or Fuel Filler Neck.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P052.jpg",
+   "bytes": 693619,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P053.jpg",
+   "name": "No. 053 Post-Test View of Fuel Filler Cap or Fuel Filler Neck.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P053.jpg",
+   "bytes": 890887,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P054.jpg",
+   "name": "No. 054 Close-Up View of Vehicle Certification Label.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P054.jpg",
+   "bytes": 1299897,
+   "note": {
+    "group": "labels / ballast",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P055.jpg",
+   "name": "No. 055 Close-Up View of Vehicle Tire Information Placard or Label.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P055.jpg",
+   "bytes": 2308724,
+   "note": {
+    "group": "labels / ballast",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P056.jpg",
+   "name": "No. 056 Pre-Test Pole Barrier Front View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P056.jpg",
+   "bytes": 1001994,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P057.jpg",
+   "name": "No. 057 Post-Test Pole Barrier Front View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P057.jpg",
+   "bytes": 1050472,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "post",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P058.jpg",
+   "name": "No. 060 Pre-Test Ballast View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P058.jpg",
+   "bytes": 1012084,
+   "note": {
+    "group": "labels / ballast",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P059.jpg",
+   "name": "No. 058 Pre-Test Pole Barrier Side View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P059.jpg",
+   "bytes": 1075144,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "pre"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P060.jpg",
+   "name": "No. 059 Post-Test Pole Barrier Side View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P060.jpg",
+   "bytes": 1007655,
+   "note": {
+    "group": "impact zone",
+    "by": "name",
+    "phase": "post",
+    "structure": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P061.jpg",
+   "name": "No. 061 Post-Test Primary and Redundant Speed Trap Read-Out.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P061.jpg",
+   "bytes": 728674,
+   "note": {
+    "group": "labels / ballast",
+    "by": "name",
+    "phase": "post"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P062.jpg",
+   "name": "No. 062 FMVSS No. 301 Static Rollover 0 Degrees.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P062.jpg",
+   "bytes": 1084363,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P063.jpg",
+   "name": "No. 063 FMVSS No. 301 Static Rollover 90 Degrees.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P063.jpg",
+   "bytes": 1130452,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P064.jpg",
+   "name": "No. 064 FMVSS No. 301 Static Rollover 180 Degrees.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P064.jpg",
+   "bytes": 1104323,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P065.jpg",
+   "name": "No. 065 FMVSS No. 301 Static Rollover 270 Degrees.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P065.jpg",
+   "bytes": 1248299,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P066.jpg",
+   "name": "No. 066 FMVSS No. 301 Static Rollover 360 Degrees.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P066.jpg",
+   "bytes": 1087647,
+   "note": {
+    "group": "rollover / fuel",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P067.jpg",
+   "name": "No. 067 POLE Impact FoR WEB.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P067.jpg",
+   "bytes": 433037,
+   "note": {
+    "group": "impact zone",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P068.jpg",
+   "name": "No. 068 Monroney Label.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P068.jpg",
+   "bytes": 675850,
+   "note": {
+    "group": "labels / ballast",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P069.jpg",
+   "name": "No. 069 Head Restraint Use and Adjustment Information from Vehicle Owner Manual.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P069.jpg",
+   "bytes": 4362420,
+   "note": {
+    "group": "dummy",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P070.jpg",
+   "name": "No. 069a Head Restraint Use and Adjustment Information from Vehicle Owner Manual.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P070.jpg",
+   "bytes": 2572720,
+   "note": {
+    "group": "dummy",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07523P071.jpg",
+   "name": "No. 070 Load Carrying Capacity Reduced Label.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07523P071.jpg",
+   "bytes": 778448,
+   "note": {
+    "group": "labels / ballast",
+    "by": "name"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C001.avi",
+   "name": "Camera No. 10 - Overhead Wide View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C001.avi",
+   "bytes": 11059708,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C001.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "overhead wide above the pole (camera 10, 14 mm); car's front at the left, pole at the bottom",
+    "moments": [
+     {
+      "frame": 51,
+      "ms": 0,
+      "what": "pole at the front door, on the roof's head-CG cross tape"
+     },
+     {
+      "frame": 91,
+      "ms": 40,
+      "what": "door and roof rail wrapping round the pole"
+     },
+     {
+      "frame": 151,
+      "ms": 100,
+      "what": "deepest: V around the pole across door, roof rail and roof"
+     },
+     {
+      "frame": 351,
+      "ms": 300,
+      "what": "car still at the pole, hardly turned"
+     }
+    ],
+    "look": "wrap around the pole, yaw"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C002.avi",
+   "name": "Camera No. 2 - Front Impact View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C002.avi",
+   "bytes": 11083728,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C002.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "front ground level (camera 2): the car head-on, pole on the image's right",
+    "moments": [
+     {
+      "frame": 111,
+      "ms": 60,
+      "what": "glass spray at the A-pillar"
+     },
+     {
+      "frame": 351,
+      "ms": 300,
+      "what": "car still square to the camera (little yaw)"
+     }
+    ],
+    "look": "yaw, roll"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C003.avi",
+   "name": "Camera No. 3 - 45 Front Imact View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C003.avi",
+   "bytes": 11084920,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C003.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "45 deg forward on the impact side (camera 3)",
+    "look": "door and pillar wrap"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C004.avi",
+   "name": "Camera No. 4 - Overhead Close-Up View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C004.avi",
+   "bytes": 9321484,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C004.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "overhead close-up at the pole (camera 4, 50 mm)",
+    "look": "roof rail and door around the pole"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C005.avi",
+   "name": "Camera No. 6 - Dummy Side View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C005.avi",
+   "bytes": 11081312,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C005.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "dummy side, onboard (camera 6)",
+    "look": "intrusion toward the dummy"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C006.avi",
+   "name": "Camera No. 8 - Rear Impact View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C006.avi",
+   "bytes": 11109990,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C006.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "rear ground level (camera 8)",
+    "moments": [
+     {
+      "frame": 131,
+      "ms": 80,
+      "what": "car's rear square to the camera, pole at the front door"
+     }
+    ],
+    "look": "yaw, roll"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C007.avi",
+   "name": "Camera No. 9 - 45 Rear Impact View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C007.avi",
+   "bytes": 11140238,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C007.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "45 deg rearward on the impact side (camera 9)",
+    "look": "rear door, wrap"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C008.avi",
+   "name": "Camera No. 5 - Dummy Front View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C008.avi",
+   "bytes": 11138454,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C008.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "dummy front, onboard (camera 5)",
+    "look": "occupant (not compared)"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C009.avi",
+   "name": "Camera No. 7 - Dummy Rear Oblique View.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C009.avi",
+   "bytes": 11014728,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07523C009.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "fps_film": 1000,
+    "t0_frame": 51,
+    "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps",
+    "file_frames_per_film_frame": 3,
+    "view": "dummy rear oblique, onboard (camera 7)",
+    "look": "occupant (not compared)"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C010.mp4",
+   "name": "Camera No. 1 - Real Time Pan View of Impact for web.wmv",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C010.mp4",
+   "bytes": 1617326,
+   "probe": {
+    "width": 720,
+    "height": 400,
+    "frames": 182,
+    "playback_fps": 29.97,
+    "duration_s": 6.073
+   },
+   "note": {
+    "fps_film": 30,
+    "t0_frame": null,
+    "time_source": "real-time camera (30 fps, report camera table); no time caption; first contact not established",
+    "view": "real-time pan of the impact (camera 1, web cut)",
+    "look": "whole event"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07523C011.mp4",
+   "name": "Camera No. 11 - Real-Time View of Dummy Movement.mp4",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07523C011.mp4",
+   "bytes": 6471951,
+   "probe": {
+    "width": 640,
+    "height": 480,
+    "frames": 791,
+    "playback_fps": 29.97,
+    "duration_s": 26.393
+   },
+   "note": {
+    "fps_film": 30,
+    "t0_frame": null,
+    "time_source": "real-time camera (30 fps, report camera table); no time caption; first contact not established",
+    "view": "real-time dummy front view (camera 11)",
+    "look": "occupant"
+   }
+  }
+ ]
+}

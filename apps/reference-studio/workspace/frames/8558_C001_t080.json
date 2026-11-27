@@ -1,0 +1,24 @@
+{
+ "id": "8558_C001_t080",
+ "shot": "8558_S13_camry",
+ "image": {
+  "file": "8558_S13_camry/8558_C001_t080.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "e62c82ffdd6cb72c69d3d14710f3e985a7161ce5642585fc905c853713f5a239"
+ },
+ "moment": {
+  "label": "deepest",
+  "after_impact_ms": 80
+ },
+ "time": null,
+ "view": "overhead",
+ "notes": "NHTSA 8558 film C001 (overhead), 80 ms after first contact (film frame 131 at 1,000 fps).",
+ "rubble": {
+  "moment": "deepest",
+  "camera": "top"
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}

@@ -1,0 +1,24 @@
+{
+ "id": "8560_C005_t300",
+ "shot": "8560_S14_camry",
+ "image": {
+  "file": "8560_S14_camry/8560_C005_t300.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "c00e2373806af365eb3481967df7e72fb94e48a2ce7c72671171245862bed3a3"
+ },
+ "moment": {
+  "label": "300 ms",
+  "after_impact_ms": 300
+ },
+ "time": null,
+ "view": "rear of struck side",
+ "notes": "NHTSA 8560 film C005 (rear of struck side), 300 ms after first contact (film frame 351 at 1,000 fps).",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}

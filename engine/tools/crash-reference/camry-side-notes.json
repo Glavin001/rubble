@@ -1,0 +1,87 @@
+{
+ "about": "Hand annotations of the Camry side tests' films, merged into docs/crash-reference/nhtsa/media/<test>.json by `side_compare.py notes`. Frames are the film's burned-in frame numbers (Frame: 1 is the file's first); ms = (frame - t0_frame) * 1000 / fps_film. Everything here was seen on the films or read in the report; 'inferred' marks the rest. engine/docs/crash-reference/camry-side-comparison.md has the timelines.",
+ "common": {
+  "hs": {"fps_film": 1000, "t0_frame": 51, "time_source": "burned-in caption on every frame: '<ms> ms, 1,000 fps, Frame: <n>'; 0.00 ms at Frame 51 (checked on every film used); the report's camera table gives 1,000 fps"},
+  "rt": {"fps_film": 30, "t0_frame": null, "time_source": "real-time camera (30 fps, report camera table); no time caption; first contact not established"}
+ },
+ "tests": {
+  "7517": {
+   "scenario": "S14",
+   "summary": "2012 Camry LE (1,641 kg as tested), NCAP side: the FMVSS 214 MDB (1,361.5 kg) crabbed 26.9 deg at 62.3 km/h into the stationary car's left side; the MDB's forward edge 463 mm aft of the front axle (intended 447; 16 mm rearward). The car's CG gains 6.6 m/s across by 88 ms (half of it by 21 ms), with a 31.8 g spike at 6 ms; the MDB loses 8.6 m/s. Front door glass breaks (25-40 ms); doors jammed shut, no pillar or sill separation; maximum static crush 275 mm (mid-door, 450 mm behind the impact line); B-post width 197 mm narrower. The car yaws nose-left about 14 deg by 150 ms and 30 deg by 300 ms (engine and trunk-floor accelerometers).",
+   "sources": ["report v07517R001.pdf p.6 summary and speeds", "p.11 test weight and ballast", "p.12 attitude and CG", "p.19 camera table (1,000 fps)", "p.20 accelerometer positions", "p.22-23 post-test observations and impact point", "p.24 MDB weights, speed and angles, honeycomb crush", "p.25 profile measurements (wheelbase, B-post width)", "p.26-27 exterior crush levels and grid", "p.29 MDB face crush grid", "EV5 curves v07517.033-.060 (CG, sills, A-post, engine, trunk floor, MDB CG)"]
+  },
+  "8560": {
+   "scenario": "S14",
+   "summary": "2014.5 Camry LE (1,649 kg), NCAP side: MDB (1,361.6 kg) crabbed 26.8 deg at 61.9 km/h; impact point 455 mm aft of the front axle (intended 444). CG gains 6.8 m/s across by 110 ms (half by 22 ms), 35.6 g spike at 7 ms; MDB loses 8.1 m/s by 150 ms. Curtain airbag full by 15 ms, front door glass crazes at 25 ms and bursts at 30-40 ms; belt line visibly bowed by 20 ms. Doors jammed shut; maximum static crush 258 mm (mid-door); B-post width 352 mm narrower (pre-test 1,974 mm: not the same measurement as 7517's 1,821, inferred). Yaw nose-left about 15 deg by 150 ms, 33 deg by 300 ms.",
+   "sources": ["report v08560R001.pdf p.19 camera table", "p.20 accelerometer positions", "p.22-23 observations and impact point", "p.24 MDB weights, speed, angles", "p.25 profile measurements", "p.26-27 exterior crush levels and grid", "EV5 curves v08560.033-.060"]
+  },
+  "7523": {
+   "scenario": "S13",
+   "summary": "2012 Camry LE (1,566 kg), NCAP oblique pole: carried at 75 deg into a rigid 254 mm pole at 32.1 km/h, the pole on the driver's head CG, 1,101 mm aft of the front axle (front door). The pulse lasts about 150 ms (CG half of its 10.3 m/s change by 62 ms; 16.5 g peak at 34 ms); pole force 191 kN at 44 ms. The side wraps around the pole: maximum crush 394 mm (mid-door, at the pole), wheelbase 129 mm and left side 135 mm shorter, B-pillar width 111 mm less; windshield cracked, front door glass broken. Small yaw (nose-left about 4 deg by 150 ms); the car stays at the pole.",
+   "sources": ["report v07523R001.pdf p.6 summary", "p.17 camera table (1,000 fps; note: vehicle at 15 deg to the pole, i.e. 75 deg travel)", "p.18 accelerometer positions", "p.20-21 observations, impact point and speed", "p.22 profile measurements", "p.23-24 exterior crush levels and grid", "EV5 curves v07523.017-.042 (CG, A/B-post, engine, firewall, roof, sill, trunk, 8 pole load cells)"]
+  },
+  "8558": {
+   "scenario": "S13",
+   "summary": "2014.5 Camry LE (1,579 kg), NCAP oblique pole at 31.95 km/h, 75 deg, pole 1,125 mm aft of the front axle. CG half of its 10.9 m/s change by 60 ms, pulse about 150 ms, 17.9 g peak at 15 ms; pole force 197 kN at 46 ms. Maximum crush 379 mm at mid-door 75 mm behind the impact line (sill 340, window sill 340); wheelbase 106 mm shorter, B-pillar width 257 mm less; windshield cracked, door glass broken (window crazes by 20 ms, bursts by 40 ms on the overhead close-up). Small yaw, nose-left about 5 deg by 150 ms.",
+   "sources": ["report v08558R001.pdf p.17 camera table", "p.18 accelerometer positions", "p.20-21 observations, impact point and speed", "p.22 profile measurements", "p.23-24 exterior crush levels and grid", "p.26 damage profile distances (top view)", "EV5 curves v08558.017-.042"]
+  }
+ },
+ "videos": {
+  "v07517C001.avi": {"hs": 3, "view": "overhead wide, above the impact point (camera 1, 14 mm); image up = the MDB's travel, car's front lower left", "moments": [{"frame": 51, "ms": 0, "what": "MDB face at the car's side"}, {"frame": 91, "ms": 40, "what": "face deep in the front door; glass spray starts"}, {"frame": 151, "ms": 100, "what": "car moving off across, MDB following in contact"}, {"frame": 351, "ms": 300, "what": "car leaving the frame nose-left, MDB still against the side"}], "look": "yaw and how far the MDB rides into and along the side"},
+  "v07517C002.avi": {"hs": 3, "view": "overhead close-up (camera 2, 20 mm)", "moments": [{"frame": 81, "ms": 30, "what": "door skin folding around the face's edges"}, {"frame": 111, "ms": 60, "what": "front door glass gone, the face's bumper element buried in the sill/door"}], "look": "plan-view intrusion profile along the door"},
+  "v07517C003.avi": {"hs": 3, "view": "left impact point, on the MDB (camera 3, 50 mm)", "look": "first contact (frame 51)"},
+  "v07517C004.avi": {"hs": 3, "view": "struck side overall from the MDB (camera 4, 16 mm)", "moments": [{"frame": 61, "ms": 10, "what": "side airbags starting"}, {"frame": 71, "ms": 20, "what": "belt line bowing in"}, {"frame": 81, "ms": 30, "what": "front door glass crazed"}, {"frame": 91, "ms": 40, "what": "front door glass bursting outward and up"}, {"frame": 201, "ms": 150, "what": "door and B-pillar region pressed in; roof rail line still straight"}], "look": "door skin, belt line, glass, roof rail over time"},
+  "v07517C005.avi": {"hs": 3, "view": "behind the car along the struck side (camera 5: 4.85 m rearward, 1.13 m up, 24 mm)", "moments": [{"frame": 81, "ms": 30, "what": "glass spray above the roof"}, {"frame": 131, "ms": 80, "what": "car moving off across; struck-side wheels still on the ground"}, {"frame": 251, "ms": 200, "what": "car well across, MDB following"}], "look": "roll and lateral motion, wheels lifting (none seen)"},
+  "v07517C006.avi": {"hs": 3, "view": "ahead of the car, out on the struck side (camera 6: left front, 24 mm)", "moments": [{"frame": 111, "ms": 60, "what": "glass spray, front fender undisturbed"}, {"frame": 201, "ms": 150, "what": "car moving across, front end rotating toward the MDB (nose-left)"}], "look": "front end's motion, yaw"},
+  "v07517C007.avi": {"hs": 3, "view": "driver dummy front, onboard (camera 7)", "look": "occupant (not compared)"},
+  "v07517C008.avi": {"hs": 3, "view": "driver dummy side, onboard (camera 8)", "look": "inner door panel and B-pillar trim intrusion toward the dummy"},
+  "v07517C009.avi": {"hs": 3, "view": "rear passenger side, onboard (camera 9)", "look": "rear door intrusion"},
+  "v07517C010.wmv": {"rt": true, "view": "real-time left rear (camera 10)", "look": "whole event, approximate"},
+  "v07517C011.mp4": {"rt": true, "view": "real-time pan of the run-in and impact (camera 11, web cut)", "look": "whole event, approximate"},
+  "v08560C001.avi": {"hs": 1, "view": "overhead wide (camera 1, 14 mm); image up = MDB travel", "moments": [{"frame": 51, "ms": 0, "what": "face at the side"}, {"frame": 91, "ms": 40, "what": "face in the front door/B-pillar, glass spray"}, {"frame": 201, "ms": 150, "what": "car moving off, nose turning left, MDB following"}, {"frame": 351, "ms": 300, "what": "car mostly out of frame, MDB yawed with it"}], "look": "yaw and engagement"},
+  "v08560C002.avi": {"hs": 1, "view": "overhead close-up (camera 2)", "look": "plan-view intrusion"},
+  "v08560C003.avi": {"hs": 1, "view": "left impact point, on the MDB (camera 3, 50 mm)", "moments": [{"frame": 51, "ms": 0, "what": "the face's edge reaches the car's impact target (first contact, within 1-2 ms)"}], "look": "first contact"},
+  "v08560C004.avi": {"hs": 1, "view": "struck side overall from the MDB (camera 4)", "moments": [{"frame": 61, "ms": 10, "what": "side airbag visible through the front window"}, {"frame": 66, "ms": 15, "what": "curtain airbag across both windows"}, {"frame": 71, "ms": 20, "what": "belt-line tape bowed in at the front door"}, {"frame": 76, "ms": 25, "what": "front door glass crazed in place"}, {"frame": 81, "ms": 30, "what": "glass buckling outward"}, {"frame": 91, "ms": 40, "what": "glass bursting, spray above the roof"}, {"frame": 131, "ms": 80, "what": "front door glass gone; belt line deeply bowed at the front door and B-pillar; rear door glass intact"}, {"frame": 201, "ms": 150, "what": "debris; roof rail line still straight"}], "look": "door skin, belt line, glass, roof rail"},
+  "v08560C005.avi": {"hs": 1, "view": "behind the car along the struck side (camera 5)", "moments": [{"frame": 131, "ms": 80, "what": "MDB's front wheel at the car's rear door; car moving off; no wheel lift seen"}], "look": "roll, lateral motion"},
+  "v08560C006.avi": {"hs": 1, "view": "ahead of the car, out on the struck side (camera 6)", "moments": [{"frame": 131, "ms": 80, "what": "glass spray; front fender undisturbed"}], "look": "front end, yaw"},
+  "v08560C007.avi": {"hs": 1, "view": "driver dummy front, onboard", "look": "occupant (not compared)"},
+  "v08560C008.avi": {"hs": 1, "view": "driver dummy side, onboard", "look": "inner door intrusion"},
+  "v08560C009.avi": {"hs": 1, "view": "rear passenger dummy side, onboard", "look": "rear door intrusion"},
+  "v08560C010.wmv": {"rt": true, "view": "real-time left rear", "look": "whole event"},
+  "v08560C011.mp4": {"rt": true, "view": "real-time pan", "look": "whole event"},
+  "v08560C012.wmv": {"rt": true, "view": "web cut of the impact (inferred from its name)", "look": "not viewed"},
+  "v08560C013.mp4": {"rt": true, "view": "documentation video, 5.8 min (inferred from its name: walk-around)", "look": "not viewed"},
+  "v08560C014.mp4": {"rt": true, "view": "web cut, 1080p (inferred from its name)", "look": "not viewed"},
+  "v07523C001.avi": {"hs": 3, "view": "overhead wide above the pole (camera 10, 14 mm); car's front at the left, pole at the bottom", "moments": [{"frame": 51, "ms": 0, "what": "pole at the front door, on the roof's head-CG cross tape"}, {"frame": 91, "ms": 40, "what": "door and roof rail wrapping round the pole"}, {"frame": 151, "ms": 100, "what": "deepest: V around the pole across door, roof rail and roof"}, {"frame": 351, "ms": 300, "what": "car still at the pole, hardly turned"}], "look": "wrap around the pole, yaw"},
+  "v07523C002.avi": {"hs": 3, "view": "front ground level (camera 2): the car head-on, pole on the image's right", "moments": [{"frame": 111, "ms": 60, "what": "glass spray at the A-pillar"}, {"frame": 351, "ms": 300, "what": "car still square to the camera (little yaw)"}], "look": "yaw, roll"},
+  "v07523C003.avi": {"hs": 3, "view": "45 deg forward on the impact side (camera 3)", "look": "door and pillar wrap"},
+  "v07523C004.avi": {"hs": 3, "view": "overhead close-up at the pole (camera 4, 50 mm)", "look": "roof rail and door around the pole"},
+  "v07523C005.avi": {"hs": 3, "view": "dummy side, onboard (camera 6)", "look": "intrusion toward the dummy"},
+  "v07523C006.avi": {"hs": 3, "view": "rear ground level (camera 8)", "moments": [{"frame": 131, "ms": 80, "what": "car's rear square to the camera, pole at the front door"}], "look": "yaw, roll"},
+  "v07523C007.avi": {"hs": 3, "view": "45 deg rearward on the impact side (camera 9)", "look": "rear door, wrap"},
+  "v07523C008.avi": {"hs": 3, "view": "dummy front, onboard (camera 5)", "look": "occupant (not compared)"},
+  "v07523C009.avi": {"hs": 3, "view": "dummy rear oblique, onboard (camera 7)", "look": "occupant (not compared)"},
+  "v07523C010.mp4": {"rt": true, "view": "real-time pan of the impact (camera 1, web cut)", "look": "whole event"},
+  "v07523C011.mp4": {"rt": true, "view": "real-time dummy front view (camera 11)", "look": "occupant"},
+  "v08558C001.avi": {"hs": 1, "view": "overhead wide above the pole (camera 10)", "moments": [{"frame": 51, "ms": 0, "what": "pole at the front door on the head-CG cross tape"}, {"frame": 111, "ms": 60, "what": "door, roof rail and roof cross tape wrapped round the pole"}, {"frame": 351, "ms": 300, "what": "car still at the pole, little yaw"}], "look": "wrap, yaw"},
+  "v08558C002.avi": {"hs": 1, "view": "front ground level (camera 2)", "look": "yaw, roll"},
+  "v08558C003.avi": {"hs": 1, "view": "45 deg forward on the impact side (camera 3)", "look": "door and pillar wrap"},
+  "v08558C004.avi": {"hs": 1, "view": "overhead close-up at the pole (camera 4, 50 mm)", "moments": [{"frame": 51, "ms": 0, "what": "pole at the roof rail's edge"}, {"frame": 61, "ms": 10, "what": "door glass intact"}, {"frame": 71, "ms": 20, "what": "door glass crazed"}, {"frame": 91, "ms": 40, "what": "glass broken, pole past the window line; roof cross tape bending"}, {"frame": 111, "ms": 60, "what": "roof cross tape in a V round the pole"}, {"frame": 151, "ms": 100, "what": "head-CG target close to the pole (deepest, roughly)"}, {"frame": 351, "ms": 300, "what": "car moved off the pole a little (rebound)"}], "look": "penetration over time"},
+  "v08558C005.avi": {"hs": 1, "view": "driver dummy front, onboard (camera 5)", "look": "occupant (not compared)"},
+  "v08558C006.avi": {"hs": 1, "view": "dummy side, onboard (camera 6)", "look": "intrusion toward the dummy"},
+  "v08558C007.avi": {"hs": 1, "view": "dummy rear oblique, onboard (camera 7)", "look": "occupant"},
+  "v08558C008.avi": {"hs": 1, "view": "45 deg rearward on the impact side (camera 8)", "look": "rear door, wrap"},
+  "v08558C009.avi": {"hs": 1, "view": "rear ground level (camera 9)", "look": "yaw, roll"},
+  "v08558C010.mp4": {"rt": true, "view": "real-time pan (camera 1)", "look": "whole event"},
+  "v08558C011.mp4": {"rt": true, "view": "real-time dummy front (camera 11)", "look": "occupant"},
+  "v08558C012.wmv": {"rt": true, "view": "web cut (inferred from its name)", "look": "not viewed"},
+  "v08558C013.mp4": {"rt": true, "view": "documentation video, 5.1 min (inferred from its name)", "look": "not viewed"},
+  "v08558C014.mp4": {"rt": true, "view": "web cut, 1080p (inferred from its name)", "look": "not viewed"}
+ },
+ "photos": {
+  "7517": {"P008": "final shape: front door pushed in from the sill to the belt line, deepest at the front door's rear and the B-pillar foot; rear door's front pushed in; roof rail straight", "P016": "final positions: car nose turned toward the MDB, the MDB against the side", "P006": "front fender undamaged; front door folded in"},
+  "8560": {"P008": "final shape: as 7517, front door and B-pillar foot deepest"},
+  "7523": {"P008": "final shape: V wrap around the pole at the front door, roof rail and A-to-B roof bent in", "P016": "final position: car still at the pole"},
+  "8558": {"P008": "final shape: front door caved in a V at the pole, roof rail kinked above it", "P016": "car still wrapped on the pole", "P022": "windshield cracked", "P025": "the file is a 'PHOTOGRAPH NOT AVAILABLE' placeholder", "P026": "placeholder (no photograph)", "P028": "placeholder (no photograph)"}
+ }
+}

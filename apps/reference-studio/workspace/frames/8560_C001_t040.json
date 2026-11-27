@@ -1,0 +1,24 @@
+{
+ "id": "8560_C001_t040",
+ "shot": "8560_S14_camry",
+ "image": {
+  "file": "8560_S14_camry/8560_C001_t040.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "7092c580e3f6182f7781e560ed41aea92923499c407744aaf66188224312b15b"
+ },
+ "moment": {
+  "label": "peak",
+  "after_impact_ms": 40
+ },
+ "time": null,
+ "view": "overhead",
+ "notes": "NHTSA 8560 film C001 (overhead), 40 ms after first contact (film frame 91 at 1,000 fps).",
+ "rubble": {
+  "moment": "peak",
+  "camera": "top"
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}
