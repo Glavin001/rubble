@@ -1,0 +1,24 @@
+{
+ "id": "7517_C001_t080",
+ "shot": "7517_S14_camry",
+ "image": {
+  "file": "7517_S14_camry/7517_C001_t080.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "a41e2751203b4e934db6d22b8f028057dfd47f9e337c2e0c27ae8275c9f20639"
+ },
+ "moment": {
+  "label": "deepest",
+  "after_impact_ms": 80
+ },
+ "time": null,
+ "view": "overhead",
+ "notes": "NHTSA 7517 film C001 (overhead), 80 ms after first contact (film frame 131 at 1,000 fps).",
+ "rubble": {
+  "moment": "deepest",
+  "camera": "top"
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:50:42.000Z"
+}

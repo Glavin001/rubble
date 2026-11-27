@@ -49,9 +49,10 @@ fn main() -> Result<(), String> {
         }
         return Ok(());
     }
-    // `--export ID`: the Rust scenario as data (`CrashScenario::to_desc`, run 0), printed as JSON.
+    // `--export ID`: the Rust scenario as data (`CrashScenario::to_desc`, run 0), printed as
+    // JSON, with any `--set` values applied (as a run takes them).
     if let Some(id) = flag("--export") {
-        let s = cr::get(&id).ok_or(format!("no scenario {id}"))?;
+        let s = with_sets(cr::get(&id).ok_or(format!("no scenario {id}"))?, &sets)?;
         let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
         println!("{}", serde_json::to_string_pretty(&s.to_desc(&templates)?).map_err(|e| e.to_string())?);
         return Ok(());

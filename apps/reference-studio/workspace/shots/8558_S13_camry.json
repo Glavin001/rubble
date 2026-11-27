@@ -1,0 +1,17 @@
+{
+ "id": "8558_S13_camry",
+ "title": "8558: NHTSA Ncap Side Pole - 2014.5 Toyota Camry Le 4-Dr Sedan (S13)",
+ "source": {
+  "kind": "video",
+  "url": "https://nrd.api.nhtsa.dot.gov/nhtsa/vehicle/api/v1/vehicle-database-test-results/get-multimedia-files/8558",
+  "note": "High-speed films at 1,000 fps; times are ms after first contact from the burned-in caption (exact to the frame)."
+ },
+ "rubble": {
+  "scenario": "S13",
+  "contact": "edge",
+  "run": 0
+ },
+ "before_frame": "8558_C001_m010",
+ "notes": "Camry side test 8558 beside S13; engine/docs/crash-reference/camry-side-comparison.md.",
+ "updated": "2026-11-27T19:50:42.000Z"
+}
