@@ -1749,7 +1749,6 @@ impl ExplicitBeamsWorld {
     }
 }
 
-
 impl ExplicitBeamsWorld {
     /// Penalty contact's forces (`Dat::penalty`), into the vehicles' forces after their beam
     /// pass, so the next node update integrates them with the beams' (symplectic Euler).
