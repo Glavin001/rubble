@@ -1173,7 +1173,30 @@ Contact's work (rule 8), 2 runs each:
 - **What it does not:** the zones left are fewer but larger, and they remove more. The ball's
   paint reaches 131 mm during the hit (guard 70 mm): the door's paint does not follow the skin
   where the zones used to hold it rigid (a generator fix).
-- **Next:** why 16–67 cluster solves a run are still left unsettled, and the zones they leave.
+- **Where the zones left come from** (`DAT_VDBG`, `DAT_RELINWHY`): the solves settle (669 of 920
+  rounds follow a settled solve), but 917 of 920 rounds change rows. About two pairs a round are
+  re-linearised. In 1,700 of 1,811 cases the trigger is the true end gap alone: median 0.80 of
+  the limit, while the row's own separation is at 1.02. The closest points slide along the
+  surfaces, so the pair closes elsewhere than where its row was built, every round.
+- **Tried against it:**
+  - The true gap's length, not its projection (`DAT_RELIN_LEN=1`): 2,088 zones (worse).
+  - Rows kept across rounds (`DAT_KEEPROWS=1`): 1,186 zones and 153 unsettled cluster solves.
+  - Re-linearising only below half the limit (`DAT_RELIN=0.5`, a loosened tolerance, measured
+    only): 56 zones in head 100's 0.3 s and no crossings, but paint 77 mm (guard 70) and angular
+    momentum 2.2 N·m·s a step (bar 2).
+- **Energy, the exact solve, torque-free rows, `DAT_RELIN=0.5`** (2 runs, the share of the
+  start's kinetic energy):
+
+  | crash | removed | with Newton's law on newly closing rows (`DAT_RESTITUTE=newton DAT_E=1`) |
+  |---|---|---|
+  | ball 100 | 7.5–7.7 % (0 zones) | 5.3–6.5 % (0 zones) |
+  | side 60 | 3.3–3.4 % (0 zones) | 3.5 % (0–7 zones) |
+  | head 100 | 14.4–16.4 % (292–523 zones) | 12.8–13.1 % (146–366 zones; zones 73–86 kJ, rows 61–71 kJ) |
+
+  Newton's law there created no energy: the guard lowered e in 138–445 passes.
+- **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
+  ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
+  adoptable as it stands.
 
 ## Velocity contact on the GPU (design, 2026-11-27)
 

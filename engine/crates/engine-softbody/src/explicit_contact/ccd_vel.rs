@@ -614,9 +614,17 @@ impl Ctx<'_> {
                     // row's own weights are those of its impact, and a feature that turned since
                     // can let the node through while that stays positive (head 100: a node
                     // 0.5 mm through its own triangle with the rounds "resolved", 2026-11-27).
-                    let s_true = closest(pr.nn, b).1.dot(r.n);
+                    // (`DAT_RELIN_LEN=1`, a measurement: the true end gap's length while it is on
+                    // the row's side; a torque-free row's normal is the start gap's, and the true
+                    // gap projected onto it reads short by cos θ every round.)
+                    let gt = closest(pr.nn, b).1;
+                    let s_true = if std::env::var("DAT_RELIN_LEN").is_ok_and(|v| v == "1") && gt.dot(r.n) > 0.0 { gt.length() } else { gt.dot(r.n) };
                     if s_end.min(s_true) > 0.0 && s_end.min(s_true) >= relin_share() * r.s0.min(pr.xi) {
                         continue;
+                    }
+                    if std::env::var("DAT_RELINWHY").is_ok() {
+                        let lim = relin_share() * r.s0.min(pr.xi);
+                        eprintln!("RELINWHY end {} true {} | s_end/lim {:.4} s_true/lim {:.4} s0/xi {:.3}", s_end <= 0.0 || s_end < lim, s_true <= 0.0 || s_true < lim, s_end / lim, s_true / lim, r.s0 / pr.xi);
                     }
                 }
                 // A fresh row at its impact; a row linearised again at the step's end, where it
