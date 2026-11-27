@@ -117,6 +117,10 @@ impl Member {
             0.0
         }
     }
+    /// The region of the car its type is ([`crate::crash::member_zone`]).
+    pub fn zone(&self) -> Option<crate::crash::Zone> {
+        crate::crash::member_zone(self.kind)
+    }
     pub fn steel_kg(&self) -> f64 {
         self.sheet_area * self.gauge * RHO_STEEL
     }

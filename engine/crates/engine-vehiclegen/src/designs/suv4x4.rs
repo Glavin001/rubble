@@ -86,7 +86,23 @@ pub struct Suv4x4Params {
 
 impl Default for Suv4x4Params {
     fn default() -> Self {
-        Suv4x4Params { rim_style: "steel".into(), roof_rack: true, spare_wheel: true, paint: [0.10, 0.16, 0.06], metallic: 0.15, roughness: 0.38, physics: Physics::default() }
+        Suv4x4Params { rim_style: "steel".into(), roof_rack: true, spare_wheel: true, paint: [0.10, 0.16, 0.06], metallic: 0.15, roughness: 0.38, physics: Physics { kerb: SUV_KERB_KG, ..Physics::default() } }
+    }
+}
+
+/// Kerb mass (kg): a mid-size body-on-frame 4x4 on this 2.70 m wheelbase (the 2012
+/// Nissan Xterra Pro-4X 4WD, also 2.70 m: 4,417-4,425 lb published, 2,004-2,007 kg).
+/// `engine/docs/generated-vehicles-lessons.md` §21: the rigger does not yet read it for
+/// cars on the body definitions.
+pub const SUV_KERB_KG: f32 = 2000.0;
+
+#[cfg(test)]
+mod kerb_tests {
+    #[test]
+    fn the_4x4_states_an_suvs_kerb_not_the_sedans() {
+        let p = super::Suv4x4Params::default();
+        assert_eq!(p.physics.kerb, super::SUV_KERB_KG);
+        assert!(p.physics.kerb > crate::physics::Physics::default().kerb + 400.0);
     }
 }
 
