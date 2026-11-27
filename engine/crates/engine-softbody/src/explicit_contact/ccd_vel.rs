@@ -299,6 +299,18 @@ impl Ctx<'_> {
         if !ok && std::env::var("DAT_CLUSTERS").is_ok() {
             self.clusters_dbg("apgd", rows, &l, vel);
         }
+        if !ok && std::env::var("DAT_UNSET").is_ok() {
+            // (A measurement: each unsettled row's start separation over its gap, its bound, and
+            // which test it fails.)
+            let prec = self.precision(rows, &l, vel);
+            for (r, &lr) in rows.iter().zip(&l) {
+                if !self.row_settled(r, lr, vel, &prec) {
+                    let g = Self::normal(r, vel) + r.b;
+                    let close = -g * self.h > ROW_GAP_SHARE * self.pairs[r.q].xi.min(r.s0.max(0.0));
+                    eprintln!("UNSET s0/xi {:.3e} s0 {:.3e} b {:.3e} g {:.3e} l {:.3e} fails {}", r.s0 / self.pairs[r.q].xi, r.s0, r.b, g, lr, if close { "close" } else { "push" });
+                }
+            }
+        }
         // The clusters APGD left unsettled, solved exactly (`ccd_exact`; `DAT_EXACT=1`, off).
         if !ok && exact_on() {
             // Kept only when it settles: a cluster too big, or a dependent row held bound, can

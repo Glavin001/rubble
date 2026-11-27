@@ -1096,6 +1096,22 @@ switch was set. Rerun with each switch its own argument.)
   - **Neither iterations nor diagonals end the rounds:** 512 iterations a round still leave 2,356
     zones, and 493 of the 745 rounds change rows (fresh or re-linearised). Both the inner solve
     and the outer loop keep the eight rounds from resolving.
+  - **Not linearisation error** (Fable's proposal, a time split at the CCD's safe time, and its
+    kill test). Head 100 over the same 50 ms at smaller steps (`STEP` rebuilt, a measurement):
+
+    | step | rounds a step | zones | zones a step |
+    |---|---|---|---|
+    | 0.5 ms | 7.59 | 2,523 | 25 |
+    | 0.25 ms | 7.58 | 4,974 | 25 |
+    | 0.125 ms | 7.65 | 11,461 | 29 |
+
+    The zones do not fall with the step, so a row frozen at one instant is not why the rounds
+    run out, and splitting the step would not help.
+  - **What the unsettled rows are** (`DAT_UNSET=1`, 72,482 over the 50 ms): 98 % fail the push
+    test, still pushing while they part faster than their bound; 2 % fail the closing test.
+    Start separations: 61 % outside their gap (impacts), 25 % at it, 14 % between half the gap
+    and the gap; none closer. The work an over-push does is energy created, so the test stands.
+    The problem is the solve's convergence of λ on the pushing rows, not the bound.
   - **What the evidence points to:** a block solve per crowded node, or contact that merges a
     node's rows (one vertex against one vertex is one constraint, not twenty), rather than a
     better diagonal.
