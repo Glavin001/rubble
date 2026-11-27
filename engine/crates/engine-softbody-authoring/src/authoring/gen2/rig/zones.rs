@@ -380,6 +380,29 @@ pub(super) fn hull_faces(p: &[Vec3]) -> Vec<Vec<usize>> {
                     let f = |k: usize| (p[k] - cen).dot(v).atan2((p[k] - cen).dot(u));
                     f(i).total_cmp(&f(j))
                 });
+                // A point inside the face (the rear seat's `sear_c`, the centre of its four
+                // corners) has no angle of its own around the centre, so the sort put it
+                // anywhere: between two corners it made a polygon that folds over itself, and
+                // its fan laid a triangle across the same corners on top of the triangles to
+                // the centre (0 mm apart, the lint's skin_clearance). The face starts at it
+                // instead: its fan is the centre's to each rim edge (the rim's last edge is
+                // closed by fill_holes, as it was where the sort happened to put it first).
+                if on.len() > 3 {
+                    let inside = |k: usize| {
+                        let rim: Vec<usize> = on.iter().copied().filter(|&i| i != k).collect();
+                        let s: Vec<f32> = (0..rim.len())
+                            .map(|e| {
+                                let (a, b) = (p[rim[e]], p[rim[(e + 1) % rim.len()]]);
+                                n.dot((b - a).cross(p[k] - a)) / (b - a).length().max(1e-6)
+                            })
+                            .collect();
+                        s.iter().all(|&x| x > eps) || s.iter().all(|&x| x < -eps)
+                    };
+                    if let Some(at) = (0..on.len()).find(|&e| inside(on[e])) {
+                        let k = on.remove(at);
+                        on.insert(0, k);
+                    }
+                }
                 out.push(on);
             }
         }
@@ -436,6 +459,17 @@ pub(super) fn interior_skins(r: &mut Rig, inp: &dyn RigInput) {
             let m = ids.len();
             (1..m.saturating_sub(1)).map(|k| [ids[start], ids[(start + k) % m], ids[(start + k + 1) % m]]).collect()
         };
+        // A face already on the skin whole (one of its fans, every triangle there: the
+        // Mach 1's outer floor is its pan's quad) is not laid again. Its other diagonal
+        // would lie on top of it, the two crossing diagonals 0 mm apart (the lint's
+        // skin_clearance), and tri_crosses does not see a coplanar overlap.
+        let sorted = |mut k: [usize; 3]| {
+            k.sort_unstable();
+            k
+        };
+        if ids.len() > 3 && (0..ids.len()).map(fan).any(|f| f.iter().all(|&t| have.contains(&sorted(t)))) {
+            return;
+        }
         let tris: Vec<[usize; 3]> = if check && sub.is_none() && ids.len() > 3 {
             (0..ids.len())
                 .map(fan)

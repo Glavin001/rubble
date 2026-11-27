@@ -354,8 +354,32 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   before. Six runs of the 60 + 60 head-on: node-only contact 71 → 66 nodes inside,
   191 → 145 L; with edge contact 26 → 33, 49 → 55 L (within the spread).
 
+- **(Fix, 2026-11-27) Two coplanar overlaps in the shared rigger** (`gen2/rig/zones.rs`;
+  the lab refuses a car whose own skin primitives sharing no node are closer than 2 mm at
+  rest, the lint's `skin_clearance`). Both laid a second surface in the plane of the first,
+  which `tri_crosses` cannot see (coplanar edges meet, they do not pass through):
+  - *A hull face with a point inside it.* `hull_faces` orders a face's points by angle
+    round their centre; the rear seat's `sear_c` *is* the centre of its four corners, so its
+    angle was noise. On the sedan it happened to sort first (a fan round the centre); on the
+    Mach 1s and the 4x4 it sorted between two corners, the polygon folded over itself and
+    its fan laid `sear_rl,sear_fr,sear_rr` across the centre's triangles (0.00 / 0.07 mm).
+    **Rule:** a point strictly inside its face starts the face's polygon, so the fan is the
+    centre's to each rim edge (fill_holes closes the last one, as on the sedan).
+  - *A quad given both diagonals.* On the Mach 1s the outer skin already had the first
+    floor-pan quad (`sh_c1_1o*`, `sh_c1_2t*`, one diagonal); `interior_skins` found that fan
+    "crossing" something else and took the other diagonal over the same quad. **Rule:** a
+    face one of whose fans is already on the skin whole is not laid again.
+  Sedan, police_sedan and wagon rig byte for byte as before (neither case occurs there).
+  Mach 1 / gasser `skin_clearance` 4 → 0, the 4x4's `sear_*` pairs gone (15 → 13; the rest
+  are the hood/fender and `sh_e5` seams). With the doubled quad gone, the Mach 1s' floor pan
+  also comes out whole in rows 3–4 (open edges 172 → 160, 169 → 157), which leaves
+  the tunnel's open rear end (`sh_c1_5t*`–`sh_c3_5`, two open edges, open on every design
+  including the sedan, where it runs into a larger opening) standing alone: the Mach 1's
+  `skin_holes` now reports it, as the gasser and 4x4 already did for the tunnel's front end.
+
 ## Changelog
 
+- 2026-11-27: section 19, two coplanar overlaps fixed in the rigger (a hull face's inside point, a quad's second diagonal).
 - 2026-11-24: section 18, adding a vehicle (the registry, variant or standalone, what the rigger needs, the gate); mach1_gasser (pose, per-axle wheels) and suv_4x4 registered.
 - 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).
 - 2026-11-14: section 16, hinges that snap instead of bending.
