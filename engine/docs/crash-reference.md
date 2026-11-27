@@ -786,6 +786,9 @@ In words (what the overlays show):
   barrier loses 11.2 m/s (Camry 8.2–8.6), and the door band springs back to 0.05 m of
   residual crush (Camry 0.26–0.28): an elastic side. The CG's lateral pulse lacks the Camrys'
   first 30–35 g spike at 6–7 ms (their door and sill meeting the barrier's bumper element).
+- The side tests' films, photos and curves beside S13 and S14 over time, with the setup
+  mismatches (S13's pole 1.0 m further back than the tests' relative to the front axle) and
+  each difference's likely cause: `crash-reference/camry-side-comparison.md`.
 
 ## Results (2026-11-27)
 
