@@ -245,8 +245,9 @@ impl ExplicitBeams {
             let bd = s.bounds();
             out.push((shape_from_static(s), bd.lo, bd.hi));
         }
+        let rows = self.no_position_steps;
         if let Some(r) = self.rigid.as_mut() {
-            out.extend(r.surface_shapes());
+            out.extend(r.surface_shapes_rows(rows));
         }
         out
     }

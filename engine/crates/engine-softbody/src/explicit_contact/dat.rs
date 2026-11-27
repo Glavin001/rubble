@@ -20,6 +20,9 @@
 //! clamped: the step is then not covered, and the count says so.
 
 use super::ExplicitBeamsWorld;
+#[path = "dat_vel.rs"]
+mod vel;
+use vel::ccd_pairs;
 #[path = "dat_passes.rs"]
 mod passes;
 use passes::{separate, speculative};
@@ -55,6 +58,8 @@ pub struct Dat {
     /// Velocity-only impulse contact (`ccd_vel`; `DAT_RESPONSE=vel` sets it): its rows take the
     /// speculative pass's place too, so every contact goes through one law.
     pub velocity: bool,
+    /// Velocity contact's warm starts (`ccd_vel::Warm`).
+    pub(crate) warm: super::ccd_vel::Warm,
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
     /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
@@ -192,7 +197,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), warm: Default::default(), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -397,7 +402,12 @@ pub(super) type DatStart = (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>, Vec<Vec<(Vec3, Vec3)
 
 impl ExplicitBeamsWorld {
     /// The continuous mode's start of a step: every node's World position (None: off).
-    pub(super) fn dat_start(&self) -> Option<DatStart> {
+    pub(super) fn dat_start(&mut self) -> Option<DatStart> {
+        let dat = self.continuous.as_ref()?;
+        let velocity = dat.velocity;
+        for v in &mut self.vehicles {
+            v.no_position_steps = velocity;
+        }
         let dat = self.continuous.as_ref()?;
         (self.contact && (self.vehicles.len() > 1 || dat.self_contact)).then(|| {
             let x = world_positions(&self.vehicles);
@@ -436,6 +446,9 @@ impl ExplicitBeamsWorld {
             .collect();
         let mut t: Vec<Vec<f32>> = x0.iter().map(|x| vec![1.0; x.len()]).collect();
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
+        if dat.velocity {
+            dat.warm.prev = std::mem::take(&mut dat.warm.next);
+        }
         if dat.total.steps == 0 {
             st.ke_start = self.vehicles.iter().flat_map(|v| v.nodes.iter()).map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
             // (and the rigid bodies the vehicles hold as proxies: a ball fired into a car)
@@ -533,16 +546,17 @@ impl ExplicitBeamsWorld {
         if dat.ccd_rounds > 0 {
             // The physical guarantee: CCD with inelastic impulses, then impact zones.
             let q = reach(&x1, &zero);
-            let pairs = ccd_pairs(&recs, &q, dat.min_gap, dat.penalty);
+            let pairs = ccd_pairs(&recs, &q, dat.min_gap, dat.penalty, if dat.velocity { 1.0 } else { xi_share() });
             st.pairs_ccd = pairs.len() as u64;
             let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
             let mut vs: Vec<Vec<Vec3>> = (0..x1.len())
                 .map(|v| (0..x1[v].len()).map(|i| v0[v][i] + (x1[v][i] - x1p[v][i] - shift[v][i]) / STEP).collect())
                 .collect();
             let vpre: Vec<Vec<Vec3>> = if pre.is_empty() { Vec::new() } else { pre.iter().map(|p| p.iter().map(|q| q.1).collect()).collect() };
-            super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpre, dat.restitution, dat.velocity);
             if dat.velocity {
-                relist_velocity(dat, &mut recs, &mut own_reach, &surf, &off, &x0, &mut x1, &mut vs, &m, &im, &vpre, &reach_v, pairs.len(), &mut st);
+                vel::respond(&mut self.vehicles, dat, &mut recs, &mut own_reach, &surf, &off, &x0, &mut x1, &mut vs, &m, &im, &vpre, &reach_v, &pairs, &mut st);
+            } else {
+                super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpre, dat.restitution, None);
             }
             vfinal = Some(vs);
         }
@@ -776,58 +790,6 @@ fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
     out
 }
 
-/// The CCD's pairs among the records: within twice the two sides' reach `q` this step.
-fn ccd_pairs(recs: &[Rec], q: &[Vec<f32>], min_gap: f32, penalty: f32) -> Vec<super::ccd::CcdPair> {
-    let side = |r: &Rec, neg: bool| {
-        let js = if neg { 0..r.nn } else { r.nn..r.len };
-        js.map(|j| q[r.k[j].0][r.k[j].1 as usize]).fold(0.0f32, f32::max)
-    };
-    recs.iter()
-        .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, true) + side(r, false)))
-        .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: if penalty > 0.0 { min_gap } else { (xi_share() * r.d).max(min_gap) } })
-        .collect()
-}
-
-/// Velocity contact moves nodes by impulses, which can carry a node farther than the reach its
-/// pairs and records were listed for (a bounce, a push from its neighbours' rows; and the records
-/// are listed relative to each vehicle's first node, which the response may move too): it could
-/// then meet a pair not listed. Each vehicle's reach the response grew lists the records again,
-/// the pairs the final reach adds are listed, and the response runs again from here, until the
-/// listing covers the motion (at most four times).
-#[allow(clippy::too_many_arguments)]
-fn relist_velocity(dat: &mut Dat, recs: &mut Vec<Rec>, own_reach: &mut [f32], surf: &[Surface], off: &[Vec<Vec3>], x0: &[Vec<Vec3>], x1: &mut Vec<Vec<Vec3>>, vs: &mut Vec<Vec<Vec3>>, m: &[Vec<f32>], im: &[Vec<f32>], vpre: &[Vec<Vec3>], reach_v: &[f32], listed: usize, st: &mut DatStats) {
-    let mut reach_l = reach_v.to_vec();
-    let mut n = listed;
-    for _ in 0..4 {
-        let fin: Vec<f32> = surf.iter().enumerate().map(|(v, s)| {
-            let r0 = x1[v][0] - x0[v][0];
-            s.nodes.iter().map(|&i| ((x1[v][i as usize] - x0[v][i as usize]) - r0).length()).fold(0.0f32, f32::max)
-        }).collect();
-        let mut grew = false;
-        for (l, f) in reach_l.iter_mut().zip(&fin) {
-            if *f > *l {
-                *l = *f;
-                grew = true;
-            }
-        }
-        if grew {
-            let refs_l: Vec<(Vec3, Vec3)> = (0..x0.len()).map(|v| (x1[v][0] - x0[v][0], vs[v][0])).collect();
-            let mut own_l = vec![0.0f32; x0.len()];
-            *recs = list_pairs(dat, x0, surf, off, &reach_l, &refs_l, &mut own_l, st);
-            for (o, l) in own_reach.iter_mut().zip(own_l) {
-                *o = o.max(l);
-            }
-        }
-        let q: Vec<Vec<f32>> = x1.iter().zip(x0).map(|(a, b)| a.iter().zip(b).map(|(p, o)| (*p - *o).length()).collect()).collect();
-        let more = ccd_pairs(recs, &q, dat.min_gap, dat.penalty);
-        if !grew && more.len() <= n {
-            break;
-        }
-        n = more.len();
-        st.relisted += 1;
-        super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.restitution, dat.velocity);
-    }
-}
 
 /// Every listed pair at the step's start `x0` (point-triangle, edge-edge; between vehicles
 /// within r_q of their paint, within one vehicle sharing no node),

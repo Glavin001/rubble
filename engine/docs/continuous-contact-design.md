@@ -660,6 +660,102 @@ the integrator steps, so it is a design decision, measured on the elastic bars a
 suite before adoption. Also: a bound on the fixed-point sums' range, so an overflow is an error,
 not wrapped garbage.
 
+## Velocity contact: the band passes off, warm starts, a safe preconditioner (2026-11-27, later)
+
+**Correction to the section above.** The mismatch between end positions and velocities was not
+centred damping: its correction moves positions too. It was the older contact passes'
+position-only steps, `shift_applied` (§37 dissipative contact).
+
+What changed:
+- With velocity contact on, the band passes it covers are off: vehicle contact, and each car's
+  self collision. Kept on with their own band passes: surface contact, ground, static colliders,
+  rigid proxies. Without their position steps, the band passes' forces only dissipate: the
+  elastic bars kept 12 % of their energy.
+- Warm starts: each pressed pair starts the step from last step's impulse. Impacts are not
+  seeded: their impulse seeded into the next step overflowed the sums.
+- APGD's preconditioner is Gershgorin's bound, so D ⪰ A. Mass splitting fell under A with
+  barycentric weights, and the accelerated steps diverged on 744 rows.
+- Impulse sums are 64-bit fixed point. The 32-bit sums wrapped 902 times at head-on 130.
+- Over-push is judged by its work, λ·excess ≤ 10 µJ.
+
+Elastic bars with every pass on, velocity contact at e = 1: kept 0.989 at 1 m/s, 0.996 at 5 m/s,
+none created; rebound 0.89 / 0.90.
+
+Generated sedan, e = 1:
+
+| Scene | Crossings | Zones | Momentum (N·s) | Contact's work |
+|---|---|---|---|---|
+| Side 60 | 0 | 737 | 1e-4 | −2.9 % |
+| Head 100 | 0 | 2,910 | 7e-4 | −11.5 % |
+| Head 130 | 0 | 5,219 | 2e-3 | |
+| Offset 100 | 0 | 1,277 | 1.5e-3 | |
+| Ball 100 | 0 | 119 | | |
+
+Open:
+- The rows on a crushed front converge slowly. One impact row shared its nodes with 88 others
+  and overshot its bound by 0.07 % after 1,000 iterations. The rigid zones that catch these
+  steps are the energy sink: −11.5 % at head 100, against ≤ 5 %. Next: a solver for dense,
+  redundant clusters (a block solve per node cluster, or removing exactly duplicate rows).
+- Ball 100: the ball's centre comes 136 mm inside the door's paint, against 17 mm in the
+  default mode. Next: surface contact's position steps against the velocity rows.
+
+## Velocity contact: the full paint gap, spheres as bodies, the suite (2026-11-27, later still)
+
+**Changes:**
+- **Full paint gap.** Each pair's gap is now its whole paint thickness (`ccd_pairs`'s share 1.0).
+  The default mode's speculative pass held the half the CCD's half-gap left. Velocity contact
+  has no speculative pass, so with the half gap the paint stood 107 mm into the other car at
+  head 100. With the full gap it is 0.8 mm.
+- **Spheres as bodies.** A rigid proxy's sphere joins the solve as a body of its own: its centre
+  against the car's collision triangles, the gap grown by its radius. The node pass's and
+  surface contact's rules for it are off. Ball 100: paint 139 → 44 mm during the hit, 0 after.
+
+**Acceptance suite** (8 runs a scene, generated sedan, e = 1). Every scene has 0 crossings.
+
+| Result | Scenes |
+|---|---|
+| Pass | side 30, side 60, head 30 pressed, head 60 pressed, head 60, side 90, ball 100 |
+| Paint passes, angular momentum fails | head 100 (2.06 N·m·s a step), head 130 (2.3), offset 100 (3.5); bound 2.0 |
+| Paint fails | side 60 pressed (52 mm, lasting) |
+
+Linear momentum is kept to 2e-3 N·s in every scene.
+
+**Angular momentum.** A row's impulse acts along its impact normal, but at the nodes' positions
+at the step's end, where the pair has turned. The two impulses then make a couple, larger with
+a wider gap. Taking the normal along the pair's separation at the rounds' start positions brought
+it under the bound (1.4–1.8), but head 100 crossed 10 times: **not adopted**.
+
+**Side 60 pressed.** The lasting paint is car B's front-left door near the pillar. That paint
+vertex is skinned partly to `door_FL_i12`, an inner node in no collision triangle. Contact never
+holds an inner node, so paint that follows one goes where the skin does not. The fix is in the
+generator's skin binding, which is visual only.
+
+## Velocity contact: where the zones come from (2026-11-27, measured)
+
+Head 100, e = 1, full paint gap.
+
+**The zones are the energy sink.** Contact's work is −172 kJ of 1,117 kJ (15.4 %). With the zones
+off (`DAT_ZONES=0`, a measurement) the rows alone do −57.9 kJ (5.2 %), but 7 pairs then cross.
+
+**Why the rounds don't finish.** The stuck solves hold rows on shared nodes with nearly
+opposite normals: different pairs (no duplicates: 0 or 1 a solve), whose constraints are nearly
+parallel. One row over-pushes (λ ≈ 12 N·s while the pair parts 0.3–1.6 m/s faster than its
+bound); its neighbour stops just short. An ill-conditioned system like this converges slowly
+under every iterative method.
+
+| Variant | Zones | Notes |
+|---|---|---|
+| APGD (default) | 1,972 | |
+| Projected Gauss–Seidel (`DAT_PGS=1`), 32 / 128 / 512 iterations | 1,833 / 2,185 / 1,820 | |
+| Over-push bound relative to the row's speed, 1e-5 (`DAT_PUSH_SHARE`) | (above) | kept: the work bound asked a 55 m/s row for 1e-6 m/s, below f32 resolution |
+| Rounds stopped when nothing new collides, settled or not, APGD | 1,298 | paint 31 mm |
+| Same, Gauss–Seidel | 260 | paint 82 mm, angular momentum 19 N·m·s a step |
+| e = 0 (Gauss–Seidel) | 5,033 | not restitution's multi-impact paradox |
+
+Next: a solve exact for these near-parallel clusters. Candidates: a block solve per small node
+cluster (a direct LCP of tens of rows); or merging nearly parallel rows that share nodes into
+one, which is lossless only if their constraint is the same.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

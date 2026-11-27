@@ -70,8 +70,8 @@ fn continuous_probe() {
     let t = std::time::Instant::now();
     let r = crash_mode(&scene, kmh, secs, 1, true, false, true, false, false, Some(true)).expect("the scene");
     let (x, c) = (&r[0].0, r[0].2.expect("continuous").ccd);
-    println!("PROBE {scene} {kmh} soft {} | worst {:.1} mm, after 0.3 s {:.1} mm, crossings {}, jitter {:.2} m/s | zones {} ({} nodes), soft rounds {} rows {} left {}, unresolved {}, energy {:.0} J, dp {:.1e}, dl {:.1e} | {:.0} s",
-        e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, t.elapsed().as_secs_f32());
+    println!("PROBE {scene} {kmh} soft {} | worst {:.1} mm, after 0.3 s {:.1} mm, crossings {}, jitter {:.2} m/s | zones {} ({} nodes), soft rounds {} rows {} left {}, unresolved {}, energy {:.0} J, dp {:.1e}, dl {:.1e}, fixed overflows {} | {:.0} s",
+        e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, engine_softbody::explicit_contact::fixed_overflows(), t.elapsed().as_secs_f32());
 }
 
 /// Contact never stands in for metal (AGENTS.md): over a crash the contact pass changes the
