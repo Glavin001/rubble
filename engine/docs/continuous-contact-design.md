@@ -1076,6 +1076,25 @@ Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
   That is a change of the contact's formulation (barrier contact, or rows that stay linearised
   across rounds with a monotone set), not a tuning.
 
+## The barrier prototype's non-convergence, explained (2026-11-27, CPU, `DAT_BARRIER=1`, off)
+
+Head 100 for 0.1 s, `DAT_BARRIER_TOL=5e-7`:
+
+| | paint during | jitter | capped solves |
+|---|---|---|---|
+| one global line search | 147.7 mm | 8.41 m/s | 155 |
+| each contact component its own (now the default) | 147.9 mm | 8.43 m/s | 270 of more, smaller solves |
+
+- **Why they are capped** (`DAT_BDBG=1`): a capped solve's last iterations are identical. Steps are
+  about 1e-6 m, the energy is unchanged to 7 digits, the CCD limit is 1, and the gradient is up to
+  12 N. The positions are f32 (1.2e-7 m at 1 m), so the iterate stalls at f32 resolution before the
+  step test can pass. It is not diverging.
+- **What that costs:** the gradient left unsolved is the momentum drift (1.7–2.7 N·s).
+- **What the prototype needs** before it can be judged: the minimisation in f64 (positions and
+  closest points), and a stop test on the gradient against the inertia.
+- **What it shows meanwhile**, apart from convergence: 148 mm of paint during the crush and 8 m/s
+  of jitter. It does not yet meet the paint guard.
+
 ## Velocity contact on the GPU (design, 2026-11-27)
 
 The CPU reference (`ccd_vel.rs`, `dat_vel.rs`) is the spec. It takes the position response's

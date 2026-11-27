@@ -36,9 +36,62 @@ fn ddb(d: f64, dh: f64) -> f64 {
     if d >= dh { 0.0 } else { -2.0 * (d / dh).ln() - 4.0 * (d - dh) / d + (d - dh) * (d - dh) / (d * d) }
 }
 
-/// The step's barrier contact: `x1`, `vel` moved for the contact set's nodes. Returns the number
-/// of gradient steps taken; `st.barrier_unconverged` counts steps that reached [`ITERS`].
+/// The step's barrier contact: `x1`, `vel` moved for the contact set's nodes. E is a sum over the
+/// contact graph's connected components (pairs joined by a movable node), which share no movable
+/// node: each is minimised on its own, with its own line search (one global step, limited by the
+/// nearest pair anywhere, held every cluster to the slowest's pace; `DAT_BARRIER_GLOBAL=1` keeps
+/// it, a comparison). The same minimum, the same crossing-free path.
 pub(in super::super) fn barrier(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, st: &mut CcdStats) {
+    if std::env::var("DAT_BARRIER_GLOBAL").is_ok_and(|v| v == "1") {
+        return barrier_set(pairs, x0, x1, vel, im, h, st);
+    }
+    let mut id: BTreeMap<(usize, u32), usize> = BTreeMap::new();
+    let mut parent: Vec<usize> = Vec::new();
+    fn find(p: &mut [usize], mut a: usize) -> usize {
+        while p[a] != a {
+            p[a] = p[p[a]];
+            a = p[a];
+        }
+        a
+    }
+    let mut first: Vec<Option<usize>> = Vec::with_capacity(pairs.len());
+    for p in pairs {
+        let mut f: Option<usize> = None;
+        for k in p.k {
+            if im[k.0][k.1 as usize] <= 0.0 {
+                continue;
+            }
+            let n = parent.len();
+            let i = *id.entry(k).or_insert(n);
+            if i == n {
+                parent.push(n);
+            }
+            match f {
+                None => f = Some(i),
+                Some(a) => {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, i));
+                    if ra != rb {
+                        parent[rb.max(ra)] = ra.min(rb);
+                    }
+                }
+            }
+        }
+        first.push(f);
+    }
+    let mut comps: BTreeMap<usize, Vec<CcdPair>> = BTreeMap::new();
+    for (p, f) in pairs.iter().zip(first) {
+        if let Some(f) = f {
+            let r = find(&mut parent, f);
+            comps.entry(r).or_default().push(p.clone());
+        }
+    }
+    for c in comps.values() {
+        barrier_set(c, x0, x1, vel, im, h, st);
+    }
+}
+
+/// [`barrier`] over one set of pairs: one Newton loop, one line search.
+fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, st: &mut CcdStats) {
     let (dh, iters) = (env("DAT_DHAT", DHAT) as f64, env("DAT_BARRIER_ITERS", ITERS as f32) as u32);
     // The contact set: every movable node of a pair, in a fixed order.
     let mut idx: BTreeMap<(usize, u32), usize> = BTreeMap::new();
@@ -159,6 +212,11 @@ pub(in super::super) fn barrier(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [V
             }
         }
         let slope: f64 = g.iter().zip(&dir).map(|(g, d)| g.dot(d.as_dvec3())).sum();
+        if std::env::var("DAT_BDBG").is_ok() && used + 3 > iters {
+            let gn = g.iter().map(|g| g.length()).fold(0.0f64, f64::max);
+            let dmin = pairs.iter().zip(&xi).map(|(p, &gap)| closest(p.nn, at(&x, p)).1.length() - gap).fold(f32::MAX, f32::min);
+            eprintln!("BDBG it {used} pairs {} nodes {} | max |dir| {big:.2e} m, ccd alpha {a:.2e}, max |grad| {gn:.2e}, slope {slope:.2e}, E {e:.6e}, min d {dmin:.2e}, active {}", pairs.len(), x.len(), act.len());
+        }
         let mut moved = false;
         for _ in 0..30 {
             let xn: Vec<Vec3> = x.iter().zip(&dir).map(|(x, d)| *x + *d * a).collect();
