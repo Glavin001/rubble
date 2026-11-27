@@ -242,6 +242,7 @@ pub fn jbeam_files(
                 if f.limit_expansion > 0.0 {
                     o.insert("deformLimitExpansion".into(), num(f.limit_expansion));
                 }
+                if let Some(&(dl, ls)) = car.fixed_limits.get(&j) { o.insert("deformLimit".into(), json!(dl)); o.insert("deformLimitStress".into(), num(ls)); }
                 if let Some(pc) = car.precomp.get(&j) {
                     o.insert(
                         "beamPrecompression".into(),

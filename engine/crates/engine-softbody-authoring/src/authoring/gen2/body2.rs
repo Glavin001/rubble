@@ -142,7 +142,7 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
         }
     }
     // ---- its lattice: springs, damping and yield as built by `shell`
-    let lat = shell::lattice_with(st, &inp.physics().crash);
+    let lat = super::front_rules::lattice(st, inp.physics());
     for b in &lat.beams {
         let j = r
             .car

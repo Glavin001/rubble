@@ -1,6 +1,8 @@
 //! The crash reference suite on the CPU reference (`engine_softbody::crash_reference`).
 //!
-//! `crash_ref -- [ID ...] [--runs N] [--contact discrete|edge|continuous] [--json]`
+//! `crash_ref -- [ID ...] [--runs N] [--contact discrete|edge|continuous] [--json] [--params design=FILE[,design=FILE]]`
+//! (`--params`: a design's parameters, e.g. a physics block with other front rules; the
+//! scenarios as written, their designs from those parameters)
 //! (no id: every scenario; `--list`: their ids). One report a run; exit code 1 when a
 //! tier 0 or tier 1 criterion fails.
 
@@ -18,10 +20,11 @@ fn main() -> Result<(), String> {
     let runs: usize = flag("--runs").and_then(|x| x.parse().ok()).unwrap_or(1);
     let contact = flag("--contact").map_or(Ok(Contact::Edge), |x| Contact::from_name(&x).ok_or(format!("no contact setting {x}")))?;
     let json = a.iter().any(|x| x == "--json");
+    let params = flag("--params").map_or(Ok(Vec::new()), |v| engine_softbody_authoring::crash_templates::params_from_list(&v))?;
     let ids: Vec<&String> = a.iter().take_while(|x| !x.starts_with("--")).collect();
     let mut failed = 0;
     for s in cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(s.id))) {
-        let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
+        let templates = engine_softbody_authoring::crash_templates::templates_for_with(&s, &params)?;
         for run in 0..runs {
             let built = s.build(&templates, Jitter::run(run), contact)?;
             let t = std::time::Instant::now();

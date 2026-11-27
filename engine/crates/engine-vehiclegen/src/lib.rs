@@ -26,6 +26,7 @@ pub mod assemble;
 pub mod export;
 pub mod designs;
 pub mod physics;
+pub mod front_rules;
 pub mod crash;
 pub mod thin_wall;
 

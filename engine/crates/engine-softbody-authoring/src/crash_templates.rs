@@ -18,12 +18,19 @@ pub const MDB214: &str = "mdb214";
 /// is the same spawn as the lab's pressure-wheel one, and it never rides a carrier (the
 /// lab's `on_carrier` skips it). It has no crash zones.
 pub fn template(design: &str) -> Result<Template, String> {
+    template_with(design, None)
+}
+
+/// [`template`] from the design's parameters (`params`: JSON, any subset, the design's
+/// defaults for the rest; `vehicle_gen_rig --params`), e.g. a physics block with other front
+/// rules, to compare a variant against the default car in the same scenario.
+pub fn template_with(design: &str, params: Option<&str>) -> Result<Template, String> {
     if design == MDB214 {
         let text = engine_softbody::crash_rigs::mdb214_jbeam();
         let desc = engine_softbody::jbeam::load_jbeam(&[("mdb214.jbeam", text.as_str())], None)?;
         return Ok(Template { desc, settings: crate::vehicle_compare::settings(), zones: ZoneMap::default() });
     }
-    let built = rig::rig_vehicle(design, None, None)?;
+    let built = rig::rig_vehicle(design, params, None)?;
     template_from_files(design, &rig::mod_files(&built))
 }
 
@@ -52,5 +59,30 @@ pub fn template_from_files(design: &str, files: &[(String, Vec<u8>)]) -> Result<
 
 /// Every template a scenario needs.
 pub fn templates_for(s: &CrashScenario) -> Result<Templates, String> {
-    s.designs.iter().map(|d| Ok((d.to_string(), template(d)?))).collect()
+    templates_for_with(s, &[])
+}
+
+/// [`templates_for`] with parameters for some designs (`(design, JSON)`; the others their
+/// defaults).
+pub fn templates_for_with(s: &CrashScenario, params: &[(String, String)]) -> Result<Templates, String> {
+    let of = |d: &str| params.iter().find(|(n, _)| n == d).map(|(_, p)| p.as_str());
+    s.designs.iter().map(|d| Ok((d.to_string(), template_with(d, of(d))?))).collect()
+}
+
+/// Design parameters from `RUBBLE_DESIGN_PARAMS` (`design=FILE[,design=FILE]`), for the
+/// diagnostics that build their own templates.
+pub fn params_from_env() -> Result<Vec<(String, String)>, String> {
+    let Ok(v) = std::env::var("RUBBLE_DESIGN_PARAMS") else { return Ok(Vec::new()) };
+    params_from_list(&v)
+}
+
+/// `design=FILE[,design=FILE]` read into (design, the file's JSON).
+pub fn params_from_list(v: &str) -> Result<Vec<(String, String)>, String> {
+    v.split(',')
+        .filter(|x| !x.is_empty())
+        .map(|kv| {
+            let (d, f) = kv.split_once('=').ok_or(format!("params {kv}: want design=FILE"))?;
+            Ok((d.to_string(), std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?))
+        })
+        .collect()
 }

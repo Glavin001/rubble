@@ -27,14 +27,18 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 fn sedan() -> (Template, ExplicitBeams, Vec<String>) {
-    let t = engine_softbody_authoring::crash_templates::template("sedan").expect("sedan");
+    // (`RUBBLE_DESIGN_PARAMS=sedan=FILE`: the sedan from those parameters)
+    let p = engine_softbody_authoring::crash_templates::params_from_env().expect("params");
+    let p = p.iter().find(|x| x.0 == "sedan").map(|x| x.1.as_str());
+    let t = engine_softbody_authoring::crash_templates::template_with("sedan", p).expect("sedan");
     let (s, _) = ExplicitBeams::from_desc_jbeam_raycast(&t.desc, Vec3::ZERO, Vec3::ZERO, t.settings).expect("spawn");
     let names = t.desc.nodes.iter().map(|n| n.name.clone()).collect();
     (t, s, names)
 }
 
 fn out_dir() -> std::path::PathBuf {
-    let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/sections");
+    // (`AUDIT_OUT=DIR`: another folder, one per variant)
+    let d = std::env::var("AUDIT_OUT").map_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/sections"), std::path::PathBuf::from);
     std::fs::create_dir_all(&d).expect("out dir");
     d
 }
@@ -425,7 +429,10 @@ fn sedan_front_push() {
 #[ignore = "diagnostic: S11 on the CPU with the elastic energy by member at maximum crush"]
 fn sedan_s11_stored_energy() {
     let s = cr::get("S11").expect("S11");
-    let templates = engine_softbody_authoring::crash_templates::templates_for(&s).expect("templates");
+    let params = engine_softbody_authoring::crash_templates::params_from_env().expect("params");
+    let scene = std::env::var("AUDIT_SCENE").unwrap_or_else(|_| "S11".into());
+    let s = if scene == "S11" { s } else { cr::get(&scene).expect("scene") };
+    let templates = engine_softbody_authoring::crash_templates::templates_for_with(&s, &params).expect("templates");
     let built = s.build(&templates, Jitter::run(0), Contact::Edge).expect("build");
     let names: Vec<String> = templates["sedan"].desc.nodes.iter().map(|n| n.name.clone()).collect();
     let mut r = CpuRunner::new(&built);
@@ -449,6 +456,7 @@ fn sedan_s11_stored_energy() {
     let spans = |v: &ExplicitBeams| [nose(v) - mean_z(v, &beam), mean_z(v, &beam) - mean_z(v, &cb_front), mean_z(v, &cb_front) - mean_z(v, &fw), mean_z(v, &fw) - mean_z(v, &rear)];
     let spans0 = spans(&r.0.vehicles[0]);
     let mut min_gap = gap0;
+    let (mut min_gap_ms, mut touch_ms) = (0.0f32, None::<f32>);
     let mut at_stop = false;
     let mut min_v = f64::MAX;
     let mut st_tm: BTreeMap<String, f64> = BTreeMap::new();
@@ -459,8 +467,14 @@ fn sedan_s11_stored_energy() {
         let w = &r.0;
         let (vz, _) = com_vz(w);
         let veh = &w.vehicles[0];
-        min_gap = min_gap.min(mean_z(veh, &eng_rear) - mean_z(veh, &fw));
         let t = (k + 1) as f32 * cr::DT;
+        let g = mean_z(veh, &eng_rear) - mean_z(veh, &fw);
+        if g < min_gap {
+            (min_gap, min_gap_ms) = (g, (t - built.layout.impact_s) * 1e3);
+        }
+        if touch_ms.is_none() && g < 0.03 {
+            touch_ms = Some((t - built.layout.impact_s) * 1e3);
+        }
         if !at_stop && t > built.layout.impact_s && vz <= 0.0 {
             at_stop = true;
             let st = stored_by_class(veh, &names);
@@ -492,7 +506,7 @@ fn sedan_s11_stored_energy() {
     std::fs::write(out_dir().join("sedan_s11_elastic_by_class.csv"), csv).expect("write");
     writeln!(o, "elastic energy: largest {:.1} kJ at {:.0} ms; 0.3 s after contact {:.1} kJ", el_max.0 / 1e3, el_max.1, st_end.values().sum::<f64>() / 1e3).ok();
     let ke_out = 0.5 * mass * min_v * min_v;
-    writeln!(o, "rebound: COM {min_v:.2} m/s, ½mv² {:.1} kJ = {:.1} % of the impact's; engine rear to firewall, least {min_gap:.3} m", ke_out / 1e3, 100.0 * ke_out / ke0).ok();
+    writeln!(o, "rebound: COM {min_v:.2} m/s, ½mv² {:.1} kJ = {:.1} % of the impact's; engine rear to firewall, least {min_gap:.3} m at {min_gap_ms:.0} ms, within 3 cm at {touch_ms:?} ms", ke_out / 1e3, 100.0 * ke_out / ke0).ok();
     println!("{o}");
     std::fs::write(out_dir().join("sedan_s11_energy.txt"), o).expect("write");
 }
