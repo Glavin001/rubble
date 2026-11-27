@@ -18,11 +18,12 @@ const OVERLAP: f32 = 0.4;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S01",
-        title: "40 % offset rigid block, 64 km/h",
+        id: "S01".into(),
+        title: "40 % offset rigid block, 64 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[112, 126], real_test: "Euro NCAP offset deformable barrier (ODB), 40 % overlap, 64 km/h" },
-        designs: &["sedan"],
-        layout: |extent, j| {
+        designs: names(&["sedan"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let e = extent("sedan");
             let v = KMH / 3.6 * j.speed;
             // A tenth of a second of travel before the block.
@@ -31,38 +32,38 @@ pub(super) fn scenario() -> CrashScenario {
             // A rigid block 2 m tall and 1 m deep over the left 40 % of the car's width,
             // running a metre past its side.
             let (x0, x1) = (e.hi.x - OVERLAP * e.width(), e.hi.x + 1.0);
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
                 boxes: vec![(Vec3::new(0.5 * (x0 + x1), 1.0, face + 0.5), Vec3::new(0.5 * (x1 - x0), 1.0, 0.5))],
                 impact_s: 0.1,
             }
-        },
+        }),
         // The car is back off the block by 0.1 s and rolls away on free wheels; the yaw is
         // settled by 0.4 s.
         secs_after_impact: 1.0,
         // World coordinates: the sedan's front is 0.96 m ahead of its origin, the block's face
         // 1.78 m beyond (z ≈ 2.7), its inner edge at x ≈ 0.19.
-        cameras: &[
+        cameras: vec![
             // Framed as the reference footage (60° vertical field of view, 16:9): the side and top
             // views fill about two thirds of the width with the car at impact (it spans z −2.1 to
             // 2.7 then), the barrier at the left edge of the side view as in the film, and room on the
             // right for the rebound (the car's centre ends near z −2.6).
-            Camera { name: "side", eye: [5.2, 1.0, -0.6], target: [0.0, 0.7, -0.6] },
+            Camera { name: "side".into(), eye: [5.2, 1.0, -0.6], target: [0.0, 0.7, -0.6] },
             // Straight down, the car's length across the frame, travelling left to right (struck side up):
             // the eye a centimetre to −x of the target fixes the picture's up as +x.
-            Camera { name: "top", eye: [-0.01, 6.4, -0.6], target: [0.0, 0.7, -0.6] },
-            Camera { name: "front_quarter", eye: [-3.4, 1.9, 5.2], target: [0.2, 0.6, 1.4] },
+            Camera { name: "top".into(), eye: [-0.01, 6.4, -0.6], target: [0.0, 0.7, -0.6] },
+            Camera { name: "front_quarter".into(), eye: [-3.4, 1.9, 5.2], target: [0.2, 0.6, 1.4] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
             // The reference's "early crush" frame: bumper and lamp gone, the hood starting to buckle.
-            Moment { name: "early_crush", after_impact_ms: 20.0 },
-            Moment { name: "wheel_at_sill", after_impact_ms: 40.0 },
-            Moment { name: "peak", after_impact_ms: 60.0 },
+            Moment { name: "early_crush".into(), after_impact_ms: 20.0 },
+            Moment { name: "wheel_at_sill".into(), after_impact_ms: 40.0 },
+            Moment { name: "peak".into(), after_impact_ms: 60.0 },
             // The reference's "rebound" frame: the front destroyed, the car moving back off the block.
-            Moment { name: "rebound", after_impact_ms: 150.0 },
-            Moment { name: "rear_swing", after_impact_ms: 300.0 },
-            Moment { name: "rest", after_impact_ms: 950.0 },
+            Moment { name: "rebound".into(), after_impact_ms: 150.0 },
+            Moment { name: "rear_swing".into(), after_impact_ms: 300.0 },
+            Moment { name: "rest".into(), after_impact_ms: 950.0 },
         ],
         criteria: || {
             use Tier::*;

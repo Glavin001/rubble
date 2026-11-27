@@ -18,7 +18,7 @@
 //! rendered like a scenario camera, under its own name.
 //! The census of a design's parts: `crash_outlines -- --census sedan`.
 
-use engine_softbody::crash_reference::outline::{self, CarFrame, Ghost, Parts, View};
+use engine_softbody::crash_reference::outline::{self, BodyParts, View};
 use engine_softbody::crash_reference::{self as cr, Contact, CpuRunner, Jitter, Runner, DT};
 use glam::Vec3;
 use serde_json::{json, Value};
@@ -146,22 +146,6 @@ fn box_tris(c: Vec3, h: Vec3) -> Vec<[Vec3; 3]> {
         .collect()
 }
 
-fn outlines_json(
-    parts: &Parts,
-    now: &[Vec3],
-    ghost: &[Vec3],
-    proj: &dyn Fn(Vec3) -> Option<[f32; 2]>,
-) -> Value {
-    let mut groups = serde_json::Map::new();
-    for g in &parts.groups {
-        groups.insert(g.name.clone(), json!({ "now": outline::outline(g, now, proj), "ghost": outline::outline(g, ghost, proj) }));
-    }
-    json!({
-        "parts": groups,
-        "hood_centreline": { "now": outline::centreline_line(parts, now, proj), "ghost": outline::centreline_line(parts, ghost, proj) },
-    })
-}
-
 fn census(design: &str) -> Result<(), String> {
     let t = engine_softbody_authoring::crash_templates::template(design)?;
     let rest: Vec<Vec3> = t
@@ -225,10 +209,20 @@ fn main() -> Result<(), String> {
     if let Some(d) = flag("--census") {
         return census(&d);
     }
-    let id = a.first().filter(|x| !x.starts_with("--")).ok_or(
-        "usage: crash_outlines ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render] [--cameras FILE]",
-    )?;
-    let s = cr::get(id).ok_or(format!("no scenario {id}"))?;
+    let usage = "usage: crash_outlines ID|--scenario FILE.json [--contact edge] [--size 1280x720] [--out DIR] [--no-render] [--cameras FILE]";
+    // `--scenario FILE`: a data scenario (`crash_reference::ScenarioDesc`), as `crash_ref` takes it.
+    let s = match flag("--scenario") {
+        Some(file) => {
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+            let d: cr::ScenarioDesc = serde_json::from_str(&text).map_err(|e| format!("{file}: {e}"))?;
+            d.check()?;
+            d.scenario()
+        }
+        None => {
+            let id = a.first().filter(|x| !x.starts_with("--")).ok_or(usage)?;
+            cr::get(id).ok_or(format!("no scenario {id}"))?
+        }
+    };
     let contact = flag("--contact").map_or(Ok(Contact::Edge), |x| {
         Contact::from_name(&x).ok_or(format!("no contact setting {x}"))
     })?;
@@ -247,36 +241,14 @@ fn main() -> Result<(), String> {
     let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
     let built = s.build(&templates, Jitter::run(0), contact)?;
     let mut runner = CpuRunner::new(&built);
-    // Per body: its template, groups, start state.
-    let bodies: Vec<(&cr::Body, Parts, Vec<Vec3>, Vec<f32>)> = built
+    // Per body: its groups and start state (`outline::BodyParts`, as the Reference Studio
+    // computes them from a recording).
+    let bodies: Vec<BodyParts> = built
         .layout
         .bodies
         .iter()
         .zip(&built.fleet)
-        .map(|(b, f)| {
-            let t = &templates[b.design];
-            let rest: Vec<Vec3> = (0..f.nodes.len())
-                .map(|i| {
-                    t.desc
-                        .nodes
-                        .get(i)
-                        .map_or(Vec3::ZERO, |n| Vec3::from(n.position))
-                })
-                .collect();
-            let tris: Vec<[u32; 3]> = f
-                .triangles
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| !f.tri_anti_only(*k))
-                .map(|(_, x)| x.nodes)
-                .collect();
-            (
-                b,
-                outline::groups(t, &rest, &tris),
-                f.positions(),
-                f.nodes.iter().map(|n| n.mass).collect(),
-            )
-        })
+        .map(|(b, f)| BodyParts::new(b, f, &templates[&b.design]))
         .collect();
     // The scenario's cameras, then any explicit ones (--cameras FILE: a JSON list of
     // { name, eye, target, up?, fov_y_deg?, width?, height? } in the scenario's world frame,
@@ -330,36 +302,10 @@ fn main() -> Result<(), String> {
             .flat_map(|&(c, hh)| box_tris(c, hh))
             .map(|t| (t, [0.32, 0.34, 0.40]))
             .collect();
-        for (k, (b, parts, p0, mass)) in bodies.iter().enumerate() {
+        for (k, bp) in bodies.iter().enumerate() {
             let now = &sample.pos[k];
-            let g = Ghost::fit(parts, p0, now, mass);
-            let ghost: Vec<Vec3> = p0.iter().map(|&p| g.apply(p)).collect();
-            let frame = CarFrame::new(parts, now, &g, b.heading());
-            let side = |p: Vec3| Some(frame.side(p));
-            let mut cams = serde_json::Map::new();
-            for (c, v) in &views {
-                let proj = |p: Vec3| v.project(p);
-                let mut o = outlines_json(parts, now, &ghost, &proj);
-                let wheels: Vec<Value> = parts
-                    .wheels
-                    .iter()
-                    .map(|wh| {
-                        let (c_now, c_gh) = (0.5 * (now[wh.hub[0]] + now[wh.hub[1]]), 0.5 * (ghost[wh.hub[0]] + ghost[wh.hub[1]]));
-                        json!({ "name": wh.name, "now": { "c": v.project(c_now), "r": v.radius_px(c_now, wh.radius) }, "ghost": { "c": v.project(c_gh), "r": v.radius_px(c_gh, wh.radius) } })
-                    })
-                    .collect();
-                o["wheels"] = json!(wheels);
-                cams.insert(c.clone(), o);
-            }
-            let mut car = outlines_json(parts, now, &ghost, &side);
-            car["wheels"] = json!(parts
-                .wheels
-                .iter()
-                .map(|wh| json!({ "name": wh.name, "r": wh.radius, "now": frame.side(0.5 * (now[wh.hub[0]] + now[wh.hub[1]])), "ghost": frame.side(0.5 * (ghost[wh.hub[0]] + ghost[wh.hub[1]])) }))
-                .collect::<Vec<_>>());
-            // The cabin and rear's turn from the start: yaw (+ toward its left), pitch (+ nose down, rear up).
-            let (yaw, pitch, _) = cr::metrics::yaw_pitch_roll(g.r, b.heading());
-            jb.push(json!({ "name": b.name, "design": b.design, "cameras": cams, "car_frame": car, "fit_nodes": parts.rigid.len(), "rear_yaw_deg": yaw.to_degrees(), "rear_pitch_deg": pitch.to_degrees() }));
+            let parts = &bp.parts;
+            jb.push(bp.outlines(now, &views));
             // The still: every collision triangle, coloured by its group.
             let f = &built.fleet[k];
             let mut owner = vec![""; now.len()];

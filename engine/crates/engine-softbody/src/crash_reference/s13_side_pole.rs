@@ -38,11 +38,12 @@ pub const HEAD_BEHIND_AXLE: f32 = 2.146;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S13",
-        title: "NCAP side pole: sedan carried into a 254 mm pole at 75°, 32 km/h",
+        id: "S13".into(),
+        title: "NCAP side pole: sedan carried into a 254 mm pole at 75°, 32 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA NCAP / FMVSS 214 oblique pole, 32 km/h, 75°, 254 mm (tests 7523, 8558: 2012-14 Toyota Camry)" },
-        designs: &["sedan"],
-        layout: |extent, j| {
+        designs: names(&["sedan"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let e = extent("sedan");
             let v = KMH / 3.6 * j.speed;
             let a = ANGLE_DEG.to_radians();
@@ -61,20 +62,20 @@ pub(super) fn scenario() -> CrashScenario {
             let at = -u * (v * impact_s) + across * j.lateral;
             let mut car = Body::new("car", "sedan", at, j.yaw, v).on_carrier();
             car.vel = Some(u * v);
-            Layout { bodies: vec![car], boxes: vec![pole], impact_s }
-        },
+            Layout { box_yaw: Vec::new(), bodies: vec![car], boxes: vec![pole], impact_s }
+        }),
         secs_after_impact: 0.3,
         // World coordinates at contact: the car's origin at 0, the pole at about (1.07, −1.96).
-        cameras: &[
-            Camera { name: "front three-quarter", eye: [4.5, 1.6, 2.0], target: [0.9, 0.7, -1.9] },
-            Camera { name: "top", eye: [0.01, 12.0, -1.7], target: [0.0, 0.0, -1.7] },
-            Camera { name: "behind the pole", eye: [5.5, 1.2, -1.96], target: [0.9, 0.8, -1.96] },
+        cameras: vec![
+            Camera { name: "front three-quarter".into(), eye: [4.5, 1.6, 2.0], target: [0.9, 0.7, -1.9] },
+            Camera { name: "top".into(), eye: [0.01, 12.0, -1.7], target: [0.0, 0.0, -1.7] },
+            Camera { name: "behind the pole".into(), eye: [5.5, 1.2, -1.96], target: [0.9, 0.8, -1.96] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "peak", after_impact_ms: 40.0 },
-            Moment { name: "deepest", after_impact_ms: 100.0 },
-            Moment { name: "rest", after_impact_ms: 280.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "peak".into(), after_impact_ms: 40.0 },
+            Moment { name: "deepest".into(), after_impact_ms: 100.0 },
+            Moment { name: "rest".into(), after_impact_ms: 280.0 },
         ],
         // 8.89 m/s nominal, +2 % jitter: 9.07 m/s.
         criteria: || {

@@ -11,6 +11,8 @@ engine-vehicle.workspace = true
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The Reference Studio's TypeScript types (crash_reference::types).
+ts-rs.workspace = true
 # Imported vehicles' textures (flextex.rs: materials.json colour maps).
 png = "0.18"
 

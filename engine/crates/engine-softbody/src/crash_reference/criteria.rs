@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// How a known failure shows across the jittered runs ([`super::Jitter::run`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum Occurs {
     /// Fails in every run: passing in all of them fails the verdict (remove the entry).
@@ -38,7 +38,7 @@ pub struct KnownFailure {
     pub note: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     /// Tier 0: holds in every crash (conservation, nothing passes through, finite).
@@ -170,7 +170,7 @@ impl Criterion {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
 pub struct CriterionResult {
     pub name: String,
     pub metric: String,

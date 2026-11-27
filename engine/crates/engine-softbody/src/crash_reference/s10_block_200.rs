@@ -18,43 +18,44 @@ const BLOCK_WIDTH: f32 = 0.9;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S10",
-        title: "Narrow rigid block, 200 km/h, 40 % overlap",
+        id: "S10".into(),
+        title: "Narrow rigid block, 200 km/h, 40 % overlap".into(),
         reference: Reference { video: VIDEO, at_s: &[393], real_test: "narrow rigid block, 40 % of the width, 200 km/h (no standard test)" },
-        designs: &["wagon"],
-        layout: |extent, j| {
+        designs: names(&["wagon"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let e = extent("wagon");
             let v = KMH / 3.6 * j.speed;
             // A tenth of a second of travel before the block.
             let gap = 0.1 * v;
             let face = e.hi.z + gap;
             let x0 = e.hi.x - OVERLAP * e.width();
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![Body::new("car", "wagon", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
                 // A concrete block 0.9 m wide, 2 m tall and 2 m deep.
                 boxes: vec![(Vec3::new(x0 + 0.5 * BLOCK_WIDTH, 1.0, face + 1.0), Vec3::new(0.5 * BLOCK_WIDTH, 1.0, 1.0))],
                 impact_s: 0.1,
             }
-        },
+        }),
         secs_after_impact: 2.0,
-        cameras: &[
+        cameras: vec![
             // Close, from the side away from the block (the wagon spans z 1.7 to 6.5 at impact): from
             // the struck side the block hides the car swinging round it. High enough for the rear
             // rising (60° vertical field of view).
-            Camera { name: "side", eye: [-5.2, 1.6, 4.6], target: [-0.3, 1.4, 4.6] },
+            Camera { name: "side".into(), eye: [-5.2, 1.6, 4.6], target: [-0.3, 1.4, 4.6] },
             // On the wreck where it ends: past the block, about 8 m to −x (its centre near z 17.8).
-            Camera { name: "aftermath", eye: [-4.3, 2.4, 21.6], target: [-7.8, 0.6, 17.8] },
+            Camera { name: "aftermath".into(), eye: [-4.3, 2.4, 21.6], target: [-7.8, 0.6, 17.8] },
             // Straight down on the whole path, travelling left to right (the eye a centimetre to −x
             // of the target fixes the picture's up as +x): the block, and the wreck about 10 m past
             // it and 8 m to the side.
-            Camera { name: "top", eye: [-4.01, 12.8, 10.5], target: [-4.0, 0.6, 10.5] },
+            Camera { name: "top".into(), eye: [-4.01, 12.8, 10.5], target: [-4.0, 0.6, 10.5] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "door_reached", after_impact_ms: 30.0 },
-            Moment { name: "peak", after_impact_ms: 60.0 },
-            Moment { name: "rear_up", after_impact_ms: 250.0 },
-            Moment { name: "rest", after_impact_ms: 1950.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "door_reached".into(), after_impact_ms: 30.0 },
+            Moment { name: "peak".into(), after_impact_ms: 60.0 },
+            Moment { name: "rear_up".into(), after_impact_ms: 250.0 },
+            Moment { name: "rest".into(), after_impact_ms: 1950.0 },
         ],
         criteria: || {
             use Tier::*;

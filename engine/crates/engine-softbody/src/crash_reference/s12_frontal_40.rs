@@ -18,21 +18,22 @@ pub const KMH: f32 = 40.0;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S12",
-        title: "Sedan into a full-width rigid wall, 40 km/h",
+        id: "S12".into(),
+        title: "Sedan into a full-width rigid wall, 40 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA FMVSS 208 rigid barrier, 40 km/h (tests 9692, 7793: Toyota Camry)" },
-        designs: &["sedan"],
-        layout: |extent, j| wall_layout(extent("sedan"), KMH / 3.6 * j.speed, j),
+        designs: names(&["sedan"]),
+        recreated: false,
+        layout: code(|extent, j| wall_layout(extent("sedan"), KMH / 3.6 * j.speed, j)),
         secs_after_impact: 0.4,
-        cameras: &[
-            Camera { name: "side", eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },
-            Camera { name: "top", eye: [0.01, 12.0, -1.5], target: [0.0, 0.0, -1.5] },
+        cameras: vec![
+            Camera { name: "side".into(), eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },
+            Camera { name: "top".into(), eye: [0.01, 12.0, -1.5], target: [0.0, 0.0, -1.5] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "peak", after_impact_ms: 50.0 },
-            Moment { name: "max_crush", after_impact_ms: 72.0 },
-            Moment { name: "rest", after_impact_ms: 350.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "peak".into(), after_impact_ms: 50.0 },
+            Moment { name: "max_crush".into(), after_impact_ms: 72.0 },
+            Moment { name: "rest".into(), after_impact_ms: 350.0 },
         ],
         criteria: || {
             use Tier::*;

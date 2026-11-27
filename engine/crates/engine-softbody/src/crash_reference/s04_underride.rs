@@ -29,17 +29,18 @@ pub const AFTER_IMPACT_S: f32 = 0.8;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S04",
-        title: "Sedan into the rear of a parked semi-trailer, 56 km/h, full overlap",
+        id: "S04".into(),
+        title: "Sedan into the rear of a parked semi-trailer, 56 km/h, full overlap".into(),
         reference: Reference { video: VIDEO, at_s: &[179, 181], real_test: "IIHS rear underride guard test, full width, a mid-size sedan at 56 km/h into a parked trailer" },
-        designs: &["sedan", "box_trailer"],
-        layout: |extent, j| {
+        designs: names(&["sedan", "box_trailer"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let (c, t) = (extent("sedan"), extent("box_trailer"));
             let v = KMH / 3.6 * j.speed;
             // The trailer heads +Z, its rear (`t.lo.z` behind its origin) a run-up ahead of
             // the car's front.
             let z = c.hi.z + RUN_UP_S * v - t.lo.z;
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![
                     Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v),
                     Body::new("trailer", "box_trailer", Vec3::new(0.0, 0.0, z), 0.0, 0.0),
@@ -47,21 +48,21 @@ pub(super) fn scenario() -> CrashScenario {
                 boxes: vec![],
                 impact_s: RUN_UP_S,
             }
-        },
+        }),
         secs_after_impact: AFTER_IMPACT_S,
         // The car's front reaches the trailer's rear at z ≈ 1.0 + 7.8 = 8.8 (the sedan's
         // front is 0.96 m ahead of its origin).
-        cameras: &[
-            Camera { name: "side", eye: [-9.5, 1.3, 8.0], target: [0.0, 0.9, 8.0] },
-            Camera { name: "aftermath", eye: [-5.5, 2.4, 3.5], target: [0.0, 0.8, 8.0] },
-            Camera { name: "top", eye: [0.01, 13.0, 7.0], target: [0.0, 0.0, 7.0] },
+        cameras: vec![
+            Camera { name: "side".into(), eye: [-9.5, 1.3, 8.0], target: [0.0, 0.9, 8.0] },
+            Camera { name: "aftermath".into(), eye: [-5.5, 2.4, 3.5], target: [0.0, 0.8, 8.0] },
+            Camera { name: "top".into(), eye: [0.01, 13.0, 7.0], target: [0.0, 0.0, 7.0] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
             // the guard meets the bumper; the hood and fenders crush above it
-            Moment { name: "early_crush", after_impact_ms: 30.0 },
-            Moment { name: "peak", after_impact_ms: 80.0 },
-            Moment { name: "rest", after_impact_ms: 750.0 },
+            Moment { name: "early_crush".into(), after_impact_ms: 30.0 },
+            Moment { name: "peak".into(), after_impact_ms: 80.0 },
+            Moment { name: "rest".into(), after_impact_ms: 750.0 },
         ],
         criteria: || {
             use Tier::*;

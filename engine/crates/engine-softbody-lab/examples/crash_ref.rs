@@ -1,9 +1,12 @@
 //! The crash reference suite on the CPU reference (`engine_softbody::crash_reference`).
 //!
-//! `crash_ref -- [ID ...] [--runs N | --run K] [--contact discrete|edge|continuous] [--json]
-//! [--out DIR]` (no id: every scenario; `--list`: their ids; `--run K`: run K alone, the
-//! jitter of `Jitter::run(K)`; `--out DIR`: each run's report, without its time histories, as
-//! `DIR/ID-contact-run.json`).
+//! `crash_ref -- [ID ...] [--scenario FILE.json ...] [--runs N | --run K] [--contact discrete|edge|continuous] [--json]
+//! [--out DIR]` (no id and no file: every Rust scenario; `--list`: their ids; `--run K`: run
+//! K alone, the jitter of `Jitter::run(K)`; `--out DIR`: each run's report, without its time
+//! histories, as `DIR/ID-contact-run.json`; `--export ID`: a Rust scenario as data, the JSON a
+//! `--scenario` file holds). `--scenario FILE`: a data scenario (`crash_reference::ScenarioDesc`,
+//! as the Reference Studio writes it), run by the same code; its contact setting is its own
+//! unless `--contact` is given.
 //! One report a run, then each scenario's verdict (`crash_reference::verdict`): exit code 1
 //! when a tier 0 or tier 1 criterion fails that is not a known failure, or a known failure
 //! recorded for every run passes in all of them (remove the entry).
@@ -13,6 +16,13 @@ use engine_softbody::crash_reference::{self as cr, Contact, CpuRunner, Jitter};
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
+    // `--export ID`: the Rust scenario as data (`CrashScenario::to_desc`, run 0), printed as JSON.
+    if let Some(id) = flag("--export") {
+        let s = cr::get(&id).ok_or(format!("no scenario {id}"))?;
+        let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
+        println!("{}", serde_json::to_string_pretty(&s.to_desc(&templates)?).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
     if a.iter().any(|x| x == "--list") {
         for s in cr::all() {
             println!("{} {}", s.id, s.title);
@@ -23,12 +33,25 @@ fn main() -> Result<(), String> {
         Some(k) => vec![k.parse().map_err(|_| format!("--run {k}"))?],
         None => (0..flag("--runs").and_then(|x| x.parse().ok()).unwrap_or(1)).collect(),
     };
-    let contact = flag("--contact").map_or(Ok(Contact::Edge), |x| Contact::from_name(&x).ok_or(format!("no contact setting {x}")))?;
+    let contact = flag("--contact").map(|x| Contact::from_name(&x).ok_or(format!("no contact setting {x}"))).transpose()?;
     let json = a.iter().any(|x| x == "--json");
     let out = flag("--out");
     let ids: Vec<&String> = a.iter().take_while(|x| !x.starts_with("--")).collect();
+    let mut list: Vec<(cr::CrashScenario, Contact)> = Vec::new();
+    for (i, x) in a.iter().enumerate() {
+        if x == "--scenario" {
+            let file = a.get(i + 1).ok_or("--scenario FILE.json")?;
+            let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+            let d: cr::ScenarioDesc = serde_json::from_str(&text).map_err(|e| format!("{file}: {e}"))?;
+            d.check()?;
+            list.push((d.scenario(), contact.unwrap_or(d.contact)));
+        }
+    }
+    if list.is_empty() || !ids.is_empty() {
+        list.extend(cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(&s.id))).map(|s| (s, contact.unwrap_or(Contact::Edge))));
+    }
     let mut failed = Vec::new();
-    for s in cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(s.id))) {
+    for (s, contact) in list {
         let templates = engine_softbody_authoring::crash_templates::templates_for(&s)?;
         let mut reports = Vec::new();
         for &run in &runs {

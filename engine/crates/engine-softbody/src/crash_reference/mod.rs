@@ -16,8 +16,11 @@
 pub mod criteria;
 #[cfg(test)]
 mod known_tests;
+pub mod desc;
 pub mod metrics;
 pub mod outline;
+pub mod recording;
+pub mod registry;
 pub mod shape;
 mod s01_offset;
 mod s02_wall;
@@ -35,9 +38,10 @@ mod s13_side_pole;
 mod s14_ncap_side_mdb;
 
 use crate::desc::SoftVehicleDesc;
-use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
+use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape};
 use crate::explicit_contact::{Dat, ExplicitBeamsWorld};
 pub use criteria::{Basis, Criterion, CriterionResult, KnownFailure, Occurs, Tier};
+pub use desc::{BodyDesc, BoxDesc, ScenarioDesc};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -133,8 +137,8 @@ impl Extent {
 #[derive(Clone, Debug)]
 pub struct Body {
     /// The name criteria and reports use (`car`, `truck`, `trailer`...).
-    pub name: &'static str,
-    pub design: &'static str,
+    pub name: String,
+    pub design: String,
     pub at: Vec3,
     pub yaw: f32,
     pub speed: f32,
@@ -147,8 +151,8 @@ pub struct Body {
 }
 
 impl Body {
-    pub fn new(name: &'static str, design: &'static str, at: Vec3, yaw: f32, speed: f32) -> Self {
-        Self { name, design, at, yaw, speed, vel: None, carrier: false }
+    pub fn new(name: &str, design: &str, at: Vec3, yaw: f32, speed: f32) -> Self {
+        Self { name: name.into(), design: design.into(), at, yaw, speed, vel: None, carrier: false }
     }
     /// The same body on a side-impact carrier ([`Body::carrier`]).
     pub fn on_carrier(mut self) -> Self {
@@ -169,7 +173,21 @@ impl Body {
 pub struct Layout {
     pub bodies: Vec<Body>,
     pub boxes: Vec<(Vec3, Vec3)>,
+    /// Box `i`'s turn about +Y (rad), where this has an entry `i`: the others (and every box
+    /// of the Rust scenarios) are axis-aligned.
+    pub box_yaw: Vec<f32>,
     pub impact_s: f32,
+}
+
+impl Layout {
+    /// Box `i`'s turn about +Y (rad; 0: axis-aligned).
+    pub fn yaw_of(&self, i: usize) -> f32 {
+        self.box_yaw.get(i).copied().unwrap_or(0.0)
+    }
+    /// Box `i`'s rotation (identity when axis-aligned).
+    pub fn rotation_of(&self, i: usize) -> glam::Quat {
+        glam::Quat::from_rotation_y(self.yaw_of(i))
+    }
 }
 
 /// A run's small deviation from nominal, so that no criterion is tuned to one lucky run.
@@ -203,7 +221,7 @@ impl Jitter {
 }
 
 /// The three contact settings every scenario is run in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum Contact {
     Discrete,
@@ -227,17 +245,17 @@ impl Contact {
 }
 
 /// A fixed camera for stills and video, relative to the scene's point of impact.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Camera {
-    pub name: &'static str,
+    pub name: String,
     pub eye: [f32; 3],
     pub target: [f32; 3],
 }
 
 /// A named instant to compare with a reference frame (ms after first contact).
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Moment {
-    pub name: &'static str,
+    pub name: String,
     pub after_impact_ms: f32,
 }
 
@@ -252,19 +270,44 @@ pub struct Reference {
 
 pub const VIDEO: &str = "https://www.youtube.com/watch?v=Lqx2KKWI8aM";
 
+/// A Rust scenario's layout: a function of each design's extent and the run's jitter.
+pub type CodeLayout = fn(&dyn Fn(&str) -> Extent, Jitter) -> Layout;
+
+/// Where a scenario's layout comes from: Rust code, or data ([`ScenarioDesc`], a scenario
+/// recreated in the Reference Studio). [`CrashScenario::build`] and every runner take either.
+#[derive(Clone)]
+pub enum LayoutSource {
+    Code(CodeLayout),
+    Data(Box<ScenarioDesc>),
+}
+
+#[derive(Clone)]
 pub struct CrashScenario {
-    pub id: &'static str,
-    pub title: &'static str,
+    pub id: String,
+    pub title: String,
     pub reference: Reference,
     /// The designs it needs (the consumer loads these templates).
-    pub designs: &'static [&'static str],
+    pub designs: Vec<String>,
     /// The run's layout from each design's extent.
-    pub layout: fn(&dyn Fn(&str) -> Extent, Jitter) -> Layout,
+    pub layout: LayoutSource,
     /// Simulated seconds after first contact.
     pub secs_after_impact: f32,
-    pub cameras: &'static [Camera],
-    pub moments: &'static [Moment],
+    pub cameras: Vec<Camera>,
+    pub moments: Vec<Moment>,
     pub criteria: fn() -> Vec<Criterion>,
+    /// Recreated from data ([`ScenarioDesc::scenario`]), not defined in Rust: it carries the
+    /// law-based criteria only ([`desc::law_criteria`]).
+    pub recreated: bool,
+}
+
+/// A Rust scenario's layout (a closure's argument types given by the function's).
+pub(crate) fn code(f: CodeLayout) -> LayoutSource {
+    LayoutSource::Code(f)
+}
+
+/// `&["a", "b"]` as owned names (the Rust scenarios' design lists).
+pub(crate) fn names(x: &[&str]) -> Vec<String> {
+    x.iter().map(|s| s.to_string()).collect()
 }
 
 /// Every scenario, in order.
@@ -310,12 +353,16 @@ fn turned(d: &SoftVehicleDesc, yaw: f32) -> SoftVehicleDesc {
 
 impl CrashScenario {
     pub fn layout_for(&self, templates: &Templates, jitter: Jitter) -> Result<Layout, String> {
-        for d in self.designs {
-            if !templates.contains_key(*d) {
+        for d in &self.designs {
+            if !templates.contains_key(d) {
                 return Err(format!("{}: no template for design {d}", self.id));
             }
         }
-        Ok((self.layout)(&|d| Extent::of(&templates[d].desc), jitter))
+        let extent = |d: &str| Extent::of(&templates[d].desc);
+        Ok(match &self.layout {
+            LayoutSource::Code(f) => f(&extent, jitter),
+            LayoutSource::Data(d) => d.resolve(&extent, jitter),
+        })
     }
 
     /// The fleet for one run: each body spawned at its pose and speed with every static box,
@@ -324,7 +371,7 @@ impl CrashScenario {
         let layout = self.layout_for(templates, jitter)?;
         let mut fleet = Vec::new();
         for b in &layout.bodies {
-            let t = templates.get(b.design).ok_or_else(|| format!("{}: no template for design {}", self.id, b.design))?;
+            let t = templates.get(&b.design).ok_or_else(|| format!("{}: no template for design {}", self.id, b.design))?;
             let d = turned(&t.desc, b.yaw);
             // Standing on its wheels (their tread 2 cm up), or on its lowest node when that is lower
             // or it has none.
@@ -336,8 +383,14 @@ impl CrashScenario {
             if b.carrier {
                 crate::crash_rigs::on_carrier(&mut s);
             }
-            for &(c, h) in &layout.boxes {
-                s.boxes.push(StaticBox::centered(c, h));
+            for (i, &(c, h)) in layout.boxes.iter().enumerate() {
+                // Axis-aligned boxes stay `StaticBox`es (every Rust scenario's); a turned one
+                // is an oriented box shape.
+                if layout.yaw_of(i) == 0.0 {
+                    s.boxes.push(StaticBox::centered(c, h));
+                } else {
+                    s.shapes.push(StaticShape::oriented_box(c, h, layout.rotation_of(i)));
+                }
             }
             s.finish();
             fleet.push(s);
@@ -482,7 +535,7 @@ impl Runner for CpuRunner {
 }
 
 /// One run's result: every metric by name, and each criterion judged on it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
 pub struct CrashReport {
     pub id: String,
     pub contact: Contact,
@@ -492,6 +545,7 @@ pub struct CrashReport {
     /// The run's time histories ([`metrics::series`]); None from an executor that keeps only
     /// the metrics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
     pub series: Option<metrics::Series>,
 }
 
@@ -625,5 +679,5 @@ pub fn run(
         metrics.insert("all.continuous_engaged".into(), f64::from(u8::from(on)));
     }
     let results = judge(s, &metrics, built.contact);
-    Ok(CrashReport { id: s.id.into(), contact: built.contact, run, metrics, results, series: Some(series) })
+    Ok(CrashReport { id: s.id.clone(), contact: built.contact, run, metrics, results, series: Some(series) })
 }

@@ -279,7 +279,7 @@ pub(super) fn pulse_scalars(put: &mut dyn FnMut(&str, f64), prefix: &str, t_ms: 
 pub const DV_AT_MS: f64 = 150.0;
 
 pub(super) struct SeriesInput<'a> {
-    pub names: Vec<&'static str>,
+    pub names: Vec<&'a str>,
     pub masses: Vec<f64>,
     pub headings: Vec<Vec3>,
     /// Body 0's initial velocity's direction (the box force's axis).

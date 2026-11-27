@@ -105,11 +105,11 @@ fn probe(id: &str, templates: &Templates) {
     let mut runner = CpuRunner::new(&built);
     runner.0.enable_ledger();
     let mut rec = Recorder::new(templates, &built);
-    let names: Vec<Vec<String>> = built.layout.bodies.iter().map(|b| templates[b.design].desc.nodes.iter().map(|n| n.name.clone()).collect()).collect();
+    let names: Vec<Vec<String>> = built.layout.bodies.iter().map(|b| templates[&b.design].desc.nodes.iter().map(|n| n.name.clone()).collect()).collect();
     // The barrier (by kind of beam) and the car (by zone), when the scene has them.
     let bar = built.layout.bodies.iter().position(|b| b.design == "mdb214").unwrap_or(usize::MAX);
     let car = built.layout.bodies.iter().position(|b| b.design != "mdb214").unwrap_or(0);
-    let car_t = &templates[built.layout.bodies[car].design];
+    let car_t = &templates[&built.layout.bodies[car].design];
     let n = s.samples(&built.layout);
     let impact = f64::from(built.layout.impact_s);
     let mut rest_prev: Vec<Vec<f32>> = built.fleet.iter().map(|v| v.beams.iter().map(|b| b.rest).collect()).collect();

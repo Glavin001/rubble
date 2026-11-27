@@ -43,11 +43,12 @@ const RUN_UP_S: f32 = 0.4;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S03",
-        title: "Moving barrier into the side of a stationary car, 50 km/h",
+        id: "S03".into(),
+        title: "Moving barrier into the side of a stationary car, 50 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[146, 151], real_test: "IIHS / Euro NCAP side impact (run with the FMVSS 214 barrier, perpendicular), 50 km/h" },
-        designs: &["sedan", "mdb214"],
-        layout: |extent, j| {
+        designs: names(&["sedan", "mdb214"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let (e, b) = (extent("sedan"), extent("mdb214"));
             let v = KMH / 3.6 * j.speed;
             let (front, rear) = e.axles.unwrap_or((e.lo.z + 0.2 * e.length(), e.lo.z + 0.8 * e.length()));
@@ -61,7 +62,7 @@ pub(super) fn scenario() -> CrashScenario {
             // The barrier faces −X (yaw −90°): its bumper's front, `b.hi.z` ahead of its
             // origin, a run-up short of the car's left side.
             let x = e.hi.x + RUN_UP_S * v + b.hi.z;
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![
                     Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0),
                     Body::new("barrier", "mdb214", Vec3::new(x, 0.0, face_z), -0.5 * std::f32::consts::PI + j.yaw, v),
@@ -69,26 +70,26 @@ pub(super) fn scenario() -> CrashScenario {
                 boxes: Vec::new(),
                 impact_s: RUN_UP_S,
             }
-        },
+        }),
         secs_after_impact: AFTER_IMPACT_S,
-        cameras: &[
+        cameras: vec![
             // Ahead of the car and out on the struck side, looking back at the doors.
             // (World frame: the sedan spans z −3.9 to 1.0, the face's middle at z ≈ −1.3.)
             // Closer than the first cut, as the reference frame: the doors and the barrier's face fill it.
-            Camera { name: "front three-quarter", eye: [4.0, 1.5, 2.6], target: [0.2, 0.7, -1.2] },
+            Camera { name: "front three-quarter".into(), eye: [4.0, 1.5, 2.6], target: [0.2, 0.7, -1.2] },
             // Straight down, the car's length across the frame (the eye a centimetre to −x fixes the
             // picture's up as +x: the barrier comes from the top); wide enough for the car's slide
             // (2.5 to 4 m to −x by the run's end, more with discrete contact).
-            Camera { name: "top", eye: [-1.41, 9.0, -1.4], target: [-1.4, 0.7, -1.4] },
+            Camera { name: "top".into(), eye: [-1.41, 9.0, -1.4], target: [-1.4, 0.7, -1.4] },
             // On the car's axis ahead of it: the side hit in elevation.
-            Camera { name: "side", eye: [-0.5, 1.3, 5.0], target: [-0.5, 0.7, -0.5] },
+            Camera { name: "side".into(), eye: [-0.5, 1.3, 5.0], target: [-0.5, 0.7, -0.5] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
             // Deepest intrusion, about where the car's sideways speed peaks.
-            Moment { name: "peak", after_impact_ms: 70.0 },
+            Moment { name: "peak".into(), after_impact_ms: 70.0 },
             // The run's end: the car is still sliding (about 4 m/s), the barrier behind it.
-            Moment { name: "rest", after_impact_ms: 550.0 },
+            Moment { name: "rest".into(), after_impact_ms: 550.0 },
         ],
         // Worked from M = 1,367.6 kg, m = 1,448.4 kg, V = 13.889 m/s (jitter: speed ±2 %).
         criteria: || {
