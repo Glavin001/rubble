@@ -21,7 +21,7 @@ pub const STOP_DAMP: f32 = 4000.0;
 /// 619 N·m a wheel; twice that for margin (a cable brake's design factor).
 pub const PARKING_TORQUE: f32 = 1240.0;
 
-fn num(x: f32) -> Value {
+pub(super) fn num(x: f32) -> Value {
     if !x.is_finite() {
         return json!("FLT_MAX");
     }

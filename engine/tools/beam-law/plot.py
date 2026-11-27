@@ -52,7 +52,7 @@ def one_beam():
 def off_centre():
     fig, axs = plt.subplots(2, 3, figsize=(16, 8.5), dpi=120)
     for row, member in enumerate(["crash_box", "rail_bay"]):
-        for col, r in enumerate(["0.0", "0.3", "1.0"]):
+        for col, r in enumerate(["0", "0.3", "1"]):
             ax = axs[row][col]
             for law, c in [("crush_cell_x", "C0"), ("crush_chords_x", "C3"), ("jbeam_flat", "C1")]:
                 p = os.path.join(OUT, f"off_centre_{member}_{law}_{r}.csv")
@@ -66,7 +66,7 @@ def off_centre():
             ax.set_xlabel("t (ms)")
             ax.set_ylabel("chord pair shortening (mm)")
             ax.grid(alpha=0.3)
-            if row == 0 and col == 0:
+            if row == 0 and col == 1:
                 ax.legend(fontsize=7)
     fig.suptitle("A ram through a pin off the cell's centre: the crush cell folds (both pairs alike); independent chords turn (the near pair only)")
     fig.tight_layout()

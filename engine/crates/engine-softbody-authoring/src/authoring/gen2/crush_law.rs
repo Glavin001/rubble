@@ -22,6 +22,7 @@ use super::load_path::{BAYS, FACES, STATIONS};
 use super::rig::{Rig, RigInput};
 use engine_softbody::explicit_crush::MIN_REST_FLOOR;
 use engine_vehiclegen::crush_law::member_crush;
+use super::export::num;
 use serde_json::{json, Map, Value};
 
 fn on(inp: &dyn RigInput) -> bool {
@@ -75,12 +76,12 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
                 // (never breaking below its own yield: the tear is past the section's squash share)
                 b.strength = b.strength.max((1.1 * (mc.tension * scale / 4.0).max(peak)) as f32);
                 let mut o = Map::new();
-                o.insert("rubbleCrushPlateau".into(), json!(plateau as f32));
-                o.insert("rubbleCrushDrop".into(), json!(drop as f32));
+                o.insert("rubbleCrushPlateau".into(), num(plateau as f32));
+                o.insert("rubbleCrushDrop".into(), num(drop as f32));
                 o.insert("rubbleMinRest".into(), json!(MIN_REST_FLOOR));
-                o.insert("rubbleTensionYield".into(), json!((mc.tension * scale / 4.0) as f32));
+                o.insert("rubbleTensionYield".into(), num((mc.tension * scale / 4.0) as f32));
                 o.insert("rubbleCrushCell".into(), Value::String(cell.clone()));
-                o.insert("rubbleCellMoment".into(), json!([(mc.moment[0] * scale) as f32, (mc.moment[1] * scale) as f32]));
+                o.insert("rubbleCellMoment".into(), Value::Array(vec![num((mc.moment[0] * scale) as f32), num((mc.moment[1] * scale) as f32)]));
                 car.crush_keys.insert(j, o);
                 if let Some(l) = car.fixed_limits.get_mut(&j) {
                     l.1 = peak as f32;
@@ -91,9 +92,9 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
                 let tt = v * scale / (1.0 - along(car, j).powi(2)).sqrt();
                 car.beams[j].strength = car.beams[j].strength.max((1.1 * tt) as f32);
                 let mut o = Map::new();
-                o.insert("rubbleCrushPlateau".into(), json!(car.beams[j].deform));
+                o.insert("rubbleCrushPlateau".into(), num(car.beams[j].deform));
                 o.insert("rubbleMinRest".into(), json!(MIN_REST_FLOOR));
-                o.insert("rubbleTensionYield".into(), json!(tt as f32));
+                o.insert("rubbleTensionYield".into(), num(tt as f32));
                 car.crush_keys.insert(j, o);
             }
             cells += 1;

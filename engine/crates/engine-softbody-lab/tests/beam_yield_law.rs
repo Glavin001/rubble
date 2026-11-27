@@ -251,6 +251,32 @@ fn the_drop_is_stable_at_crash_rate() {
     }
 }
 
+/// What JBeam's own parameters already do (beam-yield-law.md §2.1): a peak then a plateau from two
+/// NORMAL beams in parallel, a plateau beam flat at Q (`deformLimitStress` = `beamDeform`) and a fuse
+/// that breaks at S = P − Q (`beamStrength`, `beamDeform` FLT_MAX). The force peaks at P and drops to
+/// Q in one step when the fuse breaks (its stored ½S²/k is gone with it: no energy created), then
+/// stays at Q. What it cannot give: the drop is a jump (no softening length), the fuse breaks in
+/// tension too, and neither beam knows the other's state (a cell of such pairs still turns, §3.5).
+#[test]
+fn existing_parameters_peak_then_plateau_by_a_fuse() {
+    let (k, p, q, l0) = (5.0e6f32, 50e3f32, 20e3f32, 0.5f32);
+    let mut plateau = beam(0, 1, k, 0.0, q, 0.73, None);
+    plateau.deform_limit_stress = q;
+    let mut fuse = beam(0, 1, k, 0.0, f32::INFINITY, f32::INFINITY, None);
+    fuse.strength = p - q;
+    let mut s = spawn(&[(Vec3::ZERO, 1.0), (Vec3::new(0.0, 0.0, l0), 1.0)], vec![plateau, fuse]);
+    let mut out = Vec::new();
+    for d in ramp(0.0, 0.1, 10_000) {
+        let f = pass(&mut s, &[Vec3::ZERO, Vec3::new(0.0, 0.0, l0 - d)]);
+        out.push((d, s.nodes[0].force.z.abs(), s.beams[1].broken, f[0]));
+    }
+    let peak = out.iter().map(|x| x.1).fold(0.0, f32::max);
+    let at = out.iter().position(|x| x.2).expect("the fuse breaks");
+    println!("fuse pair: peak {:.1} kN at {:.4} m, then {:.1} kN; the fuse broke at {:.4} m", peak / 1e3, out[at - 1].0, out[at + 10].1 / 1e3, out[at].0);
+    assert!((peak - p).abs() < 0.01 * p, "peak {peak}");
+    assert!(out[at + 10..].iter().all(|x| (x.1 - q).abs() < 0.01 * q), "plateau after the break");
+}
+
 // --- crush cells -------------------------------------------------------------------------------
 
 /// The sedan's crash box (70 × 110 × 1.5 mm HSLA, 0.18 m) or a rail bay (70 × 110 × 1.8, 0.38 m).
