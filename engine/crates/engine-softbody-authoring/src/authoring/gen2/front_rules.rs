@@ -53,6 +53,9 @@ pub fn lattice(st: &Structure, ph: &Physics) -> Lattice {
     // box's front nodes, the other behind its rear nodes) carry, together and in their axial
     // direction, a share of the box's own chords.
     if rules.crash_box_bay_alone {
+        // (`FRONT_RULE2_ALONG=c`, a measurement: only the braces whose direction cosine to the car's
+        // axis is at least c; 0, the rule, all of them)
+        let min_along: f64 = std::env::var("FRONT_RULE2_ALONG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         for side in [1.0f64, -1.0] {
             let on = |i: usize| st.nodes[i].pos.x * side > 0.0;
             let box_chords: f64 = l.beams.iter().filter(|b| on(b.a) && chord(b, &["A1", "A2"])).map(|b| b.deform).sum();
@@ -62,7 +65,7 @@ pub fn lattice(st: &Structure, ph: &Physics) -> Lattice {
                     let (ga, gb) = (group(b.a), group(b.b));
                     let front = |g: &str| g == "A1";
                     let boxed = |g: &str| g == "A1" || g == "A2";
-                    ((front(ga) && !boxed(gb) && on(b.a)) || (front(gb) && !boxed(ga) && on(b.b))) && b.deform.is_finite()
+                    ((front(ga) && !boxed(gb) && on(b.a)) || (front(gb) && !boxed(ga) && on(b.b))) && b.deform.is_finite() && along(b) >= min_along
                 })
                 .collect();
             let cos: f64 = across.iter().map(|&j| along(&l.beams[j])).sum();

@@ -1,6 +1,6 @@
 //! The crash reference suite on the CPU reference (`engine_softbody::crash_reference`).
 //!
-//! `crash_ref -- [ID ...] [--runs N] [--contact discrete|edge|continuous] [--json] [--params design=FILE[,design=FILE]]`
+//! `crash_ref -- [ID ...] [--runs N] [--contact discrete|edge|continuous] [--json] [--params design=FILE[,design=FILE]] [--run K]`
 //! (`--params`: a design's parameters, e.g. a physics block with other front rules; the
 //! scenarios as written, their designs from those parameters)
 //! (no id: every scenario; `--list`: their ids). One report a run; exit code 1 when a
@@ -25,7 +25,9 @@ fn main() -> Result<(), String> {
     let mut failed = 0;
     for s in cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(s.id))) {
         let templates = engine_softbody_authoring::crash_templates::templates_for_with(&s, &params)?;
-        for run in 0..runs {
+        // (`--run K`: run K alone, to split a slow scenario's runs over several processes)
+        let only: Option<usize> = flag("--run").and_then(|x| x.parse().ok());
+        for run in only.map_or(0..runs, |k| k..k + 1) {
             let built = s.build(&templates, Jitter::run(run), contact)?;
             let t = std::time::Instant::now();
             let report = cr::run(&s, &templates, &built, run, &mut CpuRunner::new(&built), &mut |_| {})?;

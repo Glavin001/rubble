@@ -176,6 +176,27 @@ impl FrontRules {
     pub fn is_off(&self) -> bool {
         *self == Self::default()
     }
+    /// The rules a design takes when its physics block does not say: [`FrontRules::default`],
+    /// or `RUBBLE_FRONT_RULES` when set (`all`, `none`, or rule names joined by commas), a
+    /// measurement switch to run the gates and tests on another set without editing code (an
+    /// unknown name panics, so a typo cannot pass as the default).
+    pub fn from_env_or_default() -> Self {
+        let Ok(v) = std::env::var("RUBBLE_FRONT_RULES") else { return Self::default() };
+        let mut r = Self { subframe_mounts_off_crash_box: false, crash_box_bay_alone: false, crash_box_stroke: false, yielding_stops: false, hood_fold_row: false, crush_from_section: false };
+        for n in v.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != "none") {
+            match n {
+                "all" => r = Self::all(),
+                "subframe_mounts_off_crash_box" => r.subframe_mounts_off_crash_box = true,
+                "crash_box_bay_alone" => r.crash_box_bay_alone = true,
+                "crash_box_stroke" => r.crash_box_stroke = true,
+                "yielding_stops" => r.yielding_stops = true,
+                "hood_fold_row" => r.hood_fold_row = true,
+                "crush_from_section" => r.crush_from_section = true,
+                _ => panic!("RUBBLE_FRONT_RULES: no rule {n}"),
+            }
+        }
+        r
+    }
     /// Every rule on.
     pub fn all() -> Self {
         Self {
@@ -339,7 +360,7 @@ impl Default for Physics {
             drag_cd: 0.30,
             crash: CrashFeel::default(),
             suspension_by_load: false,
-            front_rules: FrontRules::default(),
+            front_rules: FrontRules::from_env_or_default(),
         }
     }
 }

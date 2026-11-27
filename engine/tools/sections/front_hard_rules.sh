@@ -17,8 +17,11 @@ done
 p="sedan=$PWD/$dir/sedan.json,suv_4x4=$PWD/$dir/suv_4x4.json"
 for s in S11 S12 S01 S02 S08; do
   for c in discrete edge continuous; do
-    perl -e 'alarm 295; exec @ARGV' target/release/examples/crash_ref "$s" --runs 8 --contact "$c" --params "$p" --json \
-      </dev/null >"$dir/$s-$c.jsonl" 2>"$dir/$s-$c.err" || true
+    : >"$dir/$s-$c.jsonl"
+    for k in 0 1 2 3 4 5 6 7; do
+      perl -e 'alarm 295; exec @ARGV' target/release/examples/crash_ref "$s" --runs 8 --run "$k" --contact "$c" --params "$p" --json \
+        </dev/null >>"$dir/$s-$c.jsonl" 2>>"$dir/$s-$c.err" || true
+    done
     echo "$s $c: $(wc -l <"$dir/$s-$c.jsonl") runs"
   done
 done

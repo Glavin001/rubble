@@ -332,11 +332,13 @@ fn sedan_front_push() {
     let rad: Vec<usize> = ["rad_ul", "rad_ur", "rad_dl", "rad_dr"].map(id).to_vec();
     let cb = (id("sh_a1_ul"), id("sh_a2_ul"));
     let rails = (id("sh_a2_dl"), id("sh_a4_l"), id("sh_a5_l"));
+    let cbd = (id("sh_a1_dl"), id("sh_a2_dl"));
     // where the displacement goes, along z: the impact beam, the crash boxes' fronts, the
     // firewall, the cabin's held part
     let beam: Vec<usize> = names.iter().enumerate().filter(|(_, n)| n.starts_with("impbf_")).map(|(i, _)| i).collect();
     let cb_front: Vec<usize> = ["sh_a1_ul", "sh_a1_dl", "sh_a1_ur", "sh_a1_dr"].map(id).to_vec();
     let mut w = ExplicitBeamsWorld::new(vec![s]);
+    let yl0 = [w.vehicles[0].nodes[cbd.0].pos.y, w.vehicles[0].nodes[rails.2].pos.y];
     for &(i, f) in &lift_n {
         w.vehicles[0].nodes[i].force.y += f;
     }
@@ -345,7 +347,7 @@ fn sedan_front_push() {
     let momentum = |w: &ExplicitBeamsWorld| w.vehicles[0].nodes.iter().map(|n| f64::from(n.mass) * f64::from(n.vel.z)).sum::<f64>();
     let mut p_prev = momentum(&w);
     let z_held0 = mean_z(&w.vehicles[0], &held);
-    let mut csv = String::from("t_s,disp_m,wall_kN,cabin_v_mps,engine_rear_to_firewall_m,engine_front_to_radiator_m,crash_box_len_m,rail_a2_a4_m,rail_a4_a5_m,elastic_kJ,plastic_kJ,beam_to_crash_box_m,crash_box_front_to_firewall_m,firewall_to_held_m\n");
+    let mut csv = String::from("t_s,disp_m,wall_kN,cabin_v_mps,engine_rear_to_firewall_m,engine_front_to_radiator_m,crash_box_len_m,rail_a2_a4_m,rail_a4_a5_m,elastic_kJ,plastic_kJ,beam_to_crash_box_m,crash_box_front_to_firewall_m,firewall_to_held_m,crash_box_low_len_m,z_a1_a2_m,z_a2_a4_m,z_a4_a5_m,z_a5_firewall_m,a1_drop_m,a5_drop_m\n");
     let (mut fw_acc, mut nacc) = (0.0f64, 0);
     let mut snaps = String::new();
     let mut marks = [0.10f32, 0.25, 0.39, 0.55, 0.70];
@@ -381,9 +383,10 @@ fn sedan_front_push() {
             let el: f64 = stored_by_class(veh, &names).values().sum();
             let pl: f64 = plastic.iter().flatten().map(|p| p.work).sum();
             let n = veh.nodes.as_slice();
+            let (zl, yl) = (|i: usize| n[i].pos.z, |i: usize| n[i].pos.y);
             writeln!(
                 csv,
-                "{tnow:.4},{disp:.4},{:.2},{:.4},{gap_fw:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.4},{:.4},{:.4}",
+                "{tnow:.4},{disp:.4},{:.2},{:.4},{gap_fw:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
                 fw_acc / nacc as f64 / 1e3,
                 held.iter().map(|&i| veh.nodes[i].vel.z).sum::<f32>() / held.len() as f32,
                 mean_z(veh, &rad) - mean_z(veh, &eng_front),
@@ -394,7 +397,14 @@ fn sedan_front_push() {
                 pl / 1e3,
                 mean_z(veh, &beam) - mean_z(veh, &cb_front),
                 mean_z(veh, &cb_front) - mean_z(veh, &fw),
-                mean_z(veh, &fw) - mean_z(veh, &held)
+                mean_z(veh, &fw) - mean_z(veh, &held),
+                n[cbd.0].pos.distance(n[cbd.1].pos),
+                zl(cbd.0) - zl(cbd.1),
+                zl(rails.0) - zl(rails.1),
+                zl(rails.1) - zl(rails.2),
+                zl(rails.2) - mean_z(veh, &fw),
+                yl0[0] - yl(cbd.0),
+                yl0[1] - yl(rails.2)
             )
             .ok();
             (fw_acc, nacc) = (0.0, 0);
