@@ -975,6 +975,10 @@ and end are joined without crossing).
 
   All have 0 zones and 0 crossings. The paint was the prototype's own fault: a pressed pair's
   gap halved every step. None converges.
+- A stop test at a velocity scale (`DAT_BARRIER_TOL=5e-7`, |dx|/h ≈ 1e-3 m/s; 1e-8 m is below
+  f32's resolution at a metre): paint 46 mm, linear momentum 1.7 N·s and angular momentum
+  2.7 N·m·s per step, 96 solves at the cap. With 200 iterations, 94: the search is stuck (the
+  CCD's 0.8·TOI limit and the backtracking), not stopped by its test.
 
 What it needs: a Newton solve (the barrier's Hessian per pair) to converge in a few
 iterations; a CCD test that matches the straight path (end positions whose straight path from
