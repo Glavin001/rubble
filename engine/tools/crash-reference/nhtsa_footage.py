@@ -17,7 +17,8 @@ ROOT: the local folder `nhtsa_media.py` filled (`nhtsa-<test>/media/`). For each
   item's file, URL, the lab's name for it, bytes, and for a video its probe; plus what a
   person wrote about it, kept across runs: an item's `note` object (`view`, `fps_film`:
   the camera's rate, `t0_frame`: the frame of first contact, `moments`: [{frame, ms,
-  what}], `look`: what to compare) and the test's `scenario`, `summary` and `sources`.
+  what}], `look`: what to compare) and the test's `scenario`, `summary` and `sources` (and
+  any other test-level key written by hand, e.g. `photo_groups`).
 
 A film's time: `ms = (frame - t0_frame) * 1000 / fps_film`. The camera's rate is the
 report's (its camera table), not the file's playback rate. Needs ffmpeg and ffprobe.
@@ -140,7 +141,10 @@ def main():
             if it["file"] in notes:
                 row["note"] = notes[it["file"]]
             out_items.append(row)
-        doc = {"test": int(t), "source": idx["source"], "scenario": old.get("scenario"), "summary": old.get("summary", ""), "sources": old.get("sources", []), "items": out_items}
+        doc = {"test": int(t), "source": idx["source"], "scenario": old.get("scenario"), "summary": old.get("summary", ""), "sources": old.get("sources", [])}
+        # Any other test-level annotation written by hand (e.g. `cameras`, `photo_groups`) is kept too.
+        doc.update({k: v for k, v in old.items() if k not in doc and k != "items"})
+        doc["items"] = out_items
         json.dump(doc, open(doc_path, "w"), indent=1)
         print(f"{t}: {len(probes)} videos probed, {sum(1 for it in out_items if it.get('note'))} annotated -> {os.path.relpath(doc_path)}")
 
