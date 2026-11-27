@@ -1079,9 +1079,18 @@ Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
   - With the exact diagonal scaled by a power-iteration eigenvalue estimate
     (`DAT_PRECOND=power`, a larger step): the same stall, longer (64), settled by 128. Head 100
     for 0.05 s: 2,522 zones against 2,523.
-  - So the step size is not why it stalls: the iterate sits still, then moves. The cause (an
-    update below a float's or the fixed-point sums' resolution, or the momentum's restarts) is
-    the next thing to find.
+  - So a global step size is not why it stalls.
+  - **The row that holds it** (the trace's worst row): λ = 0.071, pushing at 0.129 m/s past its
+    31 m/s bound. It drains by g/d ≈ 0.0006 an iteration, about 120 iterations, while its own λ
+    barely moves its velocity. Its true diagonal Σ w²/m is small: small weights at nodes many
+    rows share. Gershgorin's bound there is |w| times that crowding, hundreds of times too
+    large, so the step is that much too small.
+  - **Gershgorin on the Jacobi-scaled matrix** (`DAT_PRECOND=scaled`; still diag ⪰ A, the
+    kernel's per-node sums): dᵢ = √Aᵢᵢ Σⱼ |wᵢⱼ| mⱼ⁻¹ Σₖ |wₖⱼ|/√Aₖₖ. Head 100 for 0.05 s: 2,460
+    zones against 2,523. Only a little: the crowded nodes still limit it.
+  - **What the evidence points to:** a block solve per crowded node, or contact that merges a
+    node's rows (one vertex against one vertex is one constraint, not twenty), rather than a
+    better diagonal.
 
 ## The barrier prototype's non-convergence, explained (2026-11-27, CPU, `DAT_BARRIER=1`, off)
 

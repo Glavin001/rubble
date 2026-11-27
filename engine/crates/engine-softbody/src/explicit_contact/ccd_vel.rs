@@ -265,7 +265,11 @@ impl Ctx<'_> {
         // (`DAT_PRECOND=power`, a measurement: the exact diagonal Σ w²/m scaled by the largest
         // eigenvalue of D⁻¹A, from ten power iterations of a fixed start, times 1.05 — APGD's
         // step 1/L, where Gershgorin's bound is the rows-at-a-node times too small.)
-        let d: Vec<f32> = if std::env::var("DAT_PRECOND").is_ok_and(|v| v == "power") { self.power_diag(rows, base) } else { d };
+        let d: Vec<f32> = match std::env::var("DAT_PRECOND").as_deref() {
+            Ok("power") => self.power_diag(rows, base),
+            Ok("scaled") => self.scaled_diag(rows, base, &dup),
+            _ => d,
+        };
         let mut l: Vec<f32> = rows.iter().map(|r| r.l).collect();
         let mut y = l.clone();
         let mut vy = base.to_vec();
@@ -332,6 +336,26 @@ impl Ctx<'_> {
         ok
     }
 
+    /// Gershgorin on the Jacobi-scaled matrix D^-½ A D^-½ (`DAT_PRECOND=scaled`): row i's
+    /// dᵢ = √Aᵢᵢ · Σⱼ |wᵢⱼ| mⱼ⁻¹ Tⱼ, Tⱼ = Σₖ |wₖⱼ| / √Aₖₖ over the rows at node j, Aᵢᵢ = Σⱼ wᵢⱼ² mⱼ⁻¹.
+    /// diag(d) ⪰ A (the scaled matrix's rows dominated), and a row of small weights at a node
+    /// many rows share is no longer held to those rows' pace.
+    fn scaled_diag(&self, rows: &[VRow], base: &[Vec<Vec3>], dup: &[bool]) -> Vec<f32> {
+        let aii: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * self.mi(r.k[j])).sum()).collect();
+        let mut t: Vec<Vec<f64>> = base.iter().map(|x| vec![0.0; x.len()]).collect();
+        for ((r, &a), &u) in rows.iter().zip(&aii).zip(dup) {
+            if u || a <= 0.0 {
+                continue;
+            }
+            for j in 0..4 {
+                if self.mi(r.k[j]) > 0.0 {
+                    t[r.k[j].0][r.k[j].1 as usize] += (r.w[j].abs() / a.sqrt()) as f64;
+                }
+            }
+        }
+        rows.iter().zip(&aii).zip(dup).map(|((r, &a), &u)| if u || a <= 0.0 { 0.0 } else { a.sqrt() * (0..4).map(|j| r.w[j].abs() * self.mi(r.k[j]) * t[r.k[j].0][r.k[j].1 as usize] as f32).sum::<f32>() }).collect()
+    }
+
     fn power_diag(&self, rows: &[VRow], base: &[Vec<Vec3>]) -> Vec<f32> {
         let dj: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * self.mi(r.k[j])).sum()).collect();
         let zero: Vec<Vec<Vec3>> = base.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
@@ -366,6 +390,13 @@ impl Ctx<'_> {
                 for ((y, &n), &o) in y.iter_mut().zip(&next).zip(&l) {
                     *y = n + beta * (n - o);
                 }
+            }
+            if used <= 80 {
+                self.velocities(rows, &next, 1.0, base, &mut vel);
+                let (i, _) = rows.iter().zip(&next).enumerate().map(|(i, (r, &l))| (i, if l > 0.0 { (Self::normal(r, &vel) + r.b) / r.b.abs().max(1e-3) } else { 0.0 })).fold((0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
+                let g = Self::normal(&rows[i], &vel) + rows[i].b;
+                let gy = Self::normal(&rows[i], &vy) + rows[i].b;
+                eprintln!("ROW it {used} row {i} | l {:.6e} -> next {:.6e}, y {:.6e}, d {:.3e}, g(next) {g:.4e}, g(y) {gy:.4e}, b {:.3e}", l[i], next[i], y[i], d[i], rows[i].b);
             }
             l = next;
             if used.is_power_of_two() || used % 5000 == 0 {
