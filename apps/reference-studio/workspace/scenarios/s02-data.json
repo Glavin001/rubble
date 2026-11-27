@@ -1,0 +1,79 @@
+{
+ "id": "s02-data",
+ "title": "S02 as data: SUV into a full-width rigid wall, 50 km/h",
+ "notes": "S02 exported from Rust (crash_ref --export S02, run 0): the same fleet bit for bit (tests/crash_scenario_data.rs).",
+ "bodies": [
+  {
+   "name": "car",
+   "design": "suv_4x4",
+   "at": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "yaw_deg": 0.0,
+   "speed_kmh": 50.0,
+   "carrier": false
+  }
+ ],
+ "boxes": [
+  {
+   "name": "wall",
+   "centre": [
+    0.0,
+    2.0,
+    2.678089
+   ],
+   "half": [
+    1.9577999,
+    2.0,
+    0.5
+   ],
+   "yaw_deg": 0.0
+  }
+ ],
+ "cameras": [
+  {
+   "name": "side",
+   "eye": [
+    4.6,
+    1.1,
+    -0.3
+   ],
+   "target": [
+    0.0,
+    0.8,
+    -0.3
+   ]
+  },
+  {
+   "name": "top",
+   "eye": [
+    0.01,
+    5.6,
+    0.0
+   ],
+   "target": [
+    0.0,
+    0.8,
+    0.0
+   ]
+  }
+ ],
+ "moments": [
+  {
+   "name": "before",
+   "after_impact_ms": -10.0
+  },
+  {
+   "name": "peak",
+   "after_impact_ms": 70.0
+  },
+  {
+   "name": "rest",
+   "after_impact_ms": 450.0
+  }
+ ],
+ "secs_after_impact": 0.5,
+ "contact": "edge"
+}

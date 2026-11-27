@@ -32,11 +32,12 @@ const RUN_UP_S: f32 = 0.4;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S14",
-        title: "NCAP side: moving deformable barrier crabbed 27° into a standing sedan, 62 km/h",
+        id: "S14".into(),
+        title: "NCAP side: moving deformable barrier crabbed 27° into a standing sedan, 62 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA NCAP side MDB, 62 km/h crabbed 27° (tests 7517, 8560: 2012-14 Toyota Camry)" },
-        designs: &["sedan", "mdb214"],
-        layout: |extent, j| {
+        designs: names(&["sedan", "mdb214"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let (e, b) = (extent("sedan"), extent("mdb214"));
             let v = SPEED * j.speed;
             let (front, rear) = e.axles.unwrap_or((e.lo.z + 0.2 * e.length(), e.lo.z + 0.8 * e.length()));
@@ -49,20 +50,20 @@ pub(super) fn scenario() -> CrashScenario {
             let contact = Vec3::new(e.hi.x + b.hi.z, 0.0, face_z);
             let mut barrier = Body::new("barrier", "mdb214", contact - dir * (v * RUN_UP_S), -0.5 * std::f32::consts::PI + j.yaw, v);
             barrier.vel = Some(dir * v);
-            Layout { bodies: vec![Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0), barrier], boxes: Vec::new(), impact_s: RUN_UP_S }
-        },
+            Layout { box_yaw: Vec::new(), bodies: vec![Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0), barrier], boxes: Vec::new(), impact_s: RUN_UP_S }
+        }),
         secs_after_impact: 0.5,
-        cameras: &[
+        cameras: vec![
             // As S03's: ahead of the car and out on the struck side; above; on its axis ahead.
-            Camera { name: "front three-quarter", eye: [5.5, 1.6, 3.5], target: [0.9, 0.7, -1.3] },
-            Camera { name: "top", eye: [0.01, 12.0, -1.6], target: [0.0, 0.0, -1.6] },
-            Camera { name: "side", eye: [0.0, 1.0, 8.0], target: [0.0, 0.7, -1.4] },
+            Camera { name: "front three-quarter".into(), eye: [5.5, 1.6, 3.5], target: [0.9, 0.7, -1.3] },
+            Camera { name: "top".into(), eye: [0.01, 12.0, -1.6], target: [0.0, 0.0, -1.6] },
+            Camera { name: "side".into(), eye: [0.0, 1.0, 8.0], target: [0.0, 0.7, -1.4] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "peak", after_impact_ms: 40.0 },
-            Moment { name: "deepest", after_impact_ms: 80.0 },
-            Moment { name: "rest", after_impact_ms: 450.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "peak".into(), after_impact_ms: 40.0 },
+            Moment { name: "deepest".into(), after_impact_ms: 80.0 },
+            Moment { name: "rest".into(), after_impact_ms: 450.0 },
         ],
         // M = 1,367.6 kg, m = 1,448.4 kg, V = 17.211 m/s (jitter: speed ±2 %).
         criteria: || {

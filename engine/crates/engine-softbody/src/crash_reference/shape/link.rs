@@ -72,7 +72,7 @@ pub fn norm(s: &str) -> String {
         .join(" ")
 }
 
-pub fn pick_camera(view: &str, cams: &[Camera]) -> Option<&'static str> {
+pub fn pick_camera<'a>(view: &str, cams: &'a [Camera]) -> Option<&'a str> {
     let v = norm(view);
     let alias = CAMERA_ALIAS
         .iter()
@@ -82,15 +82,15 @@ pub fn pick_camera(view: &str, cams: &[Camera]) -> Option<&'static str> {
         .chain(alias.iter().copied())
         .find_map(|cand| {
             cams.iter()
-                .find(|c| norm(c.name) == norm(cand))
-                .map(|c| c.name)
+                .find(|c| norm(&c.name) == norm(cand))
+                .map(|c| c.name.as_str())
         })
-        .or(cams.first().map(|c| c.name))
+        .or(cams.first().map(|c| c.name.as_str()))
 }
 
-pub fn pick_moment(scenario: &str, label: &str, moments: &[Moment]) -> Option<&'static str> {
+pub fn pick_moment<'a>(scenario: &str, label: &str, moments: &'a [Moment]) -> Option<&'a str> {
     let key = norm(label);
-    let by = |name: &str| moments.iter().find(|m| m.name == name).map(|m| m.name);
+    let by = |name: &str| moments.iter().find(|m| m.name == name).map(|m| m.name.as_str());
     if let Some(m) = MOMENT_OVERRIDE
         .iter()
         .find(|(s, k, _)| s.eq_ignore_ascii_case(scenario) && norm(k) == key)
@@ -102,7 +102,7 @@ pub fn pick_moment(scenario: &str, label: &str, moments: &[Moment]) -> Option<&'
         return moments
             .iter()
             .max_by(|a, b| a.after_impact_ms.total_cmp(&b.after_impact_ms))
-            .map(|m| m.name);
+            .map(|m| m.name.as_str());
     }
     if let Some(m) = MOMENT_NAME
         .iter()
@@ -122,62 +122,66 @@ pub fn pick_moment(scenario: &str, label: &str, moments: &[Moment]) -> Option<&'
                 .abs()
                 .total_cmp(&(b.after_impact_ms - ms).abs())
         })
-        .map(|m| m.name)
+        .map(|m| m.name.as_str())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const MOMENTS: &[Moment] = &[
+    fn moments() -> Vec<Moment> {
+        vec![
         Moment {
-            name: "before",
+            name: "before".into(),
             after_impact_ms: -10.0,
         },
         Moment {
-            name: "peak",
+            name: "peak".into(),
             after_impact_ms: 70.0,
         },
         Moment {
-            name: "on_its_nose",
+            name: "on_its_nose".into(),
             after_impact_ms: 400.0,
         },
         Moment {
-            name: "rest",
+            name: "rest".into(),
             after_impact_ms: 900.0,
         },
-    ];
-    const CAMS: &[Camera] = &[
+    ]
+    }
+    fn cams() -> Vec<Camera> {
+        vec![
         Camera {
-            name: "side",
+            name: "side".into(),
             eye: [0.0; 3],
             target: [1.0, 0.0, 0.0],
         },
         Camera {
-            name: "front_quarter",
+            name: "front_quarter".into(),
             eye: [0.0; 3],
             target: [1.0, 0.0, 0.0],
         },
-    ];
+    ]
+    }
 
     #[test]
     fn moments_by_name_by_time_and_by_override() {
-        assert_eq!(pick_moment("S01", "peak crush", MOMENTS), Some("peak"));
-        assert_eq!(pick_moment("S01", "first contact", MOMENTS), Some("before"));
-        assert_eq!(pick_moment("S01", "Before", MOMENTS), Some("before"));
-        assert_eq!(pick_moment("S01", "aftermath", MOMENTS), Some("rest"));
-        assert_eq!(pick_moment("S07", "Peak", MOMENTS), Some("on_its_nose"));
-        assert_eq!(pick_moment("S01", "peak", MOMENTS), Some("peak"));
+        assert_eq!(pick_moment("S01", "peak crush", &moments()), Some("peak"));
+        assert_eq!(pick_moment("S01", "first contact", &moments()), Some("before"));
+        assert_eq!(pick_moment("S01", "Before", &moments()), Some("before"));
+        assert_eq!(pick_moment("S01", "aftermath", &moments()), Some("rest"));
+        assert_eq!(pick_moment("S07", "Peak", &moments()), Some("on_its_nose"));
+        assert_eq!(pick_moment("S01", "peak", &moments()), Some("peak"));
     }
 
     #[test]
     fn cameras_by_name_and_alias() {
-        assert_eq!(pick_camera("Side", CAMS), Some("side"));
-        assert_eq!(pick_camera("wide", CAMS), Some("front_quarter"));
+        assert_eq!(pick_camera("Side", &cams()), Some("side"));
+        assert_eq!(pick_camera("wide", &cams()), Some("front_quarter"));
         assert_eq!(
-            pick_camera("front-three-quarter", CAMS),
+            pick_camera("front-three-quarter", &cams()),
             Some("front_quarter")
         );
-        assert_eq!(pick_camera("top", CAMS), Some("side"));
+        assert_eq!(pick_camera("top", &cams()), Some("side"));
     }
 }

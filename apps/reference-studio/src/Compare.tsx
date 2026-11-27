@@ -19,7 +19,7 @@ export interface Comparison {
   schema: string;
   frame: { id: string; label: string } | null;
   sources: { name: string; label: string; source: string }[];
-  rubble: { scenario: string; moment: string; before_moment: string; camera: string; view: string } | { error: string } | null;
+  rubble: { scenario: string; at_ms: number; before_ms: number; moment: string | null; pinned: boolean; check: boolean; camera: string | null; view: string; recording: { executor: string; fresh: boolean } } | { error: string } | null;
   shapes: Record<string, { before: Shape; now: Shape }>;
   rows: { id: string; label: string; values: Record<string, { v: number; vis: Vis; int?: boolean } | null> }[];
 }
@@ -150,7 +150,7 @@ export function Compare({ ctx, frame }: { ctx: Ctx; frame: FrameDoc }) {
   const shot = ctx.state.shots.find((s) => s.id === frame.shot);
   if (!traced) return <div className="page"><div className="notice">Trace at least one region of this frame first (Annotate).</div></div>;
   if (error) return <div className="page"><div className="notice bad">{error}</div></div>;
-  if (!data) return <div className="page"><div className="notice">Computing (the first comparison of a linked shot runs Rubble's outlines: about 10 s)…</div></div>;
+  if (!data) return <div className="page"><div className="notice">Computing (Rubble's shapes come from the recorded run: the scene is simulated on this page's GPU first when it has no recording)…</div></div>;
   const col = (name: string) => SOURCE_HEX[data.sources.find((s) => s.name === name)?.source ?? 'other'];
   const rub = data.rubble && 'error' in data.rubble ? data.rubble.error : null;
   return (
@@ -168,8 +168,11 @@ export function Compare({ ctx, frame }: { ctx: Ctx; frame: FrameDoc }) {
             <span className="dot" style={{ background: col(s.name) }} /> {s.label}
           </span>
         ))}
-        {data.rubble && !rub && 'moment' in data.rubble && (
-          <span className="muted">Rubble: {data.rubble.scenario} at {data.rubble.moment} against {data.rubble.before_moment} ({data.rubble.view})</span>
+        {data.rubble && !rub && 'at_ms' in data.rubble && (
+          <span className="muted">
+            Rubble: {data.rubble.scenario} at {data.rubble.at_ms} ms{data.rubble.pinned ? ' (pinned)' : data.rubble.moment ? ` (${data.rubble.moment})` : ''} against {data.rubble.before_ms} ms ({data.rubble.view}) · recording {data.rubble.recording.executor === 'webgpu' ? 'WebGPU' : 'CPU fallback (tests only)'}
+            {data.rubble.check ? ' · check after re-simulation' : ''}
+          </span>
         )}
       </div>
       {rub && <div className="notice bad">Rubble's outline: {rub}</div>}

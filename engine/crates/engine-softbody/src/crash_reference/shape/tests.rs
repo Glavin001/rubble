@@ -212,7 +212,7 @@ fn rubble_camera_view_round_trips_to_an_instance() {
 #[test]
 fn the_committed_structure_schemas_parse_and_are_consistent() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/crash-reference/studio/structures");
+        .join("../../../apps/reference-studio/workspace/structures");
     let mut n = 0;
     for e in std::fs::read_dir(&dir).unwrap() {
         let p = e.unwrap().path();

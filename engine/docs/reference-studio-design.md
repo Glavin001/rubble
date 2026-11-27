@@ -4,7 +4,18 @@ Step 1 (built, `apps/reference-studio/`): a library of reference images in shots
 schema-driven tracings, a hand-set camera per image, a link to a Rust-defined scenario, and
 the comparison computed in Rust (`crash_reference::shape`). Step 2 makes *recreating* the
 crash easy: from a traced image, pick the vehicle that matches, place what it hits, set the
-camera, press Simulate, and compare, all in the studio, all live. Nothing here is built yet.
+camera, press Simulate, and compare, all in the studio, all live.
+
+**Status (2026-11-27): built**, with the owner's answers to the open questions below and two
+later decisions: the studio is client-side only (a static site over a workspace folder,
+everything computed by Rust in wasm, the run on the page's WebGPU) and the Scene view has
+Setup and Review (images pinned to a time and a camera of the recorded run). See
+`apps/reference-studio/README.md`. Deviations from this note: a data scenario places
+bodies and boxes absolutely (no `gap_s`/`face` relative placement); `CrashScenario` keeps a
+`fn` for its criteria (a data scenario's are one of the law sets); the soft bodies are drawn
+by three's `WebGLRenderer` from node positions the recording gives (not a TSL storage
+buffer); data scenarios live in the studio's workspace (`apps/reference-studio/workspace/
+scenarios/`), not `engine/docs/`; no camera solve and no ffmpeg ingestion yet.
 
 ## The direction (owner, 2026-11-27)
 

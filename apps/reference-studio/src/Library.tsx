@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { FrameSummary, Scenario, Status } from '../shared/model.ts';
+import type { FrameSummary, ScenarioInfo as Scenario, Status } from '../shared/model.ts';
 import { tool, upload, type ShotRow } from './api.ts';
 import type { Ctx } from './App.tsx';
 
@@ -216,8 +216,8 @@ export function Library({ ctx }: { ctx: Ctx }) {
         </form>
       )}
       <div className={`drop${over ? ' over' : ''}`}>
-        Drop screenshots or video frames anywhere on this page to add them to the library{target ? ` (into ${target})` : ''}. Images stay on this machine
-        (<code>apps/reference-studio/library/</code>, never committed); tracings are saved as points in <code>engine/docs/crash-reference/studio/</code>.
+        Drop screenshots or video frames anywhere on this page to add them to the library{target ? ` (into ${target})` : ''}. Images go to the workspace's
+        <code>library/</code> (never committed); tracings are saved as points in its <code>frames/</code>.
       </div>
       {!state.frames.length && !state.shots.length ? (
         <div className="card empty">

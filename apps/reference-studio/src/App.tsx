@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Frame, Region, StructureSchema } from '../shared/model.ts';
-import { getState, tool, type FrameDoc, type State } from './api.ts';
+import { getState, openWorkspace, tool, type FrameDoc, type State } from './api.ts';
+import { SceneView } from './Scene.tsx';
+import { sceneTools } from './sceneTools.ts';
+import { WorkspaceGate } from './WorkspaceGate.tsx';
+import type { Workspace } from '../shared/workspace.ts';
 import { Annotate, nextElement, type ViewBox } from './Annotate.tsx';
 import { Compare } from './Compare.tsx';
 import { Help } from './Help.tsx';
@@ -8,13 +12,16 @@ import { Library } from './Library.tsx';
 import { Link } from './Link.tsx';
 import { installStudio } from './studio.ts';
 
-export type ViewName = 'library' | 'annotate' | 'link' | 'compare';
+export type ViewName = 'library' | 'annotate' | 'link' | 'compare' | 'scene';
 const VIEWS: { id: ViewName; label: string; key: string }[] = [
   { id: 'library', label: 'Library', key: '1' },
   { id: 'annotate', label: 'Annotate', key: '2' },
   { id: 'link', label: 'Link', key: '3' },
   { id: 'compare', label: 'Compare', key: '4' },
+  { id: 'scene', label: 'Scene', key: '5' },
 ];
+/** Views that work without an open frame. */
+const FREE: ViewName[] = ['library', 'scene'];
 
 export interface Ctx {
   state: State;
@@ -49,6 +56,7 @@ function schemaOfRegion(state: State | null, r: Region | null): StructureSchema 
 
 export function App() {
   const [state, setState] = useState<State | null>(null);
+  const [ws, setWs] = useState<Workspace | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [route, setRoute] = useState(parseHash);
   const [frame, setFrame] = useState<FrameDoc | null>(null);
@@ -110,7 +118,19 @@ export function App() {
   }, [toast]);
 
   useEffect(() => {
-    reloadState();
+    if (!ws) return;
+    let live = true;
+    openWorkspace(ws, () => live && reloadState())
+      .then(() => {
+        if (live) reloadState();
+      })
+      .catch((e) => setLoadError(`could not open the workspace: ${(e as Error).message}`));
+    return () => {
+      live = false;
+    };
+  }, [ws, reloadState]);
+
+  useEffect(() => {
     const on = () => setRoute(parseHash());
     addEventListener('hashchange', on);
     return () => removeEventListener('hashchange', on);
@@ -119,6 +139,7 @@ export function App() {
   useEffect(() => {
     undo.current = [];
     redo.current = [];
+    if (!state) return;
     reloadFrame(route.frame).then((f) => {
       setViewBox(null);
       const r = f?.regions[0] ?? null;
@@ -126,7 +147,7 @@ export function App() {
       const sc = schemaOfRegion(stateRef.current, r);
       setElement(sc && r ? nextElement(sc, r.tracing.instances[0], null) : null);
     });
-  }, [route.frame, reloadFrame]);
+  }, [route.frame, reloadFrame, !!state]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const open = useCallback((view: ViewName, f?: string | null) => {
     const id = f === undefined ? route.frame : f;
@@ -193,9 +214,12 @@ export function App() {
   useEffect(() => {
     installStudio(
       {
+        ...sceneTools(() => {
+          if (live.current.route.view !== 'scene') open('scene');
+        }),
         open_view: (i) => {
           const v = String(i.view) as ViewName;
-          if (!VIEWS.some((x) => x.id === v)) throw new Error('view is library, annotate, link or compare');
+          if (!VIEWS.some((x) => x.id === v)) throw new Error('view is library, annotate, link, compare or scene');
           open(v, typeof i.frame === 'string' ? i.frame : undefined);
           return { view: v, frame: i.frame ?? live.current.route.frame };
         },
@@ -247,10 +271,10 @@ export function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         undoRedo('redo');
-      } else if (e.altKey && /^[1-4]$/.test(e.key)) {
+      } else if (e.altKey && /^[1-5]$/.test(e.key)) {
         e.preventDefault();
         const v = VIEWS[Number(e.key) - 1];
-        if (v.id === 'library' || live.current.route.frame) open(v.id);
+        if (FREE.includes(v.id) || live.current.route.frame) open(v.id);
       } else if (e.key === '?') setHelp((h) => !h);
     };
     addEventListener('keydown', on);
@@ -294,8 +318,8 @@ export function App() {
               key={v.id}
               className="tab"
               aria-current={route.view === v.id ? 'page' : undefined}
-              disabled={v.id !== 'library' && !route.frame}
-              title={`${v.label} (Alt+${v.key})${v.id !== 'library' && !route.frame ? ': open a frame from the library first' : ''}`}
+              disabled={!FREE.includes(v.id) && !route.frame}
+              title={`${v.label} (Alt+${v.key})${!FREE.includes(v.id) && !route.frame ? ': open a frame from the library first' : ''}`}
               onClick={() => open(v.id)}
             >
               {v.label}
@@ -309,6 +333,11 @@ export function App() {
           </span>
         )}
         <span className="spacer" />
+        {state && (
+          <span className={`badge ${state.workspace.kind === 'opfs' ? 'warn' : 'ok'}`} title={state.workspace.kind === 'opfs' ? 'No folder chosen: the data lives only in this browser (its private storage).' : 'The workspace folder you chose'} data-testid="workspace">
+            {state.workspace.kind === 'opfs' ? 'this browser only' : `folder: ${state.workspace.name}`}
+          </span>
+        )}
         <button className="btn" onClick={() => setHelp(true)} aria-haspopup="dialog">
           How this works <kbd>?</kbd>
         </button>
@@ -324,13 +353,13 @@ export function App() {
       <main className="main">
         {loadError && (
           <div className="page">
-            <div className="notice bad">
-              The studio's server did not answer ({loadError}). Start it with <code>npm run dev</code> in <code>apps/reference-studio</code>.
-            </div>
+            <div className="notice bad">{loadError}</div>
           </div>
         )}
+        {!ws && <WorkspaceGate onOpen={setWs} />}
         {ctx && route.view === 'library' && <Library ctx={ctx} />}
-        {ctx && route.view !== 'library' && !frame && (
+        {ctx && route.view === 'scene' && <SceneView ctx={ctx} />}
+        {ctx && !FREE.includes(route.view) && !frame && (
           <div className="page">
             <div className="notice">Loading the frame, or it does not exist. <button className="btn small" onClick={() => open('library', null)}>Back to the library</button></div>
           </div>

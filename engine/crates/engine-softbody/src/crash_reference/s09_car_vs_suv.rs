@@ -31,11 +31,12 @@ const OVERLAP: f32 = 0.5;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S09",
-        title: "Car vs heavier SUV head-on, 2 × 55 km/h, 50 % overlap",
+        id: "S09".into(),
+        title: "Car vs heavier SUV head-on, 2 × 55 km/h, 50 % overlap".into(),
         reference: Reference { video: VIDEO, at_s: &[375], real_test: "car-to-SUV frontal offset, 50 % overlap, each at 55 km/h" },
-        designs: &["wagon", "suv_4x4"],
-        layout: |extent, j| {
+        designs: names(&["wagon", "suv_4x4"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let (ec, es) = (extent("wagon"), extent("suv_4x4"));
             let v = KMH / 3.6 * j.speed;
             // A tenth of a second of closing (both move) before the fronts meet.
@@ -45,7 +46,7 @@ pub(super) fn scenario() -> CrashScenario {
             // from the car's left (+X) edge, so their left sides overlap.
             let xs = ec.hi.x - OVERLAP * ec.width() + es.hi.x;
             let zs = ec.hi.z + es.hi.z + gap;
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![
                     Body::new("car", "wagon", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v),
                     Body::new("suv", "suv_4x4", Vec3::new(xs, 0.0, zs), std::f32::consts::PI, v),
@@ -53,23 +54,23 @@ pub(super) fn scenario() -> CrashScenario {
                 boxes: vec![],
                 impact_s: 0.1,
             }
-        },
+        }),
         secs_after_impact: 1.0,
         // The fronts meet at z ≈ 2.2 (the wagon's front is 0.96 m ahead of its origin), x ≈ 0.5.
-        cameras: &[
+        cameras: vec![
             // From −x, as the reference film: the wagon on the left, the 4x4 on the right; the pair
             // (z −2.4 to 6.9 at impact) fills about two thirds of the width (60° vertical field of view).
-            Camera { name: "side", eye: [-7.6, 1.2, 1.9], target: [0.48, 0.9, 1.9] },
+            Camera { name: "side".into(), eye: [-7.6, 1.2, 1.9], target: [0.48, 0.9, 1.9] },
             // Straight down, the pair across the frame (the eye a centimetre to −x fixes the
             // picture's up as +x).
-            Camera { name: "top", eye: [0.47, 8.6, 1.9], target: [0.48, 0.8, 1.9] },
-            Camera { name: "quarter", eye: [-5.0, 3.2, 5.5], target: [0.4, 0.7, 1.8] },
+            Camera { name: "top".into(), eye: [0.47, 8.6, 1.9], target: [0.48, 0.8, 1.9] },
+            Camera { name: "quarter".into(), eye: [-5.0, 3.2, 5.5], target: [0.4, 0.7, 1.8] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "override", after_impact_ms: 60.0 },
-            Moment { name: "car_rear_up", after_impact_ms: 120.0 },
-            Moment { name: "rest", after_impact_ms: 950.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "override".into(), after_impact_ms: 60.0 },
+            Moment { name: "car_rear_up".into(), after_impact_ms: 120.0 },
+            Moment { name: "rest".into(), after_impact_ms: 950.0 },
         ],
         criteria: || {
             use Tier::*;

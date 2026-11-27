@@ -87,12 +87,20 @@ fn shape_of(schema: &Schema, spec: &Value, cache: &mut Cache) -> Result<Shape, S
     Err("a shape is {tracing} or {rubble}".into())
 }
 
+/// The built-in scenarios, then the Reference Studio's data scenarios (its workspace's
+/// `scenarios/`, or `STUDIO_SCENARIOS`), marked `recreated`.
 fn scenarios() -> Value {
-    json!(cr::all()
+    let dir = std::env::var("STUDIO_SCENARIOS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../apps/reference-studio/workspace/scenarios").into());
+    let data = cr::desc::load_dir(std::path::Path::new(&dir)).unwrap_or_else(|e| {
+        eprintln!("reference_shape: {e}");
+        Vec::new()
+    });
+    let list: Vec<cr::CrashScenario> = cr::all().into_iter().chain(data.iter().map(|d| d.scenario())).collect();
+    json!(list
         .iter()
         .map(|x| json!({
             "id": x.id, "title": x.title, "designs": x.designs, "cameras": x.cameras, "moments": x.moments,
-            "reference": x.reference, "secs_after_impact": x.secs_after_impact,
+            "reference": x.reference, "secs_after_impact": x.secs_after_impact, "recreated": x.recreated,
         }))
         .collect::<Vec<_>>())
 }
@@ -107,8 +115,8 @@ fn handle(req: &Value, cache: &mut Cache) -> Result<Value, String> {
             let id = s(req, "scenario")?;
             let sc = cr::get(&id).ok_or(format!("no scenario {id}"))?;
             Ok(json!({
-                "moment": shape::link::pick_moment(sc.id, &s(req, "moment")?, sc.moments),
-                "camera": shape::link::pick_camera(&s(req, "view")?, sc.cameras),
+                "moment": shape::link::pick_moment(&sc.id, &s(req, "moment")?, &sc.moments),
+                "camera": shape::link::pick_camera(&s(req, "view")?, &sc.cameras),
             }))
         }
         "compare" => {

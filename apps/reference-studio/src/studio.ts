@@ -4,7 +4,8 @@
 //   "4.2 ModelContext Interface", "4.2.1 ModelContextTool Dictionary"); the W3C polyfill
 //   (@w3c/webmcp-polyfill, pinned and bundled, no network) installs document.modelContext
 //   where the browser has none;
-// - HTTP: the server tools are POST /api/tool/<name> (server/api.ts).
+// Data tools run shared/ops.ts on the open workspace (src/api.ts); page tools act on the
+// open page (the views, the Scene view's simulation). No server: the studio is a static site.
 
 import { installWebMCP } from '@w3c/webmcp-polyfill';
 import { TOOLS, type ToolDef } from '../shared/tools.ts';
@@ -33,8 +34,8 @@ declare global {
 // The page's current handlers: React re-renders replace them; the tools are registered once.
 let handlers: { page: PageTools; after: (name: string, result: unknown) => void } | null = null;
 
-export function installStudio(page: PageTools, afterServerWrite: (name: string, result: unknown) => void): Studio {
-  handlers = { page, after: afterServerWrite };
+export function installStudio(page: PageTools, afterDataWrite: (name: string, result: unknown) => void): Studio {
+  handlers = { page, after: afterDataWrite };
   if (window.studio) return window.studio;
   const call = async (name: string, input: Record<string, unknown> = {}) => {
     const t = TOOLS.find((x) => x.name === name);

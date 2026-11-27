@@ -17,7 +17,7 @@ use super::{ExplicitSim, Spawn, Spawned};
 use crate::err;
 use engine_softbody::crash_reference::{
     self as cr, metrics::Recorder, BeamState, Built, Contact, CrashReport, Jitter, Sample,
-    DT, RUNS, SAMPLE_STEPS,
+    DT, SAMPLE_STEPS,
 };
 use glam::Vec3;
 use std::cell::RefCell;
@@ -30,54 +30,36 @@ use wasm_bindgen::prelude::*;
 /// coordinates), moments (ms after first contact) and criteria (band, tier, basis, why,
 /// whether failing it fails a run), and the contact settings and run count a run takes.
 pub fn registry() -> serde_json::Value {
-    let scenarios: Vec<serde_json::Value> = cr::all()
-        .iter()
-        .map(|s| {
-            let criteria: Vec<serde_json::Value> = (s.criteria)()
-                .iter()
-                .map(|c| {
-                    let mut v = serde_json::to_value(c).unwrap_or_default();
-                    v["asserted"] = c.asserted().into();
-                    v
-                })
-                .collect();
-            serde_json::json!({
-                "id": s.id,
-                "title": s.title,
-                "reference": {
-                    "video": s.reference.video,
-                    "atS": s.reference.at_s,
-                    "links": s.reference.at_s.iter().map(|t| format!("{}&t={t}s", s.reference.video)).collect::<Vec<_>>(),
-                    "realTest": s.reference.real_test,
-                },
-                "designs": s.designs,
-                // The designs the page loads a mod folder for (the others are built from code).
-                "folderDesigns": s.designs.iter().filter(|d| !engine_softbody_authoring::crash_templates::from_code(d)).collect::<Vec<_>>(),
-                "secsAfterImpact": s.secs_after_impact,
-                "cameras": s.cameras,
-                "moments": s.moments,
-                "criteria": criteria,
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "scenarios": scenarios,
-        "contacts": Contact::ALL.iter().map(|c| c.name()).collect::<Vec<_>>(),
-        "runs": RUNS,
-        "sampleSteps": SAMPLE_STEPS,
-        "dt": DT,
-    })
+    registry_with(&[])
 }
 
-/// [`registry`] as JSON text.
+/// [`registry`] with data scenarios (`crash_reference::ScenarioDesc`, the Reference Studio's
+/// recreated crashes) after the built-in ones, each marked `recreated` and carrying its own
+/// description (`desc`) and default contact setting.
+pub fn registry_with(data: &[cr::ScenarioDesc]) -> serde_json::Value {
+    let r = cr::registry::registry(data, &engine_softbody_authoring::crash_templates::from_code);
+    serde_json::to_value(r).unwrap_or_default()
+}
+
+/// [`registry`] as JSON text; `data` (optional): the data scenarios to list after the
+/// built-in ones (`ScenarioDesc[]` as JSON text: the Reference Studio's workspace).
 #[wasm_bindgen(js_name = crashReferenceRegistry)]
-pub fn crash_reference_registry() -> String {
-    registry().to_string()
+pub fn crash_reference_registry(data: Option<String>) -> Result<String, JsValue> {
+    let list: Vec<cr::ScenarioDesc> = match data {
+        Some(t) if !t.is_empty() => serde_json::from_str(&t).map_err(|e| err(format!("data scenarios: {e}")))?,
+        _ => Vec::new(),
+    };
+    Ok(registry_with(&list).to_string())
 }
 
 /// One run in progress: the built fleet, the recorder and the samples read so far.
 pub(super) struct CrashRun {
     id: String,
+    /// The scenario (built-in or data): its criteria judge the run (`crash_reference::judge`).
+    scenario: cr::CrashScenario,
+    /// Every sample read, kept for playback (`crashTakeRecording`: the Reference Studio's
+    /// recording), when asked for (`crashRef.record`).
+    recording: Option<cr::recording::Recording>,
     run: usize,
     built: Built,
     /// Samples in a whole run (`CrashScenario::samples` + 1: the first at step 0).
@@ -99,13 +81,16 @@ impl CrashRun {
             if let Some(r) = self.rec.as_mut() {
                 r.push(&x);
             }
+            if let Some(r) = self.recording.as_mut() {
+                r.push(&x);
+            }
             self.pushed += 1;
         }
         if self.pushed == self.samples && self.report.is_none() {
-            if let (Some(rec), Some(s)) = (self.rec.take(), cr::get(&self.id)) {
+            if let Some(rec) = self.rec.take() {
                 let (metrics, series) = rec.finish_with_series();
-                let results = cr::judge(&s, &metrics, self.built.contact);
-                self.report = Some(CrashReport { id: s.id.into(), contact: self.built.contact, run: self.run, metrics, results, series: Some(series) });
+                let results = cr::judge(&self.scenario, &metrics, self.built.contact);
+                self.report = Some(CrashReport { id: self.scenario.id.clone(), contact: self.built.contact, run: self.run, metrics, results, series: Some(series) });
             }
         }
     }
@@ -116,14 +101,14 @@ impl CrashRun {
 /// (`designs: { <design>: [[path, text], ...] }`, the folder `__mods/<design>_new` the site
 /// build generates) by `crash_templates::template_from_files`, the constructor
 /// `crash_templates::template` itself uses on the rigger's output.
-fn templates(s: &cr::CrashScenario, designs: Option<&serde_json::Value>) -> Result<cr::Templates, String> {
+pub(crate) fn templates(s: &cr::CrashScenario, designs: Option<&serde_json::Value>) -> Result<cr::Templates, String> {
     use engine_softbody_authoring::crash_templates as ct;
     let mut out = cr::Templates::new();
-    for d in s.designs {
+    for d in s.designs.iter().map(String::as_str) {
         let t = if ct::from_code(d) {
             ct::template(d)?
         } else {
-            let list = designs.and_then(|x| x.get(*d)).and_then(|x| x.as_array()).ok_or_else(|| format!("{}: crashRef.designs.{d}: the files of its mod folder ([[path, text], ...])", s.id))?;
+            let list = designs.and_then(|x| x.get(d)).and_then(|x| x.as_array()).ok_or_else(|| format!("{}: crashRef.designs.{d}: the files of its mod folder ([[path, text], ...])", s.id))?;
             // A folder holds one file per path (files.json may list a path twice: the later
             // is the file).
             let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -140,23 +125,36 @@ fn templates(s: &cr::CrashScenario, designs: Option<&serde_json::Value>) -> Resu
     Ok(out)
 }
 
-/// `spec.crashRef`: `{ id, run (default 0), contact ('discrete' | 'edge' | 'continuous',
-/// default 'edge'), designs (see [`templates`]) }`: the scenario's fleet for that run,
+/// The scenario `crashRef` names: `desc` (a data scenario, `crash_reference::ScenarioDesc`)
+/// or `id` (a built-in one), and its default contact setting.
+pub(crate) fn scenario_of(c: &serde_json::Value) -> Result<(cr::CrashScenario, Contact), String> {
+    if let Some(d) = c.get("desc").filter(|d| !d.is_null()) {
+        let d: cr::ScenarioDesc = serde_json::from_value(d.clone()).map_err(|e| format!("crashRef.desc: {e}"))?;
+        d.check()?;
+        return Ok((d.scenario(), d.contact));
+    }
+    let id = c.get("id").and_then(|x| x.as_str()).ok_or("crashRef.id (a scenario id) or crashRef.desc (a scenario description)")?;
+    let s = cr::get(id).ok_or_else(|| format!("no crash reference scenario {id}: {}", cr::all().iter().map(|s| s.id.clone()).collect::<Vec<_>>().join(", ")))?;
+    Ok((s, Contact::Edge))
+}
+
+/// `spec.crashRef`: `{ id | desc, run (default 0), contact ('discrete' | 'edge' |
+/// 'continuous', default 'edge' or the description's), designs (see [`templates`]), record
+/// (keep every sample: `crashTakeRecording`) }`: the scenario's fleet for that run,
 /// [`cr::CrashScenario::build`] as every executor takes it.
 pub(super) fn spawn(c: &serde_json::Value) -> Result<Spawn, String> {
-    let id = c.get("id").and_then(|x| x.as_str()).ok_or("crashRef.id: a scenario id")?;
-    let s = cr::get(id).ok_or_else(|| format!("no crash reference scenario {id}: {}", cr::all().iter().map(|s| s.id).collect::<Vec<_>>().join(", ")))?;
+    let (s, default_contact) = scenario_of(c)?;
     let run = c.get("run").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
     let contact = match c.get("contact").and_then(|x| x.as_str()) {
         Some(n) => Contact::from_name(n).ok_or_else(|| format!("no contact setting {n}"))?,
-        None => Contact::Edge,
+        None => default_contact,
     };
     let templates = templates(&s, c.get("designs"))?;
     let built = s.build(&templates, Jitter::run(run), contact)?;
     let mut vehicles = Vec::new();
     for (b, sim) in built.layout.bodies.iter().zip(&built.fleet) {
         vehicles.push(Spawned {
-            name: templates[b.design].desc.name.clone(),
+            name: templates[&b.design].desc.name.clone(),
             sim: sim.clone(),
             reference: super::reference_node(sim),
             forward: b.heading(),
@@ -165,13 +163,19 @@ pub(super) fn spawn(c: &serde_json::Value) -> Result<Spawn, String> {
     }
     let samples = s.samples(&built.layout) + 1;
     let rec = Recorder::new(&templates, &built);
+    let record = c.get("record").and_then(|x| x.as_bool()).unwrap_or(false);
+    let recording = record.then(|| cr::recording::Recording::new(&s, &built, "webgpu"));
+    // Turned boxes are oriented box shapes (drawn as shapes); the others the layout's boxes.
+    let l = &built.layout;
+    let boxes = (0..l.boxes.len()).filter(|&i| l.yaw_of(i) == 0.0).map(|i| l.boxes[i]).collect();
+    let shapes = (0..l.boxes.len()).filter(|&i| l.yaw_of(i) != 0.0).map(|i| engine_softbody::explicit_beams::StaticShape::oriented_box(l.boxes[i].0, l.boxes[i].1, l.rotation_of(i))).collect();
     Ok(Spawn {
         vehicles,
-        boxes: built.layout.boxes.clone(),
-        shapes: Vec::new(),
+        boxes,
+        shapes,
         pull: None,
         scene: format!("crashRef:{}", s.id),
-        crash: Some(CrashRun { id: s.id.into(), run, built, samples, rec: Some(rec), issued: 0, pushed: 0, waiting: BTreeMap::new(), report: None, error: None }),
+        crash: Some(CrashRun { id: s.id.clone(), scenario: s.clone(), recording, run, built, samples, rec: Some(rec), issued: 0, pushed: 0, waiting: BTreeMap::new(), report: None, error: None }),
     })
 }
 
@@ -209,7 +213,7 @@ impl ExplicitSim {
             "impactS": l.impact_s, "impactStep": (l.impact_s / DT).round(),
             "sampleSteps": SAMPLE_STEPS, "samples": c.samples,
             "totalSteps": (c.samples - 1) as u32 * SAMPLE_STEPS,
-            "bodies": l.bodies.iter().map(|b| serde_json::json!({ "name": b.name, "design": b.design, "at": b.at.to_array(), "yaw": b.yaw, "speed": b.speed })).collect::<Vec<_>>(),
+            "bodies": l.bodies.iter().map(|b| serde_json::json!({ "name": &b.name, "design": &b.design, "at": b.at.to_array(), "yaw": b.yaw, "speed": b.speed })).collect::<Vec<_>>(),
             "boxes": l.boxes.iter().map(|(c, h)| [c.x, c.y, c.z, h.x, h.y, h.z]).collect::<Vec<_>>(),
         }))
     }
@@ -287,6 +291,25 @@ impl ExplicitSim {
         }
         Ok(r.report.as_ref().map_or(JsValue::NULL, |x| super::js(serde_json::to_value(x).unwrap_or_default())))
     }
+
+    /// The run's recording (every sample's node positions and broken beams, the Reference
+    /// Studio's playback: `crash_reference::recording::Recording::to_bytes`) once every
+    /// sample is in and `crashRef.record` was set, else null. Taken: a second call is null.
+    #[wasm_bindgen(js_name = crashTakeRecording)]
+    pub fn crash_take_recording(&self) -> Result<JsValue, JsValue> {
+        let mut r = run_of(self)?.borrow_mut();
+        if r.report.is_none() {
+            return Ok(JsValue::NULL);
+        }
+        let report = r.report.clone();
+        Ok(match r.recording.take() {
+            Some(mut rec) => {
+                rec.report = report;
+                js_sys::Uint8Array::from(&rec.to_bytes()[..]).into()
+            }
+            None => JsValue::NULL,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +332,7 @@ mod tests {
             assert_eq!(gc.len(), crit.len(), "{}", s.id);
             for (a, c) in gc.iter().zip(&crit) {
                 assert_eq!(a["metric"], c.metric);
+                assert!(a["basis"]["kind"].is_string());
                 assert_eq!(a["asserted"], c.asserted());
             }
             assert_eq!(g["cameras"].as_array().unwrap().len(), s.cameras.len());
@@ -318,7 +342,7 @@ mod tests {
         assert_eq!(r["contacts"].as_array().unwrap().len(), Contact::ALL.len());
         assert!(got.iter().all(|g| g["folderDesigns"].as_array().is_some()));
         // The text the page parses is the same value.
-        let text: serde_json::Value = serde_json::from_str(&crash_reference_registry()).unwrap();
+        let text: serde_json::Value = serde_json::from_str(&crash_reference_registry(None).unwrap()).unwrap();
         assert_eq!(text, r);
     }
 
@@ -340,8 +364,8 @@ mod tests {
         let files: Vec<serde_json::Value> = folder.iter().filter(|(p, _)| p.ends_with(".jbeam") || p.ends_with(".pc") || p.ends_with("crash.json")).map(|(p, b)| serde_json::json!([p, String::from_utf8_lossy(b)])).collect();
         let web = templates(&s, Some(&serde_json::json!({ "sedan": files }))).unwrap();
         let native = ct::templates_for(&s).unwrap();
-        for d in s.designs {
-            let (a, b) = (&web[*d], &native[*d]);
+        for d in &s.designs {
+            let (a, b) = (&web[d], &native[d]);
             assert_eq!(a.desc.nodes.len(), b.desc.nodes.len(), "{d}");
             assert_eq!(a.desc.beams.len(), b.desc.beams.len(), "{d}");
             assert_eq!(serde_json::to_string(&a.desc).unwrap(), serde_json::to_string(&b.desc).unwrap(), "{d}");

@@ -404,7 +404,7 @@ fn probe_trailer_scene() {
     let s = cr::get(&id).unwrap();
     let t = engine_softbody_authoring::crash_templates::templates_for(&s).unwrap();
     let built = s.build(&t, Jitter::run(0), contact).unwrap();
-    let names: Vec<&str> = built.layout.bodies.iter().map(|b| b.name).collect();
+    let names: Vec<&str> = built.layout.bodies.iter().map(|b| b.name.as_str()).collect();
     let k_car = names.iter().position(|n| *n == "car").unwrap();
     let k_tr = names.iter().position(|n| *n == "trailer").unwrap();
     let car_desc = &t["sedan"].desc;

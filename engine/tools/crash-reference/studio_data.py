@@ -1,10 +1,10 @@
 """The Reference Studio's data for the crash reference scripts (`outlines.py`, `sheet.py`).
 
 Shots, frames and tracings are the studio's (`apps/reference-studio`, README "Data model"):
-points-only JSON in `engine/docs/crash-reference/studio/`, images in the gitignored
-`apps/reference-studio/library/`. Shape maths (normalising, measures, Rubble's elements, the
+points-only JSON in the studio's workspace (`apps/reference-studio/workspace/`), images in its gitignored
+`library/` (`apps/reference-studio/workspace/library/`). Shape maths (normalising, measures, Rubble's elements, the
 reference-moment rule) is Rust's: `reference_shape` (engine-softbody-lab example), called
-here as the studio's server calls it. Standard library only.
+here; the studio itself runs the same Rust in wasm. Standard library only.
 """
 import json
 import subprocess
@@ -12,8 +12,8 @@ from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parents[2]
 REPO = ENGINE.parent
-DATA = ENGINE / 'docs' / 'crash-reference' / 'studio'
-LIBRARY = REPO / 'apps' / 'reference-studio' / 'library'
+DATA = REPO / 'apps' / 'reference-studio' / 'workspace'
+LIBRARY = DATA / 'library'
 BIN = ENGINE / 'target' / 'release' / 'examples' / 'reference_shape'
 
 

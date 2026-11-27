@@ -2,14 +2,14 @@
 """Side-by-side sheets of the crash reference suite (engine/docs/crash-reference.md).
 
 For each scenario and each contact setting it has stills for, one PNG: a row per reference
-frame of the Reference Studio (`engine/docs/crash-reference/studio/`: the frame itself,
+frame of the Reference Studio (`apps/reference-studio/workspace/`: the frame itself,
 already real | BeamNG halves) beside Rubble's still from the frame's linked camera and
 moment (its own choice, else the rule in `engine_softbody::crash_reference::shape::link`), each row labelled with the scenario id,
 the reference moment and Rubble's moment (ms after first contact), the camera and the
 contact setting.
 
     python3 engine/tools/crash-reference/sheet.py [S01 S02 ...]
-        [--library apps/reference-studio/library]
+        [--library apps/reference-studio/workspace/library]
         [--stills engine/out/crash-reference] [--out engine/out/crash-reference/sheets]
         [--copy-to ~/Development/rubble-artifacts/crash-reference/sheets] [--run 0]
 

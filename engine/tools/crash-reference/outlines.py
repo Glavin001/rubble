@@ -8,9 +8,9 @@ Inputs:
   `engine/out/crash-reference/outlines/<ID>-edge/` with its own stills of the collision
   surface from each scenario camera at each moment);
 - the recorder's stills (`crash-ref-record.mjs --all-cams`, `<moment>-<camera>.png`);
-- the Reference Studio's shots, frames and tracings (`engine/docs/crash-reference/studio/`,
+- the Reference Studio's shots, frames and tracings (`apps/reference-studio/workspace/`,
   points only; trace and correct them in `apps/reference-studio`) and its image library
-  (third-party footage, never committed: `apps/reference-studio/library/`).
+  (third-party footage, never committed: `apps/reference-studio/workspace/library/`).
 
 Normalising and measuring are Rust's (`reference_shape`, the studio's maths: one place for
 the page and this script); this script only draws.
@@ -395,7 +395,7 @@ def main():
     md = ['# Shape numbers: real test, BeamNG and Rubble', '',
           'From the normalised traced elements, by the same Rust code for every source (`reference_shape`, '
           '`engine_softbody::crash_reference::shape`; the Reference Studio shows the same table). Reported comparisons, '
-          'not criteria. Reference values come from hand tracings (`engine/docs/crash-reference/studio/frames/`, '
+          'not criteria. Reference values come from hand tracings (`apps/reference-studio/workspace/frames/`, '
           'partly an approximate first pass); Rubble\'s from the CPU reference (run 0, edge contact). Rubble\'s hood '
           'line is its centreline nodes (4 rows on the generated designs); the footage\'s is the hood\'s visible side edge.', '']
     for sid in ids:

@@ -132,7 +132,7 @@ impl Track {
 }
 
 struct BodyRec {
-    name: &'static str,
+    name: String,
     mass: Vec<f32>,
     heading: Vec3,
     left: Vec3,
@@ -392,7 +392,7 @@ impl BodyRec {
         let side_nodes = [1.0f32, -1.0].map(|s| (0..pos.len()).filter(|&i| skin[i] && !wheel_node[i] && in_band(&rest[i]) && s * (rest[i].x - mid) >= SIDE_OUTER * half).collect());
         let v0 = b.velocity();
         Self {
-            name: b.name,
+            name: b.name.clone(),
             mass: s.nodes.iter().map(|n| n.mass).collect(),
             heading,
             left: Vec3::Y.cross(heading),
@@ -515,7 +515,7 @@ impl BodyRec {
 impl Recorder {
     pub fn new(templates: &Templates, built: &Built) -> Self {
         let blank = Template { desc: Default::default(), settings: Default::default(), zones: Default::default() };
-        let bodies: Vec<BodyRec> = built.layout.bodies.iter().zip(&built.fleet).map(|(b, s)| BodyRec::new(templates.get(b.design).unwrap_or(&blank), b, s)).collect();
+        let bodies: Vec<BodyRec> = built.layout.bodies.iter().zip(&built.fleet).map(|(b, s)| BodyRec::new(templates.get(&b.design).unwrap_or(&blank), b, s)).collect();
         let mut pairs = BTreeMap::new();
         for a in 0..bodies.len() {
             for b in a + 1..bodies.len() {
@@ -624,7 +624,7 @@ impl Recorder {
         let mut m = self.metrics();
         let tracks: Vec<&series::BodyTrack> = self.bodies.iter().map(|b| &b.track).collect();
         let input = series::SeriesInput {
-            names: self.bodies.iter().map(|b| b.name).collect(),
+            names: self.bodies.iter().map(|b| b.name.as_str()).collect(),
             masses: self.bodies.iter().map(|b| b.mass.iter().map(|x| f64::from(*x)).sum()).collect(),
             headings: self.bodies.iter().map(|b| b.heading).collect(),
             travel0: self.bodies.first().map_or(DVec3::Z, |b| if b.travel == DVec3::ZERO { b.heading.as_dvec3() } else { b.travel }),
@@ -676,8 +676,20 @@ impl Recorder {
         ] {
             m.insert(format!("all.{n}"), v);
         }
+        // The generic laws of a recreated scenario (`desc::law_criteria`): energy created as a
+        // fraction of the start's kinetic energy, and, without static boxes, the horizontal
+        // momentum's change over the most the ground's friction (μ ≤ 1.2 of the weight) and air
+        // drag (C_d·A ≤ 8 m² at each body's starting speed, ρ = 1.225) give over the run.
+        m.insert("all.energy_gain_frac".into(), self.e_gain / ke0.max(1.0));
+        if self.boxes.is_empty() {
+            let t = f64::from(last.t - first.t).max(0.0);
+            let drag: f64 = self.bodies.iter().map(|b| 0.5 * 1.225 * 8.0 * f64::from(b.v0.length_squared())).sum();
+            let bound = t * (1.2 * mass * G + drag);
+            let dp = DVec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).length();
+            m.insert("all.momentum_friction_ratio".into(), if bound > 0.0 { dp / bound } else { 0.0 });
+        }
         for (&(a, b), pr) in &self.pairs {
-            let (na, nb) = (self.bodies[a].name, self.bodies[b].name);
+            let (na, nb) = (self.bodies[a].name.as_str(), self.bodies[b].name.as_str());
             let mut put = |n: &str, v: f64| {
                 m.insert(n.to_string(), v);
             };
@@ -694,7 +706,7 @@ impl Recorder {
         }
         // Symmetry of two bodies (in layout order): the larger over the smaller.
         for (&(a, b), _) in &self.pairs {
-            let (na, nb) = (self.bodies[a].name, self.bodies[b].name);
+            let (na, nb) = (self.bodies[a].name.as_str(), self.bodies[b].name.as_str());
             let g = |n: &str, q: &str| m.get(&format!("{n}.{q}")).copied().unwrap_or(0.0);
             let ratio = |x: f64, y: f64, eps: f64| {
                 let (x, y) = (x.max(0.0) + eps, y.max(0.0) + eps);

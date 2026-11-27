@@ -47,6 +47,7 @@ mod scene;
 mod showcase;
 mod showcase_world;
 mod stability;
+mod studio;
 mod ring_drive;
 mod vehicle_lab;
 mod soft;

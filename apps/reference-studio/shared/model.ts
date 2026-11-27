@@ -1,12 +1,36 @@
 // The Reference Studio's data model (README "Data model"; JSON Schema files in schema/).
-// Types only: the server reads and writes these as JSON files, the page shows them. Shape
-// maths (normalising, measuring, reading Rubble's outlines) is Rust
-// (engine-softbody crash_reference::shape), reached through the server.
+// Types only. Every type Rust also reads (tracings, cameras, scenario descriptions, the
+// report, the registry) is generated from the Rust (src/generated/crash-reference.ts) and
+// re-exported here; the rest is the studio's own bookkeeping (shots, frames, regions). The
+// maths (normalising, measuring, Rubble's outlines, the comparison, design ranking) is Rust
+// compiled to wasm, called from src/engine.ts.
+
+import type { ElementValue, FrameCamera, Instance, Vis } from '../src/generated/crash-reference.ts';
+
+export type {
+  BodyDesc,
+  BoxDesc,
+  Camera,
+  CompareSource,
+  Contact,
+  CrashReport,
+  ElementValue,
+  FrameCamera,
+  Instance,
+  Moment,
+  RecordingStatus,
+  Registry,
+  RubbleSpec,
+  ScenarioDesc,
+  ScenarioInfo,
+  SceneInfo,
+  SceneSource,
+  Vis,
+} from '../src/generated/crash-reference.ts';
 
 export type Xy = [number, number];
 
 /** How well an element can be seen: a measure reports the worst of its inputs. */
-export type Vis = 'clear' | 'blurred' | 'hidden';
 export const VIS: Vis[] = ['clear', 'blurred', 'hidden'];
 
 /** Where a region's picture comes from. */
@@ -20,22 +44,13 @@ export interface Shot {
   source:
     | { kind: 'video'; url: string; note?: string }
     | { kind: 'screenshots'; note?: string };
-  /** The Rubble scenario setup this run is recreated by. */
+  /** The Rubble scenario setup this run is recreated by: a built-in scenario (S01...) or a
+   * data scenario of the workspace (scenarios/<id>.json). */
   rubble: { scenario: string; contact: string; run: number } | null;
   /** The frame each source's shapes are compared against ("before"); frames may override. */
   before_frame: string | null;
   notes: string;
   updated?: string;
-}
-
-/** A camera set by hand for one image, in the scenario's world frame (metres, +Y up). */
-export interface FrameCamera {
-  eye: [number, number, number];
-  target: [number, number, number];
-  up: [number, number, number];
-  fov_y_deg: number;
-  /** The region it applies to (its crop's aspect), or null for the whole image. */
-  region: string | null;
 }
 
 export interface Region {
@@ -56,32 +71,23 @@ export interface Tracing {
   updated?: string;
 }
 
-export interface ElementValue {
-  /** keypoint */
-  p?: Xy;
-  /** polyline, in order */
-  pts?: Xy[];
-  /** circle: centre and a point on the rim */
-  c?: Xy;
-  rim?: Xy;
-  vis: Vis;
-}
-
-/** One structure traced in a region; points in the region's normalised coordinates. */
-export interface Instance {
-  id: string;
-  /** A StructureSchema id (structures/<id>.json). */
-  schema: string;
-  /** Where the structure's front is in the image. */
-  front: 'left' | 'right';
-  elements: Record<string, ElementValue>;
+/** Where an image sits in the recorded run: a time chosen by scrubbing in the Scene view's
+ * Review mode (ms after first contact, any value, not only a named moment), with its own
+ * camera (`Frame.camera`). `recording`: the hash of the recording it was pinned on; when the
+ * scene is re-simulated it differs, and the pin is flagged "check after re-simulation". */
+export interface FramePin {
+  at_ms: number;
+  recording: string;
+  /** The named moment it is nearest, as a label only. */
+  label?: string | null;
+  pinned: string;
 }
 
 /** An image in the library and what is known about it. */
 export interface Frame {
   id: string;
   shot: string | null;
-  /** The image file in the library (gitignored); null when it is not on disk yet. */
+  /** The image file in the workspace's library/ (never committed); null when it is not there yet. */
   image: { file: string; width: number; height: number; sha256: string } | null;
   moment: { label: string; after_impact_ms: number | null };
   /** Seconds into the shot's video, when it came from one. */
@@ -89,11 +95,13 @@ export interface Frame {
   /** A view label: side, top, three-quarter, ... */
   view: string;
   notes: string;
-  /** The Rubble moment and named scenario camera this frame is compared with (null: picked
-   * from the moment label and the view). */
+  /** The Rubble moment and named scenario camera this frame is compared with when it has no
+   * pin (null: picked from the moment label and the view). */
   rubble: { moment: string | null; camera: string | null };
   /** This image's own camera, set by hand; used instead of the named camera when present. */
   camera: FrameCamera | null;
+  /** Its time in the recorded run (set with its camera in Review); used instead of the named moment. */
+  pin?: FramePin | null;
   /** Overrides the shot's before frame. */
   before_frame?: string | null;
   regions: Region[];
@@ -111,7 +119,7 @@ export interface ElementDef {
   rubble?: unknown;
 }
 
-/** A structure kind as data: structures/<id>.json. */
+/** A structure kind as data: structures/<id>.json (the Rust reads its own fields of it). */
 export interface StructureSchema {
   id: string;
   title: string;
@@ -125,16 +133,7 @@ export interface StructureSchema {
   measures: { id: string; label: string; kind: string }[];
 }
 
-export interface Scenario {
-  id: string;
-  title: string;
-  designs: string[];
-  cameras: { name: string; eye: number[]; target: number[] }[];
-  moments: { name: string; after_impact_ms: number }[];
-  reference: { video: string; at_s: number[]; real_test: string };
-}
-
-export type Status = 'no image' | 'untraced' | 'traced' | 'paired' | 'linked';
+export type Status = 'no image' | 'untraced' | 'traced' | 'paired' | 'linked' | 'pinned';
 
 export interface FrameSummary {
   id: string;
@@ -146,4 +145,9 @@ export interface FrameSummary {
   regions: number;
   traced: number;
   status: Status[];
+}
+
+/** A traced element has data. */
+export function hasData(v: ElementValue | undefined): boolean {
+  return !!v && (!!v.p || (!!v.pts && v.pts.length > 0) || !!v.c);
 }

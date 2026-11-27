@@ -27,11 +27,12 @@ pub const AFTER_IMPACT_S: f32 = 1.0;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S05",
-        title: "Tractor unit T-bones a stationary sedan, 70 km/h",
+        id: "S05".into(),
+        title: "Tractor unit T-bones a stationary sedan, 70 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[203, 209], real_test: "TV test: a loaded truck at about 70-80 km/h into the side of a stationary car" },
-        designs: &["truck_cab", "sedan"],
-        layout: |extent, j| {
+        designs: names(&["truck_cab", "sedan"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let (c, t) = (extent("sedan"), extent("truck_cab"));
             let v = KMH / 3.6 * j.speed;
             let (front, rear) = c.axles.unwrap_or((c.lo.z + 0.2 * c.length(), c.lo.z + 0.8 * c.length()));
@@ -39,7 +40,7 @@ pub(super) fn scenario() -> CrashScenario {
             // The truck faces −X (yaw −90°), its bumper (`t.hi.z` ahead of its origin) a
             // run-up off the car's left side; its centre line (its own x = 0) on `mid`.
             let x = c.hi.x + RUN_UP_S * v + t.hi.z;
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![
                     Body::new("truck", "truck_cab", Vec3::new(x, 0.0, mid + j.lateral), -0.5 * std::f32::consts::PI + j.yaw, v),
                     Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0),
@@ -47,20 +48,20 @@ pub(super) fn scenario() -> CrashScenario {
                 boxes: vec![],
                 impact_s: RUN_UP_S,
             }
-        },
+        }),
         secs_after_impact: AFTER_IMPACT_S,
         // The truck strikes the car's left side (x ≈ 0.9) at z ≈ −1.4 and carries it along −X.
-        cameras: &[
-            Camera { name: "front of car, low", eye: [-1.0, 0.6, 6.0], target: [-1.0, 0.7, -1.4] },
-            Camera { name: "aftermath", eye: [-14.0, 3.0, 6.0], target: [-10.0, 0.8, -1.4] },
-            Camera { name: "top", eye: [-5.0, 16.0, -1.39], target: [-5.0, 0.0, -1.4] },
+        cameras: vec![
+            Camera { name: "front of car, low".into(), eye: [-1.0, 0.6, 6.0], target: [-1.0, 0.7, -1.4] },
+            Camera { name: "aftermath".into(), eye: [-14.0, 3.0, 6.0], target: [-10.0, 0.8, -1.4] },
+            Camera { name: "top".into(), eye: [-5.0, 16.0, -1.39], target: [-5.0, 0.0, -1.4] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "peak", after_impact_ms: 60.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "peak".into(), after_impact_ms: 60.0 },
             // the car on the truck's face, carried along
-            Moment { name: "carried", after_impact_ms: 250.0 },
-            Moment { name: "rest", after_impact_ms: 950.0 },
+            Moment { name: "carried".into(), after_impact_ms: 250.0 },
+            Moment { name: "rest".into(), after_impact_ms: 950.0 },
         ],
         criteria: || {
             use Tier::*;

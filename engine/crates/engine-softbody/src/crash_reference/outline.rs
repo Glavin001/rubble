@@ -28,7 +28,7 @@ const NEAR: f32 = 0.05;
 /// A look-at camera with its own up and field of view (degrees, vertical), in the
 /// scenario's world frame (the named scenario cameras are relative to the point of impact
 /// too: [`Camera`]).
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize, ts_rs::TS)]
 pub struct FreeCamera {
     pub name: String,
     pub eye: [f32; 3],
@@ -37,6 +37,28 @@ pub struct FreeCamera {
     pub up: [f32; 3],
     #[serde(default = "fov_default")]
     pub fov_y_deg: f32,
+}
+
+/// A reference image's own camera (the Reference Studio's `Frame.camera`), set by hand in
+/// the scenario's world frame: as [`FreeCamera`] without a name, with the region whose crop
+/// is its image.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize, ts_rs::TS)]
+pub struct FrameCamera {
+    pub eye: [f32; 3],
+    pub target: [f32; 3],
+    #[serde(default = "y_up")]
+    pub up: [f32; 3],
+    #[serde(default = "fov_default")]
+    pub fov_y_deg: f32,
+    /// The region it applies to (its crop's aspect), or null for the whole image.
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
+impl FrameCamera {
+    pub fn free(&self, name: &str) -> FreeCamera {
+        FreeCamera { name: name.into(), eye: self.eye, target: self.target, up: self.up, fov_y_deg: self.fov_y_deg }
+    }
 }
 
 fn y_up() -> [f32; 3] {
@@ -540,6 +562,69 @@ pub fn centreline_line(
         .collect()
 }
 
+/// A body's part groups and what its outlines are measured against, fixed for a run: its
+/// groups ([`groups`] over its rest shape and its collision triangles, those that are not
+/// anti-only), its spawn positions and its node masses.
+pub struct BodyParts {
+    pub name: String,
+    pub design: String,
+    pub heading: Vec3,
+    pub parts: Parts,
+    pub p0: Vec<Vec3>,
+    pub mass: Vec<f32>,
+}
+
+impl BodyParts {
+    /// For body `b` of a built run (spawned as `f`) of `t`.
+    pub fn new(b: &super::Body, f: &crate::explicit_beams::ExplicitBeams, t: &Template) -> Self {
+        let rest: Vec<Vec3> = (0..f.nodes.len()).map(|i| t.desc.nodes.get(i).map_or(Vec3::ZERO, |n| Vec3::from(n.position))).collect();
+        let tris: Vec<[u32; 3]> = f.triangles.iter().enumerate().filter(|(k, _)| !f.tri_anti_only(*k)).map(|(_, x)| x.nodes).collect();
+        Self { name: b.name.clone(), design: b.design.clone(), heading: b.heading(), parts: groups(t, &rest, &tris), p0: f.positions(), mass: f.nodes.iter().map(|n| n.mass).collect() }
+    }
+
+    /// Its outlines at one instant (node positions `now`), as `outlines.json` holds a body
+    /// (`crash_outlines`) and the Reference Studio computes it from a recording: per camera
+    /// view its part groups (now and ghost), hood centreline and wheels (pixels), the same in
+    /// the car's own side frame (`car_frame`), and the rear's turn from the start. The one
+    /// function both use, so an outline is the same for the same positions and camera.
+    pub fn outlines(&self, now: &[Vec3], views: &[(String, View)]) -> serde_json::Value {
+        use serde_json::json;
+        let parts = &self.parts;
+        let g = Ghost::fit(parts, &self.p0, now, &self.mass);
+        let ghost: Vec<Vec3> = self.p0.iter().map(|&p| g.apply(p)).collect();
+        let frame = CarFrame::new(parts, now, &g, self.heading);
+        let groups_json = |proj: &dyn Fn(Vec3) -> Option<[f32; 2]>| {
+            let mut groups = serde_json::Map::new();
+            for gr in &parts.groups {
+                groups.insert(gr.name.clone(), json!({ "now": outline(gr, now, proj), "ghost": outline(gr, &ghost, proj) }));
+            }
+            json!({
+                "parts": groups,
+                "hood_centreline": { "now": centreline_line(parts, now, proj), "ghost": centreline_line(parts, &ghost, proj) },
+            })
+        };
+        let hub = |p: &[Vec3], w: &Wheel| 0.5 * (p[w.hub[0]] + p[w.hub[1]]);
+        let mut cams = serde_json::Map::new();
+        for (c, v) in views {
+            let mut o = groups_json(&|p| v.project(p));
+            o["wheels"] = json!(parts
+                .wheels
+                .iter()
+                .map(|wh| {
+                    let (c_now, c_gh) = (hub(now, wh), hub(&ghost, wh));
+                    json!({ "name": wh.name, "now": { "c": v.project(c_now), "r": v.radius_px(c_now, wh.radius) }, "ghost": { "c": v.project(c_gh), "r": v.radius_px(c_gh, wh.radius) } })
+                })
+                .collect::<Vec<_>>());
+            cams.insert(c.clone(), o);
+        }
+        let mut car = groups_json(&|p| Some(frame.side(p)));
+        car["wheels"] = json!(parts.wheels.iter().map(|wh| json!({ "name": wh.name, "r": wh.radius, "now": frame.side(hub(now, wh)), "ghost": frame.side(hub(&ghost, wh)) })).collect::<Vec<_>>());
+        // The cabin and rear's turn from the start: yaw (+ toward its left), pitch (+ nose down, rear up).
+        let (yaw, pitch, _) = super::metrics::yaw_pitch_roll(g.r, self.heading);
+        json!({ "name": self.name, "design": self.design, "cameras": cams, "car_frame": car, "fit_nodes": parts.rigid.len(), "rear_yaw_deg": yaw.to_degrees(), "rear_pitch_deg": pitch.to_degrees() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,7 +638,7 @@ mod tests {
         // A unit box 5 m in front of the eye on +Z, 1280 × 720, 60° vertical field of view.
         let v = View::new(
             &Camera {
-                name: "t",
+                name: "t".into(),
                 eye: [0.0, 0.0, 5.0],
                 target: [0.0, 0.0, 0.0],
             },
@@ -586,7 +671,7 @@ mod tests {
 
     #[test]
     fn a_free_camera_with_its_own_up_and_field_of_view() {
-        let named = Camera { name: "t", eye: [0.0, 0.0, 5.0], target: [0.0, 0.0, 0.0] };
+        let named = Camera { name: "t".into(), eye: [0.0, 0.0, 5.0], target: [0.0, 0.0, 0.0] };
         let free = FreeCamera::from(&named);
         let (a, b) = (View::new(&named, 1280.0, 720.0), View::look(&free, 1280.0, 720.0));
         assert_eq!(a.project(Vec3::new(0.3, 0.2, 0.1)), b.project(Vec3::new(0.3, 0.2, 0.1)));
@@ -609,7 +694,7 @@ mod tests {
         // As S02's top camera: the eye a centimetre to +x of straight above.
         let v = View::new(
             &Camera {
-                name: "top",
+                name: "top".into(),
                 eye: [0.01, 5.0, 0.0],
                 target: [0.0, 0.0, 0.0],
             },

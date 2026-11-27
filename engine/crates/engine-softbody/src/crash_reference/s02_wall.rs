@@ -10,36 +10,37 @@ const KMH: f32 = 50.0;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S02",
-        title: "SUV into a full-width rigid wall, 50 km/h",
+        id: "S02".into(),
+        title: "SUV into a full-width rigid wall, 50 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[130], real_test: "Euro NCAP full-width rigid barrier, 50 km/h" },
-        designs: &["suv_4x4"],
-        layout: |extent, j| {
+        designs: names(&["suv_4x4"]),
+        recreated: false,
+        layout: code(|extent, j| {
             let e = extent("suv_4x4");
             let v = KMH / 3.6 * j.speed;
             // A tenth of a second of travel before the wall.
             let gap = 0.1 * v;
             let face = e.hi.z + gap;
-            Layout {
+            Layout { box_yaw: Vec::new(),
                 bodies: vec![Body::new("car", "suv_4x4", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
                 boxes: vec![(Vec3::new(0.0, 2.0, face + 0.5), Vec3::new(0.5 * e.width() + 1.0, 2.0, 0.5))],
                 impact_s: 0.1,
             }
-        },
+        }),
         secs_after_impact: 0.5,
-        cameras: &[
+        cameras: vec![
             // Framed as the reference footage (60° vertical field of view, 16:9): the SUV (z −2.3 to
             // 2.2 at impact) fills about two thirds of the width, the wall at the left of the side view.
-            Camera { name: "side", eye: [4.6, 1.1, -0.3], target: [0.0, 0.8, -0.3] },
+            Camera { name: "side".into(), eye: [4.6, 1.1, -0.3], target: [0.0, 0.8, -0.3] },
             // Straight down, the car's length across the frame, travelling right to left into the wall
             // at the left as in the reference's top view (the eye a centimetre to +x of the target
             // fixes the picture's up as −x).
-            Camera { name: "top", eye: [0.01, 5.6, 0.0], target: [0.0, 0.8, 0.0] },
+            Camera { name: "top".into(), eye: [0.01, 5.6, 0.0], target: [0.0, 0.8, 0.0] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "peak", after_impact_ms: 70.0 },
-            Moment { name: "rest", after_impact_ms: 450.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "peak".into(), after_impact_ms: 70.0 },
+            Moment { name: "rest".into(), after_impact_ms: 450.0 },
         ],
         criteria: || {
             use Tier::*;

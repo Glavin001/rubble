@@ -3,16 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Reference Studio: a local app to collect crash reference images, trace structures on them, link them to Rubble scenarios and compare shapes",
+  "description": "Reference Studio: a static web app to collect crash reference images, trace them, recreate the crash in Rubble (WebGPU, in the page) and compare shapes",
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
     "dev": "vite",
+    "engine": "node scripts/engine-assets.ts engine --link",
+    "designs": "node scripts/engine-assets.ts designs",
     "build": "tsc && vite build",
     "typecheck": "tsc",
     "preview": "vite preview",
-    "import-prototype": "node scripts/import-prototype.ts",
     "check-data": "node scripts/check-data.ts",
     "test": "node --test tests/*.test.ts",
     "smoke": "node tests/smoke.ts"
@@ -20,12 +21,14 @@
   "dependencies": {
     "@w3c/webmcp-polyfill": "0.2.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "three": "0.186.1"
   },
   "devDependencies": {
     "@types/node": "22.20.7",
     "@types/react": "19.3.3",
     "@types/react-dom": "19.3.0",
+    "@types/three": "0.186.0",
     "@vitejs/plugin-react": "4.7.0",
     "typescript": "5.9.3",
     "vite": "6.4.6"

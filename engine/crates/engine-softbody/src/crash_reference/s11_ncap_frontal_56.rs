@@ -27,21 +27,22 @@ pub const KMH: f32 = 56.3;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
-        id: "S11",
-        title: "NHTSA NCAP frontal: sedan into a full-width rigid wall, 56.3 km/h",
+        id: "S11".into(),
+        title: "NHTSA NCAP frontal: sedan into a full-width rigid wall, 56.3 km/h".into(),
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA NCAP frontal rigid barrier, 56.3 km/h (tests 8545, 7520: 2012-14 Toyota Camry)" },
-        designs: &["sedan"],
-        layout: |extent, j| wall_layout(extent("sedan"), KMH / 3.6 * j.speed, j),
+        designs: names(&["sedan"]),
+        recreated: false,
+        layout: code(|extent, j| wall_layout(extent("sedan"), KMH / 3.6 * j.speed, j)),
         secs_after_impact: 0.4,
-        cameras: &[
-            Camera { name: "side", eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },
-            Camera { name: "top", eye: [0.01, 12.0, -1.5], target: [0.0, 0.0, -1.5] },
+        cameras: vec![
+            Camera { name: "side".into(), eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },
+            Camera { name: "top".into(), eye: [0.01, 12.0, -1.5], target: [0.0, 0.0, -1.5] },
         ],
-        moments: &[
-            Moment { name: "before", after_impact_ms: -10.0 },
-            Moment { name: "peak", after_impact_ms: 45.0 },
-            Moment { name: "max_crush", after_impact_ms: 72.0 },
-            Moment { name: "rest", after_impact_ms: 350.0 },
+        moments: vec![
+            Moment { name: "before".into(), after_impact_ms: -10.0 },
+            Moment { name: "peak".into(), after_impact_ms: 45.0 },
+            Moment { name: "max_crush".into(), after_impact_ms: 72.0 },
+            Moment { name: "rest".into(), after_impact_ms: 350.0 },
         ],
         criteria: || {
             use Tier::*;
@@ -68,7 +69,7 @@ pub(super) fn scenario() -> CrashScenario {
 /// `v` (the jitter's speed applied) moved and turned by the jitter.
 pub(super) fn wall_layout(e: Extent, v: f32, j: Jitter) -> Layout {
     let face = e.hi.z + 0.1 * v;
-    Layout {
+    Layout { box_yaw: Vec::new(),
         bodies: vec![Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
         boxes: vec![(Vec3::new(0.0, 2.0, face + 0.5), Vec3::new(0.5 * e.width() + 1.0, 2.0, 0.5))],
         impact_s: 0.1,
