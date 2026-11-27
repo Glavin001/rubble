@@ -1,0 +1,27 @@
+{
+ "id": "S11_nhtsa8545_right-front-half_30ms",
+ "shot": "S11_nhtsa8545",
+ "image": {
+  "file": "S11_nhtsa8545/S11_nhtsa8545_right-front-half_30ms.jpg",
+  "width": 1024,
+  "height": 1056,
+  "sha256": "caf67569d5f51947aa6326a2e4e3d5d2530fed066cc8af29cf17907b70d0685c"
+ },
+ "moment": {
+  "label": "first force peak",
+  "after_impact_ms": 30.0
+ },
+ "time": {
+  "video_s": 3.2,
+  "approximate": false
+ },
+ "view": "side",
+ "notes": "Camera No. 9 - Right Front Half.avi (v08545C015.avi), file frame 80; +30 ms after first contact. Camera: camera 9, right front half: from the car's right (10.2 m), level with the hood; wall at the right of the image.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:44:07.000Z"
+}

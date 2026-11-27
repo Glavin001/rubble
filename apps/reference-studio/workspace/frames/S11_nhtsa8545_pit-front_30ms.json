@@ -1,0 +1,27 @@
+{
+ "id": "S11_nhtsa8545_pit-front_30ms",
+ "shot": "S11_nhtsa8545",
+ "image": {
+  "file": "S11_nhtsa8545/S11_nhtsa8545_pit-front_30ms.jpg",
+  "width": 1024,
+  "height": 1056,
+  "sha256": "aaa94ccce4986ba79f0aeb2426193553b1920da10ef0cc64e1ccf22c4c38a06a"
+ },
+ "moment": {
+  "label": "first force peak",
+  "after_impact_ms": 30.0
+ },
+ "time": {
+  "video_s": 3.2,
+  "approximate": false
+ },
+ "view": "below",
+ "notes": "Camera No. 14 - Pit Front.avi (v08545C006.avi), file frame 80; +30 ms after first contact. Camera: camera 14, pit front: from below the floor through the glass pit, ~1 m behind the wall face looking up; the wall is at the left of the image, the car runs right to left.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:44:07.000Z"
+}

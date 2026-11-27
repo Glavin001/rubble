@@ -1,0 +1,16 @@
+{
+ "id": "S11_nhtsa7520",
+ "title": "S11 real: 2012 Toyota Camry, NHTSA 7520 (NCAP frontal, rigid wall, 56.3 km/h)",
+ "source": {
+  "kind": "screenshots",
+  "note": "Stills read off NHTSA test 7520's high-speed films (public domain US government work; never committed) by camry_frontal.py studio, at exact frames: ms after first contact from each film's note in engine/docs/crash-reference/nhtsa/media/7520.json. Film URLs there."
+ },
+ "rubble": {
+  "scenario": "S11",
+  "contact": "edge",
+  "run": 0
+ },
+ "before_frame": "S11_nhtsa7520_left-front-half_0ms",
+ "notes": "Frames' times are exact to the film's frame (1 ms); see engine/docs/crash-reference/camry-frontal-comparison.md.",
+ "updated": "2026-11-27T19:44:07.000Z"
+}

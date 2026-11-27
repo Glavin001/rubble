@@ -1,0 +1,27 @@
+{
+ "id": "S11_nhtsa8545_windshield-overhead_0ms",
+ "shot": "S11_nhtsa8545",
+ "image": {
+  "file": "S11_nhtsa8545/S11_nhtsa8545_windshield-overhead_0ms.jpg",
+  "width": 1024,
+  "height": 1056,
+  "sha256": "9c2db0f25fccef57731f8ace885f9a7d0f513619547068ccb976c21244c244c3"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": 0.0
+ },
+ "time": {
+  "video_s": 2.0,
+  "approximate": false
+ },
+ "view": "top",
+ "notes": "Camera No. 11 - Windshield.avi (v08545C003.avi), file frame 50; +0 ms after first contact. Camera: camera 11, windshield: overhead, from above and behind the wall (X -533 mm, 3.3 m up), looking down on the hood and windshield.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T19:44:07.000Z"
+}

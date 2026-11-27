@@ -1,0 +1,1432 @@
+{
+ "test": 7520,
+ "source": "NHTSA Vehicle Crash Test Database (public domain, US government)",
+ "scenario": "S11",
+ "summary": "2012 Toyota Camry LE 4-door (VIN 4T4BF1FK1CR157833), NCAP full-frontal into a rigid wall at 56.3 km/h, MGA Research, 2011-11-15. Test mass 1662.1 kg (curb 1459). 14 high-speed films at 1000 fps with each camera frame written 3 times; caption 0.00 ms at file frames 150-152 (all 14 films). Same sequence and timing as 8545 by eye in camera 3: hood tent by 30 ms, folded by 85 ms. Sensor: wall-force peaks 304 kN at 13 ms, 829 kN at 30 ms, 583 kN at 56 ms; maximum travel 0.685 m at 76 ms; rebound 0.89 m/s; separation 88.3 ms (report). Post-test (report): crush C1..C6 364, 478, 531, 535, 489, 400 mm (damage width 1282 mm); wheelbase -56 mm left, -52 mm right. Comparison with Rubble: engine/docs/crash-reference/camry-frontal-comparison.md.",
+ "sources": [
+  "report v07520R001.pdf (MGA NCAP-MGA-2012-027, 164 pages): PDF p. 10 (Data Sheet 1 cont., p. 6): weights (UVW 1459.0 kg, ATW 1662.1 kg, front/rear 946.8/715.3 kg), CG 1194 mm aft of front axle as tested, wheelbase 2774 mm",
+  "PDF p. 18 (Data Sheet 6 cont., p. 14): camera table: cameras 2-15 at 1000 fps, cameras 1 and 18 real time 30 fps; 16 and 17 not used",
+  "PDF p. 26 (Data Sheet 13, p. 22): impact 56.3 km/h, velocity change 59.7 km/h, time of separation 88.3 ms, crush profile C1-C6, damage width 1282 mm",
+  "PDF p. 27 (Data Sheet 14, p. 23): wheelbase 2774 -> 2718 left, 2722 right; door openings unchanged",
+  "PDF p. 3 (abstract), p. 5 and p. 25: maximum crush 579 mm at the centreline (length at centreline 4809 -> 4230 mm)",
+  "report v07520R002.pdf: the airbag module's event data (Bosch CDR), not used here",
+  "sensor curves: engine/docs/crash-reference/nhtsa/7520.json"
+ ],
+ "items": [
+  {
+   "kind": "photo",
+   "file": "photos/v07520P001.jpg",
+   "name": "No. 001 Load Cell Location.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P001.jpg",
+   "bytes": 906511,
+   "note": {
+    "phase": null,
+    "subject": "barrier",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P002.jpg",
+   "name": "No. 002 Load Cell Wall.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P002.jpg",
+   "bytes": 1297891,
+   "note": {
+    "phase": null,
+    "subject": "barrier",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P003.jpg",
+   "name": "No. 003 Manufacturer Label.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P003.jpg",
+   "bytes": 2580767,
+   "note": {
+    "phase": null,
+    "subject": "labels",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P004.jpg",
+   "name": "No. 004 Tire Placard.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P004.jpg",
+   "bytes": 2589286,
+   "note": {
+    "phase": null,
+    "subject": "labels",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P005.jpg",
+   "name": "No. 005 Vehicle Frontal As Delivered FOR WEB.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P005.jpg",
+   "bytes": 1680746,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior front",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P006.jpg",
+   "name": "No. 006 Left Rear 3-4 View, As Received.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P006.jpg",
+   "bytes": 1961617,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior left-rear 3/4",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P007.jpg",
+   "name": "No. 007 Pre-Test Front View of Test Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P007.jpg",
+   "bytes": 709580,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior front",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P008.jpg",
+   "name": "No. 008 Post-Test Front View of Test Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P008.jpg",
+   "bytes": 916676,
+   "note": {
+    "phase": "post-test",
+    "subject": "exterior front",
+    "from": "the lab's file name",
+    "seen": "seen: hood folded up into a ridge across the front, fascia crushed",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P009.jpg",
+   "name": "No. 009 Pre-Test Left View of Test Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P009.jpg",
+   "bytes": 887781,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior left",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P010.jpg",
+   "name": "No. 010 Post-Test Left View of Test Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P010.jpg",
+   "bytes": 842087,
+   "note": {
+    "phase": "post-test",
+    "subject": "exterior left",
+    "from": "the lab's file name",
+    "seen": "seen: left side; front crushed to the wheel, hood peak",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P011.jpg",
+   "name": "No. 011 Pre-Test Right View of Test Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P011.jpg",
+   "bytes": 773552,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior right",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P012.jpg",
+   "name": "No. 012 Post-Test Right View of Test Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P012.jpg",
+   "bytes": 867369,
+   "note": {
+    "phase": "post-test",
+    "subject": "exterior right",
+    "from": "the lab's file name",
+    "seen": "seen: right side; front crushed, hood peak",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P013.jpg",
+   "name": "No. 013 Pre-Test Right Front 3-4 View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P013.jpg",
+   "bytes": 764482,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior right-front 3/4",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P014.jpg",
+   "name": "No. 014 Post-Test Right Front 3-4 View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P014.jpg",
+   "bytes": 876350,
+   "note": {
+    "phase": "post-test",
+    "subject": "exterior right-front 3/4",
+    "from": "the lab's file name",
+    "shows_final_shape": true,
+    "seen": "not looked at; inferred from the name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P015.jpg",
+   "name": "No. 015 Pre-Test Left Rear 3-4 View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P015.jpg",
+   "bytes": 867819,
+   "note": {
+    "phase": "pre-test",
+    "subject": "exterior left-rear 3/4",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P016.jpg",
+   "name": "No. 016 Post-Test Left Rear 3-4 View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P016.jpg",
+   "bytes": 897951,
+   "note": {
+    "phase": "post-test",
+    "subject": "exterior left-rear 3/4",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P017.jpg",
+   "name": "No. 017 Pre-Test Windshield View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P017.jpg",
+   "bytes": 1017355,
+   "note": {
+    "phase": "pre-test",
+    "subject": "windshield",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P018.jpg",
+   "name": "No. 018 Post-Test Windshield View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P018.jpg",
+   "bytes": 1123587,
+   "note": {
+    "phase": "post-test",
+    "subject": "windshield",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P019.jpg",
+   "name": "No. 019 Pre-Test Engine Compartment View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P019.jpg",
+   "bytes": 1264336,
+   "note": {
+    "phase": "pre-test",
+    "subject": "engine bay",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P020.jpg",
+   "name": "No. 020 Post-Test Engine Compartment View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P020.jpg",
+   "bytes": 1297617,
+   "note": {
+    "phase": "post-test",
+    "subject": "engine bay",
+    "from": "the lab's file name",
+    "seen": "seen: engine bay; components pushed back, windshield cracked",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P021.jpg",
+   "name": "No. 021 Pre-Test Fuel Filler Cap View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P021.jpg",
+   "bytes": 901040,
+   "note": {
+    "phase": "pre-test",
+    "subject": "fuel system",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P022.jpg",
+   "name": "No. 022 Post-Test Fuel Filler Cap View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P022.jpg",
+   "bytes": 874130,
+   "note": {
+    "phase": "post-test",
+    "subject": "fuel system",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P023.jpg",
+   "name": "No. 023 Pre-Test Front Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P023.jpg",
+   "bytes": 1419114,
+   "note": {
+    "phase": "pre-test",
+    "subject": "underbody",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P024.jpg",
+   "name": "No. 024 Post-Test Front Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P024.jpg",
+   "bytes": 1255244,
+   "note": {
+    "phase": "post-test",
+    "subject": "underbody",
+    "from": "the lab's file name",
+    "seen": "seen: front underbody (subframe and engine painted for the cameras)",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P025.jpg",
+   "name": "No. 024a Pre-Test Mid Front Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P025.jpg",
+   "bytes": 1247165,
+   "note": {
+    "phase": "pre-test",
+    "subject": "underbody",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P026.jpg",
+   "name": "No. 024b Post-Test Mid Front Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P026.jpg",
+   "bytes": 1097195,
+   "note": {
+    "phase": "post-test",
+    "subject": "underbody",
+    "from": "the lab's file name",
+    "seen": "seen: mid front underbody: floor, tunnel, rocker rails painted green",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P027.jpg",
+   "name": "No. 024c Pre-Test Mid Rear Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P027.jpg",
+   "bytes": 1337278,
+   "note": {
+    "phase": "pre-test",
+    "subject": "underbody",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P028.jpg",
+   "name": "No. 024d Post-Test Mid Rear Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P028.jpg",
+   "bytes": 1118297,
+   "note": {
+    "phase": "post-test",
+    "subject": "underbody",
+    "from": "the lab's file name",
+    "seen": "seen: mid rear underbody: fuel tank (red) and floor",
+    "shows_final_shape": true
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P029.jpg",
+   "name": "No. 025 Pre-Test Rear Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P029.jpg",
+   "bytes": 1247158,
+   "note": {
+    "phase": "pre-test",
+    "subject": "underbody",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P030.jpg",
+   "name": "No. 026 Post-Test Rear Underbody View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P030.jpg",
+   "bytes": 1086357,
+   "note": {
+    "phase": "post-test",
+    "subject": "underbody",
+    "from": "the lab's file name",
+    "shows_final_shape": true,
+    "seen": "not looked at; inferred from the name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P031.jpg",
+   "name": "No. 027 Pre-Test Dummy Cable Routing.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P031.jpg",
+   "bytes": 1052099,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P032.jpg",
+   "name": "No. 028 Post-Test Dummy Cable Routing.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P032.jpg",
+   "bytes": 981790,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P033.jpg",
+   "name": "No. 029 Pre-Test Driver Dummy Front View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P033.jpg",
+   "bytes": 866463,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P034.jpg",
+   "name": "No. 030 Post-Test Driver Dummy Front View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P034.jpg",
+   "bytes": 972913,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P035.jpg",
+   "name": "No. 031 Pre-Test Driver Dummy Window View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P035.jpg",
+   "bytes": 801720,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P036.jpg",
+   "name": "No. 037 Pre-Test Driver Dummy Feet.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P036.jpg",
+   "bytes": 926459,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P037.jpg",
+   "name": "No. 032 Post-Test Driver Dummy Window View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P037.jpg",
+   "bytes": 825625,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P038.jpg",
+   "name": "No. 033 Pre-Test Driver Dummy and Vehicle Interior View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P038.jpg",
+   "bytes": 863243,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P039.jpg",
+   "name": "No. 034 Post-Test Driver Dummy and Vehicle Interior View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P039.jpg",
+   "bytes": 944706,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P040.jpg",
+   "name": "No. 035 Pre-Test Driver Seat Fore-Aft Markings.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P040.jpg",
+   "bytes": 909975,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P041.jpg",
+   "name": "No. 036 Post-Test Driver Seat Fore-Aft Markings.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P041.jpg",
+   "bytes": 1187477,
+   "note": {
+    "phase": "post-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P042.jpg",
+   "name": "No. 038 Post-Test Driver Dummy Feet.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P042.jpg",
+   "bytes": 748482,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P043.jpg",
+   "name": "No. 039 Pre-Test Driver Side Knee Bolster.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P043.jpg",
+   "bytes": 873690,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P044.jpg",
+   "name": "No. 040 Post-Test Driver Side Knee Bolster.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P044.jpg",
+   "bytes": 877210,
+   "note": {
+    "phase": "post-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P045.jpg",
+   "name": "No. 041 Pre-Test Driver Side Floorpan.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P045.jpg",
+   "bytes": 2021479,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P046.jpg",
+   "name": "No. 042 Post-Test Driver Side Floorpan.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P046.jpg",
+   "bytes": 1264985,
+   "note": {
+    "phase": "post-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P047.jpg",
+   "name": "No. 043 Post-Test Driver Dummy Face.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P047.jpg",
+   "bytes": 958797,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P048.jpg",
+   "name": "No. 044 Post-Test Driver Dummy Contact with Airbag.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P048.jpg",
+   "bytes": 859626,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P049.jpg",
+   "name": "No. 044a Post-Test Driver Dummy Contact with Knee Airbag.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P049.jpg",
+   "bytes": 1011454,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P050.jpg",
+   "name": "No. 045 Post-Test Driver Dummy Contact with Headrest.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P050.jpg",
+   "bytes": 1073849,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P051.jpg",
+   "name": "No. 046 Pre-Test View of the Steering Wheel.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P051.jpg",
+   "bytes": 822573,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P052.jpg",
+   "name": "No. 047 Post-Test View of the Steering Wheel.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P052.jpg",
+   "bytes": 671044,
+   "note": {
+    "phase": "post-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P053.jpg",
+   "name": "No. 048 Pre-Test Passenger Dummy Front View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P053.jpg",
+   "bytes": 811194,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P054.jpg",
+   "name": "No. 049 Post-Test Passenger Dummy Front View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P054.jpg",
+   "bytes": 825688,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P055.jpg",
+   "name": "No. 050 Pre-Test Passenger Dummy Window View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P055.jpg",
+   "bytes": 812387,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P056.jpg",
+   "name": "No. 051 Post-Test Passenger Dummy Window View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P056.jpg",
+   "bytes": 1026127,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P057.jpg",
+   "name": "No. 052 Pre-Test Passenger Dummy and Vehicle Interior View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P057.jpg",
+   "bytes": 891657,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P058.jpg",
+   "name": "No. 056 Pre-Test Passenger Dummy Feet.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P058.jpg",
+   "bytes": 844578,
+   "note": {
+    "phase": "pre-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P059.jpg",
+   "name": "No. 053 Post-Test Passenger Dummy and Vehicle Interior View.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P059.jpg",
+   "bytes": 1064410,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P060.jpg",
+   "name": "No. 054 Pre-Test Passenger Seat Fore-Aft Markings.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P060.jpg",
+   "bytes": 874170,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P061.jpg",
+   "name": "No. 055 Post-Test Passenger Seat Fore-Aft Markings.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P061.jpg",
+   "bytes": 1051085,
+   "note": {
+    "phase": "post-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P062.jpg",
+   "name": "No. 057 Post-Test Passenger Dummy Feet.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P062.jpg",
+   "bytes": 931581,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P063.jpg",
+   "name": "No. 058 Pre-Test Passenger Side Knee Bolster.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P063.jpg",
+   "bytes": 789859,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P064.jpg",
+   "name": "No. 059 Post-Test Passenger Side Knee Boslter.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P064.jpg",
+   "bytes": 1098288,
+   "note": {
+    "phase": "post-test",
+    "subject": "other",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P065.jpg",
+   "name": "No. 060 Pre-Test Passenger Side Floorpan.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P065.jpg",
+   "bytes": 2142378,
+   "note": {
+    "phase": "pre-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P066.jpg",
+   "name": "No. 061 Post-Test Passenger Side Floorpan.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P066.jpg",
+   "bytes": 1382723,
+   "note": {
+    "phase": "post-test",
+    "subject": "interior",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P067.jpg",
+   "name": "No. 062 Post-Test Passenger Dummy Contact with Airbag.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P067.jpg",
+   "bytes": 874252,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P068.jpg",
+   "name": "No. 062a Post-Test Passenger Dummy Contact with Knee Airbag.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P068.jpg",
+   "bytes": 1205102,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P069.jpg",
+   "name": "No. 062b Post-Test Passenger Dummy Contact with Headrest.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P069.jpg",
+   "bytes": 900525,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P070.jpg",
+   "name": "No. 062c Post-Test Passenger Dummy Contact with Seat Back.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P070.jpg",
+   "bytes": 827276,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P071.jpg",
+   "name": "No. 063 Photograph of Ballast Installed in Vehicle.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P071.jpg",
+   "bytes": 882297,
+   "note": {
+    "phase": null,
+    "subject": "test weight",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P072.jpg",
+   "name": "No. 064 Post-Test Stoddard Solvent Spillage Location View.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P072.jpg",
+   "bytes": 15444,
+   "note": {
+    "phase": "post-test",
+    "subject": "fuel system",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P073.jpg",
+   "name": "No. 065 Post-Test Speed Trap Read-out.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P073.jpg",
+   "bytes": 755972,
+   "note": {
+    "phase": "post-test",
+    "subject": "test conditions",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P074.jpg",
+   "name": "No. 066 Vehicle at 0 on Static Rollover Device.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P074.jpg",
+   "bytes": 916277,
+   "note": {
+    "phase": null,
+    "subject": "static rollover (FMVSS 301)",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P075.jpg",
+   "name": "No. 067 Vehicle at 90 on Static Rollover Device.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P075.jpg",
+   "bytes": 1172653,
+   "note": {
+    "phase": null,
+    "subject": "static rollover (FMVSS 301)",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P076.jpg",
+   "name": "No. 068 Vehicle at 180 on Static Rollover Device.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P076.jpg",
+   "bytes": 1033086,
+   "note": {
+    "phase": null,
+    "subject": "static rollover (FMVSS 301)",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P077.jpg",
+   "name": "No. 071 Vehicle Frontal Impact FOR WEB.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P077.jpg",
+   "bytes": 377237,
+   "note": {
+    "phase": null,
+    "subject": "impact (still of the event)",
+    "from": "the lab's file name",
+    "seen": "seen: the web still of the impact event (side), not the final shape",
+    "shows_final_shape": false
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P078.jpg",
+   "name": "No. 069 Vehicle at 270 on Static Rollover Device.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P078.jpg",
+   "bytes": 904406,
+   "note": {
+    "phase": null,
+    "subject": "static rollover (FMVSS 301)",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P079.jpg",
+   "name": "No. 070 Vehicle at 360 on Static Rollover Device.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P079.jpg",
+   "bytes": 951285,
+   "note": {
+    "phase": null,
+    "subject": "static rollover (FMVSS 301)",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P080.jpg",
+   "name": "No. 072 Monroney Label Photograph.jpg",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P080.jpg",
+   "bytes": 575457,
+   "note": {
+    "phase": null,
+    "subject": "labels",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P081.jpg",
+   "name": "No. 073 Load Carrying Capacity Reduced Label.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P081.jpg",
+   "bytes": 852210,
+   "note": {
+    "phase": null,
+    "subject": "labels",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "photo",
+   "file": "photos/v07520P082.jpg",
+   "name": "No. 074 Post-Test Driver Dummy Hand Out Window.JPG",
+   "url": "https://nrd-static.nhtsa.dot.gov/photos/vehdb/v00000/v07500/v07520P082.jpg",
+   "bytes": 886455,
+   "note": {
+    "phase": "post-test",
+    "subject": "dummies",
+    "from": "the lab's file name"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C001.avi",
+   "name": "Camera No. 10 - Right Angle.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C001.avi",
+   "bytes": 11077328,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C001.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 10, right angle: from the right and behind, raised",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C002.avi",
+   "name": "Camera No. 11 - Windshield.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C002.avi",
+   "bytes": 11022090,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C002.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 11, windshield: overhead, looking down on the hood and windshield",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "occupant or context view; not used for structure"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C003.avi",
+   "name": "Camera No. 12 - Driver Windshield.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C003.avi",
+   "bytes": 7719650,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C003.mp4",
+   "probe": {
+    "width": 512,
+    "height": 768,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 12, driver windshield",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "occupant or context view; not used for structure"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C004.avi",
+   "name": "Camera No. 13 - Passenger Windshield.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C004.avi",
+   "bytes": 10820668,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C004.mp4",
+   "probe": {
+    "width": 512,
+    "height": 768,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 13, passenger windshield",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "occupant or context view; not used for structure"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C005.avi",
+   "name": "Camera No. 14 - Pit Front.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C005.avi",
+   "bytes": 10937886,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C005.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 896,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 14, pit front: from below the front underbody",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C006.avi",
+   "name": "Camera No. 15 - Pit Rear.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C006.avi",
+   "bytes": 10889292,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C006.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 896,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 15, pit rear: from below, further back",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C007.avi",
+   "name": "Camera No. 2 -Driver Close-Up.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C007.avi",
+   "bytes": 11127906,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C007.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 2, driver close-up",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "occupant or context view; not used for structure"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C008.avi",
+   "name": "Camera No. 3 - Left Front Half.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C008.avi",
+   "bytes": 11046504,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C008.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 3, left front half: from the car's left (5.1 m), wall at the left",
+    "moments": [
+     {
+      "frame": 150,
+      "ms": 0,
+      "what": "caption 0.00 ms; bumper at the wall face by eye (within 2 ms)"
+     },
+     {
+      "frame": 210,
+      "ms": 20,
+      "what": "front fascia crushed, hood's front edge starting to lift"
+     },
+     {
+      "frame": 240,
+      "ms": 30,
+      "what": "hood tent formed, ridge about a third back from the front"
+     },
+     {
+      "frame": 270,
+      "ms": 40,
+      "what": "tent high; fender behind the headlamp crumpling"
+     },
+     {
+      "frame": 315,
+      "ms": 55,
+      "what": "front wheel close to the crushed front; fender wrinkled over it"
+     },
+     {
+      "frame": 405,
+      "ms": 85,
+      "what": "hood folded into two panels, front panel steep"
+     },
+     {
+      "frame": 513,
+      "ms": 121,
+      "what": "car moving back"
+     },
+     {
+      "frame": 1020,
+      "ms": 290,
+      "what": "a hood panel stands up; car a little back from the wall"
+     }
+    ],
+    "look": "as 8545's camera 3: the 2012 car's crash looks the same in sequence and timing by eye",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C009.avi",
+   "name": "Camera No. 4 - Left Angle.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C009.avi",
+   "bytes": 10248466,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C009.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 4, left angle",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C010.avi",
+   "name": "Camera No. 5 - Steering Column - Top.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C010.avi",
+   "bytes": 10979828,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C010.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 5, steering column - top (side view through the driver's window)",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C011.avi",
+   "name": "Camera No. 6 - Steering Column - Bottom.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C011.avi",
+   "bytes": 11050514,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C011.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 6, steering column - bottom",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C012.avi",
+   "name": "Camera No. 7 - Right Overall.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C012.avi",
+   "bytes": 11098980,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C012.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 864,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 7, right overall",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C013.avi",
+   "name": "Camera No. 8 - Passenger Close-Up.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C013.avi",
+   "bytes": 11205910,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C013.mp4",
+   "probe": {
+    "width": 768,
+    "height": 512,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 8, passenger close-up",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "occupant or context view; not used for structure"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C014.avi",
+   "name": "Camera No. 9 - Right Front Half.avi",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C014.avi",
+   "bytes": 11074940,
+   "mp4_url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/transcoded/v07520C014.mp4",
+   "probe": {
+    "width": 1536,
+    "height": 1024,
+    "frames": 1082,
+    "playback_fps": 29.97,
+    "duration_s": 36.103
+   },
+   "note": {
+    "view": "camera 9, right front half: from the car's right",
+    "fps_film": 1000,
+    "t0_frame": 150,
+    "file_frames_per_film_frame": 3,
+    "caption": "caption '<t> ms, date, 1,000 fps, Frame: n' (1-based camera frame): every high-speed film reads '0,00 ms ... Frame: 51' at file frames 150-152; checked at file frame 150 in all 14 films",
+    "time_base": "1000 fps (report Data Sheet 6, PDF p. 18); each camera frame is repeated 3 times in the file (1082 file frames)",
+    "moments": [],
+    "look": "not read for this comparison"
+   }
+  },
+  {
+   "kind": "video",
+   "file": "videos/v07520C015.mp4",
+   "name": "Camera No. 1 - Real-Time Left Overall impact for web.wmv",
+   "url": "https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v07500/v07520C015.mp4",
+   "bytes": 770409,
+   "probe": {
+    "width": 720,
+    "height": 400,
+    "frames": 86,
+    "playback_fps": 29.97,
+    "duration_s": 2.87
+   },
+   "note": {
+    "view": "camera 1, real-time left overall, NHTSA's web clip (720x400, 86 frames at 29.97 fps)",
+    "look": "context only",
+    "t0_frame": null,
+    "moments": []
+   }
+  }
+ ]
+}
