@@ -912,6 +912,9 @@ row the step before). It is the best variant measured, not adopted:
 | Side 60 | 5 % | 4–6 % (zones 1,111–1,396) |
 | Head 100 | 12–14 % | 7–10 % (rows −219 / −167 kJ, zones +111 / +91 kJ; 4,662–8,030 zones) |
 
+All of them at once (`DAT_CCD=32 DAT_EXACT=1 DAT_LEVER=1 DAT_E=1 DAT_RESTITUTE=newton`): ball 6 %,
+side 60 4–5 %, head 100 15–17 % (zones 1,309–1,515 taking 99–145 kJ). Worse in head 100.
+
 The guard lowered e in 58–231 passes. In head 100 the zones' positive work on the conserved
 energy (+91 to +111 kJ) is the plainest sign that the zones break rule 1 and must be replaced.
 
