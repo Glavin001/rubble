@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_C006_f148",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_C006_f148.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "eb30c216bc16044404aca4359fa6636b61cdcf746cb60754b6508c37a70c7d04"
+ },
+ "moment": {
+  "label": "100 ms",
+  "after_impact_ms": 100.3
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 14; corner crushed; car yaw -1.0 deg (angular rate sensor) (v08790C006.mp4, film frame 148)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

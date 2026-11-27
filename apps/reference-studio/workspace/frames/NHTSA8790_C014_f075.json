@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_C014_f075",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_C014_f075.webp",
+  "width": 1024,
+  "height": 1056,
+  "sha256": "8a35f6de493c05f12fd11c40e012a4783dc2ba681bfb1fb3a5b08094dface0cc"
+ },
+ "moment": {
+  "label": "25 ms",
+  "after_impact_ms": 25.0
+ },
+ "time": null,
+ "view": "side-left-low",
+ "notes": "camera 8; fender crushed, hood folding up (v08790C014.mp4, film frame 75)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

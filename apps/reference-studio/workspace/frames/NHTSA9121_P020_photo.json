@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9121_P020_photo",
+ "shot": "NHTSA9121",
+ "image": {
+  "file": "NHTSA9121/NHTSA9121_P020_photo.webp",
+  "width": 2000,
+  "height": 1334,
+  "sha256": "aa088b8bf9b265213e16b8722a7d10c815d0def70894f148b96e9a3086256d22"
+ },
+ "moment": {
+  "label": "post-test",
+  "after_impact_ms": null
+ },
+ "time": null,
+ "view": "photo-right-front-34",
+ "notes": "report photo No.020: post-test right front 3/4 (struck side, final shape) (v09121P020.jpg)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

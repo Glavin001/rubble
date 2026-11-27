@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_C004_f060",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_C004_f060.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "944cc444f1f491709a58a6b2a410763cca5325ccf15e5924c8905b1255aaedfd"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": 9.9
+ },
+ "time": null,
+ "view": "side-left-high",
+ "notes": "camera 12; face on the left front corner; bumper cover and fender start to crush (v09124C004.mp4, film frame 60)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

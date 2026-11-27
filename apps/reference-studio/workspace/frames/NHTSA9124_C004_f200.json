@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_C004_f200",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_C004_f200.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "1d29232fb676154f0d32830a5d515885ba9fa9a541ee1564fe6e327205141448"
+ },
+ "moment": {
+  "label": "150 ms",
+  "after_impact_ms": 149.9
+ },
+ "time": null,
+ "view": "side-left-high",
+ "notes": "camera 12; RMDB pitched nose-down, sliding past the car's front (v09124C004.mp4, film frame 200)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_C006_f348",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_C006_f348.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "e5f3834c0ecdedca53d0a6a459ca9abc849b9abf12f9aaaea1ea6ba9b122b01f"
+ },
+ "moment": {
+  "label": "300 ms",
+  "after_impact_ms": 300.3
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 14; RMDB about 35 deg (by eye); car leaving the frame (v08790C006.mp4, film frame 348)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

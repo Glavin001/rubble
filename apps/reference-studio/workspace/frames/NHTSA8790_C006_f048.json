@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_C006_f048",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_C006_f048.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "8eb02b1b80bf91aafc441451e6bc998eed5f9c4b2ff133cee747c540ca567cdd"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": 0.3
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 14 overhead (v08790C006.mp4, film frame 48)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

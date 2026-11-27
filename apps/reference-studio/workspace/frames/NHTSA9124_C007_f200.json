@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_C007_f200",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_C007_f200.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "5291faf3ecb6d469cd133a71b5da679ce90afbdc688fcfaed45be792b46a2f4a"
+ },
+ "moment": {
+  "label": "150 ms",
+  "after_impact_ms": 150.2
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 15; RMDB turned about 10 deg (by eye) (v09124C007.mp4, film frame 200)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

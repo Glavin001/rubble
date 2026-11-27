@@ -1,0 +1,12 @@
+{
+ "id": "NHTSA9124",
+ "title": "NHTSA 9124: RMDB into the left front of a 2012 Camry, 89.7 km/h, 15 deg, 35 % (left oblique)",
+ "source": {
+  "kind": "screenshots",
+  "note": "Stills from NHTSA test 9124's films and photos (public domain, US government; https://nrd-static.nhtsa.dot.gov/videos/vehdb/v00000/v09100/v09124...). Film times from the burned-in captions; first contact per the media index engine/docs/crash-reference/nhtsa/media/9124.json."
+ },
+ "rubble": null,
+ "before_frame": null,
+ "notes": "No Rubble reference scenario yet; the stand-in is engine/docs/crash-reference/scenarios/camry-oblique-left-mdb214.json (camry-oblique-comparison.md).",
+ "updated": "2026-11-27T16:00:00Z"
+}

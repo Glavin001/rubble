@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9121_C002_f160",
+ "shot": "NHTSA9121",
+ "image": {
+  "file": "NHTSA9121/NHTSA9121_C002_f160.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "048efb8774affdecda08d168dc6f9911d03ef8cf3c7fc69d6a74b8ea1461535f"
+ },
+ "moment": {
+  "label": "110 ms",
+  "after_impact_ms": 109.9
+ },
+ "time": null,
+ "view": "side-right",
+ "notes": "camera 11; front end bent forward and toward the car's left (v09121C002.mp4, film frame 160)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

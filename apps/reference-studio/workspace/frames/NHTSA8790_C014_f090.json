@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_C014_f090",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_C014_f090.webp",
+  "width": 1024,
+  "height": 1056,
+  "sha256": "344f08a463f65863b8d46f7ce58070faf4a2942592bd3e1051690f2f4926737a"
+ },
+ "moment": {
+  "label": "40 ms",
+  "after_impact_ms": 40.0
+ },
+ "time": null,
+ "view": "side-left-low",
+ "notes": "camera 8; face at the front wheel, debris thrown up (v08790C014.mp4, film frame 90)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

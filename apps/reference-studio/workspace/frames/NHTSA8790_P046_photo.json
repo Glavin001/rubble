@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_P046_photo",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_P046_photo.webp",
+  "width": 2000,
+  "height": 1334,
+  "sha256": "69d497a78e5bf6e9a838e5d3210bd9bf02fbdfbf849cfffd01b0f46fe4d28f34"
+ },
+ "moment": {
+  "label": "post-test",
+  "after_impact_ms": null
+ },
+ "time": null,
+ "view": "photo-top",
+ "notes": "post-test overhead (from the contact sheets; final shape) (v08790P046.jpg)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

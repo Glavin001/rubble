@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_P345_photo",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_P345_photo.webp",
+  "width": 2000,
+  "height": 1336,
+  "sha256": "24c01cda25d3b434b4986fb9c8c7ebf407475990b70d1745ebde240d7e842018"
+ },
+ "moment": {
+  "label": "post-test",
+  "after_impact_ms": null
+ },
+ "time": null,
+ "view": "photo-top",
+ "notes": "report photo No.027: post-test overhead (final shape) (v09124P345.jpg)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

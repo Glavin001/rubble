@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9121_C002_f060",
+ "shot": "NHTSA9121",
+ "image": {
+  "file": "NHTSA9121/NHTSA9121_C002_f060.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "2030112217fd804065ec675e3d7a631d2b847ddf2706cab375672b1c19c44012"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": 9.9
+ },
+ "time": null,
+ "view": "side-right",
+ "notes": "camera 11; face at the right front corner (v09121C002.mp4, film frame 60)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

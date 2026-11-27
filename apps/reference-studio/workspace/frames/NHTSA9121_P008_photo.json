@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9121_P008_photo",
+ "shot": "NHTSA9121",
+ "image": {
+  "file": "NHTSA9121/NHTSA9121_P008_photo.webp",
+  "width": 2000,
+  "height": 1334,
+  "sha256": "bab3546b423fa320d3a62c95861f0d57556a2ed6d884de77f52b582b343953e0"
+ },
+ "moment": {
+  "label": "post-test",
+  "after_impact_ms": null
+ },
+ "time": null,
+ "view": "photo-left-front-34",
+ "notes": "report photo No.008: post-test left front 3/4; bumper beam protruding forward-left (v09121P008.jpg)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}
