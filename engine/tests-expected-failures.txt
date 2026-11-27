@@ -48,3 +48,8 @@ generated_vehicle_lint::every_other_design_passes_every_rule
 # starting kinetic energy, bar 1 % (side 60 passes at 0.2 %).
 continuous_contact::continuous_energy_head_100
 continuous_contact::continuous_energy_ball_100
+
+# Contact against known physics (tests/contact_known_solutions.rs, 2026-11-26): two elastic bars
+# head on part at 0.40 of their arrival speed (elastic theory: 1.0); their energy is kept (the
+# rest rings in the bars), so this is the rebound's form, not a loss.
+contact_known_solutions::bars_head_on_rebound

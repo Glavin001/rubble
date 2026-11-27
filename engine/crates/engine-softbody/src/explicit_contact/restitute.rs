@@ -6,10 +6,13 @@ use super::dat::DatStats;
 use crate::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 
-/// The impact law's restitution e by default (owner, 2026-11-26: contact must not absorb a
-/// crash's energy; `docs/continuous-response-parallel-design.md`): 1, Moreau's energy-neutral
-/// impact. The GPU's continuous tables carry the same value.
-pub const CONTACT_RESTITUTION: f32 = 1.0;
+/// The impact law's restitution e by default: 0 (inelastic). At e = 1 the law as written here
+/// (the whole response's change given back each step) CREATES energy: a pressed contact
+/// bounces back every step and its beams push it in again; two elastic bars head on gained
+/// 403 J on 275 J of kinetic energy (`tests/contact_known_solutions.rs`). The design's per-row
+/// share of closing at the step's start (σ, `continuous-response-parallel-design.md`) is what
+/// keeps it to true impacts; until it exists e stays 0. The GPU's tables carry the same value.
+pub const CONTACT_RESTITUTION: f32 = 0.0;
 
 /// The restitution guard's sums are striped over this many lanes in a fixed order (the
 /// kernel's `ccRestitute`, whatever its workgroup's width), then added in lane order.
