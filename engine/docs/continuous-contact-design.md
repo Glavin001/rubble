@@ -699,6 +699,37 @@ Open:
 - Ball 100: the ball's centre comes 136 mm inside the door's paint, against 17 mm in the
   default mode. Next: surface contact's position steps against the velocity rows.
 
+## Velocity contact: the full paint gap, spheres as bodies, the suite (2026-11-27, later still)
+
+**Changes:**
+- **Full paint gap.** Each pair's gap is now its whole paint thickness (`ccd_pairs`'s share 1.0).
+  The default mode's speculative pass held the half the CCD's half-gap left. Velocity contact
+  has no speculative pass, so with the half gap the paint stood 107 mm into the other car at
+  head 100. With the full gap it is 0.8 mm.
+- **Spheres as bodies.** A rigid proxy's sphere joins the solve as a body of its own: its centre
+  against the car's collision triangles, the gap grown by its radius. The node pass's and
+  surface contact's rules for it are off. Ball 100: paint 139 → 44 mm during the hit, 0 after.
+
+**Acceptance suite** (8 runs a scene, generated sedan, e = 1). Every scene has 0 crossings.
+
+| Result | Scenes |
+|---|---|
+| Pass | side 30, side 60, head 30 pressed, head 60 pressed, head 60, side 90, ball 100 |
+| Paint passes, angular momentum fails | head 100 (2.06 N·m·s a step), head 130 (2.3), offset 100 (3.5); bound 2.0 |
+| Paint fails | side 60 pressed (52 mm, lasting) |
+
+Linear momentum is kept to 2e-3 N·s in every scene.
+
+**Angular momentum.** A row's impulse acts along its impact normal, but at the nodes' positions
+at the step's end, where the pair has turned. The two impulses then make a couple, larger with
+a wider gap. Taking the normal along the pair's separation at the rounds' start positions brought
+it under the bound (1.4–1.8), but head 100 crossed 10 times: **not adopted**.
+
+**Side 60 pressed.** The lasting paint is car B's front-left door near the pillar. That paint
+vertex is skinned partly to `door_FL_i12`, an inner node in no collision triangle. Contact never
+holds an inner node, so paint that follows one goes where the skin does not. The fix is in the
+generator's skin binding, which is visual only.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
