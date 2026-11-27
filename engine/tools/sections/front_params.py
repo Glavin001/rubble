@@ -15,7 +15,7 @@ import sys
 
 RULES = ["subframe_mounts_off_crash_box", "crash_box_bay_alone", "crash_box_stroke", "yielding_stops", "hood_fold_row", "crush_from_section", "crash_box_cell"]
 # the front load path (front-load-path.md): its own switch, not part of `all` (the seven above)
-EXTRA = ["load_path"]
+EXTRA = ["load_path", "crush_law"]
 
 
 def main():

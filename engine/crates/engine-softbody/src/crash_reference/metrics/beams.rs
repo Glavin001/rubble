@@ -14,6 +14,7 @@
 //! shortens and lengthens by yield inside one 4 ms sample is integrated on its net change).
 
 use crate::explicit_beams::{dihedral, wrap_angle, Beam, ExplicitBeams, ExplicitKind, ExplicitType};
+use crate::explicit_crush::{Cell, Crush, Curve};
 use glam::Vec3;
 
 /// A beam that is a length between two nodes (counted in the bent and broken fractions).
@@ -164,19 +165,48 @@ pub struct Plastic {
     cap: f64,
     rest: f64,
     pub work: f64,
+    /// The crush law's capacity curve and compressive set so far (`explicit_crush`): its
+    /// compression work is ∫ C ds over the set. None: the JBeam rule.
+    crush: Option<(Curve, f64)>,
+    /// A crush cell's chord while the cell acts ([`CellPlastic`] counts its work then).
+    pub dormant: bool,
 }
 
 impl Plastic {
     pub fn new(b: &Beam) -> Self {
         let cap = if b.kind.is_jbeam() { f64::from(b.limit_k) } else { f64::INFINITY };
-        Self { tc: f64::from(b.tc), tt: f64::from(b.tt), cap, rest: f64::from(b.rest), work: 0.0 }
+        Self { tc: f64::from(b.tc), tt: f64::from(b.tt), cap, rest: f64::from(b.rest), work: 0.0, crush: None, dormant: false }
+    }
+
+    /// [`Self::new`] for beam `j` of `v`, with its crush law if it has one (dormant while in a crush
+    /// cell).
+    pub fn of(v: &ExplicitBeams, j: usize) -> Self {
+        let mut p = Self::new(&v.beams[j]);
+        if let Some(c) = crush_of(v, j) {
+            p.crush = Some((c.curve, f64::from(c.set)));
+            p.dormant = c.cell.is_some();
+        }
+        p
+    }
+
+    /// A crush cell's chord carries on alone (its cell stopped acting) at compressive set `set`.
+    pub fn wake(&mut self, set: f64) {
+        self.dormant = false;
+        if let Some((_, s)) = self.crush.as_mut() {
+            *s = set;
+        }
     }
 
     /// The rest length is now `rest`: the work of the set since the last sample.
     pub fn advance(&mut self, rest: f32) {
         let (old, new) = (self.rest, f64::from(rest));
         self.rest = new;
-        if !(new > 0.0 && old > 0.0) || new == old {
+        if !(new > 0.0 && old > 0.0) || new == old || self.dormant {
+            return;
+        }
+        if let (true, Some((curve, set))) = (new < old, self.crush.as_mut()) {
+            self.work += curve.work(*set, *set + (old - new));
+            *set += old - new;
             return;
         }
         if new < old && self.tc.is_finite() {
@@ -194,5 +224,57 @@ impl Plastic {
             self.work += self.tt * (hi * hi - old * old) / (2.0 * old) + if new > r_star { c * (new - r_star) } else { 0.0 };
             self.tt = (self.tt * new / old).min(c);
         }
+    }
+}
+
+/// Beam `j`'s crush-law record, if it has one.
+pub fn crush_of(v: &ExplicitBeams, j: usize) -> Option<Crush> {
+    let x = *v.ext_of.get(j).filter(|&&x| x > 0)? as usize;
+    v.beam_ext.get(x - 1)?.crush
+}
+
+/// A crush cell's plastic work (`explicit_crush`): each sample's change of the four chords' rest
+/// lengths split into the cell's modes (Δπ = Φ·Δr, Φ orthonormal), each mode's flow times its
+/// capacity: the axial mode ∫ C ds in compression and its tension capacity in tension, the others
+/// their capacity × |Δπ|. Exact while each mode flows one way between samples. Counted while the
+/// cell acts (until a chord breaks; then its chords count alone: [`Plastic::dormant`]).
+#[derive(Clone, Copy, Debug)]
+pub struct CellPlastic {
+    pub cell: Cell,
+    rest: [f64; 4],
+    /// The axial mode's compressive set (a chord's is half).
+    pub set: f64,
+    pub alive: bool,
+    pub work: f64,
+}
+
+impl CellPlastic {
+    /// The cell whose master is beam `j` of `v` (None: no cell master).
+    pub fn of(v: &ExplicitBeams, j: usize) -> Option<Self> {
+        let c = crush_of(v, j)?.cell?;
+        (c.beams[0] as usize == j && c.alive).then(|| Self { cell: c, rest: c.beams.map(|b| f64::from(v.beams[b as usize].rest)), set: f64::from(c.set), alive: true, work: 0.0 })
+    }
+
+    /// The chords' rests and broken flags now; returns true the sample the cell stops acting.
+    pub fn advance(&mut self, rest: [f32; 4], broken: [bool; 4]) -> bool {
+        if !self.alive {
+            return false;
+        }
+        let r = rest.map(f64::from);
+        for m in 0..4 {
+            let dpi: f64 = (0..4).map(|i| f64::from(self.cell.phi[m][i]) * (r[i] - self.rest[i])).sum();
+            if m == 0 && dpi < 0.0 {
+                self.work += self.cell.axial.work(self.set, self.set - dpi);
+                self.set -= dpi;
+            } else {
+                self.work += f64::from(self.cell.cap[m]) * dpi.abs();
+            }
+        }
+        self.rest = r;
+        if broken.iter().any(|b| *b) {
+            self.alive = false;
+            return true;
+        }
+        false
     }
 }

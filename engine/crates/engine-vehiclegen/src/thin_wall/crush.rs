@@ -121,3 +121,25 @@ pub fn box_bending_collapse(b: f64, h: f64, t: f64, m: &super::Material) -> Resu
     let s = super::ThinSection { walls: vec![super::Wall { points: pts, t, closed: false }] };
     Ok((m.yield_pa * s.properties()?.zx, rho))
 }
+
+/// The axial peak (first-buckle) force of a rectangular tube `b` × `h` (outer), wall `t`: its
+/// squash load with each wall at its effective width, σ_y·A_eff, A_eff = t·Σ ρ·w + 4t² (the walls'
+/// flats w = b − 2t, h − 2t at [`winter_effective_width`], the four corners fully effective). The
+/// effective-width method is the established ultimate load of a thin-walled stub column (AISI S100,
+/// EN 1993-1-5 §4.4): confident as that. Its use as the initial peak of a crushing tube (the force
+/// at the first buckle, before the first fold forms) is an engineering estimate; tests of steel
+/// tubes show peaks between this and the full squash load. Returns (force N, ρ_b, ρ_h).
+pub fn box_axial_peak(b: f64, h: f64, t: f64, m: &super::Material) -> (f64, f64, f64) {
+    let (wb, wh) = (b - 2.0 * t, h - 2.0 * t);
+    let rb = winter_effective_width(wb, t, m.e, m.yield_pa);
+    let rh = winter_effective_width(wh, t, m.e, m.yield_pa);
+    (m.yield_pa * (t * 2.0 * (rb * wb + rh * wh) + 4.0 * t * t), rb, rh)
+}
+
+/// The half-length H of a square tube's fold (side `c`, wall `t`): H = 0.99 t^(1/3) c^(2/3)
+/// (Wierzbicki and Abramowicz 1983, the superfolding element; the coefficient as we recall it,
+/// to be verified against the source). The force falls from its peak to the folding plateau
+/// while the first lobe forms, over about this much shortening (an estimate).
+pub fn fold_half_length(t: f64, c: f64) -> f64 {
+    0.99 * t.powf(1.0 / 3.0) * c.powf(2.0 / 3.0)
+}

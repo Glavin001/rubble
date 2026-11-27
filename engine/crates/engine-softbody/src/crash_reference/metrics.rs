@@ -25,7 +25,7 @@
 //! | `speed_peak` | largest COM speed in any sample (m/s) |
 //! | `length0`, `crush_peak`, `crush_residual` | `gauge.length`'s rest; the most it shortened (rest − length, 0 if it never did); rest − its last value (m) |
 //! | `bent_frac`, `broken_frac` | share of its length beams (not torsion, LBEAM, coupler, pressure, aero or trigger records) bent for good (> 0.1 % set, alive) and broken, at the end |
-//! | `plastic_work_j` | plastic work of its beams' yield, with the thresholds hardening as the solver hardens them ([`beams::Plastic`]), and of its LBEAMs' ([`beams::LbeamPlastic`]) |
+//! | `plastic_work_j` | plastic work of its beams' yield, with the thresholds hardening as the solver hardens them ([`beams::Plastic`]; the crush law's ∫C ds), of its LBEAMs' ([`beams::LbeamPlastic`]) and its crush cells' ([`beams::CellPlastic`]) |
 //! | `zone.<s>_<side>.work_j`, `.bent_frac`, `.broken_frac` | the same per zone: s in front_lower, front_upper, cabin, door, rear, wheel, other; side left, right (a centre-line beam is half on each) |
 //! | `zone.front.work_j`, `zone.front_left.work_j`, `zone.front_right.work_j`, `zone.front_upper.work_j`, `zone.front_lower.work_j` | front = front_lower + front_upper |
 //! | `zone.cabin.work_j`, `zone.rear.work_j`, `zone.left.work_j`, `zone.right.work_j` | cabin = cabin + door; left/right: every section |
@@ -142,6 +142,8 @@ struct BodyRec {
     plastic: Vec<Option<beams::Plastic>>,
     /// LBEAMs' yield ([`beams::LbeamPlastic`]).
     lplastic: Vec<Option<beams::LbeamPlastic>>,
+    /// Crush cells by master beam ([`beams::CellPlastic`]; empty without them).
+    cplastic: Vec<(usize, beams::CellPlastic)>,
     wheel_node: Vec<bool>,
     /// Per node its side at rest: +1 left, −1 right, 0 on the centre line (in both halves).
     side: Vec<i8>,
@@ -396,7 +398,8 @@ impl BodyRec {
             mass: s.nodes.iter().map(|n| n.mass).collect(),
             heading,
             left: Vec3::Y.cross(heading),
-            plastic: s.beams.iter().map(|x| beams::can_yield(x).then(|| beams::Plastic::new(x))).collect(),
+            plastic: (0..s.beams.len()).map(|j| beams::can_yield(&s.beams[j]).then(|| beams::Plastic::of(s, j))).collect(),
+            cplastic: (0..s.beams.len()).filter_map(|j| beams::CellPlastic::of(s, j).map(|c| (j, c))).collect(),
             lplastic: s.beams.iter().map(beams::LbeamPlastic::new).collect(),
             fleet: s.clone(),
             zones,
@@ -490,6 +493,17 @@ impl BodyRec {
         for (j, (p, s)) in self.lplastic.iter_mut().zip(st).enumerate() {
             if let Some(p) = p {
                 p.advance(&self.fleet, j, s.rest, pos);
+            }
+        }
+        for (_, c) in &mut self.cplastic {
+            let ch = c.cell.beams.map(|b| b as usize);
+            let (Some(rest), Some(broken)) = (ch.iter().map(|&b| st.get(b).map(|x| x.rest)).collect::<Option<Vec<f32>>>(), ch.iter().map(|&b| st.get(b).map(|x| x.broken)).collect::<Option<Vec<bool>>>()) else { continue };
+            if c.advance([rest[0], rest[1], rest[2], rest[3]], [broken[0], broken[1], broken[2], broken[3]]) {
+                for b in ch {
+                    if let Some(Some(p)) = self.plastic.get_mut(b) {
+                        p.wake(0.5 * c.set);
+                    }
+                }
             }
         }
         for (_, a, b, tr) in &mut self.gauges {
@@ -770,7 +784,7 @@ fn body_metrics(m: &mut BTreeMap<String, f64>, b: &BodyRec, last: &Sample, k: us
     let mut z: ZoneSums = [[[0.0; 4]; 2]; 7];
     for (j, (beam, s)) in b.fleet.beams.iter().zip(st).enumerate() {
         let zone = b.zones[j];
-        let w = b.plastic[j].map_or(0.0, |p| p.work) + b.lplastic[j].map_or(0.0, |p| p.work);
+        let w = b.plastic[j].map_or(0.0, |p| p.work) + b.lplastic[j].map_or(0.0, |p| p.work) + b.cplastic.iter().filter(|(m, _)| *m == j).map(|(_, c)| c.work).sum::<f64>();
         let length = beams::is_length(beam.kind);
         let bent = !s.broken && (s.rest - beam.rest0).abs() > 1e-3 * beam.rest0.abs();
         let row = &mut z[zones::section_index(zone.section)];
