@@ -416,6 +416,29 @@ impl Ctx<'_> {
         let mut rows: Vec<VRow> = Vec::new();
         let mut listed: std::collections::HashMap<usize, usize> = Default::default();
         let mut settled = false;
+        // Speculative rows (`DAT_SPEC=1`, a measurement; Catto's speculative contact): every pair
+        // whose start distance is within its gap and the two sides' paths this step is a row from
+        // the first round, linearised at the start, bounded by its own gap (b ≥ 0: inactive until
+        // the solve needs it), so a round's response does not cascade into pairs not yet rows.
+        if std::env::var("DAT_SPEC").is_ok_and(|v| v == "1") {
+            for (q, pr) in self.pairs.iter().enumerate() {
+                let (a, b) = (pos(self.x0, &pr.k), pos(x1, &pr.k));
+                let path = |r: std::ops::Range<usize>| r.map(|j| (b[j] - a[j]).length()).fold(0.0f32, f32::max);
+                let (w, gv) = closest(pr.nn, a);
+                let d0 = gv.length();
+                if d0 <= 0.0 || d0 - pr.xi > path(0..pr.nn) + path(pr.nn..4) {
+                    continue;
+                }
+                let n = gv / d0;
+                let s0: f32 = (0..4).map(|j| w[j] * n.dot(a[j])).sum();
+                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: warm.prev.get(&pr.k).copied().unwrap_or(0.0), s0, imp: false };
+                r.imp = !vpre.is_empty() && Self::normal(&r, vpre) < 0.0 && !warm.touched_prev.contains(&pr.k);
+                warm.touched_next.insert(pr.k);
+                listed.insert(q, rows.len());
+                rows.push(r);
+            }
+            st.spec_rows += rows.len() as u64;
+        }
         for _ in 0..rounds {
             let hit = collide(x1);
             st.rounds += 1;

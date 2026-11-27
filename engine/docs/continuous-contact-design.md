@@ -888,6 +888,15 @@ Neither is adopted: no combination meets rule 8 in all three, and each makes som
 The zones that remain under the exact solve now remove more each; they are where the next work
 is.
 
+**Where the remaining zones form** (head 100, 0.3 s; `CcdStats::zones_relist`): all in the step's
+first solve, none in the response's re-listed solves.
+- Exact solve off: from APGD solves left unsettled.
+- Exact solve and torque-free rows on: from rounds that keep meeting new pairs. 8 rounds leave
+  2,361 zones, 16 rounds 2,603, 32 rounds 1,470.
+- Speculative rows (`DAT_SPEC=1`, a measurement): every pair within its gap plus both sides' paths
+  is a row from the first round, linearised at the start with b = (s0 − ξ)/h ≥ 0. No help:
+  4,475 zones alone, 6,812 with the exact solve and torque-free rows.
+
 **Open.**
 - The rigid zones remain: head 60 7,902, side 90 5,192, side 60 2,969 in 1 s.
 - Head 100's contact work is −12 to −14 % at e = 0, past rule 8's 5 %.

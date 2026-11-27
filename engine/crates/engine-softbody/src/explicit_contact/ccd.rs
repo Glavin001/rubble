@@ -132,6 +132,10 @@ pub struct CcdStats {
     pub restituted: u64,
     /// Solves taken as resolved with an over-push (`DAT_OVERPUSH=1`).
     pub overpush: u64,
+    /// Speculative rows added at the rounds' start (`DAT_SPEC=1`).
+    pub spec_rows: u64,
+    /// Impact zones formed in the response's re-listed solves (velocity contact).
+    pub zones_relist: u64,
 }
 
 /// The impact law's guard's tolerance (J a pass): the rows' work on the conserved energy above

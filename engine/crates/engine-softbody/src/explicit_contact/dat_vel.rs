@@ -142,7 +142,9 @@ fn relist_velocity(dat: &mut Dat, recs: &mut Vec<Rec>, own_reach: &mut [f32], su
         }
         n = more.len();
         st.relisted += 1;
+        let z0 = st.ccd.zones;
         super::super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.velocity_restitution, Some(&mut dat.warm));
+        st.ccd.zones_relist += st.ccd.zones - z0;
     }
 }
 
