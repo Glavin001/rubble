@@ -3,6 +3,13 @@
 
     python3 -I engine/tools/crash-reference/nhtsa_reference.py camry DATA_ROOT OUT_DIR
     python3 -I engine/tools/crash-reference/nhtsa_reference.py recheck PULSES_DIR
+    python3 -I engine/tools/crash-reference/nhtsa_reference.py oblique DATA_ROOT OUT_DIR
+
+`oblique`: the same for the three Camry oblique tests (9124, 8790 left; 9121 right; an RMDB
+into the standing car turned 15 deg): the car's CG velocity change, the RMDB's, the car's
+velocity along the RMDB's travel, their closing speed and common-velocity time, the momentum
+balance, yaw where an angular rate sensor exists, and the report's crush tables (`oblique`
+below).
 
 `camry`: DATA_ROOT holds one folder per NHTSA test, nhtsa-<test>/ (the layout of the local,
 gitignored inspiration/ccsa-camry-2012/: channels.json, ev/v<test>.<curve> two-column text
@@ -386,6 +393,217 @@ def camry(root, out):
         print(tno, scen, json.dumps(ref["scalars"]))
 
 
+# ------------------------------------------------------------------ oblique (RMDB into a turned car)
+OBLIQUE = {9124: "left", 8790: "left", 9121: "right"}
+OBLIQUE_ANGLE = 15.0
+
+
+def report_text(test_dir):
+    """The test's main report as text (the largest PDF in report/, pdftotext -layout), or None."""
+    exe = shutil.which("pdftotext")
+    rep = os.path.join(test_dir, "report")
+    if not exe or not os.path.isdir(rep):
+        return None
+    pdfs = sorted((f for f in os.listdir(rep) if f.lower().endswith(".pdf")), key=lambda f: -os.path.getsize(os.path.join(rep, f)))
+    if not pdfs:
+        return None
+    try:
+        return pdfs[0], subprocess.run([exe, "-layout", os.path.join(rep, pdfs[0]), "-"], capture_output=True, text=True, timeout=180).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def oblique_report(test_dir):
+    """The oblique report's measured numbers, read from its text: the Crash Vehicle Summary's
+    masses and static crush, Data Sheet 12's crush profile (C1..C6 with the bumper cover, B1..B9
+    without; 'UR' unrecoverable kept as None) and Data Sheet 13's wheelbases and door openings,
+    each with the PDF page it is on."""
+    got = report_text(test_dir)
+    if not got:
+        return None
+    name, text = got
+    out = dict(file=name)
+    pages = text.split("\f")
+
+    def find(pat, conv=float):
+        for i, p in enumerate(pages, 1):
+            m = re.search(pat, p, re.M)
+            if m:
+                return conv(m.group(1)), i
+        return None, None
+
+    for key, pat in (("rmdb_speed_kmh", r"RMDB Velocity at Impact\s+kph\s+([\d.]+)"), ("rmdb_mass_kg", r"RMDB Test Weight\s+kg\s+([\d.]+)"),
+                     ("rmdb_max_static_crush_mm", r"RMDB Maximum Static Crush\s+mm\s+([\d.]+)"), ("car_mass_kg", r"Vehicle Test Weight\s+kg\s+([\d.]+)"),
+                     ("car_max_static_crush_mm", r"Vehicle Maximum Static Crush\s+mm\s+([\d.]+)"), ("vehicle_angle_deg", r"Actual Vehicle Angle\s+degrees\s+([\d.]+)"),
+                     ("lateral_offset_mm", r"Lateral Offset from Target Point.*?mm\s+([-+\d.]+)"), ("vertical_offset_mm", r"Vertical Offset from Target Point.*?mm\s+([-+\d.]+)")):
+        v, pg = find(pat)
+        if v is not None:
+            out[key] = v
+            out[key + "_page"] = pg
+
+    def num_or_none(x):
+        try:
+            return float(x)
+        except ValueError:
+            return None
+    rows = {}
+    for i, p in enumerate(pages, 1):
+        for m in re.finditer(r"^\s*([CB][1-9])\s+(?:Crush zone|Bumper Beam) \d at (left|right) side\s+mm\s+(\S+)\s+(\S+)\s+(\S+)\s*$", p, re.M):
+            if m.group(1) not in rows:
+                rows[m.group(1)] = dict(side=m.group(2), pre_mm=num_or_none(m.group(3)), post_mm=num_or_none(m.group(4).rstrip("*")), diff_mm=num_or_none(m.group(5).rstrip("*")), page=i)
+    if rows:
+        out["crush_profile_bumper_cover"] = [dict(point=k, **rows[k]) for k in sorted(rows) if k[0] == "C"]
+        out["crush_profile_bumper_beam"] = [dict(point=k, **rows[k]) for k in sorted(rows) if k[0] == "B"]
+    for side in ("Left", "Right"):
+        for i, p in enumerate(pages, 1):
+            m = re.search(r"%s Side Wheelbase\s+mm\s+(\d+)\s+(\d+)\s+(-?\d+)" % side, p)
+            if m:
+                out["wheelbase_%s_mm" % side.lower()] = dict(pre=int(m.group(1)), post=int(m.group(2)), diff=int(m.group(3)), page=i)
+                break
+        for lvl in ("Upper", "Lower"):
+            for i, p in enumerate(pages, 1):
+                m = re.search(r"%s Side %s\s+mm\s+(\d+)\s+(\d+)\s+(-?\d+)" % (side, lvl), p)
+                if m:
+                    out["door_opening_%s_%s_mm" % (side.lower(), lvl.lower())] = dict(pre=int(m.group(1)), post=int(m.group(2)), diff=int(m.group(3)), page=i)
+                    break
+    return out
+
+
+def oblique(test_dir, ch, ref, side):
+    """An RMDB moving along +X_g at the closing speed into a standing car turned 15 deg: the car's
+    CG accelerations (SAE body axes) integrated from rest, the RMDB's CG X integrated from the
+    closing speed, the car's velocity along the RMDB's travel and the closing speed between them."""
+    V = ch["closing_speed_kmh"] / 3.6
+    cm = lambda c: (c.get("comment") or "").upper()
+    car = {c["axis"][0]: c for c in ch["tsv_channels"] if usable(c) and c.get("vehicle_no") == 2 and "VEHICLE CG" in (c.get("sensor_attachment") or "") and c["axis"][0] in "XY" and not re.search(r"\bR[XYZ]\b|REDUNDANT", cm(c))}
+    mdb = {c["axis"][0]: c for c in ch["tsv_channels"] if usable(c) and c.get("vehicle_no") == 1 and "VEHICLE CG" in (c.get("sensor_attachment") or "") and c["axis"][0] in "XY"}
+    rate = [c for c in ch["tsv_channels"] if c.get("vehicle_no") == 2 and c["sensor_type"].startswith("ANGULAR") and c["axis"].startswith("Z")]
+    t, ax = accel(test_dir, car["X"])
+    _, ay = accel(test_dir, car["Y"])
+    vx, sx = integrate_from_zero(t, ax, 0.0)
+    vy, sy = integrate_from_zero(t, ay, 0.0)
+    tb, bx = accel(test_dir, mdb["X"])
+    _, by = accel(test_dir, mdb["Y"])
+    vbx, sbx = integrate_from_zero(tb, bx, V)
+    vby, _ = integrate_from_zero(tb, by, 0.0)
+    n = min(len(t), len(tb))
+    chans = [car[k]["file"].split("/")[-1] + ": " + car[k]["comment"] for k in "XY"] + [mdb[k]["file"].split("/")[-1] + ": " + mdb[k]["comment"] + (" (" + mdb[k]["data_status"] + ")" if mdb[k].get("data_status") == "COMPUTED" else "") for k in "XY"]
+    # Yaw: measured by an angular rate sensor (SAE: + nose right) where the test has one.
+    yaw_rate = yaw = None
+    if rate:
+        ty, w = read_ev(os.path.join(test_dir, rate[0]["file"]))
+        w = cfc(debias(ty, w), ty[1] - ty[0])
+        yaw, _ = integrate_from_zero(ty, w, 0.0)
+        yaw_rate = [at(ty, w, x) for x in t[:n]]
+        yaw = [at(ty, yaw, x) for x in t[:n]]
+        chans.append(rate[0]["file"].split("/")[-1] + ": " + rate[0]["comment"])
+    # The car in the RMDB's frame: the RMDB travels toward the car's rear and toward the struck
+    # side's opposite (left oblique: toward +Y, right).
+    a = math.radians(OBLIQUE_ANGLE)
+    sgn = 1.0 if side == "left" else -1.0
+    ux, uy = -math.cos(a), sgn * math.sin(a)  # the travel direction in the car's first frame
+    if yaw is not None:
+        # Body-axis accelerations turned into the car's first frame by the measured yaw, then integrated.
+        c_ = [math.cos(math.radians(y)) for y in yaw]
+        s_ = [math.sin(math.radians(y)) for y in yaw]
+        gx = [ax[i] * c_[i] - ay[i] * s_[i] for i in range(n)]
+        gy = [ax[i] * s_[i] + ay[i] * c_[i] for i in range(n)]
+        vgx, _ = integrate_from_zero(t[:n], gx, 0.0)
+        vgy, _ = integrate_from_zero(t[:n], gy, 0.0)
+    else:
+        vgx, vgy = vx[:n], vy[:n]
+    along = [vgx[i] * ux + vgy[i] * uy for i in range(n)]
+    across = [-vgx[i] * uy + vgy[i] * ux for i in range(n)]
+    closing = [vbx[i] - along[i] for i in range(n)]
+    sc = {}
+    after = [i for i in range(n) if 0 <= t[i] <= REBOUND_UNTIL + 0.05]
+    ia = max(after, key=lambda i: math.hypot(ax[i], ay[i]))
+    sc.update(car_a_res_peak_g=math.hypot(ax[ia], ay[ia]) / G, car_a_res_peak_ms=1000 * t[ia],
+              car_ax_peak_g=-max(-ax[i] for i in after) / G, car_ay_peak_g=max((ay[i] for i in after), key=abs) / G)
+    for ms in (100, 150, 250):
+        x = ms / 1000.0
+        sc["car_dvx_%dms_mps" % ms] = at(t, vx, x)
+        sc["car_dvy_%dms_mps" % ms] = at(t, vy, x)
+        sc["car_dv_res_%dms_mps" % ms] = math.hypot(at(t, vx, x), at(t, vy, x))
+        sc["car_dv_dir_%dms_deg" % ms] = math.degrees(math.atan2(abs(at(t, vy, x)), -at(t, vx, x)))
+        sc["car_v_along_travel_%dms_mps" % ms] = at(t[:n], along, x)
+        sc["car_v_across_travel_%dms_mps" % ms] = at(t[:n], across, x)
+        sc["rmdb_vx_%dms_mps" % ms] = at(tb, vbx, x)
+        sc["rmdb_vy_%dms_mps" % ms] = at(tb, vby, x)
+    k = [i for i in range(n) if 0 <= t[i] <= REBOUND_UNTIL]
+    im = min(k, key=lambda i: closing[i])
+    sc.update(closing_min_mps=closing[im], closing_min_ms=1000 * t[im])
+    j = next((i for i in range(n) if t[i] >= 0 and closing[i] <= 0), None)
+    if j is not None:
+        tc = t[j - 1] + (t[j] - t[j - 1]) * closing[j - 1] / (closing[j - 1] - closing[j])
+        sc["common_velocity_ms"] = 1000 * tc
+        sc["common_velocity_mps"] = at(t[:n], along, tc)
+        # The approach along the travel until then: the integral of the closing speed.
+        app = 0.0
+        for i in range(1, n):
+            if t[i] <= 0:
+                continue
+            if t[i] > tc:
+                break
+            app += 0.5 * (closing[i] + closing[i - 1]) * (t[i] - t[i - 1])
+        sc["approach_at_common_velocity_m"] = app
+    m_c, m_b = ref["vehicle"].get("test_mass_kg"), ref["barrier"].get("test_mass_kg")
+    rp = ref.get("report") or {}
+    m_c, m_b = rp.get("car_mass_kg", m_c), rp.get("rmdb_mass_kg", m_b)
+    if m_c and m_b:
+        x = 0.15
+        sc["momentum_along_rmdb_lost_150ms"] = m_b * (V - at(tb, vbx, x))
+        sc["momentum_along_car_gained_150ms"] = m_c * at(t[:n], along, x)
+        sc["momentum_balance_150ms"] = sc["momentum_along_car_gained_150ms"] / sc["momentum_along_rmdb_lost_150ms"]
+        sc["common_velocity_plastic_mps"] = m_b * V / (m_b + m_c)
+    if yaw is not None:
+        k = [i for i in range(n) if 0 <= t[i] <= 0.29]
+        iw = max(k, key=lambda i: abs(yaw_rate[i]))
+        sc.update(yaw_rate_peak_dps=yaw_rate[iw], yaw_rate_peak_ms=1000 * t[iw], yaw_150ms_deg=at(t[:n], yaw, 0.15), yaw_250ms_deg=at(t[:n], yaw, 0.25), yaw_290ms_deg=at(t[:n], yaw, 0.29))
+    ref.update(location="struck car's CG accelerometer X and Y (SAE body axes, not redundant ones); the RMDB's CG X and Y", channels=chans)
+    ref["frame"] = ("car_dv*: the car's CG velocity change in its own body axes, integrated without correction for yaw; "
+                    "car_v_along/across_travel: in the car's first frame turned onto the RMDB's travel (%s oblique: the travel is %g deg off the car's -X toward %s)%s; "
+                    "rmdb_v*: the RMDB's CG in its body axes from the closing speed; closing = rmdb_vx - car_v_along_travel."
+                    % (side, OBLIQUE_ANGLE, "+Y (right)" if side == "left" else "-Y (left)",
+                       "; this test's angular rate sensor turns the body accelerations into the first frame before integrating" if yaw is not None else
+                       "; no angular rate sensor in this test, so the body-axis velocities are used: valid while the yaw is small (the overhead film shows it small to about 150 ms)"))
+    ref["scalars"] = {k: round(x, 4) for k, x in sc.items()}
+    ys = [[x / G for x in ax[:n]], [x / G for x in ay[:n]], vx[:n], vy[:n], [x / G for x in bx[:n]], vbx[:n], vby[:n], along, across, closing]
+    names = ["car_ax_g", "car_ay_g", "car_dvx_mps", "car_dvy_mps", "rmdb_ax_g", "rmdb_vx_mps", "rmdb_vy_mps", "car_v_along_travel_mps", "car_v_across_travel_mps", "closing_mps"]
+    if yaw is not None:
+        ys += [yaw_rate, yaw]
+        names += ["yaw_rate_dps", "yaw_deg"]
+    ct, out = decimate(t[:n], ys)
+    ref["curves"] = dict(t_ms=ct, **{k: v for k, v in zip(names, out)})
+
+
+def obliques(root, out):
+    os.makedirs(out, exist_ok=True)
+    for tno, side in OBLIQUE.items():
+        d = os.path.join(root, "nhtsa-%d" % tno)
+        ch = channels(d)
+        td = api(d, "test-detail.json")
+        ref = dict(
+            source="NHTSA Vehicle Crash Test Database, test %d (public domain, US government); derived by engine/tools/crash-reference/nhtsa_reference.py oblique" % tno,
+            test=tno, scenario=None, side=side, title=ch["title"], test_type=td.get("testType"), configuration=ch["configuration"],
+            closing_speed_kmh=ch["closing_speed_kmh"], impact_angle_deg=num(td.get("impactAngle")), lab=td.get("testPerformer"), date=(td.get("testDate") or "")[:10],
+            vehicle=vehicle_scalars(d, 2), barrier=vehicle_scalars(d, 1),
+            processing="bias over [-20, 0) ms removed; SAE J211-1 CFC 60 (two-pole Butterworth, forward and backward) on accelerations and the angular rate; trapezoidal integration from contact (t = 0, the record's zero); SAE axes (+X forward, +Y right, yaw + nose right); curves at 1 kHz from -10 to 250 ms",
+        )
+        rp = oblique_report(d)
+        if rp:
+            ref["report"] = rp
+            api_max = ref["vehicle"].get("max_crush_mm")
+            if api_max and rp.get("car_max_static_crush_mm") and abs(api_max - rp["car_max_static_crush_mm"]) > 1:
+                ref["api_errata"] = "the API's maximum crush (%g mm) and C1 disagree with the report (%g mm; C1 unrecoverable): the API's C1 holds C1's pre-test distance" % (api_max, rp["car_max_static_crush_mm"])
+        oblique(d, ch, ref, side)
+        p = os.path.join(out, "%d.json" % tno)
+        with open(p, "w") as f:
+            json.dump(ref, f, separators=(",", ":"))
+            f.write("\n")
+        print(tno, side, json.dumps(ref["scalars"]))
+
+
 def recheck(pulses):
     """Section 8's tests from their per-curve files: the same scalars, and whether a file
     has the bad-server signature (both curves identical, or cut at 131,072 bytes)."""
@@ -410,6 +628,8 @@ def recheck(pulses):
 def main():
     if len(sys.argv) >= 4 and sys.argv[1] == "camry":
         camry(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "oblique":
+        obliques(sys.argv[2], sys.argv[3])
     elif len(sys.argv) >= 3 and sys.argv[1] == "recheck":
         recheck(sys.argv[2])
     else:
