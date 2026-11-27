@@ -48,6 +48,8 @@ struct VRow {
     n: Vec3,
     b: f32,
     l: f32,
+    /// The pair's separation along `n` at the step's start.
+    s0: f32,
 }
 
 struct Ctx<'a> {
@@ -174,7 +176,7 @@ impl Ctx<'_> {
                 if let Some(i) = old {
                     let r = &rows[i];
                     let s_end: f32 = (0..4).map(|j| r.w[j] * r.n.dot(b[j])).sum();
-                    if s_end >= relin_share() * closest(pr.nn, a).1.length().min(pr.xi) {
+                    if s_end > 0.0 && s_end >= relin_share() * r.s0.min(pr.xi) {
                         continue;
                     }
                 }
@@ -186,9 +188,18 @@ impl Ctx<'_> {
                 }
                 fresh += 1;
                 let s0: f32 = (0..4).map(|j| w[j] * n.dot(a[j])).sum();
-                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: 0.0 };
+                // The bound on the end separation along n: close to the gap ξ and no further.
+                // (Measured from the step's start, as the CCD's paths are: the same bound taken
+                // from the rounds' start positions cut side 60's zones from 2,750 to 30 but let
+                // head 100 cross 7 times, 2026-11-27.)
+                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: 0.0, s0 };
+                // Newton's law on a true impact: closing before the kick (u⁻ < 0) leaves parting at
+                // e·|u⁻| at least.
                 if e > 0.0 && !vpre.is_empty() {
-                    r.b = r.b.min(e * Self::normal(&r, vpre).min(0.0));
+                    let u = Self::normal(&r, vpre);
+                    if u < 0.0 {
+                        r.b = r.b.min(e * u);
+                    }
                 }
                 match old {
                     Some(i) => {
