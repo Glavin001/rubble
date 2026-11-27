@@ -29,6 +29,10 @@ pub struct LabScene {
     pub crash: bool,
     pub drive: bool,
     pub pill: &'static str,
+    /// A preset whose values are this scene's defaults: the same fleet word for word
+    /// (`tests/lab_catalog_spawn.rs`), only its pills and camera differ. The picker lists the
+    /// preset alone; `?xscene=` still opens the scene.
+    pub same_as: Option<&'static str>,
 }
 
 /// A one-click preset (`?preset=`): a scene and some of its values, its pills and camera.
@@ -66,7 +70,12 @@ fn overlap() -> Param {
 }
 
 fn scene(id: &'static str, title: &'static str, family: Option<&'static str>, params: Vec<Param>, pill: &'static str) -> LabScene {
-    LabScene { id, title, family, params, crash: !matches!(id, "idle" | "coast" | "arena" | "yard" | "traffic"), drive: matches!(id, "yard" | "traffic"), pill }
+    let same_as = match id {
+        "mdb214" => Some("mdb214"),
+        "doorpull" => Some("doorpull"),
+        _ => None,
+    };
+    LabScene { id, title, family, params, crash: !matches!(id, "idle" | "coast" | "arena" | "yard" | "traffic"), drive: matches!(id, "yard" | "traffic"), pill, same_as }
 }
 
 /// Every scene, in the picker's order.

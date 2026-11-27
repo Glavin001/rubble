@@ -79,3 +79,18 @@ fn catalogue_specs_spawn_the_old_fleets() {
         println!("{name}: same fleet ({} bytes of state)", a.len());
     }
 }
+
+/// The pure duplicates in the picker: a preset whose values are its scene's defaults spawns
+/// the scene's fleet word for word (only its pills and camera differ). The catalogue marks
+/// those scenes `sameAs` the preset (the picker lists the preset; `?xscene=` still opens the
+/// scene); every other preset spawns a fleet of its own.
+#[test]
+fn presets_equal_to_their_scene_are_marked() {
+    for p in presets() {
+        let values: Vec<(String, f64)> = p.values.0.iter().map(|(k, v)| (k.clone(), match v { engine_softbody::crash_reference::family::Value::Num(x) => *x, _ => 0.0 })).collect();
+        let same = fleet(&new_spec(p.scene, &values)) == fleet(&new_spec(p.scene, &[]));
+        let marked = scenes().iter().any(|s| s.id == p.scene && s.same_as == Some(p.id));
+        assert_eq!(same, marked, "{}: same fleet as scene {} at its defaults: {same}; marked: {marked}", p.id, p.scene);
+        println!("{} {} scene {} at its defaults", p.id, if same { "spawns the fleet of" } else { "differs from" }, p.scene);
+    }
+}

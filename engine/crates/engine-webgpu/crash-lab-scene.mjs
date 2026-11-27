@@ -56,18 +56,20 @@ export function labTables(catalog, P) {
  * The scene picker's options, grouped by scenario family: under each family its reference
  * crashes (`r:<id>`), the lab's presets (`p:<id>`) and scenes (`s:<id>`) that stage it, and
  * the family itself with the generated designs (`f:<id>`); then the lab's scenes no family
- * stages. Every entry keeps its value and name. `current`: the selected value.
+ * stages. Every entry keeps its value and name, except a scene that is a pure duplicate of a
+ * preset (`sameAs`: the same fleet word for word, Rust's catalogue says which): the preset
+ * stands for both (`?xscene=` still opens the scene, listed while it is open). `current`:
+ * the selected value.
  */
 export function pickerOptions({ registry, catalog, current }) {
   const opt = (value, text, title = '') => `<option value="${esc(value)}"${value === current ? ' selected' : ''}${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</option>`;
   const sceneOf = Object.fromEntries(catalog.scenes.map((s) => [s.id, s]));
+  const listed = (s) => !s.sameAs || current === `s:${s.id}`;
   const groups = [];
-  const used = new Set();
   for (const f of registry.families ?? []) {
     const refs = registry.scenarios.filter((s) => s.family === f.id && !s.recreated);
-    const scenes = catalog.scenes.filter((s) => s.family === f.id);
+    const scenes = catalog.scenes.filter((s) => s.family === f.id && listed(s));
     const presets = catalog.presets.filter((p) => sceneOf[p.scene]?.family === f.id);
-    for (const s of scenes) used.add(s.id);
     const rows = [
       ...refs.map((s) => opt(`r:${s.id}`, `${s.id} · ${s.title}`, 'A reference crash: its criteria, cameras and footage')),
       ...presets.map((p) => opt(`p:${p.id}`, `preset · ${p.label}`, 'A crash-test preset: the scene below with these values, on the car loaded')),
@@ -76,9 +78,9 @@ export function pickerOptions({ registry, catalog, current }) {
     ];
     groups.push(`<optgroup label="${esc(f.title)}">${rows.join('')}</optgroup>`);
   }
-  const rest = catalog.scenes.filter((s) => !used.has(s.id));
+  const rest = catalog.scenes.filter((s) => !s.family && listed(s));
   const restPresets = catalog.presets.filter((p) => !sceneOf[p.scene]?.family);
-  if (rest.length) groups.push(`<optgroup label="Rigs, fleets and driving">${[...restPresets.map((p) => opt(`p:${p.id}`, `preset · ${p.label}`)), ...rest.map((s) => opt(`s:${s.id}`, `scene · ${s.title}`))].join('')}</optgroup>`);
+  if (rest.length || restPresets.length) groups.push(`<optgroup label="Rigs, fleets and driving">${[...restPresets.map((p) => opt(`p:${p.id}`, `preset · ${p.label}`)), ...rest.map((s) => opt(`s:${s.id}`, `scene · ${s.title}`))].join('')}</optgroup>`);
   const data = registry.scenarios.filter((s) => s.recreated);
   if (data.length) groups.push(`<optgroup label="Recreated in the Reference Studio">${data.map((s) => opt(`r:${s.id}`, `${s.id} · ${s.title}`)).join('')}</optgroup>`);
   return groups.join('');
