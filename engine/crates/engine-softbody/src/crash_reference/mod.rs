@@ -20,7 +20,7 @@ mod s02_wall;
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use crate::explicit_contact::{Dat, ExplicitBeamsWorld};
-pub use criteria::{Criterion, CriterionResult, Tier};
+pub use criteria::{Basis, Criterion, CriterionResult, Tier};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -364,14 +364,20 @@ pub struct CrashReport {
 }
 
 impl CrashReport {
-    /// Tier 0 and tier 1 criteria that did not hold.
+    /// Asserted criteria (tier 0 or 1, with a basis) that did not hold.
     pub fn failures(&self) -> Vec<&CriterionResult> {
-        self.results.iter().filter(|r| !r.pass && r.tier != Tier::Shape).collect()
+        self.results.iter().filter(|r| !r.pass && r.asserted).collect()
     }
     pub fn table(&self) -> String {
         let mut o = format!("{} run {} ({})\n", self.id, self.run, self.contact.name());
         for r in &self.results {
-            o += &format!("  {} [{}] {}: {} in {}\n", if r.pass { "pass" } else { "FAIL" }, r.tier.name(), r.name, r.shown(), r.band());
+            let mark = match (r.pass, r.asserted) {
+                (true, true) => "pass",
+                (false, true) => "FAIL",
+                (true, false) => "in  ",
+                (false, false) => "out ",
+            };
+            o += &format!("  {mark} [{}] {}: {} against {} ({})\n", if r.asserted { r.tier.name() } else { "reported" }, r.name, r.shown(), r.band(), r.basis.split(':').next().unwrap_or(""));
         }
         o
     }

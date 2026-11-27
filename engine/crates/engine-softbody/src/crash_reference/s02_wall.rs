@@ -38,9 +38,11 @@ pub(super) fn scenario() -> CrashScenario {
         criteria: || {
             use Tier::*;
             vec![
-                Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes"),
+                Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes").law("every position and velocity is a real number"),
                 Criterion::new(Physics, "crush at its deepest", "car.crush_peak", Some(0.25), Some(0.8), "v²/2a at 13.9 m/s and 17–33 g, widened; NHTSA 56 km/h dynamic crush 0.62–0.75 m"),
-                Criterion::new(Physics, "rebound", "car.rebound_ratio", Some(-0.05), Some(0.2), "a plastic crush: NHTSA restitution 0.13–0.20"),
+                // Reported, not asserted: 0.13–0.20 is the p10–p90 of sedans at 56 km/h (a tenth of real
+                // cars are above it), and this run is at 50 km/h, measured 0.5 s after contact.
+                Criterion::new(Physics, "rebound", "car.rebound_ratio", Some(-0.05), Some(0.2), "a plastic crush: NHTSA restitution 0.13–0.20 at 56 km/h (crash-reference-targets.md)"),
                 Criterion::new(Invariant, "the crush stays", "car.crush_residual", Some(0.1), None, "metal does not spring back"),
             ]
         },

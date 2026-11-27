@@ -28,14 +28,32 @@ Third-party footage is not committed. `docs/crash-reference/index.json` lists ea
 (scenario, video time, camera, moment, what to look at); the frames themselves are in
 `~/Development/rubble-artifacts/crash-reference/`.
 
-## Currently failing
+## What may be asserted
 
-Measured on the generated sedan, CPU reference, edge contact, nominal run. A failing
-criterion is a finding about the generator or the solver; bands are not widened to pass.
+A criterion can fail a run only when its band has a basis, recorded with it
+(`Criterion::law`, `Criterion::cited`):
 
-| Scenario | Criterion | Band | Measured | Since |
+- **a law**: conservation or a closed form (momentum, energy never created, nothing passes
+  through, the velocity split from the mass ratio, a symmetric head-on's centre of mass at
+  rest);
+- **cited data under matching conditions**: a named source, the same speed and
+  configuration, the same definition of the quantity, the band set to the data's whole
+  spread and not its middle.
+
+Every other band (an estimate, a reading of the reference footage) is measured and
+reported and asserts nothing, whatever its tier: a wrong bound would be a wrong goal. Where
+only a direction is certain (the struck side absorbs more), the direction is asserted (a
+ratio above 1), not a size. The bands in sections 2 and 3 below are estimates unless a
+scenario's file gives them a basis.
+
+## Reported outside its band
+
+Measured on the generated sedan, edge contact, nominal run. Not failures: these are
+estimates' bands, listed so the gaps are visible.
+
+| Scenario | Measure | Band (basis) | Measured | Since |
 |---|---|---|---|---|
-| S02 (sedan stand-in for the SUV) | rebound | at most 0.2 of approach speed (NHTSA restitution 0.13-0.20) | 0.35 | 2026-11-27 |
+| S02 (sedan stand-in for the SUV) | rebound, share of approach speed | at most 0.2 (estimate: NHTSA restitution 0.13-0.20 is the p10-p90 of sedans at 56 km/h; this run is 50 km/h) | 0.35 on the CPU reference and on CUDA | 2026-11-27 |
 
 ## 1. The ten scenarios
 
