@@ -215,6 +215,20 @@ try {
     for (const [w, h] of SIZES) { await size(w, h); await draw(); await png(`family-pole-offset-${w}x${h}-full`); await png(`family-pole-${w}x${h}-scene`, await sceneClip()); }
   }
 
+  if (ONLY.includes('soft')) {
+    // The soft (AVBD) page and the explicit plain view (the arena) still load as before: no
+    // lab frame, their own panels.
+    for (const q of ['scene=wall', 'solver=explicit&xscene=arena&n=16']) {
+      await size(1280, 720);
+      await send('Page.navigate', { url: `${base}/softbody.html?${q}` });
+      let st = {};
+      for (let i = 0; i < 300 && !st.ready; i++) { await sleep(400); st = await evaluate(`({ ready: window.__ready === true, failed: window.__failed ?? null, lab: document.body.classList.contains('lab-on'), info: getComputedStyle(document.getElementById('info')).display })`).catch(() => ({})); if (st.failed) break; }
+      record[`plain ${q}`] = st;
+      if (!st.ready || st.failed || st.lab || st.info === 'none') problems.push(`${q}: ${JSON.stringify(st)}`);
+      await png(`plain-${q.replace(/[^a-z0-9]+/gi, '_')}-1280x720`);
+    }
+  }
+
   writeFileSync(join(OUT, 'check.json'), JSON.stringify({ problems, errors, record }, null, 1));
   if (errors.length) { console.log(`console errors: ${JSON.stringify(errors.slice(0, 8))}`); code = 1; }
   if (problems.length) { console.log(`problems:\n  ${problems.join('\n  ')}`); code = 1; } else console.log('ok: every change re-placed the scene without a reload');
