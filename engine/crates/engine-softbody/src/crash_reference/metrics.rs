@@ -1,39 +1,139 @@
 //! What a crash run is measured by, computed on the host from sampled state, so every
 //! executor is measured by the same code.
 //!
-//! Metric names: `<body>.<measure>` for a body, `all.<measure>` for the scene.
+//! Metric names: `<body>.<measure>` for a body, `all.<measure>` for the scene,
+//! `pair.<a>_<b>.<measure>` for two bodies (in layout order). The body's own frame is its
+//! spawn pose: forward its first heading, up +Y, left = up × forward (+X at yaw 0).
+//! Orientation is the mass-weighted best-fit rotation of its nodes from the first sample
+//! ([`fit::robust_fit`]: refitted without nodes that have flown off or crushed far).
 //!
 //! | measure | meaning |
 //! |---|---|
-//! | `mass` | kg |
+//! | `mass` | kg (the spawned nodes, wheel masses on their hubs) |
 //! | `speed_before` | the centre of mass's speed at the start (m/s) |
 //! | `v_along_end` | its velocity along its first heading at the end (m/s) |
 //! | `rebound_ratio` | −`v_along_end` / `speed_before` (positive: bounced back) |
+//! | `speed_end`, `vx_end`, `vz_end` | the COM's speed and world velocity at the end (m/s) |
+//! | `dv_along` | change of the COM's velocity along its first heading, end − start (m/s) |
+//! | `yaw_deg`, `yaw_peak_deg` | its turn at the end (signed, + from forward toward left; unwrapped past ±180°) and the largest \|turn\| |
+//! | `pitch_peak_deg`, `pitch_end_deg` | pitch (+ nose down, rear up): the sample's value of largest magnitude, and at the end |
+//! | `roll_peak_deg` | largest \|roll\| (roll + is left side up) |
+//! | `lateral_drift` | COM displacement across its first heading at the end (m, + toward its left) |
+//! | `decel_peak_g` | largest horizontal COM deceleration over a 10 ms window (in g; horizontal so landing on the suspension is not a pulse) |
+//! | `pulse_ms`, `decel_mean_g` | from the first to the last 10 ms window above 2 g (each placed at its middle); \|Δv\| over that span / its length (0 when none) |
+//! | `max_node_speed` | largest node speed in any sample (m/s) |
 //! | `length0`, `crush_peak`, `crush_residual` | length along its first heading at the start; the most it lost; what it has lost at the end (m) |
-//! | `bent_frac`, `broken_frac` | share of its beams yielded for good; broken |
-//! | `plastic_work_j` | Σ yield threshold × permanent length change over its beams |
+//! | `bent_frac`, `broken_frac` | share of its length beams (not torsion, LBEAM, coupler, pressure, aero or trigger records) bent for good (> 0.1 % set, alive) and broken, at the end |
+//! | `plastic_work_j` | plastic work of its beams' yield, with the thresholds hardening as the solver hardens them ([`beams::Plastic`]) |
+//! | `zone.<s>_<side>.work_j`, `.bent_frac`, `.broken_frac` | the same per zone: s in front_lower, front_upper, cabin, door, rear, wheel, other; side left, right (a centre-line beam is half on each) |
+//! | `zone.front.work_j`, `zone.front_left.work_j`, `zone.front_right.work_j`, `zone.front_upper.work_j`, `zone.front_lower.work_j` | front = front_lower + front_upper |
+//! | `zone.cabin.work_j`, `zone.rear.work_j`, `zone.left.work_j`, `zone.right.work_j` | cabin = cabin + door; left/right: every section |
+//! | `zone.{front,cabin,rear}.bent_frac`, `.broken_frac` | over the beams of those sections |
+//! | `zone.{front,cabin,rear,front_upper}.work_frac` | share of `plastic_work_j` (0 when none) |
+//! | `zone.front_lr_ratio`, `zone.lr_ratio` | (left + 1 J) / (right + 1 J) work, of the front and of the whole body (1 when neither yields) |
+//! | `gauge.<name>.rest`, `.change_peak`, `.change_residual`, `.shrink_frac` | a generator gauge's length at the start (m), largest \|change\|, end − start, −residual / rest |
+//! | `gauge.length.*`, `gauge.height.*` | the same for its extent along its current heading (all nodes) and along its current up (highest − lowest node, wheel hubs left out) |
+//! | `detached_parts` | connected parts of its unbroken bonds at the end minus at the start |
+//! | `detached_mass` | kg outside its heaviest part at the end |
 //! | `all.finite` | 1 when every sampled value was finite |
-//! | `all.ke_start_j`, `all.ke_end_j` | kinetic energy |
+//! | `all.ke_start_j`, `all.ke_end_j`, `all.ke_lost_j` | kinetic energy of every node, and start − end |
+//! | `all.momentum_{x,z}_{start,end}` | linear momentum of every body (kg m/s) |
+//! | `all.energy_gain_j` | largest rise of kinetic + gravitational + beam-stored energy above its running minimum (J; created energy). beam-stored includes raycast wheels' suspension springs ([`wheels`]); wheel spin is not sampled and not counted |
+//! | `all.box_depth_m` | deepest any node centre gets inside a static box of the layout (m; 0 when none) |
+//! | `all.plastic_work_j` | every body's `plastic_work_j` |
+//! | `pair.<a>_<b>.com_gap_min` | smallest distance between their COMs (m) |
+//!
+//! The executor may add `all.contact_removed_j` ([`super::run`]).
 
-use super::{Built, Sample, Templates};
-use glam::Vec3;
+mod beams;
+mod fit;
+mod graph;
+mod wheels;
+mod zones;
+#[cfg(test)]
+mod tests;
+
+pub use fit::{robust_fit, weighted_fit, yaw_pitch_roll};
+pub use zones::{assign as assign_zones, Zone, SECTIONS};
+
+use super::{Built, Sample, Section, Template, Templates};
+use crate::explicit_beams::{ExplicitBeams, GRAVITY};
+use glam::{DVec3, Vec3};
 use std::collections::BTreeMap;
+
+/// Deceleration window (s) and the pulse threshold (g).
+const WINDOW: f64 = 0.010;
+const PULSE_G: f64 = 2.0;
+const G: f64 = -GRAVITY as f64;
+
+/// A length followed through a run: its start, largest |change| and last value.
+#[derive(Clone, Copy, Debug, Default)]
+struct Track {
+    rest: f64,
+    peak: f64,
+    last: f64,
+    started: bool,
+}
+
+impl Track {
+    fn push(&mut self, v: f64) {
+        if !self.started {
+            (self.rest, self.started) = (v, true);
+        }
+        self.peak = self.peak.max((v - self.rest).abs());
+        self.last = v;
+    }
+    fn put(&self, put: &mut dyn FnMut(&str, f64), name: &str) {
+        let res = self.last - self.rest;
+        put(&format!("gauge.{name}.rest"), self.rest);
+        put(&format!("gauge.{name}.change_peak"), self.peak);
+        put(&format!("gauge.{name}.change_residual"), res);
+        put(&format!("gauge.{name}.shrink_frac"), if self.rest.abs() > 0.0 { -res / self.rest } else { 0.0 });
+    }
+}
 
 struct BodyRec {
     name: &'static str,
     mass: Vec<f32>,
     heading: Vec3,
-    /// Per beam: spawn rest length and yield thresholds in compression and tension (N).
-    beams: Vec<(f32, f32, f32)>,
+    left: Vec3,
+    /// The vehicle as spawned (its beams' rates, its raycast wheels).
+    fleet: ExplicitBeams,
+    zones: Vec<Zone>,
+    plastic: Vec<Option<beams::Plastic>>,
+    wheel_node: Vec<bool>,
+    gauges: Vec<(String, usize, usize, Track)>,
+    glength: Track,
+    gheight: Track,
     length0: f32,
     crush_peak: f32,
+    ref_pos: Vec<Vec3>,
+    com0: DVec3,
+    v0: DVec3,
+    /// Yaw: the last raw angle and the unwrapped one.
+    yaw_raw: f64,
+    yaw: f64,
+    yaw_peak: f64,
+    pitch_peak: f64,
+    pitch_end: f64,
+    roll_peak: f64,
+    /// (t, horizontal COM velocity) per sample.
+    vh: Vec<(f64, DVec3)>,
+    max_node_speed: f64,
+    parts0: usize,
 }
 
 pub struct Recorder {
     bodies: Vec<BodyRec>,
+    boxes: Vec<(Vec3, Vec3)>,
     first: Option<Sample>,
     last: Option<Sample>,
     finite: bool,
+    e_min: f64,
+    e_gain: f64,
+    box_depth: f64,
+    /// Per body pair (a < b), the smallest COM distance.
+    gaps: BTreeMap<(usize, usize), f64>,
 }
 
 fn length_along(pos: &[Vec3], h: Vec3) -> f32 {
@@ -41,33 +141,197 @@ fn length_along(pos: &[Vec3], h: Vec3) -> f32 {
     hi - lo
 }
 
+fn com(x: &[Vec3], mass: &[f32]) -> DVec3 {
+    let (s, m) = x.iter().zip(mass).fold((DVec3::ZERO, 0.0), |(s, m), (p, w)| (s + f64::from(*w) * p.as_dvec3(), m + f64::from(*w)));
+    s / m.max(1e-12)
+}
+
+fn wrap(a: f64) -> f64 {
+    let t = std::f64::consts::TAU;
+    a - t * ((a + std::f64::consts::PI) / t).floor()
+}
+
+/// The horizontal COM velocity at `t`, linear between samples.
+fn v_at(vh: &[(f64, DVec3)], t: f64) -> DVec3 {
+    let i = vh.partition_point(|x| x.0 <= t);
+    match (i.checked_sub(1).map(|i| vh[i]), vh.get(i)) {
+        (Some((t0, v0)), Some(&(t1, v1))) if t1 > t0 => v0 + (v1 - v0) * ((t - t0) / (t1 - t0)),
+        (Some((_, v)), _) | (None, Some(&(_, v))) => v,
+        _ => DVec3::ZERO,
+    }
+}
+
+/// Largest windowed deceleration (g); the pulse: from the first to the last window above
+/// 2 g, each window's deceleration placed at its middle; its length (ms) and |Δv| over it
+/// / its length (g).
+fn pulse(vh: &[(f64, DVec3)]) -> (f64, f64, f64) {
+    let (mut peak, mut first, mut last) = (0.0f64, None, None);
+    for i in 0..vh.len() {
+        let Some(j) = (i + 1..vh.len()).find(|&j| vh[j].0 >= vh[i].0 + WINDOW - 1e-6) else { break };
+        let a = (vh[j].1 - vh[i].1).length() / (vh[j].0 - vh[i].0) / G;
+        peak = peak.max(a);
+        if a > PULSE_G {
+            let mid = 0.5 * (vh[i].0 + vh[j].0);
+            first.get_or_insert(mid);
+            last = Some(mid);
+        }
+    }
+    match (first, last) {
+        (Some(a), Some(b)) if b > a => (peak, (v_at(vh, b) - v_at(vh, a)).length() / (b - a) / G, 1000.0 * (b - a)),
+        _ => (peak, 0.0, 0.0),
+    }
+}
+
+/// Every node at rest in the body's own frame: the template's positions, any node the
+/// spawn added un-turned from the fleet (`turned` in the parent module, inverted).
+fn rest_frame(t: &Template, fleet_pos: &[Vec3], at: Vec3, yaw: f32) -> Vec<Vec3> {
+    let (s, c) = yaw.sin_cos();
+    fleet_pos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match t.desc.nodes.get(i) {
+            Some(n) => Vec3::from(n.position),
+            None => {
+                let d = *p - at;
+                Vec3::new(d.x * c - d.z * s, d.y, d.x * s + d.z * c)
+            }
+        })
+        .collect()
+}
+
+impl BodyRec {
+    fn new(t: &Template, b: &super::Body, s: &ExplicitBeams) -> Self {
+        let pos = s.positions();
+        let rest = rest_frame(t, &pos, b.at, b.yaw);
+        let zones = zones::assign(t, &s.beams, &rest);
+        let d = &t.desc;
+        let named = |i: usize| d.nodes.get(i).and_then(|n| t.zones.parts.iter().filter(|(p, _)| n.name.starts_with(p.as_str())).max_by_key(|(p, _)| p.len()).map(|(_, s)| *s));
+        let mut wheel_node: Vec<bool> = (0..pos.len()).map(|i| (!d.nodes.is_empty() && i >= d.nodes.len()) || named(i) == Some(Section::Wheel)).collect();
+        for w in &d.wheels {
+            for n in [w.node1, w.node2] {
+                if let Some(x) = wheel_node.get_mut(n as usize) {
+                    *x = true;
+                }
+            }
+        }
+        let index = |name: &str| d.nodes.iter().position(|n| n.name == name);
+        let gauges = t.zones.gauges.iter().filter_map(|g| Some((g.name.clone(), index(&g.a)?, index(&g.b)?, Track::default()))).collect();
+        let heading = b.heading();
+        Self {
+            name: b.name,
+            mass: s.nodes.iter().map(|n| n.mass).collect(),
+            heading,
+            left: Vec3::Y.cross(heading),
+            plastic: s.beams.iter().map(|x| beams::can_yield(x).then(|| beams::Plastic::new(x))).collect(),
+            fleet: s.clone(),
+            zones,
+            wheel_node,
+            gauges,
+            glength: Track::default(),
+            gheight: Track::default(),
+            length0: 0.0,
+            crush_peak: 0.0,
+            ref_pos: Vec::new(),
+            com0: DVec3::ZERO,
+            v0: DVec3::ZERO,
+            yaw_raw: 0.0,
+            yaw: 0.0,
+            yaw_peak: 0.0,
+            pitch_peak: 0.0,
+            pitch_end: 0.0,
+            roll_peak: 0.0,
+            vh: Vec::new(),
+            max_node_speed: 0.0,
+            parts0: 0,
+        }
+    }
+
+    fn parts(&self, beams: &[super::BeamState], nodes: usize) -> (Vec<usize>, usize) {
+        let links = self.fleet.beams.iter().zip(beams).filter(|(b, s)| !s.broken && beams::is_link(b.kind)).map(|(b, _)| (b.a, b.b));
+        graph::components(nodes, links)
+    }
+
+    /// This sample's body measures; returns the elastic energy (J) in its beams and its
+    /// raycast wheels' suspension.
+    fn push(&mut self, t: f64, pos: &[Vec3], vel: &[Vec3], st: &[super::BeamState]) -> f64 {
+        let first = self.ref_pos.is_empty();
+        let l = length_along(pos, self.heading);
+        if first {
+            self.length0 = l;
+            self.ref_pos = pos.to_vec();
+            self.com0 = com(pos, &self.mass);
+            self.v0 = com(vel, &self.mass);
+            self.parts0 = self.parts(st, pos.len()).1;
+        }
+        self.crush_peak = self.crush_peak.max(self.length0 - l);
+        let (r, _) = fit::robust_fit(&self.ref_pos, pos, &self.mass);
+        let (yaw, pitch, roll) = fit::yaw_pitch_roll(r, self.heading);
+        self.yaw += wrap(yaw - self.yaw_raw);
+        self.yaw_raw = yaw;
+        self.yaw_peak = self.yaw_peak.max(self.yaw.abs());
+        if pitch.abs() > self.pitch_peak.abs() {
+            self.pitch_peak = pitch;
+        }
+        self.pitch_end = pitch;
+        self.roll_peak = self.roll_peak.max(roll.abs());
+        let v = com(vel, &self.mass);
+        self.vh.push((t, DVec3::new(v.x, 0.0, v.z)));
+        self.max_node_speed = vel.iter().map(|v| f64::from(v.length())).fold(self.max_node_speed, f64::max);
+        for (p, s) in self.plastic.iter_mut().zip(st) {
+            if let Some(p) = p {
+                p.advance(s.rest);
+            }
+        }
+        for (_, a, b, tr) in &mut self.gauges {
+            if let (Some(pa), Some(pb)) = (pos.get(*a), pos.get(*b)) {
+                tr.push(f64::from(pa.distance(*pb)));
+            }
+        }
+        let h = (r * self.heading.as_dvec3()).as_vec3();
+        self.glength.push(f64::from(length_along(pos, h)));
+        let up = (r * DVec3::Y).as_vec3();
+        let body: Vec<Vec3> = pos.iter().zip(&self.wheel_node).filter(|(_, w)| !**w).map(|(p, _)| *p).collect();
+        self.gheight.push(f64::from(length_along(&body, up)));
+        let beams: f64 = (0..self.fleet.beams.len().min(st.len())).map(|j| beams::elastic(&self.fleet.beams, Some(&self.fleet), j, st[j].rest, st[j].broken, pos)).sum();
+        beams + wheels::suspension_energy(&self.fleet, pos)
+    }
+}
+
 impl Recorder {
-    pub fn new(_templates: &Templates, built: &Built) -> Self {
-        let bodies = built
-            .layout
-            .bodies
-            .iter()
-            .zip(&built.fleet)
-            .map(|(b, s)| BodyRec {
-                name: b.name,
-                mass: s.nodes.iter().map(|n| n.mass).collect(),
-                heading: b.heading(),
-                beams: s.beams.iter().map(|x| (x.rest0, x.tc, x.tt)).collect(),
-                length0: 0.0,
-                crush_peak: 0.0,
-            })
-            .collect();
-        Self { bodies, first: None, last: None, finite: true }
+    pub fn new(templates: &Templates, built: &Built) -> Self {
+        let blank = Template { desc: Default::default(), settings: Default::default(), zones: Default::default() };
+        let bodies = built.layout.bodies.iter().zip(&built.fleet).map(|(b, s)| BodyRec::new(templates.get(b.design).unwrap_or(&blank), b, s)).collect();
+        Self { bodies, boxes: built.layout.boxes.clone(), first: None, last: None, finite: true, e_min: f64::INFINITY, e_gain: 0.0, box_depth: 0.0, gaps: BTreeMap::new() }
     }
 
     pub fn push(&mut self, x: &Sample) {
         self.finite &= x.pos.iter().flatten().chain(x.vel.iter().flatten()).all(|p| p.is_finite());
+        let t = f64::from(x.t);
+        let mut energy = 0.0;
+        let mut coms = Vec::new();
         for (k, b) in self.bodies.iter_mut().enumerate() {
-            let l = length_along(&x.pos[k], b.heading);
-            if self.first.is_none() {
-                b.length0 = l;
+            let (Some(pos), Some(vel)) = (x.pos.get(k), x.vel.get(k)) else { continue };
+            let st = x.beams.get(k).map_or(&[][..], |v| &v[..]);
+            energy += b.push(t, pos, vel, st);
+            for ((p, v), m) in pos.iter().zip(vel).zip(&b.mass) {
+                let m = f64::from(*m);
+                energy += 0.5 * m * f64::from(v.length_squared()) + m * G * f64::from(p.y);
+                for &(c, h) in &self.boxes {
+                    let d = h - (*p - c).abs();
+                    self.box_depth = self.box_depth.max(f64::from(d.min_element()));
+                }
             }
-            b.crush_peak = b.crush_peak.max(b.length0 - l);
+            coms.push((k, com(pos, &b.mass)));
+        }
+        if energy.is_finite() {
+            self.e_gain = self.e_gain.max(energy - self.e_min);
+            self.e_min = self.e_min.min(energy);
+        }
+        for (i, &(a, ca)) in coms.iter().enumerate() {
+            for &(b, cb) in &coms[i + 1..] {
+                let g = self.gaps.entry((a, b)).or_insert(f64::INFINITY);
+                *g = g.min(ca.distance(cb));
+            }
         }
         if self.first.is_none() {
             self.first = Some(x.clone());
@@ -78,47 +342,132 @@ impl Recorder {
     pub fn finish(self) -> BTreeMap<String, f64> {
         let mut m = BTreeMap::new();
         let (Some(first), Some(last)) = (&self.first, &self.last) else { return m };
-        let com_v = |x: &Sample, k: usize, mass: &[f32]| -> Vec3 {
-            x.vel[k].iter().zip(mass).map(|(v, m)| *v * *m).sum::<Vec3>() / mass.iter().sum::<f32>()
-        };
-        let ke = |x: &Sample| -> f64 {
-            self.bodies.iter().enumerate().map(|(k, b)| x.vel[k].iter().zip(&b.mass).map(|(v, m)| 0.5 * f64::from(*m) * f64::from(v.length_squared())).sum::<f64>()).sum()
-        };
+        let over = |x: &Sample, f: &dyn Fn(Vec3, f64) -> DVec3| -> DVec3 { self.bodies.iter().enumerate().map(|(k, b)| x.vel.get(k).map_or(DVec3::ZERO, |v| v.iter().zip(&b.mass).map(|(v, w)| f(*v, f64::from(*w))).sum())).sum() };
+        let ke = |x: &Sample| over(x, &|v, w| DVec3::splat(0.5 * w * f64::from(v.length_squared()))).x;
+        let p = |x: &Sample| over(x, &|v, w| w * v.as_dvec3());
+        let mut total_work = 0.0;
         for (k, b) in self.bodies.iter().enumerate() {
-            let mut put = |n: &str, v: f64| {
-                m.insert(format!("{}.{n}", b.name), v);
-            };
-            let v0 = com_v(first, k, &b.mass).length();
-            let v1 = com_v(last, k, &b.mass).dot(b.heading);
-            put("mass", f64::from(b.mass.iter().sum::<f32>()));
-            put("speed_before", f64::from(v0));
-            put("v_along_end", f64::from(v1));
-            put("rebound_ratio", if v0 > 0.0 { f64::from(-v1 / v0) } else { 0.0 });
-            put("length0", f64::from(b.length0));
-            put("crush_peak", f64::from(b.crush_peak));
-            put("crush_residual", f64::from(b.length0 - length_along(&last.pos[k], b.heading)));
-            let n = b.beams.len().max(1) as f64;
-            let (mut bent, mut broken, mut work) = (0usize, 0usize, 0.0f64);
-            for (s, &(rest0, tc, tt)) in last.beams[k].iter().zip(&b.beams) {
-                if s.broken {
-                    broken += 1;
-                }
-                let d = s.rest - rest0;
-                if d.abs() > 1e-3 * rest0.abs() {
-                    bent += usize::from(!s.broken);
-                    let t = if d < 0.0 { tc } else { tt };
-                    if t.is_finite() {
-                        work += f64::from(t.abs() * d.abs());
-                    }
-                }
-            }
-            put("bent_frac", bent as f64 / n);
-            put("broken_frac", broken as f64 / n);
-            put("plastic_work_j", work);
+            total_work += body_metrics(&mut m, b, last, k);
         }
-        m.insert("all.finite".into(), f64::from(u8::from(self.finite)));
-        m.insert("all.ke_start_j".into(), ke(first));
-        m.insert("all.ke_end_j".into(), ke(last));
+        let (ke0, ke1, p0, p1) = (ke(first), ke(last), p(first), p(last));
+        for (n, v) in [
+            ("finite", f64::from(u8::from(self.finite))),
+            ("ke_start_j", ke0),
+            ("ke_end_j", ke1),
+            ("ke_lost_j", ke0 - ke1),
+            ("momentum_x_start", p0.x),
+            ("momentum_z_start", p0.z),
+            ("momentum_x_end", p1.x),
+            ("momentum_z_end", p1.z),
+            ("energy_gain_j", self.e_gain),
+            ("box_depth_m", self.box_depth),
+            ("plastic_work_j", total_work),
+        ] {
+            m.insert(format!("all.{n}"), v);
+        }
+        for ((a, b), g) in &self.gaps {
+            m.insert(format!("pair.{}_{}.com_gap_min", self.bodies[*a].name, self.bodies[*b].name), *g);
+        }
         m
     }
+}
+
+/// Per zone (section × side): weighted beam count, bent, broken, work.
+type ZoneSums = [[[f64; 4]; 2]; 7];
+
+/// One body's metrics into `m`; returns its plastic work.
+fn body_metrics(m: &mut BTreeMap<String, f64>, b: &BodyRec, last: &Sample, k: usize) -> f64 {
+    let mut put = |n: &str, v: f64| {
+        m.insert(format!("{}.{n}", b.name), v);
+    };
+    let (pos, vel) = (&last.pos[k], &last.vel[k]);
+    let st = last.beams.get(k).map_or(&[][..], |v| &v[..]);
+    let h = b.heading.as_dvec3();
+    let v1 = com(vel, &b.mass);
+    let v0 = b.v0.length();
+    put("mass", b.mass.iter().map(|x| f64::from(*x)).sum());
+    put("speed_before", v0);
+    put("v_along_end", v1.dot(h));
+    put("rebound_ratio", if v0 > 0.0 { -v1.dot(h) / v0 } else { 0.0 });
+    put("speed_end", v1.length());
+    put("vx_end", v1.x);
+    put("vz_end", v1.z);
+    put("dv_along", (v1 - b.v0).dot(h));
+    put("yaw_deg", b.yaw.to_degrees());
+    put("yaw_peak_deg", b.yaw_peak.to_degrees());
+    put("pitch_peak_deg", b.pitch_peak.to_degrees());
+    put("pitch_end_deg", b.pitch_end.to_degrees());
+    put("roll_peak_deg", b.roll_peak.to_degrees());
+    put("lateral_drift", (com(pos, &b.mass) - b.com0).dot(b.left.as_dvec3()));
+    let (peak, mean, ms) = pulse(&b.vh);
+    put("decel_peak_g", peak);
+    put("decel_mean_g", mean);
+    put("pulse_ms", ms);
+    put("max_node_speed", b.max_node_speed);
+    put("length0", f64::from(b.length0));
+    put("crush_peak", f64::from(b.crush_peak));
+    put("crush_residual", f64::from(b.length0 - length_along(pos, b.heading)));
+    // Zones.
+    let mut z: ZoneSums = [[[0.0; 4]; 2]; 7];
+    for (j, (beam, s)) in b.fleet.beams.iter().zip(st).enumerate() {
+        let zone = b.zones[j];
+        let w = b.plastic[j].map_or(0.0, |p| p.work);
+        let length = beams::is_length(beam.kind);
+        let bent = !s.broken && (s.rest - beam.rest0).abs() > 1e-3 * beam.rest0.abs();
+        let row = &mut z[zones::section_index(zone.section)];
+        for (side, f) in [(0, zone.left), (1, zone.right)] {
+            let c = &mut row[side];
+            c[0] += f * f64::from(u8::from(length));
+            c[1] += f * f64::from(u8::from(length && bent));
+            c[2] += f * f64::from(u8::from(length && s.broken));
+            c[3] += f * w;
+        }
+    }
+    let sum = |secs: &[usize], sides: &[usize], q: usize| -> f64 { secs.iter().flat_map(|&s| sides.iter().map(move |&d| (s, d))).map(|(s, d)| z[s][d][q]).sum() };
+    let frac = |secs: &[usize], q: usize| -> f64 {
+        let n = sum(secs, &[0, 1], 0);
+        if n > 0.0 {
+            sum(secs, &[0, 1], q) / n
+        } else {
+            0.0
+        }
+    };
+    let all: Vec<usize> = (0..7).collect();
+    let total = sum(&all, &[0, 1], 3);
+    put("bent_frac", frac(&all, 1));
+    put("broken_frac", frac(&all, 2));
+    put("plastic_work_j", total);
+    for (i, (_, sn)) in SECTIONS.iter().enumerate() {
+        for (d, dn) in [(0, "left"), (1, "right")] {
+            let c = z[i][d];
+            put(&format!("zone.{sn}_{dn}.work_j"), c[3]);
+            put(&format!("zone.{sn}_{dn}.bent_frac"), if c[0] > 0.0 { c[1] / c[0] } else { 0.0 });
+            put(&format!("zone.{sn}_{dn}.broken_frac"), if c[0] > 0.0 { c[2] / c[0] } else { 0.0 });
+        }
+    }
+    let (fl, fu, cab, door, rear) = (0usize, 1usize, 2usize, 3usize, 4usize);
+    let groups: [(&str, Vec<usize>); 5] = [("front", vec![fl, fu]), ("front_upper", vec![fu]), ("front_lower", vec![fl]), ("cabin", vec![cab, door]), ("rear", vec![rear])];
+    for (n, secs) in &groups {
+        put(&format!("zone.{n}.work_j"), sum(secs, &[0, 1], 3));
+        put(&format!("zone.{n}.work_frac"), if total > 0.0 { sum(secs, &[0, 1], 3) / total } else { 0.0 });
+        put(&format!("zone.{n}.bent_frac"), frac(secs, 1));
+        put(&format!("zone.{n}.broken_frac"), frac(secs, 2));
+    }
+    put("zone.front_left.work_j", sum(&[fl, fu], &[0], 3));
+    put("zone.front_right.work_j", sum(&[fl, fu], &[1], 3));
+    put("zone.left.work_j", sum(&all, &[0], 3));
+    put("zone.right.work_j", sum(&all, &[1], 3));
+    put("zone.front_lr_ratio", (sum(&[fl, fu], &[0], 3) + 1.0) / (sum(&[fl, fu], &[1], 3) + 1.0));
+    put("zone.lr_ratio", (sum(&all, &[0], 3) + 1.0) / (sum(&all, &[1], 3) + 1.0));
+    // Gauges.
+    for (n, _, _, tr) in &b.gauges {
+        tr.put(&mut put, n);
+    }
+    b.glength.put(&mut put, "length");
+    b.gheight.put(&mut put, "height");
+    // Separation.
+    let (label, count) = b.parts(st, pos.len());
+    put("detached_parts", count as f64 - b.parts0 as f64);
+    put("detached_mass", graph::detached_mass(&label, count, &b.mass));
+    total
 }
