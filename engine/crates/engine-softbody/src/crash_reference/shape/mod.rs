@@ -14,6 +14,7 @@
 //! (or image right when it has none), y up. [`compare`] normalises each source by its own
 //! "before" shape and evaluates the schema's measures ([`measures`]).
 
+pub mod design;
 pub mod link;
 pub mod measures;
 pub mod rubble;

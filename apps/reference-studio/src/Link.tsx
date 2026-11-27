@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ElementValue, FrameCamera, Scenario, Xy } from '../shared/model.ts';
+import type { ElementValue, FrameCamera, ScenarioInfo as Scenario, Xy } from '../shared/model.ts';
 import { tool, type FrameDoc } from './api.ts';
 import type { Ctx } from './App.tsx';
 import { FrameInfo } from './FrameInfo.tsx';
@@ -8,18 +8,21 @@ import { regionToImage } from './geom.ts';
 interface Outline {
   scenario: string;
   contact: string;
-  moment: string;
-  camera: string;
-  auto: { moment: boolean; camera: boolean };
+  at_ms: number;
+  /** The named moment used (null when the frame is pinned at a time). */
+  moment: string | null;
+  camera: string | null;
+  pinned: boolean;
+  check: boolean;
   own_camera: boolean;
+  recording: { executor: string; hash: string; fresh: boolean };
   schema: string;
   instance: { elements: Record<string, ElementValue>; loops: Record<string, Xy[][]>; width: number; height: number; front: string };
-  still: string | null;
   region: string | null;
 }
 
 /** Elements and part loops over an image of `w` × `h` (instance coordinates are 0..1 of it). */
-function Overlay({ inst, w, h, colour, crop = [0, 0, 1, 1] }: { inst: Outline['instance']; w: number; h: number; colour: (n: string) => string; crop?: [number, number, number, number] }) {
+export function Overlay({ inst, w, h, colour, crop = [0, 0, 1, 1] }: { inst: Outline['instance']; w: number; h: number; colour: (n: string) => string; crop?: [number, number, number, number] }) {
   const t = (p: Xy) => regionToImage(crop, w, h, p);
   const lw = Math.max(1, w / 640);
   return (
@@ -187,16 +190,18 @@ export function Link({ ctx, frame }: { ctx: Ctx; frame: FrameDoc }) {
         {!shot && <div className="notice">Put this frame in a shot first (side panel), then link the shot to a Rubble scenario.</div>}
         {shot && !shot.rubble && <div className="notice">Link shot “{shot.title}” to a Rubble scenario (side panel) to see Rubble's automatic outline.</div>}
         {err && <div className="notice bad">{err}</div>}
-        {busy && <div className="notice">Running Rubble's outlines for this scenario (crash_outlines on the CPU, about 10 s the first time)…</div>}
+        {busy && <div className="notice">Rubble's outline from the recorded run (simulated on this page's GPU first when there is no recording)…</div>}
         {outline && (
           <>
             <div className="plot">
               <h3>
-                Rubble {outline.scenario} at {outline.moment}{outline.auto.moment ? ' (automatic)' : ''}, camera {outline.own_camera ? 'this frame\'s own' : outline.camera}
-                {outline.auto.camera ? ' (automatic)' : ''}: its outline in the {outline.schema} schema
+                Rubble {outline.scenario} at {outline.pinned ? `${outline.at_ms} ms (pinned)` : `${outline.moment} (${outline.at_ms} ms)`}, camera {outline.own_camera ? 'this frame\'s own' : outline.camera}: its outline in the {outline.schema} schema
               </h3>
-              <svg viewBox={`0 0 ${outline.instance.width} ${outline.instance.height}`} role="img" aria-label="Rubble's still with its outline">
-                {outline.still && <image href={outline.still} width={outline.instance.width} height={outline.instance.height} />}
+              <p className="muted small">
+                From the recording ({outline.recording.executor === 'webgpu' ? 'WebGPU' : 'CPU fallback, tests only'}){outline.check ? ' · pinned on an earlier recording: check after re-simulation' : ''}. Pin a time and camera in the Scene view.
+              </p>
+              <svg viewBox={`0 0 ${outline.instance.width} ${outline.instance.height}`} role="img" aria-label="Rubble's outline">
+                <rect width={outline.instance.width} height={outline.instance.height} fill="var(--canvas)" />
                 <Overlay inst={outline.instance} w={outline.instance.width} h={outline.instance.height} colour={colour} />
               </svg>
             </div>
@@ -243,9 +248,9 @@ export function Link({ ctx, frame }: { ctx: Ctx; frame: FrameDoc }) {
           <div className="section">
             <h3>This frame in {scenario.id}</h3>
             <label className="field">
-              <span>Moment</span>
+              <span>Moment {frame.pin ? `(unused: pinned at ${frame.pin.at_ms} ms)` : ''}</span>
               <select value={frame.rubble.moment ?? ''} onChange={(e) => ctx.edit('link_frame', { frame: frame.id, moment: e.target.value })}>
-                <option value="">automatic from “{frame.moment.label}”{outline?.auto.moment ? `: ${outline.moment}` : ''}</option>
+                <option value="">automatic from “{frame.moment.label}”{outline && !frame.rubble.moment && outline.moment ? `: ${outline.moment}` : ''}</option>
                 {scenario.moments.map((m) => <option key={m.name} value={m.name}>{m.name} ({m.after_impact_ms > 0 ? '+' : ''}{m.after_impact_ms} ms)</option>)}
               </select>
             </label>

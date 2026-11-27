@@ -153,6 +153,18 @@ impl CrashStudio {
     }
 }
 
+#[wasm_bindgen]
+impl CrashStudio {
+    /// The designs with templates ranked by proportion against a traced side view
+    /// (`DesignMatch[]`, nearest first): `instance` in `schema` over a `width` × `height` region.
+    #[wasm_bindgen(js_name = rankDesigns)]
+    pub fn rank_designs(&self, schema: JsValue, instance: JsValue, width: f64, height: f64) -> Result<JsValue, JsValue> {
+        let schema: Schema = from(schema, "schema")?;
+        let inst: engine_softbody::crash_reference::shape::Instance = from(instance, "instance")?;
+        js(&self.0.rank_designs(&schema, &inst, width, height))
+    }
+}
+
 impl Default for CrashStudio {
     fn default() -> Self {
         Self::new()

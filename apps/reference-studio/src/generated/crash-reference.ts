@@ -241,3 +241,17 @@ export type TracingSpec = { instance: Instance, width: number, height: number, }
 export type ShapeSpec = { tracing?: TracingSpec, rubble?: RubbleSpec, };
 
 export type CompareSource = { name: string, before: ShapeSpec, now: ShapeSpec, };
+
+export type DesignDims = { design: string, wheelbase_m: number, front_overhang_m: number, rear_overhang_m: number, 
+/**
+ * Its top above the ground (the wheels' lowest point).
+ */
+height_m: number, wheel_radius_m: number, length_m: number, };
+
+export type DesignMatch = { design: string, distance: number, dims: DesignDims, 
+/**
+ * Per traced proportion: its name, the traced value, the design's, the weight.
+ */
+rows: Array<MatchRow>, };
+
+export type MatchRow = { name: string, traced: number, design: number, weight: number, };

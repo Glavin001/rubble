@@ -53,6 +53,9 @@ pub fn typescript() -> String {
         studio::TracingSpec,
         studio::ShapeSpec,
         studio::CompareSource,
+        shape::design::DesignDims,
+        shape::design::DesignMatch,
+        shape::design::MatchRow,
     );
     out
 }

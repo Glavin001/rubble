@@ -6,9 +6,11 @@
     <meta name="color-scheme" content="light dark" />
     <title>Reference Studio</title>
     <link rel="icon" href="data:," />
+    <!-- The engine's wasm (public/rubble/world-wasm, from the repo's web build) imports its GPU-wait helper by this name. -->
+    <script type="importmap">{ "imports": { "rubble-gpu-wait": "./rubble/gpu-wait.mjs" } }</script>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

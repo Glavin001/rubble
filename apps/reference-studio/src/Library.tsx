@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { FrameSummary, Scenario, Status } from '../shared/model.ts';
+import type { FrameSummary, ScenarioInfo as Scenario, Status } from '../shared/model.ts';
 import { tool, upload, type ShotRow } from './api.ts';
 import type { Ctx } from './App.tsx';
 

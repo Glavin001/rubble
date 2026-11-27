@@ -452,6 +452,17 @@ impl Studio {
     }
 }
 
+impl Studio {
+    /// The generated designs with templates, ranked by proportion against a traced side
+    /// view (`instance` over a `width` × `height` region): [`shape::design`].
+    pub fn rank_designs(&self, schema: &Schema, instance: &Instance, width: f64, height: f64) -> Vec<shape::design::DesignMatch> {
+        let s = shape::from_tracing(instance, schema, width, height);
+        let traced = shape::design::traced_ratios(&s);
+        let dims: Vec<shape::design::DesignDims> = self.templates.iter().filter_map(|(d, t)| shape::design::DesignDims::of(d, t)).collect();
+        shape::design::rank(&traced, &dims)
+    }
+}
+
 /// The moment and named camera a reference frame (its moment label and view label) is
 /// compared with in a scenario ([`shape::link`]).
 pub fn pick(moments: &[Moment], cameras: &[Camera], scenario: &str, label: &str, view: &str) -> Value {
