@@ -162,7 +162,7 @@ pub(super) fn cc_tables(
         }
         statics.push([first, p.len() as u32, list_at, cap as u32]);
         statics.push([grid_at, grid_cap as u32, 0, 0]);
-        statics.push([buckets_at, 0, 0, 0]);
+        statics.push([buckets_at, engine_softbody::explicit_contact::CONTACT_RESTITUTION.to_bits(), 0, 0]);
         first += p.len() as u32;
     }
     for p in &per {

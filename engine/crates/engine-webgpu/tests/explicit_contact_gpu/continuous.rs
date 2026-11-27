@@ -79,6 +79,7 @@ fn continuous_pairs_list_like_the_cpu() {
     let mut w = ExplicitBeamsWorld::new(fleet);
     // (Both with their response: the states stay equal, so the listings must too.)
     w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
+    w.continuous.as_mut().unwrap().keys = Some(Vec::new());
     for f in 0..60 {
         g.frame(1);
         w.frame(1);
@@ -86,6 +87,17 @@ fn continuous_pairs_list_like_the_cpu() {
         let cpu = w.continuous.as_ref().unwrap().last;
         let total: u64 = pairs.iter().map(|&p| u64::from(p)).sum();
         assert_eq!(c[0], 0, "step {f}: the pair list or a grid overflowed");
+        if std::env::var("CC_DEBUG_DEAD").is_ok() {
+            eprintln!("step {f}: CPU dead triangles {:?}, broken beams {:?}", w.vehicles.iter().map(|v| v.tri_dead.iter().filter(|&&d| d).count()).collect::<Vec<_>>(), w.vehicles.iter().map(|v| v.beams.iter().filter(|b| b.broken).count()).collect::<Vec<_>>());
+        }
+        if total != cpu.pairs_vt + cpu.pairs_ee {
+            // (Which pairs: each side's keys as sorted global node sets.)
+            let first: Vec<u32> = w.vehicles.iter().scan(0u32, |a, v| { let o = *a; *a += v.nodes.len() as u32; Some(o) }).collect();
+            let norm = |mut k: [u32; 4]| { k.sort_unstable(); k };
+            let gk: std::collections::BTreeSet<[u32; 4]> = g.continuous_pair_keys().into_iter().map(norm).collect();
+            let ck: std::collections::BTreeSet<[u32; 4]> = w.continuous.as_ref().unwrap().keys.as_ref().unwrap().iter().map(|k| norm(k.map(|(v, i)| first[v] + i))).collect();
+            eprintln!("step {f}: only on the GPU {:?}; only on the CPU {:?}", gk.difference(&ck).collect::<Vec<_>>(), ck.difference(&gk).collect::<Vec<_>>());
+        }
         assert_eq!(total, cpu.pairs_vt + cpu.pairs_ee, "step {f}: GPU pairs {pairs:?}, CPU vt {} ee {}", cpu.pairs_vt, cpu.pairs_ee);
     }
 }

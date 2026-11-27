@@ -219,6 +219,125 @@ bool ccAcross(CcPair q)
     return !(l0 >= 0 && ccLabel(q.k[1]) == l0 && ccLabel(q.k[2]) == l0 && ccLabel(q.k[3]) == l0);
 }
 
+// Moreau's impact law over the response (dat.rs restitute, AGENTS.md "Contact never stands in
+// for metal"): the response's velocity change d = v - v_before given back theta times,
+// theta = e unless that would raise the group's kinetic energy above its value before the pass
+// (a quadratic). The guard's sums in CC_STRIPES fixed stripes over the members' nodes in order,
+// then the stripes in order: the CPU's order whatever the workgroup's width.
+static const uint CC_STRIPES = 64u;
+// The most members a group's guard labels (past it the frame fails: the overflow counter).
+static const uint CC_GUARD_MEMBERS = 64u;
+groupshared float4 gsCcE[CC_STRIPES];
+groupshared uint gsCcLab[CC_GUARD_MEMBERS];
+// Members a and b near by the listing's own test (ccListWide, a != b).
+bool ccNear(uint a, uint b, float rq)
+{
+    float rr = min(rq, smul(4.0, nf(nf(ccReachV(a) + ccReachV(b)) + ccApart(a, b))));
+    float r = nf(nf(rr + ccMaxOffset(a)) + ccMaxOffset(b));
+    float3 alo;
+    float3 ahi;
+    float3 blo;
+    float3 bhi;
+    ccBox(a, alo, ahi);
+    ccBox(b, blo, bhi);
+    float3 r3 = float3(r, r, r);
+    return !(any(ssub3(alo, r3) > bhi) || any(ssub3(blo, r3) > ahi));
+}
+// The guard's groups: members joined by ccNear, each labelled by its first member (dat.rs's
+// labels: the smallest), then per group the stripes' sums, theta, and the velocities.
+void ccRestitute(uint off, uint k, float rq, uint lane)
+{
+    float e = asfloat(ccVeh(vvMember(off, 0u), 2u).y);
+    if (splitUniform(lane, e > 0.0 ? 1u : 0u) == 0u) return;
+    if (splitUniform(lane, k > CC_GUARD_MEMBERS ? 1u : 0u) != 0u)
+    {
+        if (lane == 0u) gAcc[ccC(CC_C_OVERFLOW)].add(1);
+        return;
+    }
+    if (lane == 0u)
+    {
+        for (uint m = 0u; m < k; m++) gsCcLab[m] = m;
+        bool changed = true;
+        for (uint it = 0u; changed && it < k; it++)
+        {
+            changed = false;
+            for (uint a = 0u; a < k; a++)
+            {
+                for (uint b = a + 1u; b < k; b++)
+                {
+                    if (!ccNear(vvMember(off, a), vvMember(off, b), rq)) continue;
+                    uint lo = min(gsCcLab[a], gsCcLab[b]);
+                    if (gsCcLab[a] != lo || gsCcLab[b] != lo)
+                    {
+                        gsCcLab[a] = lo;
+                        gsCcLab[b] = lo;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    sync();
+    for (uint c = 0u; c < k; c++)
+    {
+        if (splitUniform(lane, gsCcLab[c] == c ? 1u : 0u) == 0u) continue;
+        if (lane < CC_STRIPES)
+        {
+            float4 s = float4(0.0, 0.0, 0.0, 0.0);
+            for (uint m = 0u; m < k; m++)
+            {
+                if (gsCcLab[m] != c) continue;
+                uint4 r0 = gStatic[vvMember(off, m) * 4u];
+                for (uint i = lane, iStop = EB_END(961, i, r0.y, CC_STRIPES); i < iStop; i += CC_STRIPES)
+                {
+                    uint gi = r0.x + i;
+                    float ms = gNodes[gi * 3u].w;
+                    float3 vm = gBeams[ccB(gi, 4u)].xyz;
+                    float3 p = ccVel(gi);
+                    float3 d = ssub3(p, vm);
+                    s.x = nf(s.x + smul(ms, sdot(p, d)));
+                    s.y = nf(s.y + smul(ms, sdot(d, d)));
+                    s.z = nf(s.z + smul(ms, sdot(vm, vm)));
+                    s.w = nf(s.w + smul(ms, sdot(p, p)));
+                }
+            }
+            gsCcE[lane] = s;
+        }
+        sync();
+        if (lane == 0u)
+        {
+            float4 t = float4(0.0, 0.0, 0.0, 0.0);
+            for (uint l = 0u; l < CC_STRIPES; l++)
+            {
+                float4 g = gsCcE[l];
+                t = float4(nf(t.x + g.x), nf(t.y + g.y), nf(t.z + g.z), nf(t.w + g.w));
+            }
+            float theta = 0.0;
+            if (t.y > 0.0)
+            {
+                float disc = max(nf(smul(t.x, t.x) - smul(t.y, nf(t.w - t.z))), 0.0);
+                float most = sdiv(nf(-t.x + ssqrtCr(disc)), t.y);
+                theta = min(e, max(most, 0.0));
+            }
+            gsCcE[0] = float4(theta, 0.0, 0.0, 0.0);
+        }
+        sync();
+        float th = gsCcE[0].x;
+        for (uint m = 0u; m < k; m++)
+        {
+            if (gsCcLab[m] != c) continue;
+            uint4 r0 = gStatic[vvMember(off, m) * 4u];
+            for (uint i = lane, iStop = EB_END(962, i, r0.y, LANES); i < iStop; i += LANES)
+            {
+                uint gi = r0.x + i;
+                float3 p = ccVel(gi);
+                gBeams[ccB(gi, 3u)].xyz = sadd3(p, sscale(ssub3(p, gBeams[ccB(gi, 4u)].xyz), th));
+            }
+        }
+        sync();
+    }
+}
+
 void ccRespond(uint off, uint k, float rq, uint lane)
 {
     // The candidates: the speculative pass's (their gap past the thickness within the sides'
@@ -516,6 +635,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         }
         sync();
     }
+    ccRestitute(off, k, rq, lane);
     // The nodes' new positions and velocities (relative to the origin), where they changed.
     for (uint m = 0u; m < k; m++)
     {

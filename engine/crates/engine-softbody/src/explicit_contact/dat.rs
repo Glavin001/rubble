@@ -50,7 +50,7 @@ pub struct Dat {
     /// comparison, `ccd::resolve`).
     pub soft_zones: u32,
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
-    /// velocity change; 0 today, `DAT_E`, [`restitute`]).
+    /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
     pub min_gap: f32,
     /// A car against itself too (`DAT_SELF=0`: only car against car).
@@ -68,6 +68,11 @@ pub struct Dat {
     /// Per vehicle, whether its first step's clearance was checked ([`own_clearance`]: no
     /// own pair is excluded, so a car built closer than `self_gap` fails).
     pub checked: Vec<bool>,
+    /// This step's vehicle pairs (a < b) whose boxes the listing found near (the kernel's
+    /// listing test): the impact law's guard groups ([`restitute`]).
+    pub near: Vec<(usize, usize)>,
+    /// With `keys` Some, each step's listed pairs' four (vehicle, node) keys (a diagnostic).
+    pub keys: Option<Vec<[(usize, u32); 4]>>,
     /// Each vehicle's positions at its first step.
     pub first: Vec<Vec<Vec3>>,
     /// The last step's counts and every step's, summed.
@@ -162,7 +167,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -604,7 +609,7 @@ impl ExplicitBeamsWorld {
             pass.pair(r);
         }
         if let Some(f) = vfinal.as_mut() {
-            restitute(&self.vehicles, f, dat.restitution, &mut st);
+            restitute(&self.vehicles, f, dat.restitution, &dat.near, &mut st);
         }
         for (v, veh) in self.vehicles.iter_mut().enumerate() {
             let o = veh.origin;
@@ -833,6 +838,7 @@ fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
 #[allow(clippy::too_many_arguments)]
 fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3>], reach: &[f32], refs: &[(Vec3, Vec3)], own_reach: &mut [f32], st: &mut DatStats) -> Vec<Rec> {
     let r_q = dat.r_q;
+    dat.near.clear();
     let mut recs: Vec<Rec> = Vec::new();
     // Pairs are listed within r_q of their paint (the gap less the two sides' offsets).
     let mo: Vec<f32> = off.iter().map(|o| o.iter().map(|v| v.length()).fold(0.0f32, f32::max)).collect();
@@ -878,6 +884,9 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
             let r = Vec3::splat(r_q + mo_a + mo_b);
             if (own && !dat.self_contact) || (alo - r).cmpgt(bhi).any() || (blo - r).cmpgt(ahi).any() {
                 continue;
+            }
+            if a < b {
+                dat.near.push((a, b));
             }
             // a's nodes against b's triangles (both orders run: every node of both).
             let (sa, sb) = (&surf[a], &surf[b]);
@@ -944,6 +953,19 @@ fn list_pairs(dat: &mut Dat, x0: &[Vec<Vec3>], surf: &[Surface], off: &[Vec<Vec3
             }
         }
     }
+    if let Some(k) = dat.keys.as_mut() {
+        *k = recs.iter().map(|r| r.k).collect();
+        // (CC_DEBUG_PAIR="v:i,v:j,v:k,v:l" sorted: that pair's record, a diagnostic.)
+        if let Ok(want) = std::env::var("CC_DEBUG_PAIR") {
+            for r in &recs {
+                let mut k: Vec<String> = r.k.iter().map(|(v, i)| format!("{v}:{i}")).collect();
+                k.sort();
+                if k.join(",") == want {
+                    eprintln!("CC_DEBUG_PAIR {want}: g {:e} d {:e} r_q {:e} nn {} len {} offsets {:?} x0 {:?}", r.g, r.d, r_q, r.nn, r.len, r.k.map(|(v, i)| off[v].get(i as usize).map_or(0.0, |o| o.length())), r.k.map(|(v, i)| x0[v][i as usize]));
+                }
+            }
+        }
+    }
     recs
 }
 
@@ -970,42 +992,80 @@ fn xi_share() -> f32 {
 }
 
 
-/// Moreau's impact law over the response (owner: contact must not absorb a crash's energy,
-/// AGENTS.md; `docs/continuous-response-parallel-design.md`): the response's velocity change
-/// Δ = v_p − v⁻ (from equal and opposite impulses: momentum kept) is given back e times,
-/// v⁺ = v_p + θ·Δ with θ = e, or less where that would raise the vehicles' kinetic energy above
-/// what it was before the pass: the guard's θ is the largest with
-/// Σm|v_p + θΔ|² ≤ Σm|v⁻|² (a quadratic), so no energy is created. Sums over vehicles and
-/// nodes in order.
-fn restitute(vehicles: &[ExplicitBeams], vp: &mut [Vec<Vec3>], e: f32, st: &mut DatStats) {
+/// The impact law's restitution e by default (owner, 2026-11-26: contact must not absorb a
+/// crash's energy; `docs/continuous-response-parallel-design.md`): 1, Moreau's energy-neutral
+/// impact. The GPU's continuous tables carry the same value.
+pub const CONTACT_RESTITUTION: f32 = 1.0;
+
+/// The restitution guard's sums are striped over this many lanes in a fixed order (the
+/// kernel's `ccRestitute`, whatever its workgroup's width), then added in lane order.
+pub const RESTITUTION_STRIPES: usize = 64;
+
+/// Moreau's impact law over the response (AGENTS.md, "Contact never stands in for metal"):
+/// the response's velocity change Δ = v_p − v⁻ (from equal and opposite impulses: momentum
+/// kept) is given back e times, v⁺ = v_p + θ·Δ, θ = e, or less where that would raise the
+/// vehicles' kinetic energy above its value before the pass: θ the larger root of
+/// Σm|v_p + θΔ|² = Σm|v⁻|² (a quadratic), so no energy is created. f32 in the kernel's order
+/// (`ccRestitute`): per stripe of [`RESTITUTION_STRIPES`] lanes over the vehicles' nodes in
+/// order, then the stripes in order.
+fn restitute(vehicles: &[ExplicitBeams], vp: &mut [Vec<Vec3>], e: f32, near: &[(usize, usize)], st: &mut DatStats) {
     if e <= 0.0 {
         return;
     }
-    let (mut a, mut b, mut k0, mut kp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    for (v, veh) in vehicles.iter().enumerate() {
-        for (i, n) in veh.nodes.iter().enumerate() {
-            let (m, vm, p) = (n.mass as f64, n.vel.as_dvec3(), vp[v][i].as_dvec3());
-            let d = p - vm;
-            a += m * p.dot(d);
-            b += m * d.length_squared();
-            k0 += m * vm.length_squared();
-            kp += m * p.length_squared();
+    // The guard's groups: vehicles joined by the listing's near test, each labelled by its
+    // smallest member (the kernel's labels, lane 0 over its group's members in order).
+    let nv = vehicles.len();
+    let mut label: Vec<usize> = (0..nv).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &(a, b) in near {
+            let m = label[a].min(label[b]);
+            if label[a] != m || label[b] != m {
+                (label[a], label[b]) = (m, m);
+                changed = true;
+            }
         }
     }
-    if b <= 0.0 {
-        return;
-    }
-    // kp + 2θa + θ²b ≤ k0: the larger root.
-    let disc = (a * a - b * (kp - k0)).max(0.0);
-    let most = (-a + disc.sqrt()) / b;
-    let theta = (e as f64).min(most.max(0.0));
-    if theta < e as f64 {
-        st.guarded += 1;
-    }
-    for (v, veh) in vehicles.iter().enumerate() {
-        for (i, n) in veh.nodes.iter().enumerate() {
-            let d = vp[v][i] - n.vel;
-            vp[v][i] += d * theta as f32;
+    let dot = |a: Vec3, b: Vec3| (a.x * b.x + a.y * b.y) + a.z * b.z;
+    for c in (0..nv).filter(|&c| label[c] == c) {
+        let members: Vec<usize> = (0..nv).filter(|&v| label[v] == c).collect();
+        let mut part = [[0.0f32; 4]; RESTITUTION_STRIPES];
+        for (l, s) in part.iter_mut().enumerate() {
+            for &v in &members {
+                let veh = &vehicles[v];
+                for i in (l..veh.nodes.len()).step_by(RESTITUTION_STRIPES) {
+                    let (m, vm, p) = (veh.nodes[i].mass, veh.nodes[i].vel, vp[v][i]);
+                    let d = p - vm;
+                    s[0] += m * dot(p, d);
+                    s[1] += m * dot(d, d);
+                    s[2] += m * dot(vm, vm);
+                    s[3] += m * dot(p, p);
+                }
+            }
+        }
+        let mut t = [0.0f32; 4];
+        for s in &part {
+            for j in 0..4 {
+                t[j] += s[j];
+            }
+        }
+        let [a, b, k0, kp] = t;
+        let mut theta = 0.0f32;
+        if b > 0.0 {
+            // kp + 2θa + θ²b ≤ k0: the larger root.
+            let disc = (a * a - b * (kp - k0)).max(0.0);
+            let most = (-a + disc.sqrt()) / b;
+            theta = e.min(most.max(0.0));
+            if theta < e {
+                st.guarded += 1;
+            }
+        }
+        for &v in &members {
+            for (i, n) in vehicles[v].nodes.iter().enumerate() {
+                let d = vp[v][i] - n.vel;
+                vp[v][i] += d * theta;
+            }
         }
     }
 }

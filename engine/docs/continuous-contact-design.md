@@ -377,6 +377,26 @@ its value before the pass (an exact quadratic guard). Positions stay non-penetra
 guard is one sum over the world (per group on the GPU); rigid proxies (the ball) are not in
 Δ yet, so e > 0 there would not keep momentum; the head-on's remaining 3 %.
 
+## Impact law on by default, CPU and GPU (2026-11-26)
+
+`CONTACT_RESTITUTION = 1` (dat.rs; the GPU's tables carry it, `ccRestitute`): the guard per group
+of vehicles the listing's near test joins, its sums in 64 fixed stripes then in order, so
+GPU == CPU bit for bit (stepping tests, 80 steps). The suite, 8 runs (energy tests 2):
+
+| | inelastic | e = 1 |
+|---|---|---|
+| energy removed, head 100 / side 60 / ball 100 | 26 % / 8.5 % / - | 2.9 % / 0.2 % / 1.5 % |
+| head 130 | 18 mm, pass | 66 mm worst, fail |
+| offset 100 | 56 mm worst, fail | 39 mm worst, 25 mm from 0.3 s, fail |
+| side 90 | pass | 49 mm, pass |
+| the other 9 | pass | pass |
+
+0 crossings, momentum to rounding. The bounce squeezes the 5-12 cm paint shells harder in the
+two hardest hits: the generator's paint gaps (CONTACT_OFFSET_LOG) are the next fix.
+Found on the way, pre-existing: the CPU flags a torn triangle in the next beam pass, the kernel
+reads its beams' break marks (break groups); the listing differs by one pair the step a triangle
+tears (`continuous_pairs_list_like_the_cpu`, listed).
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

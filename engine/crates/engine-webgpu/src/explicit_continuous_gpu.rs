@@ -33,4 +33,27 @@ impl ExplicitBeamsGpu {
         c.copy_from_slice(&acc[at + w * nv..at + w * nv + 6]);
         Some((pairs, c))
     }
+
+    /// Every listed pair's four global node keys after the last frame (a diagnostic; empty
+    /// without the tables).
+    pub fn continuous_pair_keys(&self) -> Vec<[u32; 4]> {
+        use engine_exec::explicit_plan::continuous::{CC_PAIR_WORDS, CC_VEH_WORDS, W_CC};
+        let (base, at) = (self.layout.words[W_CC] as usize, self.layout.words[W_CC + 1] as usize);
+        if base == 0 {
+            return Vec::new();
+        }
+        let acc: Vec<i32> = bytemuck::cast_slice(&self.read(&self.acc)).to_vec();
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let statics: Vec<[u32; 4]> = bytemuck::cast_slice(&self.read(&self.bufs[1])).to_vec();
+        let mut out = Vec::new();
+        for v in 0..self.layout.spans.len() {
+            let rec = statics[base + 2 + 3 * v];
+            let n = (acc[at + CC_VEH_WORDS * v] as u32).min(rec[3]) as usize;
+            for p in 0..n {
+                let w = rec[2] as usize + CC_PAIR_WORDS * p;
+                out.push([next[w], next[w + 1], next[w + 2], next[w + 3]]);
+            }
+        }
+        out
+    }
 }

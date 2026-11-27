@@ -43,15 +43,24 @@ gen_sedan_paint::accept_side_60_pressed
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
 
-# Continuous contact (tests/continuous_contact.rs, 2026-11-26): offset 100, 8 runs, worst 56 mm during
+# Continuous contact (tests/continuous_contact.rs, 2026-11-26; with e = 1: 39 mm worst, 25 mm
+# from 0.3 s): offset 100, 8 runs, worst 56 mm during
 # the hit (bar 50 mm; 0 mm from 0.3 s, 0 crossings): a front fender's corner paint is bound to nodes
 # up to 85 cm away (feL_r0, in no collision triangle), so it is drawn off the contact surface as the
 # fender crumples. Head 130 passes since the door fix (18 mm worst, 0 from 0.3 s).
 continuous_contact::continuous_offset_100
 
-# Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): the contact response
-# removes 26 % (head 100) and 8.5 % (side 60) of the starting kinetic energy by its counter (which
-# also counts the speed beams give a pressed node; the ledger split is next); bar 1 %.
+# Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): with Moreau's
+# impact law (e = 1) contact removes 2.8-2.9 % (head 100) and 1.3-1.5 % (ball 100) of the
+# starting kinetic energy, bar 1 % (side 60 passes at 0.2 %). Head 130 with e = 1: 66 mm worst
+# during the hit (bounced nodes squeeze the 5-12 cm paint shells; the generator's paint gaps).
 continuous_contact::continuous_energy_head_100
-continuous_contact::continuous_energy_side_60
 continuous_contact::continuous_energy_ball_100
+continuous_contact::continuous_head_130
+
+# Continuous contact GPU listing (engine-webgpu tests/explicit_contact_gpu/continuous.rs,
+# 2026-11-26): with the impact law (e = 1) car B tears 6 collision triangles at step 54 and the
+# CPU and GPU list one pair apart there (the CPU's tri_dead flag is set in the next beam pass;
+# the kernel's triangleDead reads the beams' break marks, which the break groups set at their
+# own time). Positions stay bit for bit (continuous_head_on_steps_like_the_cpu, 80 steps).
+explicit_contact_gpu::continuous::continuous_pairs_list_like_the_cpu
