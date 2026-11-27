@@ -162,6 +162,8 @@ pub(super) fn resolve(
     soft: u32,
     zone_rounds: u32,
     st: &mut CcdStats,
+    vpre: &[Vec<Vec3>],
+    e: f32,
 ) {
     let ke = |vel: &[Vec<Vec3>]| -> f64 {
         vel.iter().zip(m).map(|(v, m)| v.iter().zip(m).map(|(v, &m)| 0.5 * m as f64 * v.length_squared() as f64).sum::<f64>()).sum()
@@ -215,7 +217,7 @@ pub(super) fn resolve(
     // these rounds and with no non-rigid zones (they move positions alone).)
     let vel_only = std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel");
     if vel_only {
-        if super::ccd_rows::velocity_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide) {
+        if super::ccd_rows::velocity_rounds(pairs, x0, x1, vel, m, im, h, rounds, st, &collide, vpre, e) {
             finish(st, x1, vel);
             return;
         }

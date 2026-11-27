@@ -128,13 +128,14 @@ pub(super) fn rows_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
 /// feasible and every iteration lowers the kinetic energy: none is created. Repeated `rounds`
 /// times over the new paths; true when nothing collides any more.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>) -> bool {
+pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], m: &[Vec<f32>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32) -> bool {
     struct VRow {
         k: [(usize, u32); 4],
         w: [f32; 4],
         n: Vec3,
         b: f32,
         l: f32,
+        sigma: f32,
     }
     let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(ROW_ITERS);
     let pos = |x: &[Vec<Vec3>], k: &[(usize, u32); 4]| k.map(|(v, i)| x[v][i as usize]);
@@ -142,11 +143,13 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
     let (vb, xb) = (vel.to_vec(), x1.to_vec());
     let mut rows: Vec<VRow> = Vec::new();
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
+    let mut done = false;
     for _ in 0..rounds {
         let hit = collide(x1);
         st.rounds += 1;
         if hit.is_empty() {
-            return true;
+            done = true;
+            break;
         }
         st.hits += hit.len() as u64;
         for &(q, t) in &hit {
@@ -159,7 +162,13 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
                 continue;
             }
             let s0: f32 = (0..4).map(|j| w[j] * n.dot(a[j])).sum();
-            rows.push(VRow { k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / h, l: 0.0 });
+            // σ: the share of the row's closing (before the solve) that was there before this
+            // step's node update: a true impact ~1, a contact pressed by this step's forces ~0.
+            let close = |v: &dyn Fn(usize, usize) -> Vec3| -(0..4).map(|j| w[j] * n.dot(v(pr.k[j].0, pr.k[j].1 as usize))).sum::<f32>();
+            let cf = close(&|v, i| vb[v][i]);
+            let cs = if vpre.is_empty() { 0.0 } else { close(&|v, i| vpre[v][i]) };
+            let sigma = if cf > 0.0 { (cs / cf).clamp(0.0, 1.0) } else { 0.0 };
+            rows.push(VRow { k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / h, l: 0.0, sigma });
         }
         for c in count.iter_mut() {
             c.iter_mut().for_each(|c| *c = 0);
@@ -214,5 +223,42 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
             }
         }
     }
-    false
+    // Moreau's impact law on true impacts only: each row gives back e·σ of its impulse; the whole
+    // return scaled down (θ ≤ 1) where it would lift the kinetic energy above its value before the
+    // solve. Positions follow.
+    if e > 0.0 && !rows.is_empty() {
+        let mut back: Vec<Vec<Vec3>> = vel.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+        for r in &rows {
+            if r.l <= 0.0 || r.sigma <= 0.0 {
+                continue;
+            }
+            for j in 0..4 {
+                let mm = mi(r.k[j]);
+                if mm > 0.0 && r.w[j] != 0.0 {
+                    back[r.k[j].0][r.k[j].1 as usize] += r.n * (r.w[j] * mm * r.l * e * r.sigma);
+                }
+            }
+        }
+        let ke = |u: &dyn Fn(usize, usize) -> Vec3| -> f64 { (0..vel.len()).map(|v| (0..vel[v].len()).map(|i| 0.5 * m[v][i] as f64 * u(v, i).length_squared() as f64).sum::<f64>()).sum() };
+        let k0 = ke(&|v, i| vb[v][i]);
+        let (mut a, mut bq, mut kp) = (0.0f64, 0.0f64, 0.0f64);
+        for v in 0..vel.len() {
+            for i in 0..vel[v].len() {
+                let (p, d) = (vel[v][i].as_dvec3(), back[v][i].as_dvec3());
+                a += m[v][i] as f64 * p.dot(d);
+                bq += m[v][i] as f64 * d.length_squared();
+                kp += m[v][i] as f64 * p.length_squared();
+            }
+        }
+        let theta = if bq > 0.0 { let disc = (a * a - bq * (kp - 2.0 * k0)).max(0.0); ((-a + disc.sqrt()) / bq).clamp(0.0, 1.0) } else { 0.0 };
+        let _ = k0;
+        for v in 0..vel.len() {
+            for i in 0..vel[v].len() {
+                let dv = back[v][i] * theta as f32;
+                vel[v][i] += dv;
+                x1[v][i] += dv * h;
+            }
+        }
+    }
+    done
 }

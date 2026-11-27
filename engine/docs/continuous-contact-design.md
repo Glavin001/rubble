@@ -550,6 +550,24 @@ their global small step rather than sub-stepping it against a long structural st
 that leaves: the whole of a crashing group's step at the small step during contact (the
 solver's cost times the sub-steps), or impulse time-stepping (Moreau-Jean).
 
+## Velocity-only impulse contact (Moreau-Jean), first measurements (2026-11-26, `DAT_RESPONSE=vel`, off)
+
+Fable's recommendation (and the owner's rule: created energy is a bug): impulses on velocities
+only, positions following (x1 += h·Δv); each CCD impact a row Σ w n·v ≥ −max(s₀ − ξ, 0)/h, solved
+with accumulated impulses to a fixed point; these rows take the speculative pass's place;
+Moreau's law e·σ per row, σ the share of its closing that was there before the step's node
+update (a pressed contact cannot bounce), the return capped so kinetic energy stays at most its
+value before the solve. Elastic bars, continuous contact alone (exact: energy kept 1, rebound 1):
+
+| | at rest | 5 m/s | 20 m/s |
+|---|---|---|---|
+| e = 0 | 1.0003 | 0.955, rebound 0.65 | 0.441, rebound 0.33, stuck |
+| e = 1, true impacts only | 1.0003 | 0.963, rebound 0.71 | 0.469, rebound 0, stuck (826 zones) |
+
+No energy created in any run. The loss at speed is the rigid zones gluing the bars: pairs within
+their gap keep being flagged until the rounds run out. Next: why pairs within their gap stay
+flagged (their rows are linearised at the impact, the closing test is not), then the zones.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
