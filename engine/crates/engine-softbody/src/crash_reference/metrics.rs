@@ -72,7 +72,7 @@
 //!
 //! The executor may add `all.contact_removed_j` ([`super::run`]).
 
-mod beams;
+pub mod beams;
 mod fit;
 mod graph;
 pub mod series;
