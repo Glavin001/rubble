@@ -1729,11 +1729,21 @@ impl ExplicitBeamsWorld {
             }).sum()
         };
         let e0 = if on { mech(self) } else { 0.0 };
+        let before: Option<(Vec<Vec<Vec3>>, Vec<Vec<Vec3>>)> = match (&x0, on) {
+            (Some(s), true) if !s.2.is_empty() => Some((s.2.iter().map(|p| p.iter().map(|q| q.1).collect()).collect(), self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect())),
+            _ => None,
+        };
         self.dat_truncate(x0);
         if on {
             let de = mech(self) - e0;
+            let work = before.map_or(0.0, |(vpre, vb)| {
+                self.vehicles.iter().zip(vpre.iter().zip(&vb)).map(|(v, (vp, vb))| {
+                    v.nodes.iter().zip(vp.iter().zip(vb)).map(|(n, (vp, vb))| n.mass as f64 * (n.vel - *vb).as_dvec3().dot((*vp + n.vel).as_dvec3() * 0.5)).sum::<f64>()
+                }).sum()
+            });
             if let Some(d) = self.continuous.as_mut() {
                 d.total.contact_de += de;
+                d.total.contact_work += work;
             }
         }
     }

@@ -131,6 +131,12 @@ pub struct DatStats {
     pub guarded: u64,
     /// The vehicles' mechanical energy changed by the pass (J, summed; `DAT_ENERGY=1`).
     pub contact_de: f64,
+    /// The pass's work on the integrator's conserved energy (J, summed; `DAT_ENERGY=1`, with the
+    /// step's start velocities, `DAT_RESPONSE=vel`): Σ m·Δv·(v⁻ + v⁺)/2, Δv the pass's change,
+    /// v⁻ the velocity before the step's kick and v⁺ after the pass. Symplectic Euler with an
+    /// impulse at the kick: a contact holding a node its beams press does none, an inelastic
+    /// impact −½μv². (`contact_de` also counts the beams' energy a held node keeps.)
+    pub contact_work: f64,
 }
 
 impl DatStats {
