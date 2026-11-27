@@ -65,6 +65,8 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
             let diag_axial: f64 = diags.iter().map(|&(j, _)| f64::from(car.beams[j].deform) * along(car, j)).sum();
             let plateau = chords.iter().map(|&j| f64::from(car.beams[j].deform)).sum::<f64>() / 4.0;
             let peak = ((mc.peak * scale - diag_axial) / 4.0).max(plateau);
+            // (measurement `no_peak`: the chords flat at the plateau, no first-buckle peak)
+            let peak = if engine_vehiclegen::physics::crush_cell_exp("no_peak") { plateau * 1.0001 } else { peak };
             let k = chords.iter().map(|&j| car.beams[j].k).fold(f32::INFINITY, f32::min);
             // the drop over the first fold's half-length, never steeper than the solver's k/2
             let drop = mc.drop.max(2.05 * (peak - plateau) / f64::from(k));
@@ -91,6 +93,13 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
                 // in tension the wall's plastic shear over the diagonal's sine
                 let tt = v * scale / (1.0 - along(car, j).powi(2)).sqrt();
                 car.beams[j].strength = car.beams[j].strength.max((1.1 * tt) as f32);
+                // (measurement `diag_tc`: as strong in compression as in tension)
+                if engine_vehiclegen::physics::crush_cell_exp("diag_tc") {
+                    car.beams[j].deform = tt as f32;
+                    if let Some(l) = car.fixed_limits.get_mut(&j) {
+                        l.1 = tt as f32;
+                    }
+                }
                 let mut o = Map::new();
                 o.insert("rubbleCrushPlateau".into(), num(car.beams[j].deform));
                 o.insert("rubbleMinRest".into(), json!(MIN_REST_FLOOR));

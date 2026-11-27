@@ -392,6 +392,13 @@ residual crush and mean deceleration inside or at the Camry tests' range (73 ms,
 cabin's plastic share 6 % → 3 %, the engine 0.09 m nearer the firewall. But it gets there by the
 cells turning, not folding (§4.1), its peak is small and late, and S12 is now too soft.
 
+**Update (2026-11-27, `beam-yield-law.md` §9):** with the crush law the cells still do not fold, and
+measured mode by mode no cell yields at all in S11 or S12: the lattice's springs (bounded by the
+2 kHz node budget) are 40–70 × softer than the rail's steel, so the rail buckles elastically as a
+whole at about 100 kN, before its cells reach their peak (269 kN) or plateau (83 kN). Camry
+sections, a larger chord share of the budget and compression-strong diagonals (measured) do not
+change that; it needs a solver or cost decision (§9.4 there).
+
 **Next, for the owner:** (1) decide whether the solver may have a compressive yield separate from
 the tensile one (or a peak-then-plateau law): without it no four-chord cell at P_m folds instead of
 turning, so no generator rule can make this front fold axially; (2) the edge contact's energy fault

@@ -269,6 +269,18 @@ pub fn load_path_step(name: &str) -> bool {
     }
 }
 
+/// Whether a measurement of [`FrontRules::crush_law`]'s cells is on (`CRUSH_CELL_EXP`, comma
+/// separated; unset: none). Measurements only, never a default: each changes the cells against
+/// their sections to show which part of the lattice keeps the rail from folding
+/// (`engine/docs/beam-yield-law.md` §9): `chord_k` (the chords start the stiffness budget at 4 ×
+/// their zone's spring, so they take more of their nodes' budget), `diag_tc` (the face diagonals
+/// as strong in compression as in tension), `camry_sections` (the crash box and rail at the
+/// Camry's crash zone 92 × 163 × 1.70 mm and mid rail 83 × 145 × 2.06 mm, `front-load-path.md`
+/// §1.3), `no_peak` (the chords flat at the plateau: no first-buckle peak).
+pub fn crush_cell_exp(name: &str) -> bool {
+    std::env::var("CRUSH_CELL_EXP").is_ok_and(|v| v.split(',').any(|s| s.trim() == name))
+}
+
 /// The editable physics of a design: masses, zone yields, hardware and the
 /// lattice's reach. Every field has the census / 2011 Accord default gen3 was
 /// calibrated with, so an empty block gives a valid car; a vehicle-gen

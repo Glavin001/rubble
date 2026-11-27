@@ -460,3 +460,110 @@ Not confident:
 the solver feature to port (they are needed by any member that folds and they are cheap), with the
 crush cell as an opt-in extension; port only after the generator shows the front folding with
 them (the remaining defects are content: section sizes and the rail's rear joint).
+*Superseded in part by §9: the remaining defect is not content.*
+
+## 9. Why the bays do not fold: measured mode by mode (2026-11-27, `crash-ref/rail-content`)
+
+The task after §8: split the cells' work over S11 by mode, test the hypothesis of §5.3 (the rail
+hinges at `a4` at its collapse moment), then bring the rail's sections, height and stations closer
+to a mid-size sedan's and continue the rail to the firewall as cells. Step 1 refuted the
+hypothesis and found a cause no content change reaches; steps 2 and 3 were measured as
+experiments, not adopted (AGENTS.md: a goal that needs a solver change is reported, not built).
+
+Tools (from `engine/`; CPU, edge contact, run 0, about 7 s a run):
+
+```
+cargo build --release -p engine-softbody-lab --example front_fold --example vehicle_gen_rig
+target/release/examples/front_fold S11 --params sedan=FILE      # one run: bays, stations, sources CSV + summary
+tools/beam-law/fold.sh                                           # lpx and every measurement, S11 and S12
+python3 -I tools/beam-law/fold_table.py; python3 -I tools/beam-law/fold_plot.py   # tables, SVG plots
+```
+
+`front_fold` finds every crush cell on the car and logs, every 4 ms and per bay: span along the
+car and its chords' length against spawn, each station's height and face pitch, each mode's
+generalised force against its capacity (axial at its curve, strong and weak bending, warping), the
+strong moment, and each mode's plastic work (the split of `CellPlastic`); per station the load
+every other beam brings (along, up, its moment) and by source part; at the end the beams inside
+each bay and each station corner's stiffness budget. Measurement switches of the generator
+(`CRUSH_CELL_EXP`, `engine_vehiclegen::physics::crush_cell_exp`, only with `crush_law`, never a
+default): `chord_k`, `diag_tc`, `camry_sections`, `no_peak`. Outputs `out/beam-law/fold/` (copy in
+`~/Development/rubble-artifacts/rail-content/`).
+
+### 9.1 The hypothesis: refuted
+
+S11, `lpx` (load path + crush law), left bays (the right side is the same within 0.1 m):
+
+| bay | plastic work, every mode (kJ) | largest force / capacity: axial / strong / weak | largest strong moment / collapse (kN·m) | span / chords' shortening at the end (m) |
+|---|---|---|---|---|
+| crash box a1–a2 | 0.00 | 0.57 / 0.11 / 0.14 | 1.27 / 11.50 | 0.204 / 0.012 |
+| rail a2–a4 | 0.00 | 0.38 / 0.11 / 0.36 | 1.57 / 14.15 | 0.261 / 0.017 |
+| rail a4–a5 | 0.00 | 0.29 / 0.04 / 0.12 | 0.59 / 14.15 | 0.072 / 0.014 |
+
+**No cell yields in any mode in S11 or S12.** The moment at `a4` reaches 11 % of the rail's
+collapse moment; the axial force at most 57 % of the box's peak (38 % of the rail's). The bays
+lose 0.07–0.26 m of span with their chords within 2 cm of rest: they shear, turn and yaw
+**elastically** (`a2` moves 0.16 m inboard, `a4` 0.09 m outboard and 0.23 m down; the box ends up
+across the car). The face diagonals, at 2.9–3.6 kN in compression (the quarter share of §4), are
+crushed to 0.58–0.99 of their rest length by the axial shortening and then hold the sheared shape in
+tension. The loads at `a4` from outside the rail are moderate (the subframe 20–30 kN along and
+across, up to 46 kN up in all): not a hinge at the subframe.
+
+### 9.2 The cause: the lattice is 40–70 times too soft for its strength
+
+Measured on the rigged car (`front_fold`'s budget report): the chords' spring is 1.3 MN/m on the
+rail (1.84 on the box), set by the node budget (Σk/m ≤ 8.5e6 s⁻² at 1.39 kg corners, the 2 kHz
+step's stability), of which the chords take 8–19 %. Against the steel they stand for:
+
+| rail bay (70 × 110 × 1.8 mm, 0.38 m) | lattice (cell) | steel section | ratio |
+|---|---|---|---|
+| chord axial stiffness (MN/m) | 1.30 | E·A/4/L = 89.5 | 69 |
+| bending stiffness EI, strong / weak (kN·m²) | k·h²·L = 6.0 / k·w²·L = 2.4 | 240 / 124 | 41 / 52 |
+| elastic rotation to reach the collapse moment (rad) | 0.90 / 1.42 | 0.02 / 0.03 | |
+| elastic shortening to the axial peak (mm) | 52 | 0.6 | |
+| Euler load of the free rail a1–a5 (1.01 m, pinned), strong / weak (kN) | 58 / 23 | 2,400 / 1,200 | |
+
+A real rail is stiff enough that it reaches its fold within millimetres and never buckles as a
+whole; the lattice rail buckles as a whole (braced by the subframe, aprons and towers: the rails
+carry at most ≈ 100–110 kN in S11) long before its cells reach their peak (2 × 134.6 kN on the
+rail) or even their plateau (83 kN). The crush cell's bending strength (§3.5) is never engaged,
+because the elastic rotation needed to reach it is a radian.
+
+### 9.3 What content can do: measured, none folds a rail bay
+
+Each measurement alone and together (`fold_table.py`; S11 / S12, run 0, edge):
+
+| variant | what it changes | chord k (MN/m), θ to M_c strong | plastic work in the cells, S11 (kJ) | largest axial / capacity, rail a2–a4 | a4's largest drop (m) |
+|---|---|---|---|---|---|
+| lpx | – | 1.30, 0.90 rad | 0 | 0.38 | 0.232 |
+| `chord_k` | chords take 34 % of their nodes' budget (the most K_MAX and the budget allow) | 2.66, 0.44 | 0 | 0.40 | 0.303 |
+| `diag_tc` | face diagonals strong in compression too | 1.30 | 0 (the bays now turn whole: a2–a4 loses 0.58 m of span, chords at rest) | 0.15 | 0.289 |
+| `camry_sections` | box 92 × 163 × 1.70, rail 83 × 145 × 2.06 (front-load-path §1.3) | 1.25, 0.90 (M_c and K grow together) | 0 | 0.39 | 0.287 |
+| `no_peak` | chords flat at the plateau | 1.30 | boxes 2.2 / 2.0; rail 0.2 | 0.98 | 0.274 |
+| all three | | 2.59, 0.43 | 0 | 0.26 | 0.435 |
+| all + `no_peak` | | 2.59 | box 0.5 | 0.82 | 0.434 |
+
+- Bigger (Camry) sections raise the collapse moment and the crush force as much as the lever
+  raises the stiffness: the rotation to yield does not fall. The rail's height against the
+  subframe's load is not the issue (§9.1).
+- Giving the chords more of the budget doubles k at most; it would take 40–70 ×.
+- Without the first-buckle peak the crash boxes fold a little (43–50 mm of their chords, 2 kJ each),
+  but they still lose 0.2 m of span by turning, and the rail does not fold.
+- **Not done: the rear rail to the firewall as cells (step 3).** There are no nodes on the rail
+  behind `a5`; a station there needs corner nodes made from other nodes' mass, and a fourth bay of
+  the same soft lattice cannot change §9.2 (the front bays already never reach their capacity).
+- Nothing was adopted: with the switches on the car is the `lpx` of §5.3 (S11 checked: peak wall
+  force 493 kN at 48 ms, crush 0.703 m, residual 0.560 m); with them off every file is byte for
+  byte as before.
+
+### 9.4 What it would take (for the owner; no code)
+
+A member that folds before it buckles needs bending and shear stiffness near its section's
+(EI, GA) at its own strength. At 2 kHz explicit with 1–2 kg corner nodes the chords cannot carry
+it: a cell's face-rotation mode has inertia m·h² and would need ω·h ≈ 10 with the section's EI.
+Options, each a solver or cost decision: (1) the crush cell's modes integrated implicitly (a
+4 × 4 local solve a cell a step, stable for any stiffness; the cell already has the modes);
+(2) sub-stepping the cells (a cost multiplier: rule 6 of `deciding-tradeoffs`); (3) heavier
+station nodes (mass is not the knob) or many more stations (node count is not the knob). Until one
+of these, the front's crush comes from its elastic buckling and the parts around it, not from its
+rails folding; the crush law and cells remain correct and ready (§8) for when the members are
+stiff enough to reach them.
