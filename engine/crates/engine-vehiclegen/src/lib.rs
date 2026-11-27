@@ -27,6 +27,7 @@ pub mod export;
 pub mod designs;
 pub mod physics;
 pub mod crash;
+pub mod thin_wall;
 
 pub use assemble::{build, build_with_body, AxleWheel, BuildOpts, Built, Design, Pose, RigSpec};
 
