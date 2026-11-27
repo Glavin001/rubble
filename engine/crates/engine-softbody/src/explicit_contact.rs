@@ -1737,11 +1737,9 @@ impl ExplicitBeamsWorld {
         self.dat_truncate(x0);
         if on {
             let de = mech(self) - e0;
-            let work = before.map_or(0.0, |(vpre, vb)| {
-                self.vehicles.iter().zip(vpre.iter().zip(&vb)).map(|(v, (vp, vb))| {
-                    v.nodes.iter().zip(vp.iter().zip(vb)).map(|(n, (vp, vb))| n.mass as f64 * (n.vel - *vb).as_dvec3().dot((*vp + n.vel).as_dvec3() * 0.5)).sum::<f64>()
-                }).sum()
-            });
+            let work = before.map_or(0.0, |(vpre, vb)| self.vehicles.iter().zip(vpre.iter().zip(&vb)).map(|(v, (vp, vb))| {
+                v.nodes.iter().zip(vp.iter().zip(vb)).map(|(n, (vp, vb))| n.mass as f64 * (n.vel - *vb).as_dvec3().dot((*vp + n.vel).as_dvec3() * 0.5)).sum::<f64>()
+            }).sum());
             if let Some(d) = self.continuous.as_mut() {
                 d.total.contact_de += de;
                 d.total.contact_work += work;
