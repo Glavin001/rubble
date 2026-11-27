@@ -37,6 +37,86 @@ pub fn impact_beam_on_crash_box_corners(parts: &mut [MechPart]) {
     }
 }
 
+/// [`crate::physics::FrontRules::load_path`]: the bumper beam's joint to each crash box, a
+/// bolted plate. Real cars of this class bolt the beam's bracket flange to the box's front plate
+/// (the 2012 Camry: three bolts a side, `engine/docs/front-load-path.md` §1.2): the joint
+/// carries the box's whole axial force, shear and moment, so the beam cannot slide off the box's
+/// end. Its proof load, three M10 class 10.9 bolts (ISO 898-1: 58 mm² × 830 MPa = 48 kN each),
+/// is an estimate of the bolt size (the deck's rigid bodies do not state it).
+pub const BUMPER_PLATE_STRENGTH_N: f64 = 3.0 * 48e3;
+
+/// [`crate::physics::FrontRules::load_path`] on the definitions: the front impact beam gets a
+/// node at each corner of each crash box's front plate (on its own centreline, in front of the
+/// corner: `corners` are the box's four front corner nodes, name and position, a side,
+/// `[left, right]`), its
+/// mass spread evenly over all its nodes (the part's mass does not change), each new node braced
+/// to the beam's nodes either side and to the side's other three; and its mount to the box becomes
+/// a plate: all sixteen pairs between those four nodes and the box's four corners (`to`), yielding
+/// at the box's own force `box_force` (the plate does not fold before the box) and breaking as a
+/// group at [`BUMPER_PLATE_STRENGTH_N`]. A design without a front impact beam is unchanged.
+pub fn impact_beam_bolted_plate(parts: &mut [MechPart], corners: [[(String, glam::DVec3); 4]; 2], box_force: f64) {
+    let Some(p) = parts.iter_mut().find(|p| p.name == "impact_beam_front") else { return };
+    let mass = p.mass();
+    let old = p.nodes.len();
+    let mut new = [Vec::new(), Vec::new()];
+    for (k, (s, side)) in [("l", &corners[0]), ("r", &corners[1])].into_iter().enumerate() {
+        for (ci, (_, pos)) in side.iter().enumerate() {
+            // (on the beam's centreline: the nearest of its own nodes gives the depth along the car)
+            let z = p.nodes[..old].iter().min_by(|a, b| (a.pos.x - pos.x).abs().total_cmp(&(b.pos.x - pos.x).abs())).map(|n| n.pos.z).unwrap_or(pos.z);
+            let name = format!("{}_x{ci}{s}", p.nodes[0].name.split('_').next().unwrap_or("impbf"));
+            p.nodes.push(crate::mechanical::PartNode { name, pos: glam::DVec3::new(pos.x, pos.y, z.max(pos.z)), mass: 0.0, collide: true });
+            new[k].push(p.nodes.len() - 1);
+        }
+    }
+    let n = p.nodes.len() as f64;
+    for q in &mut p.nodes {
+        q.mass = mass / n;
+    }
+    let v = p.internal[0].v;
+    let mut pairs = Vec::new();
+    for side in &new {
+        for (a, &i) in side.iter().enumerate() {
+            for &j in &side[a + 1..] {
+                pairs.push((i, j));
+            }
+            // the beam's own nodes either side of the box, top and bottom
+            let pi = p.nodes[i].pos;
+            let mut near: Vec<usize> = (0..old).collect();
+            near.sort_by(|&a, &b| (p.nodes[a].pos - pi).length().total_cmp(&(p.nodes[b].pos - pi).length()));
+            for &j in near.iter().take(4) {
+                pairs.push((j, i));
+            }
+        }
+    }
+    p.internal.push(crate::mechanical::Internal { pairs, v, deform_group: None });
+    for (k, s) in ["l", "r"].into_iter().enumerate() {
+        let Some(m) = p.mounts.iter_mut().find(|m| m.group == format!("impact_beam_front_{s}")) else { continue };
+        m.from = new[k].iter().map(|&i| p.nodes[i].name.clone()).collect();
+        m.to = corners[k].iter().map(|c| c.0.clone()).collect();
+        m.beams = m.from.len() * m.to.len();
+        m.v = crate::mechanical::vals(m.v.k.unwrap_or(0.0), m.v.c, box_force, BUMPER_PLATE_STRENGTH_N);
+    }
+}
+
+/// [`crate::physics::FrontRules::load_path`] on the definitions: the front subframe is bolted
+/// under the rail at its own corners, as real cars of this class mount it (the 2012 Camry: the
+/// front bushings on hangers under the rail just behind the crash box, the rear ones under the
+/// toe pan where the rail kicks down; `front-load-path.md` §1.5): its mounts land on the rail
+/// stations above its corners (`front` the station over its front corners, `rear` over its rear
+/// ones, each station's four corner nodes a side, `{s}` the side) and on the firewall's and the
+/// floor's nodes behind it, not on the radiator support, the apron or the crash box. Its beam
+/// counts and values are the definitions'.
+pub fn subframe_on_rail_stations(parts: &mut [MechPart], front: &[&str], rear: &[&str]) {
+    for p in parts.iter_mut().filter(|p| p.name == "subframe_front") {
+        for m in &mut p.mounts {
+            let Some(s) = m.group.strip_prefix("subframe_front_").map(str::to_string) else { continue };
+            let mut to: Vec<String> = front.iter().chain(rear).map(|t| t.replace("{s}", &s)).collect();
+            to.extend([format!("sh_c1_1t{s}"), format!("sh_b1_i{s}")]);
+            m.to = to;
+        }
+    }
+}
+
 /// The mean crush force at crash rate over the quasi-static one for a boxed member
 /// ([`crush::dynamic_factor`] at [`CRASH_RATE_SPEED`], C its mean side, the Camry deck's
 /// Cowper–Symonds constants [`crush::CS_CAMRY_DECK`]); 1 for a panel. The fold strain-rate
@@ -74,6 +154,65 @@ pub fn panel_buckling_force(strips: &[f64], (t, sigma_y, e, skins): (f64, f64, f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mechanical::{vals, BeamKind, Internal, Mount, PartNode};
+    use crate::physics::FrontRules;
+    use glam::DVec3;
+
+    #[test]
+    fn the_load_path_calls_and_supersedes_the_earlier_rules() {
+        // off: the rules as given (every file as before)
+        let r = FrontRules { hood_fold_row: true, ..Default::default() };
+        assert_eq!(r.resolved(), r);
+        assert_eq!(FrontRules::default().resolved(), FrontRules::default());
+        let lp = FrontRules { load_path: true, crash_box_cell: true, crash_box_stroke: true, ..Default::default() }.resolved();
+        if std::env::var("LOAD_PATH_STEPS").is_err() {
+            assert!(lp.subframe_mounts_off_crash_box && lp.yielding_stops && lp.hood_fold_row && lp.crush_from_section);
+        }
+        assert!(!lp.crash_box_cell && !lp.crash_box_stroke && !lp.crash_box_bay_alone && lp.load_path);
+        // `all` is still the seven earlier switches
+        assert!(!FrontRules::all().load_path);
+    }
+
+    fn beam_part() -> MechPart {
+        let mut nodes = Vec::new();
+        for (i, x) in [-0.62f64, -0.31, 0.0, 0.31, 0.62].iter().enumerate() {
+            for (t, y) in [("u", 0.505), ("d", 0.395)] {
+                nodes.push(PartNode { name: format!("impbf_{}{t}", i + 1), pos: DVec3::new(*x, y, 0.80 - 0.05 * x.abs()), mass: 0.8, collide: true });
+            }
+        }
+        let mounts = ["l", "r"].map(|s| Mount { group: format!("impact_beam_front_{s}"), from: vec![], to: vec![], beams: 8, kind: BeamKind::Normal, v: vals(1e6, 100.0, 20e3, 60e3), precomp: 1.0 }).to_vec();
+        MechPart {
+            name: "impact_beam_front".into(),
+            class: "bumper",
+            zone: crate::crash::Zone::FrontLower,
+            mesh: Default::default(),
+            nodes,
+            internal: vec![Internal { pairs: vec![(0, 1)], v: vals(0.0, 100.0, 8e3, f64::INFINITY), deform_group: None }],
+            mounts,
+            links: vec![],
+            binds: vec![],
+            meshes: vec![],
+        }
+    }
+
+    #[test]
+    fn the_bolted_plate_keeps_the_beams_mass_and_joins_all_four_corners() {
+        let mut parts = vec![beam_part()];
+        let side = |sg: f64, s: &str| ["u", "d", "ui", "di"].map(|t| (format!("sh_a1_{t}{s}"), DVec3::new(sg * if t.ends_with('i') { 0.395 } else { 0.465 }, if t.starts_with('u') { 0.495 } else { 0.385 }, 0.786)));
+        impact_beam_bolted_plate(&mut parts, [side(1.0, "l"), side(-1.0, "r")], 81.8e3);
+        let p = &parts[0];
+        assert!((p.mass() - 8.0).abs() < 1e-9, "mass {}", p.mass());
+        assert_eq!(p.nodes.len(), 18);
+        for (k, m) in p.mounts.iter().enumerate() {
+            assert_eq!(m.beams, 16);
+            assert_eq!(m.to.len(), 4);
+            assert!(m.to.iter().all(|t| t.ends_with(["l", "r"][k])));
+            assert_eq!(m.v.deform, 81.8e3);
+            assert_eq!(m.v.strength, BUMPER_PLATE_STRENGTH_N);
+        }
+        // the plate's nodes stand in front of the box's front plate, never behind it
+        assert!(p.nodes[10..].iter().all(|n| n.pos.z >= 0.786 - 1e-12));
+    }
 
     #[test]
     fn a_wide_thin_strip_keeps_its_effective_width() {

@@ -347,7 +347,7 @@ fn sedan_front_push() {
     let momentum = |w: &ExplicitBeamsWorld| w.vehicles[0].nodes.iter().map(|n| f64::from(n.mass) * f64::from(n.vel.z)).sum::<f64>();
     let mut p_prev = momentum(&w);
     let z_held0 = mean_z(&w.vehicles[0], &held);
-    let mut csv = String::from("t_s,disp_m,wall_kN,cabin_v_mps,engine_rear_to_firewall_m,engine_front_to_radiator_m,crash_box_len_m,rail_a2_a4_m,rail_a4_a5_m,elastic_kJ,plastic_kJ,beam_to_crash_box_m,crash_box_front_to_firewall_m,firewall_to_held_m,crash_box_low_len_m,z_a1_a2_m,z_a2_a4_m,z_a4_a5_m,z_a5_firewall_m,a1_drop_m,a5_drop_m,x_a1_a2_m,y_a1_a2_m\n");
+    let mut csv = String::from("t_s,disp_m,wall_kN,cabin_v_mps,engine_rear_to_firewall_m,engine_front_to_radiator_m,crash_box_len_m,rail_a2_a4_m,rail_a4_a5_m,elastic_kJ,plastic_kJ,beam_to_crash_box_m,crash_box_front_to_firewall_m,firewall_to_held_m,crash_box_low_len_m,z_a1_a2_m,z_a2_a4_m,z_a4_a5_m,z_a5_firewall_m,a1_drop_m,a5_drop_m,x_a1_a2_m,y_a1_a2_m,x_a2_a4_m,y_a2_a4_m,x_a4_a5_m,y_a4_a5_m\n");
     let (mut fw_acc, mut nacc) = (0.0f64, 0);
     let mut snaps = String::new();
     let mut marks = [0.10f32, 0.25, 0.39, 0.55, 0.70];
@@ -386,7 +386,7 @@ fn sedan_front_push() {
             let (zl, yl) = (|i: usize| n[i].pos.z, |i: usize| n[i].pos.y);
             writeln!(
                 csv,
-                "{tnow:.4},{disp:.4},{:.2},{:.4},{gap_fw:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+                "{tnow:.4},{disp:.4},{:.2},{:.4},{gap_fw:.4},{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
                 fw_acc / nacc as f64 / 1e3,
                 held.iter().map(|&i| veh.nodes[i].vel.z).sum::<f32>() / held.len() as f32,
                 mean_z(veh, &rad) - mean_z(veh, &eng_front),
@@ -406,7 +406,11 @@ fn sedan_front_push() {
                 yl0[0] - yl(cbd.0),
                 yl0[1] - yl(rails.2),
                 n[cbd.0].pos.x - n[cbd.1].pos.x,
-                yl(cbd.0) - yl(cbd.1)
+                yl(cbd.0) - yl(cbd.1),
+                n[rails.0].pos.x - n[rails.1].pos.x,
+                yl(rails.0) - yl(rails.1),
+                n[rails.1].pos.x - n[rails.2].pos.x,
+                yl(rails.1) - yl(rails.2)
             )
             .ok();
             (fw_acc, nacc) = (0.0, 0);

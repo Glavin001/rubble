@@ -148,6 +148,17 @@ pub struct VgInput {
 }
 
 impl VgInput {
+    /// The physics block's front rules as the rigger applies them
+    /// ([`engine_vehiclegen::physics::FrontRules::resolved`]: the same rules unless the load
+    /// path is on). Called once before rigging, before the definitions are first asked for.
+    pub fn resolve_rules(&mut self) {
+        let r = self.physics.front_rules.resolved();
+        if r != self.physics.front_rules {
+            self.physics.front_rules = r;
+            self.ruled = Default::default();
+            self.ruled_structure = Default::default();
+        }
+    }
     /// Reads `<dir>/<design>.glb` and `<dir>/<design>.rig.json`.
     pub fn load(dir: &Path, design: &str) -> Result<Self, String> {
         let gp = dir.join(format!("{design}.glb"));
@@ -582,8 +593,11 @@ impl RigInput for VgInput {
     }
     fn definitions(&self) -> Option<super::body2::Defs<'_>> {
         self.structure.as_ref().map(|s| super::body2::Defs {
-            structure: self.ruled_structure.get_or_init(|| super::crash_box_cell::structure(s, &self.physics)),
-            parts: self.ruled.get_or_init(|| super::front_rules::mechanical(&self.physics.front_rules, &self.mechanical)),
+            structure: self.ruled_structure.get_or_init(|| super::load_path::structure(&super::crash_box_cell::structure(s, &self.physics), &self.physics)),
+            parts: self.ruled.get_or_init(|| {
+                let st = self.ruled_structure.get_or_init(|| super::load_path::structure(&super::crash_box_cell::structure(s, &self.physics), &self.physics));
+                super::load_path::mechanical(&self.physics, st, super::front_rules::mechanical(&self.physics.front_rules, &self.mechanical))
+            }),
         })
     }
     fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
@@ -643,7 +657,8 @@ pub struct Built {
 }
 
 /// Rig a design and bind its art `.glb` to the lattice.
-pub fn build(input: VgInput) -> Result<Built, String> {
+pub fn build(mut input: VgInput) -> Result<Built, String> {
+    input.resolve_rules();
     let rig = rig_only(&input);
     let skin = bind_art(&input, &rig, &input.glb)?;
     Ok(Built { input, rig, skin })
@@ -815,7 +830,8 @@ pub fn files_with(b: &Built, lite: Option<&(Vec<u8>, Skin)>) -> Vec<(String, Vec
 /// `<design>.lite.*` and physics files (`files_with`), without the full art and its
 /// skins (140 MB the page would not draw). `params` is the JSON `VgInput::from_rust` takes.
 pub fn web_files(design: &str, params: &str, h: f64) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let input = VgInput::from_rust(design, params)?;
+    let mut input = VgInput::from_rust(design, params)?;
+    input.resolve_rules();
     let rig = rig_only(&input);
     let lite = lite_art_of(&input, &rig, params, h)?;
     let name = input.design().to_string();
