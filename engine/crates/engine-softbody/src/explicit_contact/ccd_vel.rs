@@ -239,16 +239,27 @@ impl Ctx<'_> {
         // |w| of every row at node j. (Mass splitting's Σⱼ cⱼ·wᵢⱼ²/mⱼ, cⱼ the rows at j, falls
         // under A where barycentric weights are below 1, and the accelerated steps then
         // diverged on a head-on crush's 744 rows: 2026-11-27.)
+        // (Duplicate rows, `DAT_DEDUP=1`, a measurement: a row that is an earlier row's constraint
+        // takes no impulse and no share of the preconditioner; it is still tested to settle.)
+        let dup: Vec<bool> = if std::env::var("DAT_DEDUP").is_ok_and(|v| v == "1") { dup_rows(rows) } else { vec![false; rows.len()] };
+        for (r, &d) in rows.iter_mut().zip(&dup) {
+            if d {
+                r.l = 0.0;
+            }
+        }
         // (The |w| sums in fixed point, [`GERSH_FIXED`] units: order free, as the kernel's.)
         let mut sum: Vec<Vec<i32>> = base.iter().map(|x| vec![0; x.len()]).collect();
-        for r in rows.iter() {
+        for r in rows.iter().zip(&dup).filter(|x| !*x.1).map(|x| x.0) {
             for j in 0..4 {
                 if self.mi(r.k[j]) > 0.0 {
                     sum[r.k[j].0][r.k[j].1 as usize] += (r.w[j].abs() * GERSH_FIXED).round_ties_even() as i32;
                 }
             }
         }
-        let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j].abs() * self.mi(r.k[j]) * (sum[r.k[j].0][r.k[j].1 as usize] as f32 / GERSH_FIXED)).sum()).collect();
+        let d: Vec<f32> = rows.iter().zip(&dup).map(|(r, &u)| if u { 0.0 } else { (0..4).map(|j| r.w[j].abs() * self.mi(r.k[j]) * (sum[r.k[j].0][r.k[j].1 as usize] as f32 / GERSH_FIXED)).sum() }).collect();
+        if std::env::var("DAT_DUPS").is_ok() {
+            dups_dbg(rows);
+        }
         let mut l: Vec<f32> = rows.iter().map(|r| r.l).collect();
         let mut y = l.clone();
         let mut vy = base.to_vec();
@@ -616,4 +627,25 @@ pub(super) fn guarded_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<
         x1.clone_from_slice(&x1s);
         vel.clone_from_slice(&vels);
     }
+}
+
+/// Rows that are an earlier row's constraint (as [`dups_dbg`] counts).
+fn dup_rows(rows: &[VRow]) -> Vec<bool> {
+    let key = |r: &VRow| { let mut k: Vec<((usize, u32), f32)> = (0..4).filter(|&j| r.w[j] != 0.0).map(|j| (r.k[j], r.w[j])).collect(); k.sort_by(|a, b| a.0.cmp(&b.0)); k };
+    let keys: Vec<_> = rows.iter().map(key).collect();
+    (0..rows.len()).map(|i| (0..i).any(|o| keys[o].len() == keys[i].len() && keys[o].iter().zip(&keys[i]).all(|(a, b)| a.0 == b.0 && (a.1 - b.1).abs() < 1e-5) && rows[o].n.dot(rows[i].n) > 1.0 - 5e-11 && !(0..o).any(|_| false))).collect()
+}
+
+/// A measurement (`DAT_DUPS=1`): rows that are the same constraint as an earlier row of the
+/// solve (the same nodes with nonzero weights, weights within 1e-5, normals within 1e-5 rad).
+fn dups_dbg(rows: &[VRow]) {
+    let key = |r: &VRow| { let mut k: Vec<((usize, u32), f32)> = (0..4).filter(|&j| r.w[j] != 0.0).map(|j| (r.k[j], r.w[j])).collect(); k.sort_by(|a, b| a.0.cmp(&b.0)); k };
+    let mut dup = 0usize;
+    for (i, r) in rows.iter().enumerate() {
+        let ki = key(r);
+        if rows[..i].iter().any(|o| { let ko = key(o); ko.len() == ki.len() && ko.iter().zip(&ki).all(|(a, b)| a.0 == b.0 && (a.1 - b.1).abs() < 1e-5) && o.n.dot(r.n) > 1.0 - 5e-11 }) {
+            dup += 1;
+        }
+    }
+    eprintln!("DUPS rows {} duplicates {}", rows.len(), dup);
 }

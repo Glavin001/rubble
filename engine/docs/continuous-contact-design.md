@@ -1052,6 +1052,30 @@ workgroup. Real time is about 100× away.
   fused phases.
 - The lab's control.
 
+## Why the rounds never settle: iterations and duplicate rows ruled out (2026-11-27, CPU)
+
+Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
+
+| | zones | rounds | APGD iterations |
+|---|---|---|---|
+| default (32 iterations a round) | 2,523 | 759 | 23,672 |
+| 128 iterations | 2,369 | 758 | 94,328 |
+| 512 iterations | 2,356 | 756 | 371,438 |
+| projected Gauss–Seidel (`DAT_PGS=1`) | 2,318 | 756 | 23,558 |
+| duplicate rows inactive (`DAT_DEDUP=1`) | 2,115 | 759 | 23,665 |
+
+- **What is unsettled** (`DAT_CLUSTERS`): every unsettled solve has a pushing row past its bound
+  (median work 0.28 J; for example 0.13 m/s past a 31 m/s bound). 72 % also have a row closing past
+  1 % of its gap.
+- **Duplicate rows** (`DAT_DUPS`): 19 % of the rows are another row's constraint, typically one
+  vertex against another vertex seen through every pair of their edges. Making them inactive
+  removes 16 % of the zones and changes nothing else.
+- **What follows:** neither more iterations nor a better inner solver ends the rounds. Each round's
+  rows are linearised at the impact normals, and the next round's CCD meets the paths again
+  (the cycling found earlier). The outer loop, not the inner solve, is what has to converge.
+  That is a change of the contact's formulation (barrier contact, or rows that stay linearised
+  across rounds with a monotone set), not a tuning.
+
 ## Velocity contact on the GPU (design, 2026-11-27)
 
 The CPU reference (`ccd_vel.rs`, `dat_vel.rs`) is the spec. It takes the position response's
