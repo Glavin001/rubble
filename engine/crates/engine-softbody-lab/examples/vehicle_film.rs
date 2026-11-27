@@ -165,7 +165,7 @@ fn main() -> Result<(), String> {
             (1.0 / 30.0, 240, "chase")
         }
         "wall" => {
-            let v = 56.0 / 3.6;
+            let v = std::env::var("FILM_KMH").ok().and_then(|x| x.parse::<f32>().ok()).unwrap_or(56.0) / 3.6;
             let mut s = spawn(d, Vec3::ZERO, Vec3::Z * v)?;
             let wall_z = zmax + 0.05;
             s.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.0, wall_z + 0.5), Vec3::new(2.0, 1.0, 0.5)));
@@ -248,6 +248,9 @@ fn main() -> Result<(), String> {
         })
         .collect::<Result<_, String>>()?;
     write_mesh(&out, &vis).map_err(|e| e.to_string())?;
+    // Each car's length along its travel (z) at the start: its crush is how much it loses.
+    let length = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.pos.z).fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
+    let len0: Vec<f32> = sims.iter().map(|s| { let (a, b) = length(s); b - a }).collect();
     let mut w = ExplicitBeamsWorld::new(sims);
     if continuous {
         w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
@@ -275,6 +278,15 @@ fn main() -> Result<(), String> {
     let bent: usize = w.vehicles.iter().flat_map(|s| s.beams.iter()).filter(|b| !b.broken && (b.rest - b.rest0).abs() > 1e-3).count();
     let set: f32 = w.vehicles.iter().flat_map(|s| s.beams.iter()).filter(|b| !b.broken).map(|b| (b.rest - b.rest0).abs()).sum();
     let removed = w.continuous.as_ref().map_or(0.0, |d| -d.total.ccd.ke);
+    // Per car: crush (length lost, m), permanent set (m), beams bent and broken, speed now.
+    for (k, s) in w.vehicles.iter().enumerate() {
+        let (a, b) = length(s);
+        let set: f32 = s.beams.iter().filter(|b| !b.broken).map(|b| (b.rest - b.rest0).abs()).sum();
+        let bent = s.beams.iter().filter(|b| !b.broken && (b.rest - b.rest0).abs() > 1e-3).count();
+        let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+        let v = (s.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m).length();
+        println!("CAR {k}: crush {:.3} m (length {:.3} -> {:.3}), permanent set {set:.2} m, bent {bent}, broken {}, speed {v:.2} m/s", len0[k] - (b - a), len0[k], b - a, s.beams.iter().filter(|b| b.broken).count());
+    }
     println!("SUMMARY kinetic left {:.1} kJ, broken {broken:?}, bent {bent} (set {set:.2} m), contact response removed {:.1} kJ", ke * 1e-3, removed * 1e-3);
     let speed: Vec<f32> = w
         .vehicles
