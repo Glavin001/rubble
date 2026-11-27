@@ -995,6 +995,47 @@ step with a CCD step bound, which is closer to BeamNG's penalty contact but prov
 - The exact solve waits on the generator's paint at the door top and on a torque-free form of
   the rows.
 
+## Velocity contact on the GPU (design, 2026-11-27; not started)
+
+The CPU reference (`ccd_vel.rs`, `dat_vel.rs`) is the spec. It takes the position response's
+place inside `ccRespond` (`slang/kernels/explicit_beams_split_cc_respond.slang`), behind a step-word
+bit, on the same split group path and workgroup per contact group.
+
+**Reused as they are:**
+- the listing (`cc_list`) and the pair records;
+- `ccCollide`, with the velocity-only half-distance retest added behind the same bit;
+- the per-node count and apply passes (`ccCountNode`, `ccApplyAll`);
+- the impact zones (label propagation, rigid motion), as the fallback while it exists.
+
+**New, in order each round:**
+1. **Rows.** One per CCD hit, in the pair's record words: weights, normal, s0, bound
+   b = max(s0 − ξ, 0)/h, λ (warm start from last step's λ for pressed rows), and the flag
+   "listed". The re-linearisation tests are the CPU's: the signed end separation and the true end
+   gap, against `relin_share`, at the step's end while on the row's side.
+2. **APGD iterations.** One thread per row computes its λ from the velocities, then each node's
+   velocity is rebuilt as base + Σ impulses. The Gershgorin diagonal is computed once a round from
+   per-node |w| sums. The momentum restart is fixed (every 16), so no reduction across the group.
+3. **Settle test.** One flag per group, by atomic OR. Closing within 1 % of min(s0, ξ); the push
+   work's tolerance; the precision floor (velocity ulps plus the fixed point's unit per row).
+4. **Positions** follow, x1 = xb + (v − vb)·h, then the next round's `ccCollide`.
+
+**Sums.** The CPU sums impulses per node in 64-bit fixed point. In 32 bits, 902 sums overflowed
+in head 130's accelerated iterates. Core WGSL has no 64-bit atomics, so a node's sum is two 32-bit
+words: the low word's atomic add returns the old value, and its carry goes into the high word. That
+is order free and exact. The CUDA executor has native 64-bit atomics.
+
+**Rigid spheres** (a shot ball): as bodies of the solve, one row per sphere–triangle pair, the
+sphere's velocity in the group's node arrays after the vehicles'.
+
+**Parity:** GPU == CPU bit for bit with bit-exact results on, on `tests/continuous_contact_velocity.rs`'s
+three crashes, then the 11. Every float operation in the CPU's order (strict helpers), and the
+sums in integers.
+
+**Cost to expect:** each APGD iteration is a row pass plus a node pass. A head 100 crush runs up
+to 32 iterations × 8 rounds a step (CPU counters: `row_iters`). Real time needs the measured
+counts per step on the scenario matrix's rows; it is the first number to take once the kernel
+runs.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
