@@ -63,9 +63,13 @@ pub(super) fn scenario() -> CrashScenario {
         secs_after_impact: 1.0,
         // The fronts meet at z ≈ 2.5 (the sedan's front is 0.96 m ahead of its origin), x ≈ 0.5.
         cameras: &[
-            Camera { name: "side", eye: [11.0, 1.4, 2.5], target: [0.5, 0.7, 2.5] },
-            Camera { name: "top", eye: [0.5, 14.0, 2.51], target: [0.5, 0.0, 2.5] },
-            Camera { name: "quarter", eye: [-6.0, 3.0, -3.0], target: [0.5, 0.6, 2.5] },
+            // Framed as the reference footage (60° vertical field of view, 16:9): the two cars (z −2.4
+            // to 7.4 at impact, meeting at z 2.5) fill about two thirds of the width.
+            Camera { name: "side", eye: [8.3, 1.1, 2.5], target: [0.47, 0.7, 2.5] },
+            // Straight down, the cars' length across the frame (the eye a centimetre to −x fixes the
+            // picture's up as +x).
+            Camera { name: "top", eye: [0.46, 8.5, 2.5], target: [0.47, 0.7, 2.5] },
+            Camera { name: "quarter", eye: [-7.0, 5.0, -1.5], target: [0.47, 0.5, 2.5] },
         ],
         moments: &[
             Moment { name: "before", after_impact_ms: -10.0 },

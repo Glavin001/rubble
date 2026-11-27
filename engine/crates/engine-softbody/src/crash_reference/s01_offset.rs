@@ -43,14 +43,24 @@ pub(super) fn scenario() -> CrashScenario {
         // World coordinates: the sedan's front is 0.96 m ahead of its origin, the block's face
         // 1.78 m beyond (z ≈ 2.7), its inner edge at x ≈ 0.19.
         cameras: &[
-            Camera { name: "side", eye: [9.0, 1.2, 0.5], target: [0.0, 0.7, 0.5] },
-            Camera { name: "top", eye: [0.01, 12.0, 0.5], target: [0.0, 0.0, 0.5] },
-            Camera { name: "front_quarter", eye: [-5.0, 2.5, 6.5], target: [0.0, 0.6, 1.5] },
+            // Framed as the reference footage (60° vertical field of view, 16:9): the side and top
+            // views fill about two thirds of the width with the car at impact (it spans z −2.1 to
+            // 2.7 then), the barrier at the left edge of the side view as in the film, and room on the
+            // right for the rebound (the car's centre ends near z −2.6).
+            Camera { name: "side", eye: [5.2, 1.0, -0.6], target: [0.0, 0.7, -0.6] },
+            // Straight down, the car's length across the frame, travelling left to right (struck side up):
+            // the eye a centimetre to −x of the target fixes the picture's up as +x.
+            Camera { name: "top", eye: [-0.01, 6.4, -0.6], target: [0.0, 0.7, -0.6] },
+            Camera { name: "front_quarter", eye: [-3.4, 1.9, 5.2], target: [0.2, 0.6, 1.4] },
         ],
         moments: &[
             Moment { name: "before", after_impact_ms: -10.0 },
+            // The reference's "early crush" frame: bumper and lamp gone, the hood starting to buckle.
+            Moment { name: "early_crush", after_impact_ms: 20.0 },
             Moment { name: "wheel_at_sill", after_impact_ms: 40.0 },
             Moment { name: "peak", after_impact_ms: 60.0 },
+            // The reference's "rebound" frame: the front destroyed, the car moving back off the block.
+            Moment { name: "rebound", after_impact_ms: 150.0 },
             Moment { name: "rear_swing", after_impact_ms: 300.0 },
             Moment { name: "rest", after_impact_ms: 950.0 },
         ],

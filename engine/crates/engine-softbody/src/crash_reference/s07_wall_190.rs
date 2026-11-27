@@ -39,13 +39,22 @@ pub(super) fn scenario() -> CrashScenario {
         // World coordinates: the wagon's front is 0.96 m ahead of its origin, the block's face
         // 5.28 m beyond (z ≈ 6.2).
         cameras: &[
-            Camera { name: "side", eye: [11.0, 1.8, 4.0], target: [0.0, 1.0, 4.0] },
-            Camera { name: "aftermath", eye: [-6.0, 3.5, -1.0], target: [0.0, 0.5, 4.5] },
-            Camera { name: "top", eye: [0.01, 14.0, 4.0], target: [0.0, 0.0, 4.0] },
+            // From −x, as the reference film: the car (z 1.4 to 6.2 at impact) travels left to right
+            // into the block at the right; high enough for the car pitched up on its nose, wide
+            // enough for the wreck tumbling back off the block (its centre ends near z −1.4).
+            Camera { name: "side", eye: [-6.5, 2.0, 1.2], target: [0.0, 2.0, 1.2] },
+            // Behind the wreck where it ends, on the left, the block beyond it (the reference's
+            // three-quarter views).
+            Camera { name: "aftermath", eye: [-3.5, 2.6, -5.5], target: [0.9, 0.6, 0.5] },
+            // Straight down, the car's length across the frame, travelling left to right (struck side up):
+            // the eye a centimetre to −x of the target fixes the picture's up as +x.
+            Camera { name: "top", eye: [0.49, 7.6, 1.0], target: [0.5, 0.8, 1.0] },
         ],
         moments: &[
             Moment { name: "before", after_impact_ms: -10.0 },
             Moment { name: "front_gone", after_impact_ms: 20.0 },
+            // The reference's "mid crush" frame: crush through the cabin, the rear high.
+            Moment { name: "mid_crush", after_impact_ms: 40.0 },
             Moment { name: "peak", after_impact_ms: 60.0 },
             Moment { name: "on_its_nose", after_impact_ms: 600.0 },
             Moment { name: "back_down", after_impact_ms: 1250.0 },

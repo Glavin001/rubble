@@ -8,11 +8,13 @@
 //
 //   python3 engine/scripts/with-gpu-lock.py --limit 300 -- \
 //     node crash-ref-record.mjs --crashRef S02 [--cam side] [--contact edge] [--run 0] \
-//       [--size 1280x720] [--video] [--query 'skin3=ghost&skeleton=1'] [--eval EXPR] [--out DIR]
+//       [--size 1280x720] [--video] [--all-cams] [--query 'skin3=ghost&skeleton=1'] [--eval EXPR] [--out DIR]
 //
-// Output: DIR (default engine/out/crash-reference/<id>-<contact>-run<k>/): <moment>-<cam>.png,
-// panel.png, report.json (and <id>.mp4). Serves this folder (its __mods/<design>_new: the
-// site build's generated designs, or a link to `vehicle_gen_rig --out` folders). The
+// Output: DIR (default engine/out/crash-reference/<id>-<contact>-run<k>/): <moment>-<cam>.png
+// (--all-cams: every camera's), panel.png, report.json, scenario.json (the registry entry:
+// its cameras and moments, for engine/tools/crash-reference/sheet.py) and <id>.mp4. Serves
+// this folder (its __mods/<design>_new: the site build's generated designs, or a link to
+// `vehicle_gen_rig --out` folders). The
 // Chrome profile is kept in engine/out/crash-reference/chrome-profile (CRASH_REF_PROFILE)
 // so its shader cache serves later runs. Exit code 1 on a page error or console error.
 import { createServer } from 'node:http';
@@ -27,11 +29,12 @@ const OUT_ROOT = normalize(join(ROOT, '../../out/crash-reference'));
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const ID = opt('--crashRef');
-if (!ID) { console.error('usage: crash-ref-record.mjs --crashRef ID [--cam NAME] [--contact edge] [--run 0] [--size WxH] [--video] [--out DIR]'); process.exit(2); }
+if (!ID) { console.error('usage: crash-ref-record.mjs --crashRef ID [--cam NAME] [--contact edge] [--run 0] [--size WxH] [--video] [--all-cams] [--out DIR]'); process.exit(2); }
 const CONTACT = opt('--contact', 'edge');
 const RUN = Number(opt('--run', 0));
 const CAM = opt('--cam', null);
 const VIDEO = args.includes('--video');
+const ALL_CAMS = args.includes('--all-cams');
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
 const OUT = opt('--out', join(OUT_ROOT, `${ID}-${CONTACT}-run${RUN}`));
 mkdirSync(OUT, { recursive: true });
@@ -124,12 +127,25 @@ try {
       }
     }
   };
+  // --all-cams: a still from each of the scenario's cameras at each moment (the video stays
+  // on the primary camera: the view goes back to it after the stills).
+  const stillCams = ALL_CAMS ? scenario.cameras.map((c) => c.name) : [cam];
+  writeFileSync(join(OUT, 'scenario.json'), JSON.stringify(scenario, null, 1));
   for (const m of moments) {
     await advanceTo(m.step);
-    for (let i = 0; i < 3; i++) await L('L.draw()');
-    const file = `${m.name}-${cam.replace(/\s+/g, '_')}.png`;
-    await shot(file);
-    console.log(`  ${m.name} (${m.after_impact_ms} ms after contact, step ${m.step}): ${file}`);
+    // (The page eases its camera toward a new view, about half the way a draw: 16 draws
+    // after a switch put it there to 1e-4 of the move.)
+    for (const c of stillCams) {
+      if (c !== cam) await L(`(L.lab.camera(${JSON.stringify(`ref:${c}`)}), true)`);
+      for (let i = 0; i < (c !== cam ? 16 : 3); i++) await L('L.draw()');
+      const file = `${m.name}-${c.replace(/\s+/g, '_')}.png`;
+      await shot(file);
+      console.log(`  ${m.name} (${m.after_impact_ms} ms after contact, step ${m.step}): ${file}`);
+    }
+    if (stillCams.some((c) => c !== cam)) {
+      await L(`(L.lab.camera(${JSON.stringify(`ref:${cam}`)}), true)`);
+      for (let i = 0; i < 16; i++) await L('L.draw()');
+    }
   }
   await advanceTo(info.totalSteps);
   for (let i = 0; i < 600; i++) {
