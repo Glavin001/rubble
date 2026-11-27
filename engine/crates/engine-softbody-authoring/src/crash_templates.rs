@@ -4,9 +4,25 @@
 use crate::authoring::rig;
 use engine_softbody::crash_reference::{CrashScenario, Template, Templates, ZoneMap};
 
+/// The FMVSS 214 moving deformable barrier's design name.
+pub const MDB214: &str = "mdb214";
+
 /// A generated design as a template: its JBeam as the solver loads it, the lab's solver
 /// settings, and the generator's crash zones (`crash.json`, when the design writes one).
+///
+/// [`MDB214`] is the FMVSS 214 moving deformable barrier
+/// (`engine_softbody::crash_rigs::mdb214_jbeam`), loaded as the web crash lab's `mdb214`
+/// scene loads it (`engine-world-wasm` `explicit.rs`, `"native": true`): JBeam mode, i.e.
+/// `load_jbeam` and the JBeam spawn (`from_desc_jbeam_with`, the BeamNG profile), not the
+/// `.truck` export. It has no wheels (frictionless skids), so the scenario's raycast spawn
+/// is the same spawn as the lab's pressure-wheel one, and it never rides a carrier (the
+/// lab's `on_carrier` skips it). It has no crash zones.
 pub fn template(design: &str) -> Result<Template, String> {
+    if design == MDB214 {
+        let text = engine_softbody::crash_rigs::mdb214_jbeam();
+        let desc = engine_softbody::jbeam::load_jbeam(&[("mdb214.jbeam", text.as_str())], None)?;
+        return Ok(Template { desc, settings: crate::vehicle_compare::settings(), zones: ZoneMap::default() });
+    }
     let built = rig::rig_vehicle(design, None, None)?;
     let files = rig::mod_files(&built);
     let txt: Vec<(String, String)> = files.iter().filter(|(p, _)| p.ends_with(".jbeam")).map(|(p, b)| (p.clone(), String::from_utf8_lossy(b).into_owned())).collect();
