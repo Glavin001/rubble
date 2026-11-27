@@ -46,8 +46,8 @@ gen_sedan_paint::accept_side_60_pressed
 
 # The vehicle lint on every generated design (tests/generated_vehicle_lint.rs, 2026-11-24): the
 # collision skin's defects, found by hand in the S4 crash study, now caught at build time.
-# Since 2026-11-27 also the 4x4's mass: 1410 kg rigged against its SUV kerb of 2000 kg (-26.5 %;
-# the body-definition rigger does not read `kerb`, generated-vehicles-lessons.md §21).
+# (The 4x4's mass passes since 2026-11-27: 1897 kg against 1920 kg, its parts built up to an
+# SUV's, generated-vehicles-lessons.md §21.)
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
 
