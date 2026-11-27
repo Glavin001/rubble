@@ -31,7 +31,6 @@ crates/engine-softbody-authoring/src/authoring/skeleton.rs 1573
 crates/engine-softbody-authoring/src/authoring/skin.rs 3107
 crates/engine-softbody-authoring/src/authoring/vehicle.rs 6386
 crates/engine-softbody-authoring/src/flexmesh.rs 1352
-crates/engine-softbody-authoring/src/flexskin.rs 1116
 crates/engine-softbody-authoring/src/vehicle_compare.rs 3323
 crates/engine-softbody-authoring/tests/crash_invariants.rs 2586
 crates/engine-softbody-authoring/tests/host/authoring_census.rs 1511

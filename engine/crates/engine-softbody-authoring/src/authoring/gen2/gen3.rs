@@ -15,6 +15,22 @@ pub const SKIN_FILE: &str = "gen2.rskin";
 /// The render model's file name in the vehicle folder.
 pub const GLB_FILE: &str = "gen2.glb";
 
+/// The most a glass vertex's skin may amplify its nodes' motion apart from each
+/// other ([`flexskin::amplification`]: Σ|Aⱼ|, 1 where it interpolates them).
+///
+/// Glass spans an opening with no nodes in it. Where the frame's nodes on one side
+/// are sparse (long kernels) and on the other dense (short ones), the pane's edge is
+/// in reach of the one side alone and the affine fit extrapolates from it: the
+/// generated 4x4's windscreen top bound −1.45 to the roof header's middle node
+/// (Σ|A| 4.46), so a roof crush that pushed the header down lifted the glass up, a
+/// grey spike 0.7–0.9 m above the car (`engine/docs/generated-vehicles-lessons.md`,
+/// "Glass binding"). A glass mesh whose vertex passes this grows its kernels until
+/// the frame on every side is in reach. **Choice**: 3.0, the most any other
+/// design's glass reaches (the wagon's quarter lights, 2.98) and none of them
+/// spikes in a crush; the 4x4's windscreen binds at 1.32 with it, its rear glass at
+/// 1.45 (3.02), its quarter lights at 2.64 (3.43).
+pub const GLASS_AMP_MAX: f64 = 3.0;
+
 /// The physics part a model mesh rides (None: a wheel's piece).
 pub fn part_of(mesh: &str) -> Option<Part> {
     let tail = |s: &str| mesh.ends_with(s);
@@ -140,6 +156,8 @@ pub fn skins_with(
         }
         let (verts, _) = if rigid(&m.name) {
             flexskin::bind_rigid(&ids, &pos, &vp, &vn)
+        } else if m.name.starts_with("glass_") {
+            flexskin::bind_with(&ids, &pos, &vp, &vn, Some(GLASS_AMP_MAX))
         } else {
             flexskin::bind(&ids, &pos, &vp, &vn)
         }

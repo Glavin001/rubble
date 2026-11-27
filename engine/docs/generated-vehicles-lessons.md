@@ -396,8 +396,44 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
     now passes `skin_clearance`. The lint test checks every design, not only the sedan, so a
     car the lab would refuse fails at build time.
 
+## 20. Glass binding: a pane interpolates its frame (2026-11-27)
+
+- **(Measurement) The 4x4's windscreen spike.** After a roof crush (vehicle lab, shoot, a
+  1.5 m steel sphere at 6 m/s from above, or a 0.1 m one at 49 m/s), a grey cone of the
+  windscreen rose 0.7–0.9 m above the car. On the CPU reference
+  (`engine-world-lab --example skin_spike_probe`) it is one region of the pane, its top
+  middle (vertex 3064 of `glass_windshield`, 18 cm below the header). Its weighted skin
+  (`.rskin`) had Σ|A| 4.46: −1.45 on the header's middle node `sh_d4_h`, +0.95 on each
+  header corner, +0.40 on the roof's next row, −0.28 on the roof's rear, the cowl 0.01.
+  The roof crush pushed `sh_d4_h` down 0.5 m more than the corners, so the vertex went up:
+  0.86 m past its rest distance from its nodes (the rest of the car: 0.37 m at most).
+- **(Cause) Extrapolation, not a bad node.** No node broke off and no weight went to
+  another part: the moving-least-squares fit (`flexskin::bind`) reached only the roof's
+  sparse nodes (long kernels) from the pane's top; the cowl's dense nodes (short kernels)
+  were out of reach, so the affine fit extrapolated below the roof plane with large
+  weights of both signs. A glass pane spans an opening with no nodes in it, so it is
+  where this happens. Panels have nodes on them.
+- **(Fix) `gen3::GLASS_AMP_MAX` = 3.0** (`flexskin::bind_with`, `amplification`): a glass
+  mesh with a vertex past Σ|A| 3 grows its kernels, like an ill-posed fit, until the frame
+  on every side is in reach. The 4x4's windscreen now binds at Σ|A| 1.32 (its rear glass
+  3.02 → 1.45, its quarter lights 3.43 → 2.64); after the same crush its worst vertex is
+  0.20 m past rest (from 0.85 m), the small shot's 0.14 m (from 0.67 m). Glass is visual
+  only: no physics changed.
+- **(Decision) Other designs unchanged.** Their glass reaches at most 2.98 (the wagon's
+  quarter lights) and none spikes under the same crush (glass 0.10–0.13 m past rest, below
+  their body shell's). Sedan, police sedan, wagon and both Mach 1 rigs are byte for byte as
+  before.
+- **Checks:** `every_design` fails a design with a glass vertex past the bound;
+  `flexskin::tests::a_pane_across_an_opening_interpolates_its_frame` holds the case (a
+  sparse roof, a dense cowl: unbounded the pane rises 0.89 m as its header falls 0.3 m,
+  bounded 3 cm).
+- **Open:** the same measure is high on some non-glass pieces (the 4x4's fenders 8.1, the
+  rigid headlamps 4.6–9.1, rigid pieces' centroid weights); none was seen to spike, but a
+  rigid piece's frame extrapolated that far turns with the nodes' bending.
+
 ## Changelog
 
+- 2026-11-27: section 20, glass binding: a pane interpolates its frame (the 4x4's windscreen spike).
 - 2026-11-27: section 19, two coplanar overlaps fixed in the rigger (a hull face's inside point, a quad's second diagonal).
 - 2026-11-24: section 18, adding a vehicle (the registry, variant or standalone, what the rigger needs, the gate); mach1_gasser (pose, per-axle wheels) and suv_4x4 registered.
 - 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).
