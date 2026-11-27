@@ -33,7 +33,8 @@ RUN_SECONDS = {
     ("engine-softbody-authoring", "test", "showcase_skin_integrity"): 48,
     # Measured locally (15 s on an M-series Mac); a runner's estimate.
     ("engine-softbody-authoring", "test", "gen_sedan_contact"): 65,
-    ("engine-softbody-authoring", "test", "gen_sedan_paint"): 480,
+    # 1,242 s on CI (2026-11-27, shard 4 cancelled at 25 min with the binary after it).
+    ("engine-softbody-authoring", "test", "gen_sedan_paint"): 1300,
     # Continuous contact's acceptance crashes (eleven scenes and three energy tests, 8 or 2
     # runs each: 20-60 s each on an M-series Mac); a runner's estimate. It had no line and
     # counted 2 s, so its shard ran past the job's 25 minutes (2026-11-27).
