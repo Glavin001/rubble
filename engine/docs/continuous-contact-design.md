@@ -1194,6 +1194,10 @@ Contact's work (rule 8), 2 runs each:
   | head 100 | 14.4–16.4 % (292–523 zones) | 12.8–13.1 % (146–366 zones; zones 73–86 kJ, rows 61–71 kJ) |
 
   Newton's law there created no energy: the guard lowered e in 138–445 passes.
+- **Every row rebuilt at the end each round** (sequential linearisation of the true gap,
+  `DAT_RELIN_ALL=1`; a rebuilt row counts as a change only where the old test fails): 3,245
+  zones against 1,151. Rows that follow their pair's sliding closest points destabilise the
+  rounds rather than end them.
 - **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
   ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
   adoptable as it stands.

@@ -607,6 +607,8 @@ impl Ctx<'_> {
                 // The end separation is signed, along the row's own normal: a pair that passed
                 // through within the step is as far apart unsigned as one that stopped short.
                 let old = listed.get(&q).copied();
+                // (A row built again only to follow its pair, `DAT_RELIN_ALL`: not a change.)
+                let mut quiet = false;
                 if let Some(i) = old {
                     let r = &rows[i];
                     let s_end: f32 = (0..4).map(|j| r.w[j] * r.n.dot(b[j])).sum();
@@ -619,7 +621,13 @@ impl Ctx<'_> {
                     // gap projected onto it reads short by cos θ every round.)
                     let gt = closest(pr.nn, b).1;
                     let s_true = if std::env::var("DAT_RELIN_LEN").is_ok_and(|v| v == "1") && gt.dot(r.n) > 0.0 { gt.length() } else { gt.dot(r.n) };
-                    if s_end.min(s_true) > 0.0 && s_end.min(s_true) >= relin_share() * r.s0.min(pr.xi) {
+                    // (`DAT_RELIN_ALL=1`, a measurement: every row on its side at the end is built
+                    // again there each round, sequential linearisation of the true gap, so a
+                    // sliding pair's row follows its closest points.)
+                    let all = std::env::var("DAT_RELIN_ALL").is_ok_and(|v| v == "1");
+                    let passes = s_end.min(s_true) > 0.0 && s_end.min(s_true) >= relin_share() * r.s0.min(pr.xi);
+                    quiet = passes;
+                    if passes && !(all && s_true > 0.0) {
                         continue;
                     }
                     if std::env::var("DAT_RELINWHY").is_ok() {
@@ -653,7 +661,9 @@ impl Ctx<'_> {
                         n = d;
                     }
                 }
-                fresh += 1;
+                if !quiet {
+                    fresh += 1;
+                }
                 let s0: f32 = (0..4).map(|j| w[j] * n.dot(a[j])).sum();
                 // The bound on the end separation along n: close to the gap ξ and no further.
                 // (Measured from the step's start, as the CCD's paths are: the same bound taken
@@ -675,7 +685,7 @@ impl Ctx<'_> {
                         rows.push(r);
                     }
                     Some(i) => {
-                        relin += 1;
+                        relin += usize::from(!quiet);
                         r.l = rows[i].l;
                         rows[i] = r;
                     }
