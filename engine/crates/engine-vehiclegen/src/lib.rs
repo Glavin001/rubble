@@ -18,6 +18,7 @@ pub mod panels;
 pub mod solid;
 pub mod structure;
 pub mod mechanical;
+pub mod heavy;
 pub mod parts;
 pub mod frame;
 pub mod uvpack;

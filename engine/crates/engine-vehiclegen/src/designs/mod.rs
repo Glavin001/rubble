@@ -9,6 +9,7 @@ pub mod mach1_gasser;
 pub mod police;
 pub mod sedan;
 pub mod suv4x4;
+pub mod truck_cab;
 pub mod wagon;
 
 use crate::assemble::Design;
@@ -120,6 +121,7 @@ pub static REGISTRY: &[Entry] = &[
         ranges: suv4x4::RANGES,
         rim_styles: suv4x4::RIM_STYLES,
     },
+    Entry { name: "truck_cab", title: "4x2 cab-over tractor unit (ladder frame, 7.5 t)", defaults: || serde_json::to_string_pretty(&truck_cab::TruckCabParams::default()).unwrap(), build: |j| { let p: truck_cab::TruckCabParams = serde_json::from_str(j).map_err(|e| format!("parameters: {e}"))?; p.validate()?; Ok(Box::new(truck_cab::TruckCab::new(p))) }, ranges: truck_cab::RANGES, rim_styles: truck_cab::RIM_STYLES },
 ];
 
 pub fn find(name: &str) -> Result<&'static Entry, String> {

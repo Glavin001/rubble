@@ -644,7 +644,8 @@ pub fn build(input: VgInput) -> Result<Built, String> {
 
 /// The lattice alone (the physics): `build` less the binding of the art's skins.
 pub fn rig_only(input: &VgInput) -> Rig {
-    let mut rig = rig::rig_with(input);
+    // (A design of defined parts alone, no unibody shell: `parts_rig`.)
+    let mut rig = if super::parts_rig::applies(input) { super::parts_rig::rig(input) } else { rig::rig_with(input) };
     // (A posed design is rigged in its body frame and put in the world.)
     if let Some(ps) = input.rig.dims.pose {
         rig.transform(|g| {
