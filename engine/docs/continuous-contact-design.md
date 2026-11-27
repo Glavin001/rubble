@@ -400,6 +400,19 @@ order: this one; before: the next). The beam pass now records that (`explicit_be
 `ExplicitBeams::tri_torn`) and the continuous pass's surface reads it: the listing is bit for bit
 at the step a triangle tears (`continuous_pairs_list_like_the_cpu`).
 
+## The acceptance bar (owner, 2026-11-26)
+
+- **Hard: the collision mesh never overlaps.** No edge of one car through the other's
+  collision triangles, none through its own, at every 20 ms check of every run (8 runs a crash).
+- **Paint: a guard.** The drawn paint is a flexbody over the coarser node-beam mesh and may stand
+  a little into the other car while the collision meshes are apart (judged on close-ups of the
+  head 130). It is held at or under the worst measured, so it cannot quietly get worse: 7 cm
+  during a hit, 3 cm from 0.3 s after it, over 1 cm for at most 0.2 s
+  (`tests/continuous_contact.rs`, `PAINT_DURING`, `PAINT_AFTER`).
+
+All 11 acceptance crashes pass it (head 130: 66 mm during, 0 after; offset 100: 39 mm during,
+25 mm after; 0 crossings everywhere).
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

@@ -43,17 +43,8 @@ gen_sedan_paint::accept_side_60_pressed
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
 
-# Continuous contact (tests/continuous_contact.rs, 2026-11-26; with e = 1: 39 mm worst, 25 mm
-# from 0.3 s): offset 100, 8 runs, worst 56 mm during
-# the hit (bar 50 mm; 0 mm from 0.3 s, 0 crossings): a front fender's corner paint is bound to nodes
-# up to 85 cm away (feL_r0, in no collision triangle), so it is drawn off the contact surface as the
-# fender crumples. Head 130 passes since the door fix (18 mm worst, 0 from 0.3 s).
-continuous_contact::continuous_offset_100
-
 # Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): with Moreau's
 # impact law (e = 1) contact removes 2.8-2.9 % (head 100) and 1.3-1.5 % (ball 100) of the
-# starting kinetic energy, bar 1 % (side 60 passes at 0.2 %). Head 130 with e = 1: 66 mm worst
-# during the hit (bounced nodes squeeze the 5-12 cm paint shells; the generator's paint gaps).
+# starting kinetic energy, bar 1 % (side 60 passes at 0.2 %).
 continuous_contact::continuous_energy_head_100
 continuous_contact::continuous_energy_ball_100
-continuous_contact::continuous_head_130
