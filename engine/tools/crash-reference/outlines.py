@@ -8,13 +8,15 @@ Inputs:
   `engine/out/crash-reference/outlines/<ID>-edge/` with its own stills of the collision
   surface from each scenario camera at each moment);
 - the recorder's stills (`crash-ref-record.mjs --all-cams`, `<moment>-<camera>.png`);
-- tracings of the reference frames (`engine/docs/crash-reference/tracings/*.json`, points
-  in normalised image coordinates; correct them with `trace.html`);
-- the reference frames themselves (third-party footage, never committed; read from
-  `~/Development/rubble-artifacts/crash-reference/`).
+- the Reference Studio's shots, frames and tracings (`engine/docs/crash-reference/studio/`,
+  points only; trace and correct them in `apps/reference-studio`) and its image library
+  (third-party footage, never committed: `apps/reference-studio/library/`).
+
+Normalising and measuring are Rust's (`reference_shape`, the studio's maths: one place for
+the page and this script); this script only draws.
 
     python3 engine/tools/crash-reference/outlines.py all [S01 S02]
-        [--out engine/out/crash-reference/outlines] [--stills DIR] [--frames DIR]
+        [--out engine/out/crash-reference/outlines] [--stills DIR] [--library DIR]
     python3 engine/scripts/with-gpu-lock.py --limit 300 -- \\
         python3 engine/tools/crash-reference/outlines.py rasterise DIR [DIR ...]
 
@@ -24,11 +26,11 @@ turns every SVG in the folders into a PNG with headless Chrome over http (the on
 renderer this machine has; Chrome is run without the GPU, but under the lock as every
 headless Chrome is). Standard library only.
 
-The common frame (side view): x along the car (forward), y up. S01's frames show the whole
-car: origin the rear wheel's centre, unit the wheelbase in that source's own "before"
-frame. S02's frames show only the front half (no rear wheel): origin the front door's
-front edge at the sill (the cabin does not deform there), unit the front wheel's radius
-in the source's "before" frame. Shape numbers are reported comparisons, not criteria.
+The common frame is the structure schema's (`studio/structures/<id>.json` `frames`, the
+first every source has): for the side view, origin the rear wheel's centre and unit the
+wheelbase in each source's own "before" frame when the rear wheel is traced (S01), else
+origin the front door's corner at the sill and unit the front wheel's radius (S02's frames
+show only the front half). Shape numbers are reported comparisons, not criteria.
 """
 import base64
 import http.server
@@ -44,10 +46,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ENGINE = HERE.parents[1]
 sys.path.insert(0, str(HERE))
-import sheet  # noqa: E402  (the reference moment -> Rubble moment rule)
+import studio_data  # noqa: E402  (the studio's data and its Rust maths)
 
 ARTIFACTS = Path.home() / 'Development' / 'rubble-artifacts' / 'crash-reference'
-TRACINGS = ENGINE / 'docs' / 'crash-reference' / 'tracings'
 
 COLOURS = {
     'hood': '#ff9a1f', 'fender_l': '#38b6ff', 'fender_r': '#38b6ff', 'bumper_f': '#e04be0', 'bumper_r': '#e04be0',
@@ -56,10 +57,8 @@ COLOURS = {
 }
 SIDE_GROUPS = ['bumper_f', 'hood', 'fender_l', 'door_fl', 'door_rl', 'greenhouse', 'roof', 'sill_l', 'trunk']
 TOP_GROUPS = ['bumper_f', 'hood', 'fender_l', 'fender_r', 'door_fl', 'door_fr', 'greenhouse', 'roof', 'trunk']
-SOURCE_COLOURS = {'real': '#ff4d4d', 'beamng': '#3d8bff', 'rubble': '#2ee07a'}
-SOURCE_NAMES = {'real': 'real test', 'beamng': 'BeamNG', 'rubble': 'Rubble'}
-# A crease: a turn of the hood line sharper than this (degrees) at one of its points.
-CREASE_DEG = 20.0
+SOURCE_COLOURS = {'real': '#ff4d4d', 'beamng': '#3d8bff', 'rubble': '#2ee07a', 'other': '#b48cff'}
+SOURCE_NAMES = {'real': 'real test', 'beamng': 'BeamNG', 'rubble': 'Rubble', 'other': 'other'}
 
 
 # ---------------------------------------------------------------- SVG helpers
@@ -181,234 +180,93 @@ def rubble_overlays(sid, doc, out, stills):
     return made
 
 
-# ---------------------------------------------------------------- tracings
+# ---------------------------------------------------------------- tracings (the studio's frames)
 
-def load_tracings(sid):
-    out = []
-    for p in sorted(TRACINGS.glob(f'{sid}_*.json')):
-        out.append(json.loads(p.read_text()))
-    return out
-
-
-def to_px(t, p):
-    return [p[0] * t['image']['width'], p[1] * t['image']['height']]
+def scenario_frames(sid, view=None):
+    """The studio's frames of shots linked to scenario `sid` with a traced region, in time order."""
+    shot_map, all_frames = studio_data.shots(), studio_data.frames()
+    out = [f for f in all_frames.values() if studio_data.scenario_of(f, shot_map) == sid and f.get('image')
+           and any(studio_data.traced(r) for r in f['regions']) and (view is None or f['view'] == view)]
+    out.sort(key=lambda f: ((f.get('time') or {}).get('video_s', 1e9), f['id']))
+    return out, all_frames, shot_map
 
 
-def annotated_frame(t, frames, out):
-    src = frames / t['frame']
-    W, H = t['image']['width'], t['image']['height']
+def annotated_frame(f, schemas, library, out):
+    """The frame with each region's crop and traced elements (display only)."""
+    W, H = f['image']['width'], f['image']['height']
     body = []
-    for half, hv in t['halves'].items():
-        col = SOURCE_COLOURS[half]
-        body.append(polyline([to_px(t, p) for p in hv['crop']], col, 3, '12 8', 0.9, closed=True))
-        for name, line in hv['lines'].items():
-            ln = [to_px(t, p) for p in line]
-            body.append(polyline(ln, col if name != 'hood' else '#ffb000', 5 if name == 'hood' else 3.5))
-            body += [f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{col}" stroke="#000"/>' for x, y in ln]
-            body.append(label(ln[0][0] + 6, ln[0][1] - 8, name.replace('_', ' '), col, 22))
-        for name, wh in hv['wheels'].items():
-            c, rim = to_px(t, wh['c']), to_px(t, wh['rim'])
-            body.append(circle(c, math.dist(c, rim), col, 3.5))
-            body.append(label(c[0] - 40, c[1], f'{name} wheel', col, 22))
-    head = [(f'{t["frame"]}: {t["moment"]} ({t["camera"]}); tracing: {t.get("traced_by", "")}', '#fff'),
-            ('red: real test half; blue: BeamNG half; dashed: each half\'s crop', '#ddd'),
-            ('approximate first pass: correct it in trace.html', '#ffb000')]
+    for r in f['regions']:
+        col = SOURCE_COLOURS.get(r['source'], '#b48cff')
+        c = r['crop']
+        to = lambda p: [(c[0] + p[0] * (c[2] - c[0])) * W, (c[1] + p[1] * (c[3] - c[1])) * H]  # noqa: E731
+        body.append(polyline([to(p) for p in ([0, 0], [1, 0], [1, 1], [0, 1])], col, 3, '12 8', 0.9, closed=True))
+        for inst in r['tracing']['instances']:
+            labels = {e['name']: e['label'] for e in schemas.get(inst['schema'], {}).get('elements', [])}
+            for name, v in inst['elements'].items():
+                dash = None if v.get('vis', 'clear') == 'clear' else '10 6'
+                if v.get('pts'):
+                    ln = [to(p) for p in v['pts']]
+                    body.append(polyline(ln, col if name != 'hood' else '#ffb000', 5 if name == 'hood' else 3.5, dash))
+                    body += [f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{col}" stroke="#000"/>' for x, y in ln]
+                    body.append(label(ln[0][0] + 6, ln[0][1] - 8, labels.get(name, name), col, 22))
+                elif v.get('c') and v.get('rim'):
+                    cc, rim = to(v['c']), to(v['rim'])
+                    body.append(circle(cc, math.dist(cc, rim), col, 3.5, dash))
+                    body.append(label(cc[0] - 40, cc[1], labels.get(name, name), col, 22))
+                elif v.get('p'):
+                    p = to(v['p'])
+                    body.append(f'<rect x="{p[0] - 7:.1f}" y="{p[1] - 7:.1f}" width="14" height="14" fill="none" stroke="{col}" stroke-width="3"/>')
+    traced_by = '; '.join(sorted({r['tracing']['traced_by'] for r in f['regions'] if r['tracing']['traced_by']}))
+    head = [(f'{f["id"]}: {f["moment"]["label"]} ({f["view"]}); tracing: {traced_by}', '#fff'),
+            ('dashed boxes: each region\'s crop (red: real test, blue: BeamNG); dashed lines: blurred or hidden', '#ddd'),
+            ('correct it in the Reference Studio (apps/reference-studio)', '#ffb000')]
     leg = [f'<g transform="scale(1.6)">{"".join(legend(head))}</g>']
-    bg = data_uri(src) if src.exists() else None
-    return write(out / 'reference' / (Path(t['frame']).stem + '-traced.svg'), svg(W, H, body + leg, bg, 1.0))
+    src = studio_data.image_path(f, library)
+    bg = data_uri(src) if src and src.exists() else None
+    return write(out / 'reference' / (f['id'] + '-traced.svg'), svg(W, H, body + leg, bg, 1.0))
 
 
-# ---------------------------------------------------------------- the common frame
+# ---------------------------------------------------------------- the common frame (Rust)
 
-def car_xy(t, p, front_left=True):
-    x, y = to_px(t, p)
-    return [-x if front_left else x, -y]
-
-
-class Shape:
-    """One source at one moment in its own car-like axes (x forward, y up, raw units)."""
-
-    def __init__(self):
-        self.lines = {}     # name -> polyline (feature lines; tracings' names)
-        self.loops = {}     # name -> [polyline] (Rubble outlines, drawn only)
-        self.wheels = {}    # front/rear -> (centre, radius)
-        self.door = None    # front door's front edge at the sill
-        self.roof_rear = None
-
-
-def shape_from_tracing(t, half):
-    hv = t['halves'][half]
-    s = Shape()
-    fl = t.get('front', 'left') == 'left'
-    for name, line in hv['lines'].items():
-        s.lines[name] = [car_xy(t, p, fl) for p in line]
-    for name, wh in hv['wheels'].items():
-        c, rim = car_xy(t, wh['c'], fl), car_xy(t, wh['rim'], fl)
-        s.wheels[name] = (c, math.dist(c, rim))
-    if 'door_front_edge' in s.lines:
-        s.door = min(s.lines['door_front_edge'], key=lambda p: p[1])
-    if 'roofline' in s.lines:
-        s.roof_rear = min(s.lines['roofline'], key=lambda p: p[0])
-    return s
+def comparison(f, before, schema, outlines_path, sid):
+    """Every traced region of `f` against the same region of `before`, and Rubble, normalised
+    and measured by Rust (`reference_shape compare`, the studio's maths)."""
+    sources, names = [], {}
+    for r in f['regions']:
+        inst = (r['tracing']['instances'] or [None])[0]
+        if not inst or inst['schema'] != schema['id'] or not studio_data.traced(r):
+            continue
+        br = next((x for x in before['regions'] if x['id'] == r['id'] and x['tracing']['instances']), None) or \
+            next((x for x in before['regions'] if x['source'] == r['source'] and x['tracing']['instances']), None)
+        if not br:
+            continue
+        shape = lambda fr, rg: {'tracing': {'instance': rg['tracing']['instances'][0], 'width': studio_data.region_size(fr, rg)[0],  # noqa: E731
+                                            'height': studio_data.region_size(fr, rg)[1]}}
+        sources.append({'name': r['source'], 'before': shape(before, br), 'now': shape(f, r)})
+        names[r['source']] = r['label']
+    m_now, cam = studio_data.link(f, sid)
+    m_before, cam_b = studio_data.link(before, sid)
+    view = lambda c: 'car_frame' if schema.get('rubble_view') == 'car_frame' else f'camera:{c}'  # noqa: E731
+    sources.append({'name': 'rubble', 'before': {'rubble': {'outlines': str(outlines_path), 'moment': m_before, 'view': view(cam_b)}},
+                    'now': {'rubble': {'outlines': str(outlines_path), 'moment': m_now, 'view': view(cam)}}})
+    res = studio_data.rust('compare', schema=schema, sources=sources)
+    res['rubble_moment'] = m_now
+    res['order'] = [s['name'] for s in sources]
+    return res
 
 
-def envelope(points, along, take, bins):
-    """Per bin of coordinate `along` (0: x, 1: y), the point with the largest (take=+1) or
-    smallest (take=-1) other coordinate; in order of `along`."""
-    other = 1 - along
-    vals = [p[along] for p in points]
-    lo, hi = min(vals), max(vals)
-    if hi - lo < 1e-9:
-        return []
-    out = []
-    for k in range(bins):
-        a, b = lo + (hi - lo) * k / bins, lo + (hi - lo) * (k + 1) / bins
-        sel = [p for p in points if a - 1e-9 <= p[along] <= b + 1e-9]
-        if sel:
-            out.append(max(sel, key=lambda p: take * p[other]))
-    return out
-
-
-def shape_from_rubble(m):
-    """Rubble's outlines in its car frame, and from them the tracings' feature lines: the
-    hood's centreline; the greenhouse's front edge (windscreen), the roof's top (roofline),
-    the left fender's top, the bumper's and the front door's front edges, the left sill's
-    bottom (each the envelope of the part's outline on the side the footage shows)."""
-    car = m['bodies'][0]['car_frame']
-    s = Shape()
-    for g, v in car['parts'].items():
-        s.loops[g] = v['now']['lines']
-    s.lines['hood'] = car['hood_centreline']['now']
-    pts_of = lambda g: [p for ln in s.loops.get(g, []) for p in ln]  # noqa: E731
-    feature = {'windscreen': ('greenhouse', 1, 1, 6), 'roofline': ('roof', 0, 1, 8), 'fender_top': ('fender_l', 0, 1, 6),
-               'bumper_front': ('bumper_f', 1, 1, 5), 'door_front_edge': ('door_fl', 1, 1, 5), 'sill': ('sill_l', 0, -1, 6)}
-    for name, (g, along, take, bins) in feature.items():
-        p = pts_of(g)
-        if name == 'windscreen' and p:
-            # (its front half: the pillars and roof behind it reach other heights)
-            mid = sorted(q[0] for q in p)[len(p) // 2]
-            p = [q for q in p if q[0] >= mid]
-        if p:
-            line = envelope(p, along, take, bins)
-            s.lines[name] = sorted(line, key=lambda q: -q[0]) if along == 0 else line
-    roof = pts_of('roof')
-    if roof:
-        s.roof_rear = min(roof, key=lambda p: p[0])
-    # The door's corner as the cabin carries it (its ghost): the door panel itself can open
-    # or bulge, the cabin's corner where it hangs does not move in the crash.
-    door = [p for ln in car['parts'].get('door_fl', {}).get('ghost', {}).get('lines', []) for p in ln]
-    if door:
-        lo = min(p[1] for p in door)
-        s.door = max((p for p in door if p[1] <= lo + 0.1), key=lambda p: p[0])
-    for wh in car['wheels']:
-        if wh['name'] == 'wheel_fl':
-            s.wheels['front'] = (wh['now'], wh['r'])
-        if wh['name'] == 'wheel_rl':
-            s.wheels['rear'] = (wh['now'], wh['r'])
-    return s
-
-
-def normaliser(mode, before):
-    """(origin of a shape, unit) from a source's before shape."""
-    if mode == 'rear_wheel':
-        unit = math.dist(before.wheels['front'][0], before.wheels['rear'][0])
-        return (lambda s: s.wheels['rear'][0]), unit
-    return (lambda s: s.door), before.wheels['front'][1]
-
-
-def normalise(s, origin, unit):
-    o = origin(s)
-    f = lambda p: [(p[0] - o[0]) / unit, (p[1] - o[1]) / unit]  # noqa: E731
-    n = Shape()
-    n.lines = {k: [f(p) for p in v] for k, v in s.lines.items()}
-    n.loops = {k: [[f(p) for p in ln] for ln in v] for k, v in s.loops.items()}
-    n.wheels = {k: (f(c), r / unit) for k, (c, r) in s.wheels.items()}
-    n.door = f(s.door) if s.door else None
-    n.roof_rear = f(s.roof_rear) if s.roof_rear else None
-    return n
-
-
-# ---------------------------------------------------------------- shape numbers
-
-def chord(line):
-    return math.dist(line[0], line[-1])
-
-
-def fold_height(line, chord0):
-    (x0, y0), (x1, y1) = line[0], line[-1]
-    L = math.hypot(x1 - x0, y1 - y0) or 1e-9
-    nx, ny = -(y1 - y0) / L, (x1 - x0) / L
-    if ny < 0:
-        nx, ny = -nx, -ny
-    d = [(p[0] - x0) * nx + (p[1] - y0) * ny for p in line]
-    best = max(d, key=abs)
-    return best / chord0
-
-
-def creases(line):
-    turns = []
-    for a, b, c in zip(line, line[1:], line[2:]):
-        t = math.degrees(math.atan2(c[1] - b[1], c[0] - b[0]) - math.atan2(b[1] - a[1], b[0] - a[0]))
-        t = (t + 180) % 360 - 180
-        turns.append(t)
-    sharp = [t for t in turns if abs(t) > CREASE_DEG]
-    changes = sum(1 for a, b in zip(sharp, sharp[1:]) if (a > 0) != (b > 0))
-    return len(sharp), changes
-
-
-def angle(line):
-    (x0, y0), (x1, y1) = line[0], line[-1]
-    return math.degrees(math.atan2(abs(y1 - y0), abs(x1 - x0)))
-
-
-def numbers(before, after, mode):
-    """The reported shape numbers of one source (normalised shapes)."""
-    r = {}
-    hb, ha = before.lines.get('hood'), after.lines.get('hood')
-    if hb and ha and len(ha) >= 2:
-        r['hood fold height (/ chord before)'] = fold_height(ha, chord(hb))
-        r['hood chord after / before'] = chord(ha) / chord(hb)
-        n, ch = creases(ha)
-        r[f'hood creases (turn > {CREASE_DEG:g} deg)'] = n
-        r['hood crease sign changes'] = ch
-        r['hood points'] = len(ha)
-    fb, fa = before.wheels.get('front'), after.wheels.get('front')
-    if fb and fa:
-        r['front wheel setback'] = fb[0][0] - fa[0][0]
-        r['front wheel drop (+ down)'] = fb[0][1] - fa[0][1]
-    wb, wa = before.lines.get('windscreen'), after.lines.get('windscreen')
-    if wb and wa:
-        r['windscreen angle before (deg)'] = angle(wb)
-        r['windscreen angle change (deg)'] = angle(wa) - angle(wb)
-    if mode == 'rear_wheel' and before.roof_rear and after.roof_rear:
-        r['rear ride height change (roof rear over rear wheel)'] = after.roof_rear[1] - before.roof_rear[1]
-    # Orientation checks: the roofline's and the sill's tilt, + rear up (nose down).
-    for name in ('roofline', 'sill'):
-        lb, la = before.lines.get(name), after.lines.get(name)
-        if lb and la and len(lb) >= 2 and len(la) >= 2:
-            r[f'check: {name} tilt change (deg, + rear up)'] = rear_up(la) - rear_up(lb)
-    return r
-
-
-def rear_up(line):
-    """A line's tilt (deg) from its front end to its rear end, + when the rear is higher."""
-    f, b = max(line, key=lambda p: p[0]), min(line, key=lambda p: p[0])
-    return math.degrees(math.atan2(b[1] - f[1], f[0] - b[0]))
-
-
-# ---------------------------------------------------------------- figures
-
-def plot_frame(shapes, title, subtitle, unit_name, size=(1200, 620)):
-    """Shapes: [(source, Shape, style)]; style 'solid' or 'ghost'. Front at the left, as filmed."""
+def plot_frame(shapes, title, subtitle, size=(1200, 620)):
+    """Shapes (Rust's normalised JSON): [(source, shape, style)]; style 'now' or 'before'.
+    Front at the left, as filmed."""
     W, H = size
     xs, ys = [], []
     for _, s, _ in shapes:
-        for ln in list(s.lines.values()) + [p for v in s.loops.values() for p in v]:
+        for ln in list(s['lines'].values()) + [p for v in s.get('loops', {}).values() for p in v]:
             xs += [p[0] for p in ln]
             ys += [p[1] for p in ln]
-        for c, r in s.wheels.values():
-            xs += [c[0] - r, c[0] + r]
-            ys += [c[1] - r, c[1] + r]
+        for c in s['circles'].values():
+            xs += [c['c'][0] - c['r'], c['c'][0] + c['r']]
+            ys += [c['c'][1] - c['r'], c['c'][1] + c['r']]
     if not xs:
         return svg(W, H, [label(20, 40, title + ': nothing to draw', '#fff')])
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
@@ -416,120 +274,86 @@ def plot_frame(shapes, title, subtitle, unit_name, size=(1200, 620)):
     x0, x1, y0, y1 = x0 - pad, x1 + pad, y0 - pad, y1 + pad
     top = 90
     sc = min((W - 40) / (x1 - x0), (H - top - 30) / (y1 - y0))
-    # front at the left: screen x grows toward the rear
     tx = lambda p: [20 + (x1 - p[0]) * sc, top + (y1 - p[1]) * sc]  # noqa: E731
     body = []
-    # axes through the origin, and a grid of 0.1 units
-    g = 0.1 if unit_name == 'wheelbases' else 0.5
-    k = math.floor(x0 / g)
-    while k * g <= x1:
-        a = tx([k * g, y0])
-        b = tx([k * g, y1])
-        body.append(f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" y2="{b[1]:.1f}" stroke="#2a3344" stroke-width="{2 if k == 0 else 1}"/>')
-        k += 1
-    k = math.floor(y0 / g)
-    while k * g <= y1:
-        a = tx([x0, k * g])
-        b = tx([x1, k * g])
-        body.append(f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" y2="{b[1]:.1f}" stroke="#2a3344" stroke-width="{2 if k == 0 else 1}"/>')
-        k += 1
+    g = 0.1 if (x1 - x0) < 3 else 0.5
+    for axis in (0, 1):
+        lo, hi = (x0, x1) if axis == 0 else (y0, y1)
+        k = math.floor(lo / g)
+        while k * g <= hi:
+            a, b = ((tx([k * g, y0]), tx([k * g, y1])) if axis == 0 else (tx([x0, k * g]), tx([x1, k * g])))
+            body.append(f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" y2="{b[1]:.1f}" stroke="#2a3344" stroke-width="{2 if k == 0 else 1}"/>')
+            k += 1
     for src, s, style in shapes:
-        col = SOURCE_COLOURS[src] if style != 'before' else '#8a93a6'
+        col = SOURCE_COLOURS.get(src, '#b48cff') if style != 'before' else '#8a93a6'
         dash = '8 6' if style == 'before' else None
         op = 0.75 if style == 'before' else 1.0
-        for name, ln in s.lines.items():
+        for name, ln in s['lines'].items():
             body.append(polyline([tx(p) for p in ln], col, 5 if name == 'hood' else 2.5, dash, op))
             if name == 'hood':
                 body += [f'<circle cx="{tx(p)[0]:.1f}" cy="{tx(p)[1]:.1f}" r="4" fill="{col}"/>' for p in ln]
-        for name, lns in s.loops.items():
-            if name not in ('fender_l', 'bumper_f', 'door_fl', 'sill_l'):
-                continue
-            for ln in lns:
-                body.append(polyline([tx(p) for p in ln], col, 1.0, dash, 0.3 * op))
-        for c, r in s.wheels.values():
-            body.append(circle(tx(c), r * sc, col, 2.5, dash, op))
-        if s.door:
-            d = tx(s.door)
+        for name, lns in s.get('loops', {}).items():
+            if name in ('fender_l', 'bumper_f', 'door_fl', 'sill_l'):
+                for ln in lns:
+                    body.append(polyline([tx(p) for p in ln], col, 1.0, dash, 0.3 * op))
+        for c in s['circles'].values():
+            body.append(circle(tx(c['c']), c['r'] * sc, col, 2.5, dash, op))
+        for p in s['points'].values():
+            d = tx(p)
             body.append(f'<rect x="{d[0] - 5:.1f}" y="{d[1] - 5:.1f}" width="10" height="10" fill="none" stroke="{col}" stroke-width="2"/>')
-    leg = [(title, '#fff'), (subtitle, '#ccc')]
-    srcs = []
-    for src, _, style in shapes:
-        name = SOURCE_NAMES[src] + (' (before, dashed)' if style == 'before' else '')
-        if name not in [x[0] for x in srcs]:
-            srcs.append((name, SOURCE_COLOURS[src] if style != 'before' else '#8a93a6'))
     body.append(label(20, 28, title, '#fff', 18))
     body.append(label(20, 52, subtitle, '#ccc', 14))
     x = 20
-    for name, col in srcs:
-        body.append(label(x, 76, name, col, 15))
-        x += 12 + 9 * len(name)
+    seen = []
+    for src, _, style in shapes:
+        name = SOURCE_NAMES.get(src, src) + (' (before, dashed)' if style == 'before' else '')
+        if name not in seen:
+            seen.append(name)
+            body.append(label(x, 76, name, SOURCE_COLOURS.get(src, '#b48cff') if style != 'before' else '#8a93a6', 15))
+            x += 12 + 9 * len(name)
     return svg(W, H, body)
 
 
-def compare(sid, doc, out):
-    tr = [t for t in load_tracings(sid) if t['camera'] == 'side']
-    if not tr:
-        return [], ''
-    moments = doc['moments']
-    mode = 'rear_wheel' if all('rear' in t['halves'][h]['wheels'] for t in tr for h in ('real', 'beamng')) else 'door'
-    unit_name = 'wheelbases' if mode == 'rear_wheel' else 'front wheel radii'
-    tr.sort(key=lambda t: t['video_s'])
-    before_t = next((t for t in tr if t['moment'] == 'first contact'), tr[0])
-    m_before = next(m for m in moments if m['name'] == 'before')
-    raw_before = {'real': shape_from_tracing(before_t, 'real'), 'beamng': shape_from_tracing(before_t, 'beamng'), 'rubble': shape_from_rubble(m_before)}
-    norm = {k: normaliser(mode, v) for k, v in raw_before.items()}
-    nb = {k: normalise(raw_before[k], *norm[k]) for k in raw_before}
+def fmt(cell, key):
+    if cell is None:
+        return 'n/a'
+    if cell.get('int'):
+        return f'{int(cell["v"])}'
+    v = f'{cell["v"]:+.1f}' if 'deg' in key else f'{cell["v"]:+.3f}'
+    return v + ('*' if cell.get('vis', 'clear') != 'clear' else '')
+
+
+def compare(sid, out):
+    """Common-frame and change figures and the shape-number tables of a scenario's side frames."""
+    frs, all_frames, shot_map = scenario_frames(sid)
+    schemas = studio_data.structures()
+    outlines_path = out / f'{sid}-edge' / 'outlines.json'
     made, tables = [], []
-    origin_txt = ('origin: rear wheel centre; unit: wheelbase (each source\'s own before frame)' if mode == 'rear_wheel'
-                  else 'origin: front door\'s front edge at the sill (square); unit: front wheel radius (each source\'s before frame); rear not in the footage')
-    for t in tr:
-        rm = sheet.pick_moment(sid, t['moment'], moments)
-        shapes = {'real': shape_from_tracing(t, 'real'), 'beamng': shape_from_tracing(t, 'beamng'), 'rubble': shape_from_rubble(rm)}
-        n = {k: normalise(shapes[k], *norm[k]) for k in shapes}
-        tag = re.sub(r'\W+', '_', t['moment'])
-        title = f'{sid} {t["moment"]} (video {t["video_s"]} s; Rubble {rm["name"]}, {rm["after_impact_ms"]:+g} ms): side profile, front at the left'
-        made.append(write(out / sid / 'common' / f'{tag}.svg', plot_frame([(k, n[k], 'now') for k in ('real', 'beamng', 'rubble')], title, origin_txt + f'; grid {"0.1" if mode == "rear_wheel" else "0.5"} {unit_name}', unit_name)))
-        # change: each source against its own before, three panels
-        panels = []
-        for k in ('real', 'beamng', 'rubble'):
-            panels.append(plot_frame([(k, nb[k], 'before'), (k, n[k], 'now')], f'{SOURCE_NAMES[k]}: {t["moment"]} against before', origin_txt.split(';')[0], unit_name, (800, 520)))
+    for f in frs:
+        inst = next((r['tracing']['instances'][0] for r in f['regions'] if r['tracing']['instances']), None)
+        schema = schemas.get(inst['schema']) if inst else None
+        before = studio_data.before_of(f, all_frames, shot_map) or f
+        if not schema:
+            continue
+        res = comparison(f, before, schema, outlines_path, sid)
+        srcs = res['order']
+        frame_txt = res['frame']['label'] if res['frame'] else 'no common frame (raw axes)'
+        tag = re.sub(r'\W+', '_', f'{f["view"]}_{f["moment"]["label"]}_{f["id"]}')
+        title = f'{sid} {f["moment"]["label"]} ({f["id"]}; Rubble {res["rubble_moment"]}), {schema["id"]}, front at the left'
+        made.append(write(out / sid / 'common' / f'{tag}.svg', plot_frame([(k, res['shapes'][k]['now'], 'now') for k in srcs], title, frame_txt)))
+        panels = [plot_frame([(k, res['shapes'][k]['before'], 'before'), (k, res['shapes'][k]['now'], 'now')],
+                             f'{SOURCE_NAMES.get(k, k)}: {f["moment"]["label"]} against {before["id"]}', frame_txt.split(';')[0], (800, 520)) for k in srcs]
         body = ''.join(f'<g transform="translate({800 * i},0)">{p[p.index(">") + 1:p.rindex("</svg>")]}</g>' for i, p in enumerate(panels))
-        made.append(write(out / sid / 'change' / f'{tag}.svg', f'<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="520" viewBox="0 0 2400 520">{body}</svg>\n'))
-        if t is not before_t:
-            nums = {k: numbers(nb[k], n[k], mode) for k in n}
-            nums['rubble']['check: Rubble cabin and rear pitch from the fit (deg, + rear up)'] = rm['bodies'][0]['rear_pitch_deg'] - m_before['bodies'][0]['rear_pitch_deg']
-            keys = []
-            for k in ('real', 'beamng', 'rubble'):
-                keys += [x for x in nums[k] if x not in keys]
-            rows = [f'### {sid} {t["moment"]} (video {t["video_s"]} s; Rubble {rm["name"]}, {rm["after_impact_ms"]:+g} ms)', '',
-                    f'Unit: {unit_name}. {origin_txt}.', '', '| | real test | BeamNG | Rubble |', '|---|---|---|---|']
-            for key in keys:
-                cells = []
-                for k in ('real', 'beamng', 'rubble'):
-                    v = nums[k].get(key)
-                    cells.append('n/a' if v is None else (f'{v:d}' if isinstance(v, int) else f'{v:+.3f}' if 'deg' not in key else f'{v:+.1f}'))
-                rows.append(f'| {key} | ' + ' | '.join(cells) + ' |')
-            tables.append('\n'.join(rows) + '\n')
+        made.append(write(out / sid / 'change' / f'{tag}.svg', f'<svg xmlns="http://www.w3.org/2000/svg" width="{800 * len(panels)}" height="520" viewBox="0 0 {800 * len(panels)} 520">{body}</svg>\n'))
+        if before is f:
+            continue
+        rows = [f'### {sid} {f["moment"]["label"]} ({f["id"]}, against {before["id"]}; Rubble {res["rubble_moment"]})', '',
+                f'{schema["id"]}. {frame_txt}. `*`: measured from a blurred or hidden element.', '',
+                '| | ' + ' | '.join(SOURCE_NAMES.get(k, k) for k in srcs) + ' |', '|---|' + '---|' * len(srcs)]
+        for r in res['rows']:
+            rows.append(f'| {r["label"]} | ' + ' | '.join(fmt(r['values'].get(k), r['label']) for k in srcs) + ' |')
+        tables.append('\n'.join(rows) + '\n')
     return made, '\n'.join(tables)
-
-
-def top_yaw(sid, doc):
-    tr = [t for t in load_tracings(sid) if t['camera'] == 'top']
-    if not tr:
-        return ''
-    tr.sort(key=lambda t: t['video_s'])
-    ang = lambda t, h: math.degrees(math.atan2(-(to_px(t, t['halves'][h]['lines']['side_line'][-1])[1] - to_px(t, t['halves'][h]['lines']['side_line'][0])[1]),  # noqa: E731
-                                               to_px(t, t['halves'][h]['lines']['side_line'][-1])[0] - to_px(t, t['halves'][h]['lines']['side_line'][0])[0]))
-    rows = [f'### {sid} top view: yaw', '', 'Yaw from the side line\'s angle in the frame, against the first frame (+: nose toward the struck side). '
-            'Rubble: the cabin and rear\'s fitted yaw (+ toward its left, the struck side).', '',
-            '| reference moment | real test | BeamNG | Rubble (moment) |', '|---|---|---|---|']
-    for t in tr:
-        rm = sheet.pick_moment(sid, t['moment'], doc['moments'])
-        rows.append(f'| {t["moment"]} (video {t["video_s"]} s) | {ang(t, "real") - ang(tr[0], "real"):+.1f} | '
-                    f'{ang(t, "beamng") - ang(tr[0], "beamng"):+.1f} | {rm["bodies"][0]["rear_yaw_deg"]:+.1f} ({rm["name"]}) |')
-    rows += ['', 'Rubble\'s yaw at every moment: ' + ', '.join(f'{m["name"]} ({m["after_impact_ms"]:+g} ms) {m["bodies"][0]["rear_yaw_deg"]:+.1f}°' for m in doc['moments'])
-             + '. The video times of the reference frames are approximate (index.json), so "rotation" may be later than 300 ms.']
-    return '\n'.join(rows) + '\n'
 
 
 # ---------------------------------------------------------------- rasterise
@@ -566,23 +390,24 @@ def main():
         rasterise([x for x in a[1:] if not x.startswith('--')])
         return 0
     out = Path(opt('--out', ENGINE / 'out' / 'crash-reference' / 'outlines'))
-    frames = Path(opt('--frames', ARTIFACTS))
+    library = Path(opt('--library', studio_data.LIBRARY))
     ids = [x for x in a[1:] if re.fullmatch(r'S\d\d', x)] or ['S01', 'S02']
     md = ['# Shape numbers: real test, BeamNG and Rubble', '',
-          'From the normalised hood line and wheel positions, by the same code for all three sources '
-          '(`engine/tools/crash-reference/outlines.py`). Reported comparisons, not criteria. Reference values come '
-          'from hand tracings (`engine/docs/crash-reference/tracings/`, an approximate first pass); Rubble\'s from '
-          'the CPU reference (run 0, edge contact). Rubble\'s hood line is its centreline nodes (4 rows on the '
-          'generated designs); the footage\'s is the hood\'s visible side edge.', '']
+          'From the normalised traced elements, by the same Rust code for every source (`reference_shape`, '
+          '`engine_softbody::crash_reference::shape`; the Reference Studio shows the same table). Reported comparisons, '
+          'not criteria. Reference values come from hand tracings (`engine/docs/crash-reference/studio/frames/`, '
+          'partly an approximate first pass); Rubble\'s from the CPU reference (run 0, edge contact). Rubble\'s hood '
+          'line is its centreline nodes (4 rows on the generated designs); the footage\'s is the hood\'s visible side edge.', '']
     for sid in ids:
         doc = json.loads((out / f'{sid}-edge' / 'outlines.json').read_text())
         stills = Path(opt('--stills', ARTIFACTS / 'rubble-v2' / f'{sid}-edge-run0'))
         made = rubble_overlays(sid, doc, out, stills)
-        for t in load_tracings(sid):
-            made.append(annotated_frame(t, frames, out / sid))
-        figs, table = compare(sid, doc, out)
+        schemas = studio_data.structures()
+        for f in scenario_frames(sid)[0]:
+            made.append(annotated_frame(f, schemas, library, out / sid))
+        figs, table = compare(sid, out)
         made += figs
-        md += [f'## {sid}', '', table, top_yaw(sid, doc)]
+        md += [f'## {sid}', '', table]
         print(f'{sid}: {len(made)} SVGs')
     write(out / 'shape-numbers.md', '\n'.join(md))
     print(out / 'shape-numbers.md')

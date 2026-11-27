@@ -1,0 +1,27 @@
+{
+ "id": "S06_4m06s_side_01",
+ "shot": "S06",
+ "image": {
+  "file": "S06/S06_4m06s_side_01.webp",
+  "width": 2000,
+  "height": 1283,
+  "sha256": "b13bf7ca6d6e9f83693b758b9346f7c10ce25d9a26b0b819b93ca68541f128f6"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 246,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Truck drives the car toward the parked trailer's rear. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.627Z"
+}

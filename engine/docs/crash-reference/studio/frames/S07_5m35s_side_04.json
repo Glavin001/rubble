@@ -1,0 +1,27 @@
+{
+ "id": "S07_5m35s_side_04",
+ "shot": "S07",
+ "image": {
+  "file": "S07/S07_5m35s_side_04.webp",
+  "width": 2000,
+  "height": 1025,
+  "sha256": "77eec8ea40ac6b7b078a1f85047f70c0fff3976f599b37608f04c81b851b2afa"
+ },
+ "moment": {
+  "label": "peak",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 335,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Car standing on its nose against the block; doors and panels leaving. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.630Z"
+}

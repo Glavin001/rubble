@@ -1,0 +1,304 @@
+{
+ "id": "vehicle-side",
+ "title": "Vehicle, side view",
+ "kind": "vehicle",
+ "view": "side",
+ "description": "A car or truck seen from the side: wheels, the hood line, the glasshouse and the lower body. Points are placed on the side the camera sees.",
+ "orientation": {
+  "front": [
+   "left",
+   "right"
+  ],
+  "default": "left",
+  "note": "which side of the image the vehicle's front is on"
+ },
+ "rubble_view": "car_frame",
+ "elements": [
+  {
+   "name": "front_wheel",
+   "type": "circle",
+   "label": "Front wheel",
+   "colour": "#f2f2f2",
+   "hint": "Click the hub centre, then a point on the tyre's outer edge.",
+   "rubble": {
+    "wheel": "wheel_fl"
+   }
+  },
+  {
+   "name": "rear_wheel",
+   "type": "circle",
+   "label": "Rear wheel",
+   "colour": "#cfcfcf",
+   "hint": "Hub centre, then the tyre's edge. Mark it hidden if out of frame.",
+   "rubble": {
+    "wheel": "wheel_rl"
+   }
+  },
+  {
+   "name": "hood",
+   "type": "polyline",
+   "label": "Hood line",
+   "colour": "#ffb000",
+   "hint": "Front to rear along the hood's visible edge; one point at every bend.",
+   "rubble": {
+    "centreline": true
+   }
+  },
+  {
+   "name": "fender_top",
+   "type": "polyline",
+   "label": "Fender top",
+   "colour": "#38b6ff",
+   "hint": "Front to rear along the front fender's top edge.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "fender_l"
+     ],
+     "along": "x",
+     "take": "max",
+     "bins": 6
+    }
+   }
+  },
+  {
+   "name": "wheel_arch",
+   "type": "polyline",
+   "label": "Front wheel arch",
+   "colour": "#7fd0ff",
+   "hint": "Along the arch opening, front to rear."
+  },
+  {
+   "name": "bumper_front",
+   "type": "polyline",
+   "label": "Front face / bumper",
+   "colour": "#e04be0",
+   "hint": "Top to bottom down the front-most edge.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "bumper_f"
+     ],
+     "along": "y",
+     "take": "max",
+     "bins": 5
+    }
+   }
+  },
+  {
+   "name": "windscreen",
+   "type": "polyline",
+   "label": "Windscreen / A-pillar",
+   "colour": "#8f8fd8",
+   "hint": "From the windscreen's base up the A-pillar to the roof.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "greenhouse"
+     ],
+     "along": "y",
+     "take": "max",
+     "bins": 6,
+     "front_half": true
+    }
+   }
+  },
+  {
+   "name": "roofline",
+   "type": "polyline",
+   "label": "Roofline",
+   "colour": "#b8b8ff",
+   "hint": "Front to rear along the roof's top edge.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "roof"
+     ],
+     "along": "x",
+     "take": "max",
+     "bins": 8
+    }
+   }
+  },
+  {
+   "name": "door_front_edge",
+   "type": "polyline",
+   "label": "Front door, front edge",
+   "colour": "#58e070",
+   "hint": "Top to bottom along the front door's front shut line.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "door_fl"
+     ],
+     "along": "y",
+     "take": "max",
+     "bins": 5
+    }
+   }
+  },
+  {
+   "name": "door_sill_corner",
+   "type": "point",
+   "label": "Front door corner at the sill",
+   "colour": "#2fe0a0",
+   "hint": "Where the front door's front edge meets the sill: the cabin does not deform here.",
+   "rubble": {
+    "ghost_corner": "door_fl"
+   }
+  },
+  {
+   "name": "sill",
+   "type": "polyline",
+   "label": "Sill",
+   "colour": "#ff5050",
+   "hint": "Front to rear along the body's lowest edge between the wheels.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "sill_l"
+     ],
+     "along": "x",
+     "take": "min",
+     "bins": 6
+    }
+   }
+  },
+  {
+   "name": "rear_face",
+   "type": "polyline",
+   "label": "Rear face / bumper",
+   "colour": "#e8e040",
+   "hint": "Top to bottom down the rear-most edge.",
+   "rubble": {
+    "envelope": {
+     "groups": [
+      "bumper_r",
+      "trunk"
+     ],
+     "along": "y",
+     "take": "min",
+     "bins": 5
+    }
+   }
+  }
+ ],
+ "frames": [
+  {
+   "id": "wheelbase",
+   "label": "origin: rear wheel centre; unit: wheelbase (each source's own before frame)",
+   "origin": {
+    "centre": "rear_wheel"
+   },
+   "unit": {
+    "distance": [
+     "front_wheel",
+     "rear_wheel"
+    ]
+   }
+  },
+  {
+   "id": "door_radius",
+   "label": "origin: front door corner at the sill; unit: front wheel radius (each source's own before frame)",
+   "origin": {
+    "point": "door_sill_corner"
+   },
+   "unit": {
+    "radius": "front_wheel"
+   }
+  }
+ ],
+ "measures": [
+  {
+   "id": "hood_fold",
+   "label": "hood fold height (/ chord before)",
+   "kind": "fold_height",
+   "line": "hood"
+  },
+  {
+   "id": "hood_chord",
+   "label": "hood chord after / before",
+   "kind": "chord_ratio",
+   "line": "hood"
+  },
+  {
+   "id": "hood_creases",
+   "label": "hood creases (turn > 20 deg)",
+   "kind": "creases",
+   "line": "hood",
+   "deg": 20
+  },
+  {
+   "id": "hood_crease_signs",
+   "label": "hood crease sign changes",
+   "kind": "crease_sign_changes",
+   "line": "hood",
+   "deg": 20
+  },
+  {
+   "id": "hood_points",
+   "label": "hood points",
+   "kind": "point_count",
+   "line": "hood"
+  },
+  {
+   "id": "wheel_setback",
+   "label": "front wheel setback",
+   "kind": "shift_x",
+   "of": {
+    "centre": "front_wheel"
+   },
+   "sign": -1
+  },
+  {
+   "id": "wheel_drop",
+   "label": "front wheel drop (+ down)",
+   "kind": "shift_y",
+   "of": {
+    "centre": "front_wheel"
+   },
+   "sign": -1
+  },
+  {
+   "id": "windscreen_angle",
+   "label": "windscreen angle before (deg)",
+   "kind": "angle",
+   "line": "windscreen"
+  },
+  {
+   "id": "windscreen_change",
+   "label": "windscreen angle change (deg)",
+   "kind": "angle_change",
+   "line": "windscreen"
+  },
+  {
+   "id": "rear_ride",
+   "label": "rear ride height change (roof rear over rear wheel)",
+   "kind": "shift_y",
+   "of": {
+    "rearmost": "roofline"
+   },
+   "frames": [
+    "wheelbase"
+   ]
+  },
+  {
+   "id": "roof_tilt",
+   "label": "check: roofline tilt change (deg, + rear up)",
+   "kind": "tilt_change",
+   "line": "roofline"
+  },
+  {
+   "id": "sill_tilt",
+   "label": "check: sill tilt change (deg, + rear up)",
+   "kind": "tilt_change",
+   "line": "sill"
+  },
+  {
+   "id": "fit_pitch",
+   "label": "check: cabin and rear pitch from the fit (deg, + rear up; Rubble only)",
+   "kind": "fit_change",
+   "key": "pitch"
+  }
+ ]
+}

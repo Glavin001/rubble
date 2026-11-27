@@ -1,0 +1,27 @@
+{
+ "id": "S07_5m32s_side_01",
+ "shot": "S07",
+ "image": {
+  "file": "S07/S07_5m32s_side_01.webp",
+  "width": 2000,
+  "height": 749,
+  "sha256": "1284496d360c621050040b041048c3a9f88f56dbf9718ad112a5768d977df0d5"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 332,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "190 km/h into a concrete block. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.629Z"
+}

@@ -16,6 +16,7 @@
 pub mod criteria;
 pub mod metrics;
 pub mod outline;
+pub mod shape;
 mod s01_offset;
 mod s02_wall;
 mod s03_side_barrier;

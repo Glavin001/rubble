@@ -1,0 +1,17 @@
+{
+ "id": "S09",
+ "title": "S09: Car vs heavier SUV head-on, 2 × 55 km/h, 50 % overlap",
+ "source": {
+  "kind": "video",
+  "url": "https://www.youtube.com/watch?v=Lqx2KKWI8aM",
+  "note": "Real test beside BeamNG in one video; video times are approximate."
+ },
+ "rubble": {
+  "scenario": "S09",
+  "contact": "edge",
+  "run": 0
+ },
+ "before_frame": null,
+ "notes": "",
+ "updated": "2026-11-27T11:51:37.635Z"
+}

@@ -25,6 +25,34 @@ pub const FOV_Y_DEG: f32 = 60.0;
 /// The page's near plane (m): points closer than this are not drawn.
 const NEAR: f32 = 0.05;
 
+/// A look-at camera with its own up and field of view (degrees, vertical), in the
+/// scenario's world frame (the named scenario cameras are relative to the point of impact
+/// too: [`Camera`]).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
+pub struct FreeCamera {
+    pub name: String,
+    pub eye: [f32; 3],
+    pub target: [f32; 3],
+    #[serde(default = "y_up")]
+    pub up: [f32; 3],
+    #[serde(default = "fov_default")]
+    pub fov_y_deg: f32,
+}
+
+fn y_up() -> [f32; 3] {
+    [0.0, 1.0, 0.0]
+}
+
+fn fov_default() -> f32 {
+    FOV_Y_DEG
+}
+
+impl From<&Camera> for FreeCamera {
+    fn from(c: &Camera) -> Self {
+        Self { name: c.name.to_string(), eye: c.eye, target: c.target, up: y_up(), fov_y_deg: FOV_Y_DEG }
+    }
+}
+
 /// A camera as the page projects it, into a `width` × `height` image.
 #[derive(Clone, Copy, Debug)]
 pub struct View {
@@ -41,9 +69,15 @@ pub struct View {
 
 impl View {
     pub fn new(cam: &Camera, width: f32, height: f32) -> Self {
+        Self::look(&FreeCamera::from(cam), width, height)
+    }
+
+    /// Any look-at camera: its own up direction and vertical field of view (a reference
+    /// image's camera, set by hand in the Reference Studio).
+    pub fn look(cam: &FreeCamera, width: f32, height: f32) -> Self {
         let (eye, at) = (Vec3::from(cam.eye), Vec3::from(cam.target));
         let back = (eye - at).normalize();
-        let right = Vec3::Y.cross(back).normalize();
+        let right = Vec3::from(cam.up).cross(back).normalize();
         let up = back.cross(right);
         Self {
             eye,
@@ -52,7 +86,7 @@ impl View {
             back,
             width,
             height,
-            f: 1.0 / (0.5 * FOV_Y_DEG.to_radians()).tan(),
+            f: 1.0 / (0.5 * cam.fov_y_deg.to_radians()).tan(),
         }
     }
 
@@ -548,6 +582,26 @@ mod tests {
         assert!(v.project(Vec3::new(0.0, 0.0, 6.0)).is_none());
         // A sphere's radius at depth 5: r f / 5 of half the height.
         assert!((v.radius_px(Vec3::ZERO, 1.0).unwrap() - f / 5.0 * 360.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_free_camera_with_its_own_up_and_field_of_view() {
+        let named = Camera { name: "t", eye: [0.0, 0.0, 5.0], target: [0.0, 0.0, 0.0] };
+        let free = FreeCamera::from(&named);
+        let (a, b) = (View::new(&named, 1280.0, 720.0), View::look(&free, 1280.0, 720.0));
+        assert_eq!(a.project(Vec3::new(0.3, 0.2, 0.1)), b.project(Vec3::new(0.3, 0.2, 0.1)));
+        // Half the field of view: offsets from the centre grow by tan 30° / tan 15°.
+        let narrow = View::look(&FreeCamera { fov_y_deg: 30.0, ..free.clone() }, 1280.0, 720.0);
+        let k = 30f32.to_radians().tan() / 15f32.to_radians().tan();
+        let (p, q) = (a.project(Vec3::Y).unwrap(), narrow.project(Vec3::Y).unwrap());
+        assert!(((360.0 - q[1]) - k * (360.0 - p[1])).abs() < 1e-2);
+        // Up along world +X (camera rolled a quarter turn): world +X is screen up.
+        let rolled = View::look(&FreeCamera { up: [1.0, 0.0, 0.0], ..free }, 1280.0, 720.0);
+        let r = rolled.project(Vec3::X).unwrap();
+        assert!((r[0] - 640.0).abs() < 1e-3 && r[1] < 360.0);
+        // JSON with only eye and target defaults to the page's camera.
+        let j: FreeCamera = serde_json::from_str("{\"name\":\"f\",\"eye\":[0,0,5],\"target\":[0,0,0]}").unwrap();
+        assert_eq!(j, FreeCamera { name: "f".into(), ..FreeCamera::from(&named) });
     }
 
     #[test]

@@ -1,0 +1,17 @@
+{
+ "id": "S02",
+ "title": "S02: SUV into a full-width rigid wall, 50 km/h",
+ "source": {
+  "kind": "video",
+  "url": "https://www.youtube.com/watch?v=Lqx2KKWI8aM",
+  "note": "Real test beside BeamNG in one video; video times are approximate."
+ },
+ "rubble": {
+  "scenario": "S02",
+  "contact": "edge",
+  "run": 0
+ },
+ "before_frame": null,
+ "notes": "",
+ "updated": "2026-11-27T11:51:37.634Z"
+}

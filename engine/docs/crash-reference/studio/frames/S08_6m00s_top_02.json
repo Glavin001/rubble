@@ -1,0 +1,27 @@
+{
+ "id": "S08_6m00s_top_02",
+ "shot": "S08",
+ "image": {
+  "file": "S08/S08_6m00s_top_02.webp",
+  "width": 1930,
+  "height": 1356,
+  "sha256": "1a7cfc412872481cae2d6c4f39062170f26ee15b57e4b72909718b563a1c4c30"
+ },
+ "moment": {
+  "label": "peak crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 360,
+  "approximate": true
+ },
+ "view": "top",
+ "notes": "About half overlap; cars stay nearly in line. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.632Z"
+}

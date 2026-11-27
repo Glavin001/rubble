@@ -1,0 +1,27 @@
+{
+ "id": "S02_2m14s_top_03",
+ "shot": "S02",
+ "image": {
+  "file": "S02/S02_2m14s_top_03.webp",
+  "width": 2000,
+  "height": 853,
+  "sha256": "2fe415d84f951ed30de0521d148f916ffd95165633be91a5c480b46b282f9940"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 134,
+  "approximate": true
+ },
+ "view": "top",
+ "notes": "Square to the wall. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.624Z"
+}

@@ -1,0 +1,22 @@
+{
+ "id": "S10_394s_side-close",
+ "shot": "S10",
+ "image": null,
+ "moment": {
+  "label": "mid crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 394,
+  "approximate": true
+ },
+ "view": "side close",
+ "notes": "Struck side destroyed back through the front door; rear rising. (no image captured yet: add one) Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.633Z"
+}

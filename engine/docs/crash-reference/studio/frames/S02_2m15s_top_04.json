@@ -1,0 +1,27 @@
+{
+ "id": "S02_2m15s_top_04",
+ "shot": "S02",
+ "image": {
+  "file": "S02/S02_2m15s_top_04.webp",
+  "width": 2000,
+  "height": 873,
+  "sha256": "3168d72b3ad8e3d46fb650c0dc744397729c76462e5bea232aea7e867c380af2"
+ },
+ "moment": {
+  "label": "peak crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 135,
+  "approximate": true
+ },
+ "view": "top",
+ "notes": "Even crush across the width; no yaw; hood folded along a line across the car. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.624Z"
+}

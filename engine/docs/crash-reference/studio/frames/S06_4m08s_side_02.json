@@ -1,0 +1,27 @@
+{
+ "id": "S06_4m08s_side_02",
+ "shot": "S06",
+ "image": {
+  "file": "S06/S06_4m08s_side_02.webp",
+  "width": 2000,
+  "height": 1532,
+  "sha256": "17272ef85e1f497d1938f1a7018a0e4099c57875c73bee30863363361c63fb1e"
+ },
+ "moment": {
+  "label": "peak crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 248,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Car all but gone between cab and trailer; nose under the trailer deck. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.628Z"
+}

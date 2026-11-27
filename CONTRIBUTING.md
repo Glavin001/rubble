@@ -78,6 +78,7 @@ the cross-engine review it comes from and the phase plan are in
 | `engine/` | **The engine.** Slang AVBD solver for Metal, WebGPU (wgpu and the browser) and CUDA; convex hulls, D6 joints, vehicles, fracture lab, sleeping. Its own Cargo workspace | [engine/README.md](engine/README.md), [engine/DECISIONS.md](engine/DECISIONS.md) |
 | `engine/crates/engine-webgpu/` | Browser demos: `demo.html` (scenes and joints), `vehicle.html`, `fracture/` (fracture lab) | [README](engine/crates/engine-webgpu/README.md) |
 | `engine/stress-oracle/` | Destruction stress solver: the CPU f64 reference (`stress-ref`), the GPU solver (`stress-gpu`) and its coupling to the engine (`stress-rubble`), viewers and benchmarks. Its own Cargo workspace | [README](engine/stress-oracle/README.md), [improvement tracker](engine/docs/stress-solver-tracker.md) |
+| `apps/reference-studio/` | **Reference Studio**: a local React app (its own `package.json`, `npm run dev`) to collect crash reference images, trace them and compare with Rubble; its maths is the engine's Rust | [README](apps/reference-studio/README.md) |
 | `bench/` | Cross-engine rigid-body benchmark (rubble, three-avbd, rapier, PhysX) | [bench/README.md](bench/README.md) |
 | `crates/`, `web/` | **Legacy.** The original wgpu rigid-body crates (2D/3D), WASM build and web demos: the root Cargo workspace | [below](#legacy-wgpu-crates-crates-web) |
 

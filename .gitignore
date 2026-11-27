@@ -41,3 +41,9 @@ engine/ffi-dist/
 # Local outputs (renders, snapshots, frames)
 /out/
 engine/out/
+
+# Reference Studio (apps/reference-studio): the image library (third-party footage and
+# added screenshots, never committed), its install and build
+apps/reference-studio/library/
+apps/reference-studio/node_modules/
+apps/reference-studio/dist/

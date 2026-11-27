@@ -1,0 +1,27 @@
+{
+ "id": "S04_2m59s_side_01",
+ "shot": "S04",
+ "image": {
+  "file": "S04/S04_2m59s_side_01.webp",
+  "width": 2000,
+  "height": 1375,
+  "sha256": "cdce817d828b58342fdf4c72053afe816fd4b0f2c71c4507f0377a3477cf91e9"
+ },
+ "moment": {
+  "label": "early crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 179,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Underride guard meets the car at hood height; hood and fenders crushed above the bumper line. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.625Z"
+}

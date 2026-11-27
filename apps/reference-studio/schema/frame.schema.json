@@ -1,0 +1,370 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "reference-studio/frame.schema.json",
+ "title": "Frame",
+ "description": "One image in the library and everything known about it: its shot, moment, view, link to Rubble, camera, regions and their tracings. engine/docs/crash-reference/studio/frames/<id>.json",
+ "type": "object",
+ "required": [
+  "id",
+  "shot",
+  "image",
+  "moment",
+  "time",
+  "view",
+  "notes",
+  "rubble",
+  "camera",
+  "regions"
+ ],
+ "$defs": {
+  "instance": {
+   "type": "object",
+   "required": [
+    "id",
+    "schema",
+    "front",
+    "elements"
+   ],
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "schema": {
+     "type": "string",
+     "description": "a StructureSchema id"
+    },
+    "front": {
+     "enum": [
+      "left",
+      "right"
+     ]
+    },
+    "elements": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "object",
+      "required": [
+       "vis"
+      ],
+      "additionalProperties": false,
+      "properties": {
+       "p": {
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "description": "keypoint"
+       },
+       "pts": {
+        "type": "array",
+        "items": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "minItems": 2,
+         "maxItems": 2,
+         "description": "normalised [x, y] from the top-left corner"
+        },
+        "description": "polyline points in order"
+       },
+       "c": {
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "description": "circle centre"
+       },
+       "rim": {
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "description": "a point on the circle"
+       },
+       "vis": {
+        "enum": [
+         "clear",
+         "blurred",
+         "hidden"
+        ],
+        "description": "how well it can be seen; hidden includes guessed"
+       }
+      }
+     },
+     "description": "by element name; points in the region's normalised coordinates"
+    }
+   }
+  },
+  "tracing": {
+   "type": "object",
+   "required": [
+    "instances",
+    "traced_by",
+    "approximate",
+    "note"
+   ],
+   "properties": {
+    "instances": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/instance"
+     }
+    },
+    "traced_by": {
+     "type": "string"
+    },
+    "approximate": {
+     "type": "boolean"
+    },
+    "note": {
+     "type": "string"
+    },
+    "updated": {
+     "type": "string"
+    }
+   }
+  },
+  "region": {
+   "type": "object",
+   "required": [
+    "id",
+    "label",
+    "source",
+    "crop",
+    "tracing"
+   ],
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "label": {
+     "type": "string"
+    },
+    "source": {
+     "enum": [
+      "real",
+      "beamng",
+      "rubble",
+      "other"
+     ]
+    },
+    "crop": {
+     "type": "array",
+     "items": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+     },
+     "minItems": 4,
+     "maxItems": 4,
+     "description": "[x0, y0, x1, y1], normalised image coordinates"
+    },
+    "tracing": {
+     "$ref": "#/$defs/tracing"
+    }
+   }
+  }
+ },
+ "properties": {
+  "id": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+  },
+  "shot": {
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    }
+   ]
+  },
+  "image": {
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "object",
+     "required": [
+      "file",
+      "width",
+      "height",
+      "sha256"
+     ],
+     "properties": {
+      "file": {
+       "type": "string",
+       "description": "path inside the library (gitignored)"
+      },
+      "width": {
+       "type": "integer"
+      },
+      "height": {
+       "type": "integer"
+      },
+      "sha256": {
+       "type": "string"
+      }
+     }
+    }
+   ]
+  },
+  "moment": {
+   "type": "object",
+   "required": [
+    "label",
+    "after_impact_ms"
+   ],
+   "properties": {
+    "label": {
+     "type": "string"
+    },
+    "after_impact_ms": {
+     "type": [
+      "number",
+      "null"
+     ]
+    }
+   }
+  },
+  "time": {
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "object",
+     "required": [
+      "video_s",
+      "approximate"
+     ],
+     "properties": {
+      "video_s": {
+       "type": "number"
+      },
+      "approximate": {
+       "type": "boolean"
+      }
+     }
+    }
+   ]
+  },
+  "view": {
+   "type": "string"
+  },
+  "notes": {
+   "type": "string"
+  },
+  "rubble": {
+   "type": "object",
+   "required": [
+    "moment",
+    "camera"
+   ],
+   "properties": {
+    "moment": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "description": "scenario moment; null: from the moment label"
+    },
+    "camera": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "description": "named scenario camera; null: from the view label"
+    }
+   }
+  },
+  "camera": {
+   "description": "this image's own camera, set by hand (scenario world, metres, +Y up)",
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "object",
+     "required": [
+      "eye",
+      "target",
+      "up",
+      "fov_y_deg",
+      "region"
+     ],
+     "properties": {
+      "eye": {
+       "type": "array",
+       "items": {
+        "type": "number"
+       },
+       "minItems": 3,
+       "maxItems": 3
+      },
+      "target": {
+       "type": "array",
+       "items": {
+        "type": "number"
+       },
+       "minItems": 3,
+       "maxItems": 3
+      },
+      "up": {
+       "type": "array",
+       "items": {
+        "type": "number"
+       },
+       "minItems": 3,
+       "maxItems": 3
+      },
+      "fov_y_deg": {
+       "type": "number",
+       "exclusiveMinimum": 1,
+       "exclusiveMaximum": 170
+      },
+      "region": {
+       "type": [
+        "string",
+        "null"
+       ],
+       "description": "the region whose crop is the camera's image; null: the whole image"
+      }
+     }
+    }
+   ]
+  },
+  "before_frame": {
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    }
+   ]
+  },
+  "regions": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/region"
+   }
+  },
+  "updated": {
+   "type": "string"
+  }
+ }
+}

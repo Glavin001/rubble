@@ -2,7 +2,7 @@
 //! with the reference footage (`engine_softbody::crash_reference::outline`,
 //! `engine/tools/crash-reference/outlines.py`).
 //!
-//! `crash_outlines -- ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render]`
+//! `crash_outlines -- ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render] [--cameras FILE]`
 //!
 //! Runs scenario ID (run 0, nominal) to each of its moments (ms after first contact, at the
 //! exact solver step the web recorder stops on) and writes `DIR/outlines.json`: per moment,
@@ -13,6 +13,9 @@
 //! Unless `--no-render`, also `DIR/<moment>-<camera>.png`: the collision surface drawn
 //! from the same camera (flat shaded, each part group its colour), so the outlines line
 //! up with a still exactly. Default DIR: `out/crash-reference/outlines/<ID>-<contact>`.
+//! `--cameras FILE` adds explicit cameras (a JSON list of `outline::FreeCamera` with an
+//! optional `width` and `height` of the image they apply to): each is projected and
+//! rendered like a scenario camera, under its own name.
 //! The census of a design's parts: `crash_outlines -- --census sedan`.
 
 use engine_softbody::crash_reference::outline::{self, CarFrame, Ghost, Parts, View};
@@ -223,7 +226,7 @@ fn main() -> Result<(), String> {
         return census(&d);
     }
     let id = a.first().filter(|x| !x.starts_with("--")).ok_or(
-        "usage: crash_outlines ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render]",
+        "usage: crash_outlines ID [--contact edge] [--size 1280x720] [--out DIR] [--no-render] [--cameras FILE]",
     )?;
     let s = cr::get(id).ok_or(format!("no scenario {id}"))?;
     let contact = flag("--contact").map_or(Ok(Contact::Edge), |x| {
@@ -275,11 +278,30 @@ fn main() -> Result<(), String> {
             )
         })
         .collect();
-    let views: Vec<View> = s
+    // The scenario's cameras, then any explicit ones (--cameras FILE: a JSON list of
+    // { name, eye, target, up?, fov_y_deg?, width?, height? } in the scenario's world frame,
+    // a reference image's own camera set in the Reference Studio).
+    let mut views: Vec<(String, View)> = s
         .cameras
         .iter()
-        .map(|c| View::new(c, w as f32, h as f32))
+        .map(|c| (c.name.to_string(), View::new(c, w as f32, h as f32)))
         .collect();
+    let mut extra = Vec::new();
+    if let Some(file) = flag("--cameras") {
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+        let list: Vec<Value> = serde_json::from_str(&text).map_err(|e| format!("{file}: {e}"))?;
+        for c in list {
+            let fc: outline::FreeCamera =
+                serde_json::from_value(c.clone()).map_err(|e| format!("{file}: {e}"))?;
+            let cw = c["width"].as_f64().unwrap_or(w as f64) as f32;
+            let ch = c["height"].as_f64().unwrap_or(h as f64) as f32;
+            if views.iter().any(|(n, _)| *n == fc.name) {
+                return Err(format!("{file}: camera {} is already a scenario camera", fc.name));
+            }
+            views.push((fc.name.clone(), View::look(&fc, cw, ch)));
+            extra.push(json!({ "camera": fc, "width": cw, "height": ch }));
+        }
+    }
     let impact = (built.layout.impact_s / DT).round() as i64;
     let mut moments: Vec<(&cr::Moment, u32)> = s
         .moments
@@ -315,7 +337,7 @@ fn main() -> Result<(), String> {
             let frame = CarFrame::new(parts, now, &g, b.heading());
             let side = |p: Vec3| Some(frame.side(p));
             let mut cams = serde_json::Map::new();
-            for (c, v) in s.cameras.iter().zip(&views) {
+            for (c, v) in &views {
                 let proj = |p: Vec3| v.project(p);
                 let mut o = outlines_json(parts, now, &ghost, &proj);
                 let wheels: Vec<Value> = parts
@@ -327,7 +349,7 @@ fn main() -> Result<(), String> {
                     })
                     .collect();
                 o["wheels"] = json!(wheels);
-                cams.insert(c.name.to_string(), o);
+                cams.insert(c.clone(), o);
             }
             let mut car = outlines_json(parts, now, &ghost, &side);
             car["wheels"] = json!(parts
@@ -363,9 +385,9 @@ fn main() -> Result<(), String> {
             }
         }
         if render {
-            for (c, v) in s.cameras.iter().zip(&views) {
-                let path = format!("{out}/{}-{}.png", m.name, c.name);
-                write_png(&raster(v, &render_tris), w, h, &path)?;
+            for (c, v) in &views {
+                let path = format!("{out}/{}-{c}.png", m.name);
+                write_png(&raster(v, &render_tris), v.width as usize, v.height as usize, &path)?;
             }
         }
         eprintln!("  {} ({} ms, step {step})", m.name, m.after_impact_ms);
@@ -376,7 +398,7 @@ fn main() -> Result<(), String> {
         "projection": { "width": w, "height": h, "fov_y_deg": outline::FOV_Y_DEG, "up": "+Y", "pixels": "x right, y down, from the top-left corner" },
         "car_frame": "x along the car's current heading (horizontal, its rear's turn), y up, metres; origin the rear axle's centre on the ground (y = 0)",
         "ghost": "rest shape carried rigidly with the cabin and rear (mass-weighted robust fit over cabin and rear section nodes)",
-        "cameras": s.cameras, "moments": out_moments,
+        "cameras": s.cameras, "explicit_cameras": extra, "moments": out_moments,
     });
     let path = format!("{out}/outlines.json");
     std::fs::write(

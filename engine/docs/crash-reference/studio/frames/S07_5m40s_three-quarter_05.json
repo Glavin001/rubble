@@ -1,0 +1,27 @@
+{
+ "id": "S07_5m40s_three-quarter_05",
+ "shot": "S07",
+ "image": {
+  "file": "S07/S07_5m40s_three-quarter_05.webp",
+  "width": 2000,
+  "height": 789,
+  "sha256": "20ee0e85c2024ae97dab27fbc163ee0f566bbe8600ef10ef47f42ace4028206d"
+ },
+ "moment": {
+  "label": "aftermath",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 340,
+  "approximate": true
+ },
+ "view": "three-quarter",
+ "notes": "Wreck about half the car's length; rear axle on top. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.631Z"
+}

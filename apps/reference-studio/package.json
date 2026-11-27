@@ -1,0 +1,33 @@
+{
+  "name": "rubble-reference-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference Studio: a local app to collect crash reference images, trace structures on them, link them to Rubble scenarios and compare shapes",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc",
+    "preview": "vite preview",
+    "import-prototype": "node scripts/import-prototype.ts",
+    "check-data": "node scripts/check-data.ts",
+    "test": "node --test tests/*.test.ts",
+    "smoke": "node tests/smoke.ts"
+  },
+  "dependencies": {
+    "@w3c/webmcp-polyfill": "0.2.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.7",
+    "@types/react": "19.3.3",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.6"
+  }
+}

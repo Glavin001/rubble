@@ -2,18 +2,19 @@
 """Side-by-side sheets of the crash reference suite (engine/docs/crash-reference.md).
 
 For each scenario and each contact setting it has stills for, one PNG: a row per reference
-frame of `index.json` (the frame itself, already real | BeamNG halves) beside Rubble's still
-from the matching camera at the nearest moment, each row labelled with the scenario id,
+frame of the Reference Studio (`engine/docs/crash-reference/studio/`: the frame itself,
+already real | BeamNG halves) beside Rubble's still from the frame's linked camera and
+moment (its own choice, else the rule in `engine_softbody::crash_reference::shape::link`), each row labelled with the scenario id,
 the reference moment and Rubble's moment (ms after first contact), the camera and the
 contact setting.
 
     python3 engine/tools/crash-reference/sheet.py [S01 S02 ...]
-        [--frames ~/Development/rubble-artifacts/crash-reference]
+        [--library apps/reference-studio/library]
         [--stills engine/out/crash-reference] [--out engine/out/crash-reference/sheets]
         [--copy-to ~/Development/rubble-artifacts/crash-reference/sheets] [--run 0]
 
-Reference frames are third-party footage: they are read from the artifacts folder (never
-from the repository) and the sheets are not committed. Where a scenario has no frames on
+Reference frames are third-party footage: they are read from the studio's gitignored
+library (never committed), and the sheets are not committed. Where a scenario has no frames on
 disk (S10) the script says "no reference frames" and goes on. Rubble's stills are the
 recorder's (`crash-ref-record.mjs`, `<moment>-<camera>.png` in `<ID>-<contact>-run<k>/`).
 The moments and cameras are the scenario's registry entry the recorder saved beside its
@@ -29,6 +30,8 @@ import sys
 from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import studio_data  # noqa: E402  (the studio's frames; the moment rule is Rust's)
 ROW_H = 540
 LABEL_H = 56
 FONTS = [
@@ -37,54 +40,8 @@ FONTS = [
     '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
 ]
 
-# A reference moment's time after first contact (ms), to find the scenario's nearest
-# moment; a moment named in MOMENT_NAME wins when the scenario has it.
-MOMENT_MS = {
-    'setup': -10, 'first contact': -10, 'close first contact': -10,
-    'early crush': 20, 'mid crush': 40, 'peak crush': 60, 'peak': 60, 'peak intrusion': 70,
-    'rebound': 150, 'peak pitch': 250, 'rotation': 300,
-}
-MOMENT_NAME = {
-    'first contact': 'contact', 'early crush': 'early_crush', 'mid crush': 'mid_crush',
-    'peak crush': 'peak', 'peak intrusion': 'peak', 'rebound': 'rebound',
-}
-# Per scenario: a reference moment whose instant the generic table misses (S07's "peak"
-# is the car standing on its nose, not the 60 ms peak of crush).
-MOMENT_OVERRIDE = {('S07', 'peak'): 'on_its_nose', ('S10', 'peak pitch'): 'rear_up'}
-# A reference camera's Rubble camera, when the names differ (first that the scenario has).
-CAMERA_ALIAS = {
-    'wide': ['wide', 'front_quarter', 'side'],
-    'side close': ['side close', 'side'],
-    'three-quarter': ['three-quarter', 'aftermath', 'quarter', 'front three-quarter'],
-    'three-quarter rear': ['three-quarter rear', 'aftermath_rear', 'aftermath', 'quarter'],
-    'front three-quarter': ['front three-quarter', 'front_quarter', 'quarter'],
-}
-
-
 def norm(s):
     return re.sub(r'[\s_-]+', ' ', s.strip().lower())
-
-
-def pick_camera(ref_cam, cams):
-    names = {norm(c): c for c in cams}
-    aliases = {norm(k): v for k, v in CAMERA_ALIAS.items()}
-    for cand in [ref_cam] + aliases.get(norm(ref_cam), []):
-        if norm(cand) in names:
-            return names[norm(cand)]
-    return cams[0]
-
-
-def pick_moment(sid, ref_moment, moments):
-    by = {m['name']: m for m in moments}
-    key = norm(ref_moment)
-    if (sid, key) in MOMENT_OVERRIDE and MOMENT_OVERRIDE[(sid, key)] in by:
-        return by[MOMENT_OVERRIDE[(sid, key)]]
-    if key == 'aftermath':
-        return max(moments, key=lambda m: m['after_impact_ms'])
-    if MOMENT_NAME.get(key) in by:
-        return by[MOMENT_NAME[key]]
-    ms = MOMENT_MS.get(key, 60)
-    return min(moments, key=lambda m: abs(m['after_impact_ms'] - ms))
 
 
 def size(path):
@@ -112,8 +69,9 @@ def text_filter(font, textfile, x, y, size, color='white'):
 def sheet(sid, scen, frames, stills_dir, contact, out, tmp, font):
     rows = []
     for fr in frames:
-        cam = pick_camera(fr['camera'], [c['name'] for c in scen['cameras']])
-        mom = pick_moment(sid, fr['moment'], scen['moments'])
+        mom_name, cam_name = studio_data.link(fr, sid)
+        cam = next((c['name'] for c in scen['cameras'] if norm(c['name']) == norm(cam_name)), scen['cameras'][0]['name'])
+        mom = next((m for m in scen['moments'] if m['name'] == mom_name), scen['moments'][0])
         still = stills_dir / f"{mom['name']}-{cam.replace(' ', '_')}.png"
         rows.append((fr, cam, mom, still))
     widths = []
@@ -125,7 +83,7 @@ def sheet(sid, scen, frames, stills_dir, contact, out, tmp, font):
     parts = []
     for k, ((fr, cam, mom, still), (wr, ws)) in enumerate(zip(rows, widths)):
         label = tmp / f'{sid}-{contact}-{k}.txt'
-        label.write_text(f"{sid}  |  reference: {fr['moment']} ({fr['camera']}, {Path(fr['file']).name}; real | BeamNG)  "
+        label.write_text(f"{sid}  |  reference: {fr['moment']['label']} ({fr['view']}, {fr['id']}; real | BeamNG)  "
                          f"|  Rubble: {mom['name']} ({mom['after_impact_ms']:+g} ms after contact), camera {cam}, contact {contact}")
         part = tmp / f'{sid}-{contact}-{k}.png'
         src = ['-i', str(fr['path'])]
@@ -151,7 +109,7 @@ def sheet(sid, scen, frames, stills_dir, contact, out, tmp, font):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('ids', nargs='*')
-    ap.add_argument('--frames', default=os.path.expanduser('~/Development/rubble-artifacts/crash-reference'))
+    ap.add_argument('--library', default=str(studio_data.LIBRARY))
     ap.add_argument('--stills', default=str(ENGINE / 'out/crash-reference'))
     ap.add_argument('--out', default=str(ENGINE / 'out/crash-reference/sheets'))
     ap.add_argument('--copy-to', default=None)
@@ -160,9 +118,9 @@ def main():
     if not shutil.which('ffmpeg'):
         sys.exit('needs ffmpeg')
     font = next((f for f in FONTS if os.path.exists(f)), None)
-    frames_dir = Path(a.frames)
-    index = json.loads((ENGINE / 'docs/crash-reference/index.json').read_text())
-    ids = a.ids or sorted({f['scenario'] for f in index['frames']})
+    shot_map, all_frames = studio_data.shots(), studio_data.frames()
+    linked = [(studio_data.scenario_of(f, shot_map), f) for f in all_frames.values()]
+    ids = a.ids or sorted({sid for sid, _ in linked if sid})
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     tmp = out / '.parts'
@@ -170,10 +128,10 @@ def main():
     made = []
     for sid in ids:
         frames = []
-        for fr in index['frames']:
-            if fr['scenario'] != sid or not fr.get('file'):
+        for fsid, fr in sorted(linked, key=lambda x: ((x[1].get('time') or {}).get('video_s', 1e9), x[1]['id'])):
+            if fsid != sid or not fr.get('image'):
                 continue
-            p = frames_dir / fr['file']
+            p = studio_data.image_path(fr, a.library)
             if p.exists():
                 frames.append({**fr, 'path': p})
         if not frames:
@@ -193,7 +151,7 @@ def main():
             rows = sheet(sid, scen, frames, d, contact, dst, tmp, font)
             print(f'{sid} ({contact}): {dst}')
             for fr, cam, mom, still in rows:
-                print(f"   {Path(fr['file']).name}: {fr['moment']} / {fr['camera']} -> {still.name}{'' if still.exists() else ' (missing)'}")
+                print(f"   {fr['id']}: {fr['moment']['label']} / {fr['view']} -> {still.name}{'' if still.exists() else ' (missing)'}")
             made.append(dst)
     shutil.rmtree(tmp, ignore_errors=True)
     if a.copy_to and made:
