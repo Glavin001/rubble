@@ -21,7 +21,7 @@
 //! from v_f and the whole impulses, summed per node in fixed point, so momentum is kept to one
 //! rounding and nothing accumulates.
 
-use super::ccd::{closest, CcdPair, CcdStats, FixedSums};
+use super::ccd::{closest, CcdPair, CcdStats, VEL_FIXED};
 use super::ccd_rows::{ROW_GAP_SHARE, ROW_ITERS};
 use glam::Vec3;
 use std::collections::HashMap;
@@ -77,9 +77,12 @@ impl Ctx<'_> {
         self.im[k.0][k.1 as usize]
     }
 
-    /// vel = base + M⁻¹Jᵀ·(s·λ), the impulses summed per node in fixed point.
+    /// vel = base + M⁻¹Jᵀ·(s·λ), the impulses summed per node in fixed point (the kernels'
+    /// scale, `VEL_FIXED`) as 64-bit integers: order free and exact, with no range to overflow.
+    /// (In 32 bits, ±476 m/s, the accelerated iterates of a 130 km/h head-on's impact rows,
+    /// many on one node, wrapped 902 times: 2026-11-27.) A term past 2⁶² units is counted.
     fn velocities(&self, rows: &[VRow], l: &[f32], s: f32, base: &[Vec<Vec3>], vel: &mut [Vec<Vec3>]) {
-        let mut sums = FixedSums::new(base);
+        let mut sums: Vec<Vec<[i64; 3]>> = base.iter().map(|x| vec![[0i64; 3]; x.len()]).collect();
         for (r, &l) in rows.iter().zip(l) {
             if l == 0.0 {
                 continue;
@@ -87,12 +90,26 @@ impl Ctx<'_> {
             for j in 0..4 {
                 let m = self.mi(r.k[j]);
                 if m > 0.0 && r.w[j] != 0.0 {
-                    sums.add_v(r.k[j].0, r.k[j].1, r.n * (r.w[j] * m * l * s));
+                    let d = r.n * (r.w[j] * m * l * s);
+                    let e = &mut sums[r.k[j].0][r.k[j].1 as usize];
+                    for (k, c) in d.to_array().into_iter().enumerate() {
+                        let f = (c as f64 * VEL_FIXED as f64).round_ties_even();
+                        if !(f.abs() < 4.6e18) {
+                            super::ccd::FIXED_OVERFLOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        e[k] = e[k].wrapping_add(f.clamp(-4.6e18, 4.6e18) as i64);
+                    }
                 }
             }
         }
         vel.clone_from_slice(base);
-        sums.apply(vel, None);
+        for (v, row) in sums.iter().enumerate() {
+            for (i, a) in row.iter().enumerate() {
+                if *a != [0; 3] {
+                    vel[v][i] += Vec3::new((a[0] as f64 / VEL_FIXED as f64) as f32, (a[1] as f64 / VEL_FIXED as f64) as f32, (a[2] as f64 / VEL_FIXED as f64) as f32);
+                }
+            }
+        }
     }
 
     /// A row's closing speed J v (separating positive).
