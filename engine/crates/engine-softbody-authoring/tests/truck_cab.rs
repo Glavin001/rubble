@@ -183,6 +183,15 @@ fn parked_it_settles_and_stays() {
         (h4 - h2) * 1e3
     );
     assert!(dmg.is_empty(), "beams yielded or broke parked: {dmg:?}");
+    // on its tyres, not sunk into the ground: each wheel's suspension sized for its own
+    // axle's load (`Physics::suspension_by_load`; with the mean wheel load's: -38 mm)
+    let low = lowest_point(&s);
+    println!("parked: lowest point {:.1} mm", low * 1e3);
+    assert!(
+        low.abs() < 0.01,
+        "the parked truck's lowest point is {:.0} mm from the ground",
+        low * 1e3
+    );
 }
 
 #[test]
@@ -391,38 +400,85 @@ fn probe_ringing() {
     println!("{}: {} reversals in 1 s", desc().nodes[i].name, cross);
 }
 
-/// A measurement, not adopted (an engine decision): the solver sizes every
-/// raycast spring for the vehicle's mean wheel load (`pack::core_plan`), so a
-/// front-heavy truck parks nose-down past its design (`every_design`'s lowest
-/// point). The same truck with each wheel's spring and damper scaled to its
-/// own static load (the same frequency and ratio on every wheel).
+/// Diagnostics: is the rig mirror-symmetric (every beam's mirror image a beam with the
+/// same spring, damping, yield and strength), and which beams the 30 km/h wall breaks
+/// with the battery box's mass made the fuel tank's (the truck's one asymmetry), with
+/// the wall's speed varied a little.
 #[test]
 #[ignore]
-fn measure_suspension_sized_per_wheel_load() {
-    let park = |scale: Option<Vec<f32>>| {
-        let mut s = spawn(Vec3::ZERO);
-        if let (Some(sc), Some(d)) = (scale, s.drive.as_mut()) {
-            for (w, f) in d.config.wheels.iter_mut().zip(sc) {
-                w.k *= f;
-                w.c *= f;
+fn probe_wall_symmetry() {
+    let s0 = spawn(Vec3::ZERO);
+    // (the design's positions: the sim's are about its centroid, a few mm off the centre plane)
+    let p = |i: u32| {
+        desc()
+            .nodes
+            .get(i as usize)
+            .map_or(Vec3::splat(1e3 + i as f32), |n| Vec3::from(n.position))
+    };
+    let key = |q: Vec3| {
+        (
+            (q.x * 1e3).round() as i32,
+            (q.y * 1e3).round() as i32,
+            (q.z * 1e3).round() as i32,
+        )
+    };
+    let mut at: std::collections::HashMap<((i32, i32, i32), (i32, i32, i32)), usize> =
+        Default::default();
+    for (j, b) in desc().beams.iter().enumerate() {
+        let (ka, kb) = (key(p(b.a)), key(p(b.b)));
+        at.insert((ka.min(kb), ka.max(kb)), j);
+    }
+    let (mut missing, mut differ) = (Vec::new(), 0);
+    let name = |i: u32| {
+        desc()
+            .nodes
+            .get(i as usize)
+            .map_or("wheel".to_string(), |n| n.name.clone())
+    };
+    for b in &desc().beams {
+        let m = |q: Vec3| key(Vec3::new(-q.x, q.y, q.z));
+        let (ka, kb) = (m(p(b.a)), m(p(b.b)));
+        match at.get(&(ka.min(kb), ka.max(kb))) {
+            None => missing.push(format!("{}-{}", name(b.a), name(b.b))),
+            Some(&j) => {
+                let o = &desc().beams[j];
+                if (o.spring - b.spring).abs() > 1e-3 * b.spring.abs().max(1.0)
+                    || (o.strength - b.strength).abs() > 1.0
+                    || (o.deform - b.deform).abs() > 1.0
+                {
+                    differ += 1;
+                }
             }
         }
-        for _ in 0..(3.0 / STEP).round() as usize {
+    }
+    println!("(design beams: the triangles' aero records are not mirrored, the hulls' diagonals) beams with no mirror image: {} {:?}; mirrored with other values: {differ}", missing.len(), &missing[..missing.len().min(10)]);
+    for (sym, v) in [(false, 30.0), (true, 30.0), (true, 29.0), (true, 31.0)] {
+        let fw = forward();
+        let mut s = spawn(fw * (v / 3.6));
+        if sym {
+            for i in ids("batb") {
+                s.nodes[i].mass *= truck_cab::KG_FUEL as f32 / truck_cab::KG_BOX as f32;
+            }
+        }
+        let front = (0..nd())
+            .map(|i| pos(&s, i).dot(fw))
+            .fold(f32::MIN, f32::max);
+        let c = fw * (front + 0.25 + 0.5) + Vec3::new(0.0, 2.0, 0.0);
+        let half = Vec3::new(
+            if fw.x.abs() > 0.5 { 0.5 } else { 4.0 },
+            2.0,
+            if fw.z.abs() > 0.5 { 0.5 } else { 4.0 },
+        );
+        s.boxes.push(StaticBox::centered(c, half));
+        for _ in 0..(1.0 / STEP).round() as usize {
             s.step();
         }
-        let loads: Vec<f32> = s
-            .drive
-            .as_ref()
-            .unwrap()
-            .wheels
+        let broken: Vec<String> = s
+            .beams
             .iter()
-            .map(|w| w.load)
+            .filter(|b| b.broken)
+            .map(|b| format!("{}-{}", name(b.a), name(b.b)))
             .collect();
-        (lowest_point(&s), loads)
-    };
-    let (low0, loads) = park(None);
-    let mean = loads.iter().sum::<f32>() / loads.len() as f32;
-    let scale: Vec<f32> = loads.iter().map(|l| l / mean).collect();
-    let (low1, _) = park(Some(scale.clone()));
-    println!("lowest point parked: mean-load springs {:.0} mm; per-wheel-load springs (scale {scale:?}) {:.0} mm", low0 * 1e3, low1 * 1e3);
+        println!("symmetric masses {sym}, {v} km/h: {}", broken.join(", "));
+    }
 }

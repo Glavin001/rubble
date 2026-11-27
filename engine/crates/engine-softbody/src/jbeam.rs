@@ -2033,8 +2033,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             mass: f.get("raycastWheelMass").and_then(as_f32).filter(|m| *m > 0.0).unwrap_or(20.0),
             braked: brake > 0.0,
             propulsion: i32::from(driven_wheel(&name)),
-            steerable: false,
-            max_steer: 0.0,
+            steerable: false, max_steer: 0.0, // `rubbleSuspensionByLoad`: Rubble's key, SoftWheel::load_sized
+            load_sized: f.get("rubbleSuspensionByLoad").and_then(|v| v.as_bool()).unwrap_or(false),
         });
     }
     // Steering: a wheel whose arm node is driven by a steering hydro.

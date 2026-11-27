@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::assemble::{AxleWheel, Design, RigSpec};
 use crate::carbody::{CarBody, Side};
+use crate::crash::Zone;
 use crate::export::Marker;
 use crate::heavy::{self, BeamAxle, Cab, LadderFrame, Underrun};
 use crate::mechanical::{vals, MechPart};
@@ -93,6 +94,9 @@ impl Default for TruckCabParams {
         let physics = Physics {
             kerb: KERB as f32,
             drag_cd: 0.60,
+            // its front axle carries 1.39 × the mean wheel load: each wheel's raycast
+            // suspension sized for its own (with the mean's it parked 38 mm nose-down)
+            suspension_by_load: true,
             ..Physics::default()
         };
         TruckCabParams {
@@ -314,6 +318,7 @@ impl TruckCab {
             0.02,
             Mat::MetalBare,
             rigid,
+            Zone::Other,
         );
         for (s, zf, z0, z1) in [
             (1.0f64, 1, Z_FA + 0.10, Z_FA + 1.00),
@@ -336,6 +341,44 @@ impl TruckCab {
             );
         }
         parts.push(eng);
+        parts.extend(self.side_boxes(&f));
+        // the fifth wheel (its top at 1.152 m, 675 mm ahead of the drive axle)
+        let zc = Z_RA + 0.675;
+        let mut fw = heavy::block(
+            "fifth_wheel",
+            "coupling",
+            DVec3::new(-0.45, 0.975, zc - 0.45),
+            DVec3::new(0.45, 1.152, zc + 0.45),
+            KG_FIFTH + self.p.ballast_kg,
+            0.015,
+            Mat::TrimBlack,
+            vals(0.0, 0.0, 300e3, 600e3),
+            Zone::Other,
+        );
+        for s in [1.0f64, -1.0] {
+            let k = if s > 0.0 { 1 } else { 0 };
+            let from = (0..4)
+                .map(|q| format!("fifw{k}{}{}", q / 2, q % 2))
+                .collect::<Vec<_>>();
+            let to = heavy::rail_nodes(&f, s, &["ot", "it"], zc - 0.9, zc + 0.9);
+            let sd = if s > 0.0 { "L" } else { "R" };
+            heavy::mount(
+                &mut fw,
+                &format!("fifth_wheel_bolts_{sd}"),
+                from,
+                to,
+                8,
+                vals(0.0, 0.0, 100e3, 250e3),
+            );
+        }
+        parts.push(fw);
+        (parts, extra)
+    }
+
+    /// The fuel tank and the battery box on the rails' sides, on their straps and
+    /// brackets.
+    fn side_boxes(&self, f: &LadderFrame) -> Vec<MechPart> {
+        let mut out = Vec::new();
         // the fuel tank (aluminium, D-profile 710 mm, 405 L at 90 %) on the
         // left rail; batteries, AdBlue and the silencer box on the right
         for (name, s, kg, mat) in [
@@ -356,6 +399,7 @@ impl TruckCab {
                 0.02,
                 mat,
                 vals(0.0, 0.0, 200e3, 400e3),
+                Zone::Other,
             );
             let tag = heavy::short_tag(name);
             let k = if s > 0.0 { 0 } else { 1 };
@@ -399,38 +443,9 @@ impl TruckCab {
                     vals(0.0, 0.0, 30e3, 60e3),
                 );
             }
-            parts.push(t);
+            out.push(t);
         }
-        // the fifth wheel (its top at 1.152 m, 675 mm ahead of the drive axle)
-        let zc = Z_RA + 0.675;
-        let mut fw = heavy::block(
-            "fifth_wheel",
-            "coupling",
-            DVec3::new(-0.45, 0.975, zc - 0.45),
-            DVec3::new(0.45, 1.152, zc + 0.45),
-            KG_FIFTH + self.p.ballast_kg,
-            0.015,
-            Mat::TrimBlack,
-            vals(0.0, 0.0, 300e3, 600e3),
-        );
-        for s in [1.0f64, -1.0] {
-            let k = if s > 0.0 { 1 } else { 0 };
-            let from = (0..4)
-                .map(|q| format!("fifw{k}{}{}", q / 2, q % 2))
-                .collect::<Vec<_>>();
-            let to = heavy::rail_nodes(&f, s, &["ot", "it"], zc - 0.9, zc + 0.9);
-            let sd = if s > 0.0 { "L" } else { "R" };
-            heavy::mount(
-                &mut fw,
-                &format!("fifth_wheel_bolts_{sd}"),
-                from,
-                to,
-                8,
-                vals(0.0, 0.0, 100e3, 250e3),
-            );
-        }
-        parts.push(fw);
-        (parts, extra)
+        out
     }
 
     fn markers(&self) -> Vec<Marker> {

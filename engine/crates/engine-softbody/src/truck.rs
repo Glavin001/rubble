@@ -2312,7 +2312,7 @@ fn lower(mut file: TruckFile) -> SoftVehicleDesc {
                 _ => 0,
             },
             steerable,
-            max_steer,
+            max_steer, load_sized: false,
         });
     }
     desc

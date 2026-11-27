@@ -18,7 +18,15 @@ fn every_member_and_part_of_every_design_has_a_zone() {
         let parts = d.mechanical(&st);
         // the load paths the measurements read are all there
         let has = |z: Zone| st.members.iter().any(|m| m.zone() == Some(z)) || parts.iter().any(|p| p.zone == z);
-        for z in [Zone::FrontLower, Zone::FrontUpper, Zone::Cabin, Zone::Rear, Zone::Wheel] {
+        // A car's load paths; the tractor unit's own (a cab-over on a ladder frame has no
+        // hood-and-fender upper path and no rear body: its underrun bumper, cab, axles and
+        // wheels, and the frame and what it carries, `Other`).
+        let need: &[Zone] = if n == "truck_cab" {
+            &[Zone::FrontLower, Zone::Cabin, Zone::Wheel, Zone::Other]
+        } else {
+            &[Zone::FrontLower, Zone::FrontUpper, Zone::Cabin, Zone::Rear, Zone::Wheel]
+        };
+        for &z in need {
             assert!(has(z), "{n}: nothing in {z:?}");
         }
     }

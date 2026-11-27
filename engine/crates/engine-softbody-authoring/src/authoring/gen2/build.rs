@@ -548,6 +548,7 @@ pub struct Car {
     /// the solver's 20 kg).
     pub raycast_wheel_kg: Option<f32>,
     pub torsion: Vec<Torsion>,
+    pub suspension_by_load: bool, // raycast springs per wheel load (`Physics::suspension_by_load`, `rubbleSuspensionByLoad`)
     /// Render mesh name: the nodes it binds to ([`Bind`]).
     pub bind: BTreeMap<String, Bind>,
     by_name: HashMap<String, usize>,

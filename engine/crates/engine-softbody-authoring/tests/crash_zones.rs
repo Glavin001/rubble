@@ -39,7 +39,14 @@ fn every_designs_zones_cover_its_nodes_and_every_load_path() {
         let share = 1.0 - unmatched.len() as f64 / total as f64;
         println!("{design}: {} prefixes, {:.1} % of {total} nodes matched; {by:?}", z.parts.len(), 100.0 * share);
         assert!(share >= 0.95, "{design}: {:.1} % matched; unmatched {:?}", 100.0 * share, &unmatched[..unmatched.len().min(20)]);
-        for s in [Section::FrontLower, Section::FrontUpper, Section::Cabin, Section::Rear, Section::Wheel] {
+        // A car's load paths; the tractor unit's own (a cab-over on a ladder frame: no hood
+        // and fender path, no rear body; the frame and what it carries are `Other`).
+        let need: &[Section] = if *design == "truck_cab" {
+            &[Section::FrontLower, Section::Cabin, Section::Wheel, Section::Other]
+        } else {
+            &[Section::FrontLower, Section::FrontUpper, Section::Cabin, Section::Rear, Section::Wheel]
+        };
+        for &s in need {
             assert!(by.get(&s).copied().unwrap_or(0) > 0, "{design}: no node in {s:?}");
         }
     }
@@ -49,7 +56,7 @@ fn every_designs_zones_cover_its_nodes_and_every_load_path() {
 fn every_designs_gauges_are_node_pairs_of_a_plausible_length() {
     // (m) a car's: wheelbase, a front door's opening, the cabin between the B-pillars at
     // the belt, sill to roof rail, the front bumper's face to the front axle line
-    let bands: [(&str, f32, f32); 7] = [
+    let car: &[(&str, f32, f32)] = &[
         ("wheelbase_left", 2.3, 3.2),
         ("wheelbase_right", 2.3, 3.2),
         ("door_left", 0.8, 1.5),
@@ -58,20 +65,32 @@ fn every_designs_gauges_are_node_pairs_of_a_plausible_length() {
         ("roof_height", 0.8, 1.4),
         ("front_overhang", 0.7, 1.5),
     ];
+    // (m) the 4x2 tractor unit's (`truck_cab`: wheelbase 3.80 m, a 2.5 m wide cab 1.85 m
+    // from floor to roof, a 5.7 m frame, the bumper's face 1.365 m ahead of the front axle):
+    // wheelbase, the cab's width at mid height, its floor to roof on the left, the left
+    // rail's length, the bumper's face to the left rail at the front axle's line
+    let truck: &[(&str, f32, f32)] = &[
+        ("wheelbase_left", 3.5, 4.1),
+        ("wheelbase_right", 3.5, 4.1),
+        ("cab_width", 2.2, 2.7),
+        ("cab_height", 1.5, 2.1),
+        ("frame_length", 5.3, 6.1),
+        ("front_overhang", 1.0, 1.7),
+    ];
     for (design, t) in templates() {
         let pos = |n: &str| -> Vec3 {
             let i = t.desc.nodes.iter().position(|x| x.name == n).unwrap_or_else(|| panic!("{design}: gauge node {n} is not in the JBeam"));
             Vec3::from(t.desc.nodes[i].position)
         };
         let mut line = Vec::new();
-        for (name, lo, hi) in bands {
+        for &(name, lo, hi) in if *design == "truck_cab" { truck } else { car } {
             let g = t.zones.gauges.iter().find(|g| g.name == name).unwrap_or_else(|| panic!("{design}: no gauge {name}"));
             let (a, b) = (pos(&g.a), pos(&g.b));
             let l = a.distance(b);
             line.push(format!("{name} {} - {} {l:.3}", g.a, g.b));
             assert!((lo..=hi).contains(&l), "{design}: {name} {} - {} is {l:.3} m, outside {lo}-{hi}", g.a, g.b);
             // left is +X in the car's frame (forward +Z, up +Y)
-            if name.ends_with("_left") || name == "roof_height" {
+            if name.ends_with("_left") || name == "roof_height" || name == "cab_height" {
                 assert!(a.x > 0.0 && b.x > 0.0, "{design}: {name} is not on +X: {a} {b}");
             }
             if name.ends_with("_right") {
@@ -80,7 +99,7 @@ fn every_designs_gauges_are_node_pairs_of_a_plausible_length() {
             if name.starts_with("wheelbase") {
                 assert!(a.z > b.z, "{design}: {name} does not run front to rear (+Z forward)");
             }
-            if name == "roof_height" {
+            if name == "roof_height" || name == "cab_height" {
                 assert!(b.y > a.y + 0.5, "{design}: roof_height does not run sill to roof (+Y up): {a} {b}");
             }
             if name == "front_overhang" {

@@ -646,6 +646,7 @@ pub fn build(input: VgInput) -> Result<Built, String> {
 pub fn rig_only(input: &VgInput) -> Rig {
     // (A design of defined parts alone, no unibody shell: `parts_rig`.)
     let mut rig = if super::parts_rig::applies(input) { super::parts_rig::rig(input) } else { rig::rig_with(input) };
+    rig.car.suspension_by_load = input.physics.suspension_by_load;
     // (A posed design is rigged in its body frame and put in the world.)
     if let Some(ps) = input.rig.dims.pose {
         rig.transform(|g| {
