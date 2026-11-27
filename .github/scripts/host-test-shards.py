@@ -41,6 +41,9 @@ RUN_SECONDS = {
     # tests done at 22; split in two (continuous_contact_hard: the six longest crashes).
     ("engine-softbody-authoring", "test", "continuous_contact"): 1000,
     ("engine-softbody-authoring", "test", "continuous_contact_hard"): 1100,
+    # The two pressed crashes (2 s each): side 60 pressed alone did not finish in 23 minutes
+    # beside the others.
+    ("engine-softbody-authoring", "test", "continuous_contact_pressed"): 1100,
     ("engine-softbody-authoring", "test", "generated_vehicle_lint"): 150,
     ("engine-softbody-authoring", "test", "every_design"): 120,
     ("engine-softbody", "lib", "engine_softbody"): 25,
