@@ -203,8 +203,8 @@ How the stand-in differs from the real setup (masses computed):
 | Kinetic energy at contact | 772.8 kJ (9124) | 424.3 kJ | -45 % |
 
 A second variant puts the `suv_4x4` (1,974.7 kg; ratio 1.363, plastic common velocity 14.37 m/s)
-in the barrier's place, to separate the mass from the rest (files in `engine/out/oblique/desc/`,
-written by `engine/out/oblique/make_desc.py`; working files, not committed). Its front is a
+in the barrier's place, to separate the mass from the rest (files in `~/Development/rubble-artifacts/crash-reference/camry-oblique/desc/`,
+written by `scripts/make_desc.py` there; working files, not committed). Its front is a
 vehicle's, not a flat honeycomb, and its origin is not at its face, so its overlap is only
 approximate.
 
@@ -337,7 +337,7 @@ To run these tests as reference scenarios, Rust needs (not added here):
   (left/right); run-up. Presets: 9124 and 8790 (left, 89.68 and 89.69 km/h), 9121 (right, 90.46).
 - **Metrics**: the car's yaw over time (the tests' only rotation sensor is 8790's), the car's
   velocity along the barrier's travel and the closing speed (the comparison above was done
-  outside the suite by `engine/out/oblique/analyze.py` from the run's series), and the
+  outside the suite by `scripts/analyze.py` in the artifacts folder from the run's series), and the
   report's crush stations C1-C6 and B1-B9 on the car's front (0.551-0.635 m maxima) instead of
   the length gauges.
 - **Criteria with a basis**: the momentum balance is a law; the common-velocity speed, the dv
