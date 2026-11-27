@@ -20,8 +20,10 @@
     the desired settings) rather than altering data at load time.
   Measuring a lossy option to report its effect is fine; adopting it needs the
   user's decision.
-- **Deciding trade-offs: read `engine/docs/decision-rules.md` first** (the owner's rules,
-  2026-11-26): decide by them, act and report; ask only where it says to.
+- **Required reading: the `deciding-tradeoffs` skill** (`.cursor/skills/deciding-tradeoffs/`),
+  the owner's rules for physics, accuracy, performance and visual trade-offs (2026-11-26).
+  Read it before any trade-off or design choice and before asking the owner anything: decide
+  by it, act, report the decision first; ask only where it says to.
 - Contact never stands in for metal (owner, 2026-11-26). Crashes are metal bodies
   bending and breaking at every speed: the crash's energy goes into the beams
   (bending, crumpling, breaking), not into contact. Not acceptable, and not to be

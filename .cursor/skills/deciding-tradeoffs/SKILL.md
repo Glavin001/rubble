@@ -1,4 +1,9 @@
-# How to decide: the owner's rules for physics and engine trade-offs
+---
+name: deciding-tradeoffs
+description: The owner's rules for deciding physics, accuracy, performance and visual trade-offs without asking them. Required reading before any trade-off or design choice (contact, energy, solver method, real time, paint against collision mesh, generator changes, test bars and guards), before asking the owner a question, and before reporting a decision.
+---
+
+# Deciding trade-offs the way the owner does
 
 Written 2026-11-26 from the owner's own words over the continuous-contact work, reviewed by
 Fable, so that agents and people make these decisions without asking. **Decide by these rules,
