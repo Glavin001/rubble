@@ -24,6 +24,19 @@ pub fn subframe_mounts_off_crash_box(parts: &mut [MechPart]) {
     }
 }
 
+/// [`crate::physics::FrontRules::crash_box_cell`]: the front impact beam's mounts reach all four
+/// corners of each crash box's front plate (the inboard corner nodes `sh_a1_ui*`, `sh_a1_di*`
+/// the closed cell adds) as a bumper beam is bolted to the box's whole flange. The mount keeps
+/// its beam count.
+pub fn impact_beam_on_crash_box_corners(parts: &mut [MechPart]) {
+    for p in parts.iter_mut().filter(|p| p.name == "impact_beam_front") {
+        for m in &mut p.mounts {
+            let extra: Vec<String> = m.to.iter().filter_map(|n| n.strip_prefix("sh_a1_").map(|r| format!("sh_a1_{}i{}", &r[..1], &r[1..]))).collect();
+            m.to.extend(extra);
+        }
+    }
+}
+
 /// The mean crush force at crash rate over the quasi-static one for a boxed member
 /// ([`crush::dynamic_factor`] at [`CRASH_RATE_SPEED`], C its mean side, the Camry deck's
 /// Cowper–Symonds constants [`crush::CS_CAMRY_DECK`]); 1 for a panel. The fold strain-rate

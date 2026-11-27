@@ -153,6 +153,12 @@ pub struct FrontRules {
     /// ([`crate::thin_wall::crush::dynamic_factor`], the Camry deck's constants); the other
     /// characters keep their own multiple.
     pub crush_from_section: bool,
+    /// §26: the crash box's lattice cell is a closed box: a node at each corner of its section
+    /// at both ends (four more shell nodes a side, each end's nodes sharing its group's mass),
+    /// chords at the four corners, every face braced, its axial yield its section's mean crush
+    /// force. Off: the planar four-node cell (it swings about its rear nodes, §25.2).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub crash_box_cell: bool,
 }
 
 /// [`FrontRules::crash_box_bay_alone`]: the braces across a crash box's bay together carry
@@ -182,7 +188,7 @@ impl FrontRules {
     /// unknown name panics, so a typo cannot pass as the default).
     pub fn from_env_or_default() -> Self {
         let Ok(v) = std::env::var("RUBBLE_FRONT_RULES") else { return Self::default() };
-        let mut r = Self { subframe_mounts_off_crash_box: false, crash_box_bay_alone: false, crash_box_stroke: false, yielding_stops: false, hood_fold_row: false, crush_from_section: false };
+        let mut r = Self::default();
         for n in v.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != "none") {
             match n {
                 "all" => r = Self::all(),
@@ -192,6 +198,7 @@ impl FrontRules {
                 "yielding_stops" => r.yielding_stops = true,
                 "hood_fold_row" => r.hood_fold_row = true,
                 "crush_from_section" => r.crush_from_section = true,
+                "crash_box_cell" => r.crash_box_cell = true,
                 _ => panic!("RUBBLE_FRONT_RULES: no rule {n}"),
             }
         }
@@ -206,6 +213,7 @@ impl FrontRules {
             yielding_stops: true,
             hood_fold_row: true,
             crush_from_section: true,
+            crash_box_cell: true,
         }
     }
 }

@@ -143,6 +143,8 @@ pub struct VgInput {
     /// [`Self::mechanical`] with the physics block's front rules on it (`front_rules`), made
     /// the first time the rigger asks for the definitions (after any change of `physics`).
     ruled: std::cell::OnceCell<Vec<engine_vehiclegen::mechanical::MechPart>>,
+    /// [`Self::structure`] with the crash boxes' corner nodes when `crash_box_cell` is on.
+    ruled_structure: std::cell::OnceCell<engine_vehiclegen::structure::Structure>,
 }
 
 impl VgInput {
@@ -208,6 +210,7 @@ impl VgInput {
             structure: None,
             mechanical: Vec::new(),
             ruled: Default::default(),
+            ruled_structure: Default::default(),
         };
         // The section rays start between the sill and the belt at mid car.
         me.ray_y = 0.5 * (me.key("sill", 0.0)[1] + me.key("belt", 0.0)[1]);
@@ -579,7 +582,7 @@ impl RigInput for VgInput {
     }
     fn definitions(&self) -> Option<super::body2::Defs<'_>> {
         self.structure.as_ref().map(|s| super::body2::Defs {
-            structure: s,
+            structure: self.ruled_structure.get_or_init(|| super::crash_box_cell::structure(s, &self.physics)),
             parts: self.ruled.get_or_init(|| super::front_rules::mechanical(&self.physics.front_rules, &self.mechanical)),
         })
     }

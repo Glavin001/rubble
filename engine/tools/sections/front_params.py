@@ -13,7 +13,7 @@ import json
 import subprocess
 import sys
 
-RULES = ["subframe_mounts_off_crash_box", "crash_box_bay_alone", "crash_box_stroke", "yielding_stops", "hood_fold_row", "crush_from_section"]
+RULES = ["subframe_mounts_off_crash_box", "crash_box_bay_alone", "crash_box_stroke", "yielding_stops", "hood_fold_row", "crush_from_section", "crash_box_cell"]
 
 
 def main():

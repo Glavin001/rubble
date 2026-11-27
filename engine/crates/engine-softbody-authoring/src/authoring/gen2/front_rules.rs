@@ -23,6 +23,9 @@ pub fn mechanical(rules: &FrontRules, parts: &[MechPart]) -> Vec<MechPart> {
     if rules.subframe_mounts_off_crash_box {
         vr::subframe_mounts_off_crash_box(&mut out);
     }
+    if rules.crash_box_cell {
+        vr::impact_beam_on_crash_box_corners(&mut out);
+    }
     out
 }
 
@@ -42,6 +45,10 @@ pub fn lattice(st: &Structure, ph: &Physics) -> Lattice {
     // Rule 6: in the real_crash character (front multiple 1) the chords at crash rate.
     if rules.crush_from_section && ph.crash.front_crush == 1.0 {
         for (kind, gs) in [("crash_box", &["A1", "A2"][..]), ("front_rail", &["A2", "A4", "A5"][..])] {
+            // (the closed cell sets its own chords at the crash rate, below)
+            if rules.crash_box_cell && kind == "crash_box" {
+                continue;
+            }
             let Some(m) = st.members.iter().find(|m| m.kind == kind) else { continue };
             let f = vr::crash_rate_factor(m);
             for b in l.beams.iter_mut().filter(|b| chord(b, gs) && matches!(b.zone, Zone::CrashBox | Zone::FrontRail)) {
@@ -49,6 +56,12 @@ pub fn lattice(st: &Structure, ph: &Physics) -> Lattice {
             }
         }
     }
+    // The crash box's closed cell (§26), its force at crash rate with rule 6 in real_crash.
+    let rate = |kind: &str| match st.members.iter().find(|m| m.kind == kind) {
+        Some(m) if rules.crush_from_section && ph.crash.front_crush == 1.0 => vr::crash_rate_factor(m),
+        _ => 1.0,
+    };
+    super::crash_box_cell::lattice(st, &mut l, ph, rate("crash_box"), rate("front_rail"));
     // Rule 2: the beams that cross the crash box's bay without being the box (one end on the
     // box's front nodes, the other behind its rear nodes) carry, together and in their axial
     // direction, a share of the box's own chords.
