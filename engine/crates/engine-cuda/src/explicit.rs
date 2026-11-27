@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 
 mod continuous;
+pub mod crash_runner;
 pub mod table {
     pub struct ExplicitCudaKernel {
         /// The plan module (`engine_exec::explicit_plan::MODULES`).

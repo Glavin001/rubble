@@ -5,7 +5,7 @@
 //! `CRASH_CONTACT=discrete|edge|continuous` (default edge), `CRASH_RUNS=N`,
 //! `CRASH_REPORTS=DIR` (each run's report as JSON).
 
-use engine_cuda::crash_runner::CudaRunner;
+use engine_cuda::explicit::crash_runner::CudaRunner;
 use engine_cuda::CudaExplicitBeams;
 use engine_softbody::crash_reference::{self as cr, Contact, CpuRunner, Jitter, RUNS};
 

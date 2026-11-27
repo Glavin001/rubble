@@ -53,7 +53,6 @@ pub use table::{CudaKernel, CUDA_KERNELS, CUDA_TERRAIN_KERNELS, PTX_ARCH, SASS_A
 
 pub mod explicit;
 pub use explicit::{CudaExplicitBeams, CudaSnapshot, CUDA_EXPLICIT_KERNELS, CUDA_LOOP_CAP_TEST};
-pub mod crash_runner;
 pub mod world;
 pub use world::{CouplingDef, CouplingState, CudaWorld, StepTimes, CUDA_COUPLING_KERNELS};
 
