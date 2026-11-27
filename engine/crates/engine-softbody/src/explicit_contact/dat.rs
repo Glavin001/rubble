@@ -546,7 +546,7 @@ impl ExplicitBeamsWorld {
         if dat.ccd_rounds > 0 {
             // The physical guarantee: CCD with inelastic impulses, then impact zones.
             let q = reach(&x1, &zero);
-            let pairs = ccd_pairs(&recs, &q, dat.min_gap, dat.penalty);
+            let pairs = ccd_pairs(&recs, &q, dat.min_gap, dat.penalty, if dat.velocity { 1.0 } else { xi_share() });
             st.pairs_ccd = pairs.len() as u64;
             let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
             let mut vs: Vec<Vec<Vec3>> = (0..x1.len())
