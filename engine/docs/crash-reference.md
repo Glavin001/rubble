@@ -50,14 +50,15 @@ same code.
 ## Reference frames
 
 Third-party footage is not committed. The reference frames live in the **Reference Studio**
-(`apps/reference-studio/`, its README): a local app with a gitignored image library
-(`apps/reference-studio/library/`) where each frame belongs to a *shot* (one crash run in
-the video) and is annotated, linked to a scenario moment and camera, and compared. Its
-points-only data is committed in `docs/crash-reference/studio/` (`shots/`, `frames/`:
-scenario, video time, view, moment, what to look at, regions and tracings; `structures/`:
-the structure schemas). The originals stay in `~/Development/rubble-artifacts/crash-reference/`;
-`npm run import-prototype` (in the studio) copied them into the library and migrated the old
-`index.json` and tracings (removed; at commit 4773e6f1b). `tools/crash-reference/sheet.py
+(`apps/reference-studio/`, its README): a static web app over one workspace folder
+(`apps/reference-studio/workspace/`, its `library/` of images gitignored) where each frame
+belongs to a *shot* (one crash run in the video) and is annotated, linked to a scenario and
+pinned to a time and camera of the recorded run, and compared. Its points-only data is
+committed in the workspace (`shots/`, `frames/`: scenario, video time, view, moment, what to
+look at, regions, tracings, pins and cameras; `structures/`: the structure schemas;
+`scenarios/`: recreated scenarios as data, below). The originals stay in `~/Development/rubble-artifacts/crash-reference/`;
+A one-off import (removed; at commit 4773e6f1b) copied them into the library and migrated the old
+`index.json` and tracings. `tools/crash-reference/sheet.py
 [ID ...]` lays each linked frame beside Rubble's still from its camera at its moment (the
 frame's own choice, else the rule in `crash_reference::shape::link`; the recorder's
 `--all-cams` stills), one PNG per scenario and contact setting in `out/crash-reference/sheets/`
@@ -66,6 +67,36 @@ frame's own choice, else the rule in `crash_reference::shape::link`; the recorde
 The cameras are framed for a 60° vertical field of view at 16:9 (the page's): side and top
 views put the car at impact across about two thirds of the width, wide enough for where the
 wreck ends (S07 tumbles back off the block, S10 slides on past it).
+
+## Scenarios as data (recreated crashes)
+
+A scenario can also be data: `crash_reference::ScenarioDesc` (`desc.rs`), written by the
+Reference Studio's Scene view into `apps/reference-studio/workspace/scenarios/<id>.json`:
+bodies (a generated design, where it stands on the ground, yaw, speed in km/h or a velocity,
+on a carrier or not), static boxes (centre, half sizes, yaw: a turned box is an oriented box
+shape), cameras, moments, seconds after first contact and the contact setting.
+`ScenarioDesc::scenario()` is a `CrashScenario` whose layout is `LayoutSource::Data`: the same
+`build`, `run`, metrics and recorder as the Rust scenarios, on every executor (the CPU
+reference, CUDA, the page's WebGPU). The run's jitter is applied as the Rust scenarios apply
+it (every speed, and the first moving body's lateral and yaw).
+
+- **First contact is computed**, not stated (`desc::first_contact`): each body's spawn box
+  (its rest extent's corners turned by its yaw, stood on its wheels) swept along its velocity
+  against every static box's bound and every other body's box at their relative velocity;
+  the earliest touch. Boxes, not surfaces, so it may come a little early, never late (S02
+  as data: 0.099999994 s against S02's stated 0.1 s).
+- **Criteria are the laws only** (`desc::law_criteria`): finite, energy created at most
+  0.1 % of the start's kinetic energy (`all.energy_gain_frac`), nothing more than 5 cm into
+  a static box, and without boxes the horizontal momentum's change within what friction
+  (μ ≤ 1.2) and drag (C_d·A ≤ 8 m²) can give over the run (`all.momentum_friction_ratio`).
+  A recreated crash that earns cited bands becomes a Rust file.
+- `CrashScenario::to_desc` exports a Rust scenario as data (run 0, absolute positions);
+  `tests/crash_scenario_data.rs` holds S02 as data equal to S02 as code word for word on the
+  CPU reference through impact, and runs every committed data scenario.
+- `crash_ref -- --scenario FILE.json`, `crash_ref -- --export S02`, `crash_outlines --
+  --scenario FILE.json`; the registry pages read lists data scenarios after the built-in
+  ones, marked `recreated` (`registry.rs`; the crash lab's `crashReferenceRegistry(data)`,
+  `crashRef: { desc }`).
 
 ## Outlines: shape differences per part (prototype, S01 and S02)
 
@@ -93,7 +124,7 @@ stays a plate). Outlines make them visible, per part, in four steps:
    them into PNGs (headless Chrome over http, without the GPU).
 3. **Tracings.** In the Reference Studio (`cd apps/reference-studio && npm run dev`,
    `http://127.0.0.1:8770/`): per frame, regions (the real and BeamNG halves' crops) each
-   traced as an instance of a structure schema (`docs/crash-reference/studio/structures/`:
+   traced as an instance of a structure schema (`apps/reference-studio/workspace/structures/`:
    `vehicle-side` has the wheels as circles, hood, fender top, wheel arch, front face,
    windscreen, roofline, front door edge and its corner at the sill, sill and rear face;
    `vehicle-top` the outline, corners, centreline, hood, windscreen base, roof and side line),

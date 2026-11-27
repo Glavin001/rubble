@@ -2,7 +2,10 @@
 // and WebMCP as an agent would, through the whole recreate flow.
 //
 //   npm run build && npm run smoke     (from apps/reference-studio; needs Chrome)
-//   npm run smoke -- --real            screenshots of a real workspace folder's data (third-party footage: do not share)
+//   npm run smoke -- --webgpu          the same flow on the page's WebGPU (Chrome with its GPU): run it under the
+//                                      GPU lock, python3 engine/scripts/with-gpu-lock.py --limit 300 -- npm run smoke -- --webgpu
+//   npm run smoke -- --real [--webgpu] S02 recreated as data with the repo workspace's S02 frames (third-party
+//                                      footage: screenshots go to .../step2/real*, not for sharing)
 //
 // No server but a static file server for dist/ on 127.0.0.1:8771. Storage is the origin
 // private file system (?workspace=opfs) in a fresh Chrome profile. Headless Chrome here has
@@ -19,18 +22,19 @@
 // engine/out/reference-studio/screenshots/step2/generated/. Exits 1 on the first failed check.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { ENGINE, PACKAGE } from '../scripts/node-workspace.ts';
 
 const REAL = process.argv.includes('--real');
+const WEBGPU = process.argv.includes('--webgpu');
 const PORT = 8771;
 const BASE = `http://127.0.0.1:${PORT}`;
 const OUT = join(ENGINE, 'out', 'reference-studio');
 const SCRATCH = join(OUT, 'smoke');
-const SHOTS = join(OUT, 'screenshots', 'step2', REAL ? 'real' : 'generated');
+const SHOTS = join(OUT, 'screenshots', 'step2', `${REAL ? 'real' : 'generated'}${WEBGPU ? '-webgpu' : ''}`);
 const DIST = join(PACKAGE, 'dist');
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -139,7 +143,7 @@ async function chrome() {
   const port = 9400 + Math.floor(Math.random() * 400);
   const profile = join(SCRATCH, 'chrome-profile');
   mkdirSync(profile, { recursive: true });
-  procs.push(spawn(CHROME, ['--headless=new', '--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-first-run', '--no-default-browser-check', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1280,720', 'about:blank'], { stdio: 'ignore' }));
+  procs.push(spawn(CHROME, ['--headless=new', ...(WEBGPU ? ['--enable-unsafe-webgpu', '--disable-background-timer-throttling', '--disable-renderer-backgrounding'] : ['--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']), '--no-first-run', '--no-default-browser-check', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1280,720', 'about:blank'], { stdio: 'ignore' }));
   let target: { webSocketDebuggerUrl: string } | undefined;
   for (let i = 0; i < 80 && !target; i++) {
     await sleep(250);
@@ -187,7 +191,8 @@ async function main() {
   const stop = await serve();
   procs.push({ kill: stop } as unknown as ChildProcess);
   const c = await chrome();
-  const q = REAL ? '?' : '?workspace=opfs&cpu-fallback';
+  const q = WEBGPU ? '?workspace=opfs' : '?workspace=opfs&cpu-fallback';
+  const executor = WEBGPU ? 'webgpu' : 'cpu-fallback';
   const go = async (hash: string, ms = 1200) => {
     await c.send('Page.navigate', { url: `${BASE}/${q}${hash}` });
     await sleep(ms);
@@ -206,14 +211,28 @@ async function main() {
   };
   await go('#/library', 2500);
   const ws = await c.evaluate<string>("document.querySelector('[data-testid=workspace]')?.textContent ?? ''");
-  check(REAL || /this browser only/.test(ws), `the workspace is this browser's private storage (${ws})`);
+  check(/this browser only/.test(ws), `the workspace is this browser's private storage (${ws})`);
   check((await c.evaluate<number>('window.studio.tools.length')) >= 60, `window.studio lists the tools (${await c.evaluate('window.studio.tools.length')})`);
+  const S = <T = any>(expr: string) => c.evaluate<T>(`(async () => { const s = window.studio; ${expr} })()`);
   if (REAL) {
-    await shoot('library');
+    await seed(c, (rel) => rel.startsWith('structures/') || rel === 'scenarios/s02-data.json' || rel === 'shots/S02.json' || rel.startsWith('frames/S02') || rel.startsWith('library/S02/'));
+    await go('#/library', 2500);
+    await S("return s.link_scenario({ shot: 'S02', scenario: 's02-data' })");
+    const o = await S("return s.open_scene({ scenario: 's02-data', shot: 'S02' })");
+    check(o.bodies[0]?.design === 'suv_4x4', `S02 as data opened: ${o.bodies[0]?.nodes} nodes, first contact ${o.first_contact_ms?.toFixed(1)} ms`);
+    const r = await S('return s.simulate({})');
+    check(r.fresh && r.executor === executor, `simulated on ${r.executor}: ${r.samples} samples in ${r.wall_s?.toFixed(1)} s`);
+    // The real side frame at peak crush, through the scenario's side camera (a first guess: its crop is the real half).
+    const f = 'S02_2m12s_side_01';
+    await S(`await s.set_frame_camera({ frame: '${f}', eye: [4.6, 1.1, -0.3], target: [0, 0.8, -0.3], fov_y_deg: 60, region: 'real' }); await s.jump_to_pin({ frame: '${f}' }); await s.seek({ ms: 70 }); return s.pin_image({ frame: '${f}' })`);
+    await sleep(1200);
+    await shoot('s02-real-image', 1000);
+    const t = await S(`return s.get_comparison({ frame: '${f}' })`);
+    check(t.rubble && !t.rubble.error, `get_comparison of ${f} with Rubble at ${t.rubble?.at_ms} ms (${t.rubble?.recording?.executor})`);
+    console.log(JSON.stringify(t.rows?.map((x: { id: string; values: Record<string, { v: number } | null> }) => [x.id, Object.fromEntries(Object.entries(x.values).map(([k, v]) => [k, v ? +v.v.toFixed(3) : null]))])));
     return finish(c);
   }
   await shoot('empty');
-  const S = <T = any>(expr: string) => c.evaluate<T>(`(async () => { const s = window.studio; ${expr} })()`);
 
   // A shot from a drawn silhouette pair, traced.
   const before = car(0);
@@ -274,7 +293,7 @@ async function main() {
   const undone = await S('return s.describe_scene()');
   check(Math.abs(undone.first_contact_ms - opened.first_contact_ms) < 0.01, 'undo_scene puts the wall back');
   const sim = await S('return s.simulate({})');
-  check(sim.present && sim.fresh && sim.executor === 'cpu-fallback' && sim.samples > 100, `simulate (CPU fallback, labelled): ${sim.samples} samples, ${sim.duration_s?.toFixed(2)} s simulated in ${sim.wall_s?.toFixed(1)} s`);
+  check(sim.present && sim.fresh && sim.executor === executor && sim.samples > 100, `simulate (${executor}${WEBGPU ? '' : ', labelled'}): ${sim.samples} samples, ${sim.duration_s?.toFixed(2)} s simulated in ${sim.wall_s?.toFixed(1)} s`);
   const rep = await S('return s.get_report()');
   check(rep.report?.results?.every((r: { pass: boolean; asserted: boolean }) => r.pass || !r.asserted), `get_report: ${rep.report?.results?.map((r: { name: string; pass: boolean }) => `${r.name} ${r.pass ? 'pass' : 'FAIL'}`).join(', ')}`);
   const cam = { eye: [6.0, 1.0, 1.0], target: [0, 0.6, 1.0], fov_y_deg: 45 };
@@ -292,7 +311,7 @@ async function main() {
 
   // Rubble's outline at the pin through the pinned camera, and the comparison table.
   const outline = await S(`return s.get_rubble_outline({ frame: '${f1.id}' })`);
-  check(outline.pinned && outline.own_camera && Math.abs(outline.at_ms - 72.5) < 0.01 && outline.instance.elements.front_wheel?.c && outline.recording.executor === 'cpu-fallback', `get_rubble_outline: ${outline.scenario} at ${outline.at_ms} ms (pinned) through the frame's camera, from the ${outline.recording.executor} recording`);
+  check(outline.pinned && outline.own_camera && Math.abs(outline.at_ms - 72.5) < 0.01 && outline.instance.elements.front_wheel?.c && outline.recording.executor === executor, `get_rubble_outline: ${outline.scenario} at ${outline.at_ms} ms (pinned) through the frame's camera, from the ${outline.recording.executor} recording`);
   const table = await S(`return s.get_comparison({ frame: '${f1.id}' })`);
   const row = (id: string) => table.rows?.find((r: { id: string }) => r.id === id)?.values;
   const fold = row('hood_fold')?.real;
@@ -324,6 +343,21 @@ async function main() {
   await S("return s.select_object({ kind: 'body', name: 'car' })");
   await shoot('scene-setup-body', 800);
 
+  // S02 exported as data, in the Scene view: editing its wall, and mid-crash.
+  const s02 = await S("return s.create_scenario({ id: 's02-data', from: 'S02', title: 'S02 as data: SUV into a full-width rigid wall, 50 km/h' })");
+  check(s02.bodies[0].design === 'suv_4x4' && s02.bodies[0].speed_kmh === 50, `create_scenario from S02: ${s02.bodies[0].design} at ${s02.bodies[0].speed_kmh} km/h, wall at z ${s02.boxes[0].centre[2].toFixed(3)}`);
+  await S("await s.open_scene({ scenario: 's02-data' }); return s.set_scene_camera({ eye: [4.6, 1.1, -0.3], target: [0, 0.8, -0.3], fov_y_deg: 60 })");
+  const s02sim = await S('return s.simulate({})');
+  check(s02sim.fresh && s02sim.executor === executor, `S02 as data simulated (${s02sim.executor}): ${s02sim.samples} samples in ${s02sim.wall_s?.toFixed(1)} s`);
+  const s02rep = await S('return s.get_report()');
+  check(s02rep.report?.results?.every((r: { pass: boolean }) => r.pass), `S02 as data, law criteria: ${s02rep.report?.results?.map((r: { name: string; value: number; pass: boolean }) => `${r.name} ${r.value?.toPrecision(3)} ${r.pass ? 'pass' : 'FAIL'}`).join(', ')}; crush peak ${s02rep.report?.metrics?.['car.crush_peak']?.toFixed(3)} m`);
+  await S("await s.seek({ ms: 70 }); return s.set_mode({ mode: 'review' })");
+  await sleep(800);
+  await shoot('s02-midcrash', 800);
+  await S("await s.set_mode({ mode: 'setup' }); await s.select_object({ kind: 'box', name: 'box0' }); return s.set_scene_camera({ eye: [5.5, 3.2, -3.5], target: [0, 0.8, 0.8], fov_y_deg: 55 })");
+  await sleep(800);
+  await shoot('s02-setup-box', 800);
+
   await go('#/library');
   await shoot('library');
   await go(`#/link/${f1.id}`, 2500);
@@ -332,6 +366,23 @@ async function main() {
   await shoot('compare', 1500);
   check(c.errors.length === 0, `no page exceptions${c.errors.length ? `: ${c.errors.join(' | ')}` : ''}`);
   return finish(c);
+}
+
+/** Copy repo workspace files (as `keep` chooses) into the page's OPFS, as a user copying a folder would. */
+async function seed(c: { evaluate: <T = any>(e: string) => Promise<T> }, keep: (rel: string) => boolean) {
+  const root = join(PACKAGE, 'workspace');
+  const walk = (dir: string): string[] => readdirSync(join(root, dir)).flatMap((f) => (statSync(join(root, dir, f)).isDirectory() ? walk(`${dir}${f}/`) : [`${dir}${f}`]));
+  for (const rel of walk('').filter(keep)) {
+    const b64 = readFileSync(join(root, rel)).toString('base64');
+    await c.evaluate(`(async () => {
+      let d = await navigator.storage.getDirectory();
+      const parts = ${JSON.stringify(rel)}.split('/');
+      for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p, { create: true });
+      const w = await (await d.getFileHandle(parts[parts.length - 1], { create: true })).createWritable();
+      await w.write(Uint8Array.from(atob(${JSON.stringify(b64)}), (x) => x.charCodeAt(0)));
+      await w.close();
+    })()`);
+  }
 }
 
 function finish(c: { close: () => void }) {

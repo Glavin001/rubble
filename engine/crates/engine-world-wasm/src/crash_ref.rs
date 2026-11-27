@@ -17,7 +17,7 @@ use super::{ExplicitSim, Spawn, Spawned};
 use crate::err;
 use engine_softbody::crash_reference::{
     self as cr, metrics::Recorder, BeamState, Built, Contact, CrashReport, Jitter, Sample,
-    DT, RUNS, SAMPLE_STEPS,
+    DT, SAMPLE_STEPS,
 };
 use glam::Vec3;
 use std::cell::RefCell;
