@@ -46,6 +46,22 @@ only a direction is certain (the struck side absorbs more), the direction is ass
 ratio above 1), not a size. The bands in sections 2 and 3 below are estimates unless a
 scenario's file gives them a basis.
 
+## Currently failing (asserted criteria)
+
+CPU reference, nominal run, measured 2026-11-27. Each is a finding, not a band to widen.
+
+| Scenario | Criterion (basis) | Band | Discrete | Edge | Edge + continuous |
+|---|---|---|---|---|---|
+| S03 barrier into the sedan's side, 50 km/h | no energy created (law): the largest rise of kinetic + gravitational + elastic energy | at most 132 J (0.1 % of the 131.9 kJ at the start) | 9 J, holds | **38,186 J** | **19,679 J** |
+
+With edge contact the same run also shows what created energy looks like: plastic work of
+419 kJ (three times the energy the scene starts with), a car node at 138 m/s when the barrier
+arrives at 13.9 m/s, and, with continuous contact, 1,195 kJ counted as removed by the contact
+response. Discrete contact has none of this (38 kJ of plastic work, fastest node 23 m/s). Not
+yet diagnosed. Two things in the scene to look at first: the barrier's bumper element is held
+to its main block by push-only beams and folds under the car's sill in every run
+(`crash_rigs.rs`), and the barrier's honeycomb is made of push-only support beams.
+
 ## Reported outside its band
 
 Measured on the generated sedan, edge contact, nominal run. Not failures: these are

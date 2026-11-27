@@ -287,7 +287,10 @@ impl CrashScenario {
         for b in &layout.bodies {
             let t = templates.get(b.design).ok_or_else(|| format!("{}: no template for design {}", self.id, b.design))?;
             let d = turned(&t.desc, b.yaw);
-            let lift = 0.02 - Extent::of(&d).lo.y;
+            // Standing on its wheels (their tread 2 cm up), or on its lowest node when that is lower
+            // or it has none.
+            let e = Extent::of(&d);
+            let lift = 0.02 - e.wheel_low.map_or(e.lo.y, |w| w.min(e.lo.y));
             let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, b.at + Vec3::Y * lift, b.velocity(), t.settings)?;
             s.surface_contact = true;
             s.edge_contact = contact != Contact::Discrete;

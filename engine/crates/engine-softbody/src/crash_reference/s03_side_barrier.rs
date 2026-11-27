@@ -54,7 +54,6 @@ pub(super) fn scenario() -> CrashScenario {
             // The spawn puts the lowest node 2 cm up; the car stands on its raycast wheels,
             // so it is raised until their lowest point is (the web lab's spawn rule), and
             // only settles by its suspension's sag before the hit.
-            let raise = e.wheel_low.map_or(0.0, |w| (e.lo.y - w).max(0.0));
             let mid = 0.5 * (front + rear);
             // FMVSS 214 S8.10: the face's forward edge on the impact reference line.
             let irl = if front - rear <= 2.896 { mid + 0.94 } else { front - 0.508 };
@@ -64,7 +63,7 @@ pub(super) fn scenario() -> CrashScenario {
             let x = e.hi.x + RUN_UP_S * v + b.hi.z;
             Layout {
                 bodies: vec![
-                    Body::new("car", "sedan", Vec3::Y * raise, 0.0, 0.0),
+                    Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0),
                     Body::new("barrier", "mdb214", Vec3::new(x, 0.0, face_z), -0.5 * std::f32::consts::PI + j.yaw, v),
                 ],
                 boxes: Vec::new(),
