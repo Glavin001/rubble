@@ -1284,8 +1284,8 @@ impl ExplicitUpload {
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
-        // Dissipative contact's position steps (§37) on every vehicle of the upload.
-        // (Surface contact's position steps too, §38.)
+        engine_softbody::explicit_crush::assert_cpu_only(vehicles); // the crush law: no kernel yet
+        // Dissipative contact's position steps (§37, and surface contact's, §38) on every vehicle.
         let any_shift = vehicles.iter().any(|v| v.dissipative_contact || v.surface_contact);
         let any_surface = vehicles.iter().any(|v| v.surface_contact);
         // (Surface contact against rigid proxies runs on the GPU: the World-broadphase

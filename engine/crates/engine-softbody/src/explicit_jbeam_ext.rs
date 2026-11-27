@@ -35,37 +35,8 @@ pub const TYPE_EXT: u32 = 4;
 /// No beam (triangle break lists).
 pub const NO_BEAM: u32 = u32::MAX;
 
-/// A beam's extension record (spec §16). E0 = (mask, deform groups, trigger ratio),
-/// E1 and E2 the kind's parameters (index fields as `f32` bits), E3 = (precompression
-/// ramp step, ramp steps, extra break groups); then the state.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct BeamExt {
-    /// The beam (vehicle-local index).
-    pub beam: u32,
-    pub mask: u32,
-    /// Deform groups (state slot + 1, 0 none) and `deformationTriggerRatio`.
-    pub deform: [u32; 2],
-    pub trigger: f32,
-    pub e1: [f32; 4],
-    pub e2: [f32; 4],
-    pub ramp_delta: f32,
-    pub ramp_steps: u32,
-    /// The second and third break groups, signed as the beam's own (0 none).
-    pub extra_groups: [i32; 2],
-    // State.
-    pub ramp_left: u32,
-    /// Broke on its own with several groups: sets them off in the next beam pass.
-    pub pending: bool,
-    /// Pressure groups: gauge pressure by step parity (Pa).
-    pub pressure: [f32; 2],
-}
-
-impl BeamExt {
-    /// The record's E1 .x as an index.
-    pub fn index(&self, k: usize) -> u32 {
-        self.e1[k].to_bits()
-    }
-}
+/// A beam's extension record (spec §16; with Rubble's crush law, CPU only).
+pub use crate::explicit_crush::BeamExt;
 
 fn bits(u: u32) -> f32 {
     f32::from_bits(u)
@@ -266,7 +237,7 @@ pub fn jbeam_ext_force_with(
     }
     let f = -k * e - damp;
     beam.force = f;
-    let (f, tau) = jbeam_yield(beam, len, e, k, damp, f, keep);
+    let (f, tau) = crate::explicit_crush::crush_yield(beam, ext, len, e, k, damp, f).unwrap_or_else(|| jbeam_yield(beam, len, e, k, damp, f, keep));
     BeamOut {
         d,
         inv,
@@ -523,6 +494,9 @@ impl ExplicitBeams {
     /// A live beam with an extension record in the beam pass.
     pub(crate) fn ext_beam(&mut self, j: usize) {
         let x = self.ext_index(j);
+        if self.beam_ext[x].mask & crate::explicit_crush::EXT_CELL != 0 && self.crush_cell(j, x) {
+            return;
+        }
         let mut beam = self.beams[j];
         match beam.kind {
             ExplicitKind::JbeamPressureTri2
@@ -742,7 +716,9 @@ impl ExplicitBeams {
         ) {
             ext.e2[0] = beam.rest0;
         }
+        crate::explicit_crush::attach(beam, &mut ext, jb);
         self.push_ext(j, ext);
+        self.crush_attached(self.beam_ext.len() - 1);
     }
 
     /// Coupler `j`'s further break groups (spec §7.1): an extension record with

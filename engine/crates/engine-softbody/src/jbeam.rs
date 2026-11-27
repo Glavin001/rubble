@@ -1618,10 +1618,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                         .or_default() += 1;
                 }
             }
-            jb.disable_triangle_breaking = f
-                .get("disableTriangleBreaking")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            crate::explicit_crush::read_keys(jb, &f); // disableTriangleBreaking, Rubble's crush law
             let deform_names: Vec<String> = match f.get("deformGroup") {
                 Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
                 Some(Value::Array(a)) => a

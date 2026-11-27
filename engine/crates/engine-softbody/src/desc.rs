@@ -220,6 +220,10 @@ pub struct JbeamBeam {
     pub limit_damp_rebound: Option<f32>,
     /// `beamPrecompressionTime` (s; 0 none, §23).
     pub precompression_time: f32,
+    /// Rubble's crush law and crush cells (`rubbleCrushPlateau` …, CPU reference only;
+    /// [`crate::explicit_crush`], `engine/docs/beam-yield-law.md`). None: the JBeam rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crush: Option<crate::explicit_crush::CrushLaw>,
 }
 
 impl JbeamBeam {
@@ -235,6 +239,7 @@ impl JbeamBeam {
             || self.damp_velocity_split_rebound.is_some()
             || self.limit_damp_rebound.is_some()
             || self.precompression_time > 0.0
+            || self.crush.is_some()
     }
 }
 
@@ -273,6 +278,7 @@ impl Default for JbeamBeam {
             damp_velocity_split_rebound: None,
             limit_damp_rebound: None,
             precompression_time: 0.0,
+            crush: None,
         }
     }
 }
