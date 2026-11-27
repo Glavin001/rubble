@@ -165,7 +165,7 @@ export function createCrashLab(ctx) {
   // ---------------------------------------------------------------- panel
   const panel = el(`<div id="labPanel">
     <div class="r">
-      <select id="labPreset" title="Scene: a crash-test preset or any explicit scene (its knobs are in the side panel)"><optgroup label="Crash-test presets">${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="p:${k}"${k === ctx.preset ? ' selected' : ''}>${p.label}</option>`).join('')}</optgroup><optgroup label="Scenes">${Object.entries(ctx.scenes ?? {}).map(([k, t]) => `<option value="s:${k}"${!ctx.preset && k === ctx.xscene ? ' selected' : ''}>${t.replace(/^Explicit: (.)/, (_, c) => c.toUpperCase())}</option>`).join('')}</optgroup></select>
+      <select id="labPreset" title="Scene: a crash-test preset or any explicit scene (its knobs are in the side panel)">${ctx.refs?.length ? `<optgroup label="Reference crashes">${ctx.refs.map((r) => `<option value="r:${r.id}"${r.id === ctx.refId ? ' selected' : ''}>${r.id} · ${r.title}</option>`).join('')}</optgroup>` : ''}<optgroup label="Crash-test presets">${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="p:${k}"${k === ctx.preset && !ctx.refId ? ' selected' : ''}>${p.label}</option>`).join('')}</optgroup><optgroup label="Scenes">${Object.entries(ctx.scenes ?? {}).map(([k, t]) => `<option value="s:${k}"${!ctx.preset && !ctx.refId && k === ctx.xscene ? ' selected' : ''}>${t.replace(/^Explicit: (.)/, (_, c) => c.toUpperCase())}</option>`).join('')}</optgroup></select>
       <span class="sep"></span>
       <button id="labPlay" title="Space">pause</button>
       <button id="labFrame" title="One displayed frame (.)">frame ▸</button>
@@ -215,6 +215,7 @@ export function createCrashLab(ctx) {
   $('labPreset').onchange = (e) => {
     const [kind, k] = e.target.value.split(':');
     if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
+    if (kind === 'r') { location.href = ctx.refUrl(k); return; }
     // The page's vehicle and options (softbody.html keepVehicle) carry across.
     const u = new URL(location.href); const s = new URLSearchParams(); window.__keepVehicle?.(s); s.set('solver', 'explicit'); s.set('preset', k); u.search = s.toString(); location.href = u.href;
   };
@@ -324,6 +325,16 @@ export function createCrashLab(ctx) {
   /** Chunks of a frame's steps: before the impact in auto mode, small chunks so the
    * impact read lands within a few milliseconds of it. */
   function chunks(steps) {
+    // A crash reference run (ctx.sampleSteps): every chunk ends on a sample's step (the
+    // page reads each sample's state after its chunk).
+    if (ctx.sampleSteps) {
+      const out = [];
+      for (let at = ctx.sim().steps(), left = steps; left > 0;) {
+        const k = Math.min(left, ctx.sampleSteps - (at % ctx.sampleSteps));
+        out.push(k); at += k; left -= k;
+      }
+      return out;
+    }
     if (!(st.auto && st.impactStep == null) || steps <= 8) return [steps];
     const l = ctx.layout();
     const size = l.nodes * 48 + l.beams * 32 > 200000 ? 17 : 8;
@@ -348,7 +359,8 @@ export function createCrashLab(ctx) {
     }, (e) => { inFlight--; ctx.fail(e); });
   }
   function onState(s) {
-    if (st.impactStep == null && s.impact) { st.impactStep = s.step; syncPanel(); }
+    // A crash reference run's first contact is its scenario's (ctx.impactAt, a step).
+    if (st.impactStep == null && (ctx.impactAt != null ? s.step >= ctx.impactAt : s.impact)) { st.impactStep = ctx.impactAt ?? s.step; syncPanel(); }
     if (!st.lastState || s.step >= st.lastState.step) st.lastState = s;
     // The scene's focus: the box centre of every node (a flung piece ignored by
     // using the 2nd–98th percentile would cost a sort; the box is fine for presets).
@@ -397,6 +409,10 @@ export function createCrashLab(ctx) {
     st.camZoom = zoom;
     st.camYaw = yaw;
     if (name === 'follow') { ctx.setOrbit({ chase: true }); syncPanel(); return; }
+    // A fixed camera of the scene's own (ctx.cams: a crash reference scenario's eye and
+    // target, world coordinates): it does not follow the focus.
+    const fixed = ctx.cams?.[name];
+    if (fixed) { ctx.setOrbit({ ...fixed, dist: fixed.dist * zoom }); syncPanel(); return; }
     const c = CAMS[name];
     ctx.setOrbit({ yaw: yaw ?? c.yaw, pitch: c.pitch, dist: c.dist * st.size * zoom, target: null });
     syncPanel();
@@ -510,7 +526,7 @@ export function createCrashLab(ctx) {
    * Otherwise (`ahead` null: automation, frame-stepped; a replay) as read.
    * `spin` radians of yaw. */
   function followFocus(spin = 0, ahead = null) {
-    if (!st.focus || st.cam === 'follow') return;
+    if (!st.focus || st.cam === 'follow' || ctx.cams?.[st.cam]) return;
     const f = st.focusAt;
     const lead = f && ahead != null && st.replay < 0 ? Math.min(0.1, Math.max(0, ctx.sim().steps() - f.step) / STEP_RATE + ahead) : 0;
     const p = lead > 0 ? f.p.map((x, a) => x + f.v[a] * lead) : st.focus;

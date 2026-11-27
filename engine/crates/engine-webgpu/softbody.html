@@ -84,7 +84,8 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createScene, sceneFromQuery, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, FramePacer } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, FramePacer, crashReferenceRegistry } from './rubble-world.mjs';
+    import { crashRefScenario, crashRefFolders, crashRefCams, createCrashRef } from './crash-ref.mjs';
     import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCarVisual, SOFT } from './soft.mjs';
@@ -121,6 +122,23 @@
     const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact', 'centredDamping', 'wheelBoxes'];
     const keepVehicle = (s) => { for (const k of KEEP_KEYS) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
     window.__keepVehicle = keepVehicle;
+    // A crash reference scenario (?crashRef=S02&run=0&contact=edge&cam=side; crash-ref.mjs,
+    // engine-world-wasm crash_ref.rs): the suite's own fleet, built in Rust from the
+    // scenario's id, on the explicit solver with raycast wheels; the generated designs'
+    // mod folders (the body drawn, the files Rust builds their templates from).
+    const CRASH_REF_ID = qs.get('crashRef');
+    let crashReg = null, crashScenario = null, crashFolders = null;
+    if (CRASH_REF_ID) {
+      qs.set('solver', 'explicit'); qs.set('wheels', 'raycast'); qs.set('xscene', 'idle');
+      for (const k of ['preset', 'truck', 'mod', 'pc', 'car']) qs.delete(k);
+      crashReg = await crashReferenceRegistry();
+      crashScenario = crashRefScenario(crashReg, CRASH_REF_ID);
+      crashFolders = await crashRefFolders(crashScenario);
+      // The scenario's own camera (?cam=<its name>, else its first).
+      if (!qs.has('cam3')) qs.set('cam3', `ref:${crashScenario.cameras.some((c) => c.name === qs.get('cam')) ? qs.get('cam') : crashScenario.cameras[0].name}`);
+    }
+    const CRASH_RUN = crashReg ? Math.max(0, Math.min(crashReg.runs - 1, Math.floor(Number(qs.get('run')) || 0))) : 0;
+    const CRASH_CONTACT = crashReg?.contacts.includes(qs.get('contact')) ? qs.get('contact') : 'edge';
     // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
     const JBEAM_NATIVE = qs.get('jbeamMode') !== 'truck';
     // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
@@ -167,7 +185,10 @@
     // JBeam (?truck=<url>, or a loaded file kept for this tab as ?car=import).
     const IMPORT_KEY = 'rubble-softbody-import';
     let importSrc = null; // { kind: 'truck', text, label } | { kind: 'jbeam', files, pc, label }
-    if (qs.get('truck')) {
+    if (crashFolders?.mods.length) {
+      // The scenario's first generated design (vehicle 0): the body drawn on its vehicles.
+      importSrc = crashFolders.mods[0].mod;
+    } else if (qs.get('truck')) {
       const url = qs.get('truck');
       const r = await fetch(url);
       if (!r.ok) throw new Error(`?truck=${url}: ${r.status} ${r.statusText}`);
@@ -358,6 +379,12 @@
         rc.onchange = () => { const u = new URL(location.href); if (rc.checked) u.searchParams.set('wheels', 'raycast'); else u.searchParams.delete('wheels'); location.href = u.href; };
       }
       for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
+      // A reference crash's vehicles, contact and options are its scenario's (Rust): the
+      // vehicle and solver options here do not apply (its own controls are in its panel).
+      if (crashScenario) {
+        document.getElementById('optRow').style.display = 'none';
+        for (const id of ['carSel', 'modSel']) { const c = document.getElementById(id); c.disabled = true; c.title = `The vehicles of ${crashScenario.id} are its scenario's (the crash reference panel has its controls)`; }
+      }
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
       document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. Crash scenes with knobs (speeds, angles, overlap), static boxes, vehicle–vehicle contact and no drivetrain: driving, moving rigid bodies and the dune buggy are on the soft solver (button above).';
       if (DRIVE) {
@@ -558,7 +585,12 @@
     const XSPEED = (Number(qs.get('xspeed')) || 100) / 3.6;
     const XSPAWN = { wall: [0, -2 - runup], pole: [0, -2 - runup], limbo: [0, -2 - runup], headon: [0, -3 - runup / 2] };
     // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
-    const explicitSpec = (x, z) => ({
+    // A crash reference run: the scenario's id, run and contact setting, and its designs'
+    // files; Rust builds the rest (crash_ref.rs).
+    const explicitSpec = (x, z) => crashScenario
+      ? { crashRef: { id: crashScenario.id, run: CRASH_RUN, contact: CRASH_CONTACT, designs: crashFolders.designs }, timing: true }
+      : sceneSpec(x, z);
+    const sceneSpec = (x, z) => ({
         vehicles: [{ ...vehicleSource(), at: [x, z + CAR_FRONT], front: true, yaw: 0 }], scene: xscene, speed: XSPEED,
         // arena: ?n= copies of the vehicle at 90–150 km/h into walls, poles and (?headOn=
         // share of lanes) each other, or (?layout=ring) all at the centre from concentric
@@ -605,7 +637,7 @@
       if (carKind === 'showcase') { loading.stage('Building the car (Rust)'); await loading.paint(); showcaseBuilt(); }
       // Cancel: with surface contact on, reload the same scene without it (its
       // kernels are the slow ones); otherwise there is no lighter variant to offer.
-      if (OPT.surfaceContact) {
+      if (OPT.surfaceContact && !crashScenario) {
         loadCancel.label = 'Cancel: load without surface contact';
         loadCancel.hint = 'Stops waiting and reloads this scene with surface contact off (the Surface contact option turns it back on).';
         loadCancel.run = () => { const s = new URLSearchParams(location.search); s.set('surfaceContact', '0'); location.search = s.toString(); };
@@ -1163,6 +1195,14 @@ fn xpos(i: u32, v: u32) -> vec3f {
           else if (v.beams > vis.beamRest0.length && cables[1] === 0) cables = [v.beamOffset + vis.beamRest0.length, v.beamOffset + v.beams];
           tri += v.triangles;
         }
+        // A reference crash's bodies without a skin of their own (the FMVSS 214 barrier,
+        // whose collision triangles are its face alone): their beams drawn as cables too,
+        // the last such bodies' (one beam range).
+        if (crashScenario && cables[1] === 0) {
+          const bare = xlayout.vehicles.filter((v) => !own(v));
+          const last = xlayout.vehicles.length - bare.length;
+          if (bare.length && bare.every((v, i) => v === xlayout.vehicles[last + i])) cables = [bare[0].beamOffset, bare.at(-1).beamOffset + bare.at(-1).beams];
+        }
         labR.set({ solidTris, cables });
         bodyFor.step = null;
         bodyFor.layout = xlayout;
@@ -1191,6 +1231,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
     // The live frame's lead (FramePacer.lead: simulated seconds past its last step,
     // what the renderer and camera carry the state forward by; 0 in automation).
     let xLead = 0;
+    let crashRef = null;
     let lab = null, labDt = 0, labView = { vp: new Float32Array(16), eye: [0, 0, 0] };
     let flexShadowBind = null, skinBind = null;
     // The world's buffers can be replaced when they grow: rebind when one is a new object.
@@ -1422,7 +1463,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
     }
     function resetScene() {
       resetGen++;
-      if (EXPLICIT) { if (xstop?.stopped) return; buildExplicit(); watchExplicit(); pacer.reset(1); xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
+      if (EXPLICIT) { if (xstop?.stopped) return; buildExplicit(); watchExplicit(); pacer.reset(1); xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } crashRef?.reset(); return; }
       if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
       world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
@@ -1915,7 +1956,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
         // The lab's clock (slow motion, pause, stepping); the steps of a frame in
         // chunks, each followed by a frame-state read (impact, recording, picking).
         steps = lab.stepsFor(dt, xsim.maxFrameSteps());
-        for (const k of lab.chunks(steps)) if (k) { xsim.frame(k); xCallsSince++; lab.read(); }
+        for (const k of lab.chunks(steps)) if (k) { xsim.frame(k); xCallsSince++; lab.read(); crashRef?.sampled(); }
       } else {
         steps = pacer.advance(dt, 1, xsim.maxFrameSteps());
         xsim.frame(steps);
@@ -2150,17 +2191,36 @@ fn xpos(i: u32, v: u32) -> vec3f {
     // The import scene crashes an imported vehicle (?car=import, ?truck=) into its target.
     if (!EXPLICIT && scene === 'import' && carKind === 'import') window.__crashImported({ ...carDesc }, { label: importSrc.label });
     if (LAB) {
+      // The scene picker's reference crashes (the registry, Rust's) and a run's own
+      // cameras, sample steps and first contact.
+      crashReg ??= await crashReferenceRegistry();
+      const refUrl = (id, change = {}) => {
+        const u = new URL(location.href), s = new URLSearchParams();
+        s.set('solver', 'explicit'); s.set('crashRef', id);
+        const keep = { run: crashScenario?.id === id ? String(CRASH_RUN) : null, contact: CRASH_CONTACT, ...change };
+        for (const [k, v] of Object.entries(keep)) if (v != null && !(k === 'run' && v === '0')) s.set(k, v);
+        for (const k of ['skin3', 'color', 'skeleton', 'nodes']) if (qs.has(k)) s.set(k, qs.get(k));
+        u.search = s.toString();
+        return u.href;
+      };
       lab = createCrashLab({
-        sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: LAB_PRESET, xscene, body: !!bodyR,
-        scenes: XSCENES, sceneUrl: xsceneUrl, pill: XPILL[xscene]?.() ?? xscene.toUpperCase(), crash: XCRASH.has(xscene), drive: DRIVE,
+        sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: crashScenario ? null : LAB_PRESET, xscene, body: !!bodyR,
+        scenes: XSCENES, sceneUrl: xsceneUrl, pill: crashScenario ? `${crashScenario.id} · ${crashScenario.title}`.toUpperCase() : XPILL[xscene]?.() ?? xscene.toUpperCase(), crash: !!crashScenario || XCRASH.has(xscene), drive: DRIVE,
+        refs: crashReg.scenarios, refId: crashScenario?.id ?? null, refUrl,
+        ...(crashScenario ? { cams: crashRefCams(crashScenario), sampleSteps: crashReg.sampleSteps, impactAt: xsim.crashInfo().impactStep } : {}),
         setOrbit: (o) => {
           if (o.chase) { camMode = 'chase'; window.__camSync?.(); return; }
           if (o.follow) { if (camMode === 'orbit') { orbit.target = o.follow; orbit.yaw += o.spin; } return; }
-          camMode = 'orbit'; orbit = { ...orbit, yaw: o.yaw, pitch: o.pitch, dist: o.dist, target: orbit.target }; window.__camSync?.();
+          // (A fixed camera, a reference crash's own, brings its target.)
+          camMode = 'orbit'; orbit = { ...orbit, yaw: o.yaw, pitch: o.pitch, dist: o.dist, target: o.target ?? orbit.target }; window.__camSync?.();
         },
         view: () => labView, inverse: mat4Inv, restart: () => resetScene(), fail, pacer,
       });
       lab.read();
+      if (crashScenario) {
+        crashRef = createCrashRef({ registry: crashReg, scenario: crashScenario, sim: () => xsim, lab, contact: CRASH_CONTACT, run: CRASH_RUN, fail,
+          url: (change) => refUrl(crashScenario.id, change) });
+      }
       // Automation: n steps in frames of `chunk` (each read: impact to that chunk),
       // then a drawn frame; the lab's state.
       const labState = () => {
@@ -2184,7 +2244,12 @@ fn xpos(i: u32, v: u32) -> vec3f {
         async advance(n, chunk = 17) {
           manual = true;
           const reads = [];
-          for (let i = 0; i < n;) { const k = Math.min(chunk, n - i); xsim.frame(k); i += k; const r = lab.read(); if (r) reads.push(r); await device.queue.onSubmittedWorkDone(); }
+          for (let i = 0; i < n;) {
+            const k = Math.min(chunk, n - i);
+            // A crash reference run: chunks that end on its sample steps, each sample read.
+            for (const c of crashRef ? lab.chunks(k) : [k]) { xsim.frame(c); const r = lab.read(); if (r) reads.push(r); const q = crashRef?.sampled(); if (q) reads.push(q); }
+            i += k; await device.queue.onSubmittedWorkDone();
+          }
           await Promise.all(reads);
           await drawNow();
           return labState();
@@ -2192,6 +2257,8 @@ fn xpos(i: u32, v: u32) -> vec3f {
         async frames(n) { manual = false; for (let i = 0; i < n; i++) await new Promise((r) => requestAnimationFrame(r)); manual = true; await device.queue.onSubmittedWorkDone(); return labState(); },
       };
     }
+    // A crash reference run's state for automation (crash-ref-record.mjs).
+    window.__crashRef = crashRef ? { scenario: crashScenario, registry: crashReg, info: () => crashRef.info(), progress: () => crashRef.progress(), report: () => crashRef.report() } : null;
     window.__solver = EXPLICIT ? 'explicit' : 'soft';
     window.__explicit = EXPLICIT ? { sim: () => xsim, layout: () => xlayout, launch: () => xsim.launch(XSPEED), gpuMs: () => xGpuMs,
       // Driving automation: hold an input ({ forward, steer, brake, handbrake }; null: the keys

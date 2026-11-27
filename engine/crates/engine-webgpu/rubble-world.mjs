@@ -14,6 +14,7 @@ import init, {
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer, DrawPacer, setStepsInFlight,
   showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
   sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene, presetList as wasmPresetList,
+  crashReferenceRegistry as wasmCrashReferenceRegistry,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -28,6 +29,14 @@ import init, {
 // DrawPacer(): which displayed frames are drawn while the World steps, physics first (draw_pacer.rs).
 export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer, DrawPacer, setStepsInFlight };
 let ready = null;
+
+/** The crash reference suite's registry (engine-world-wasm crash_ref.rs: every scenario of
+ * `engine_softbody::crash_reference::all()`, its cameras, moments and criteria), parsed. */
+export async function crashReferenceRegistry() {
+  ready ??= init();
+  await ready;
+  return JSON.parse(wasmCrashReferenceRegistry());
+}
 
 /**
  * `world` with the solver's flag bits (`solverFlags()`) as `world.flags`.

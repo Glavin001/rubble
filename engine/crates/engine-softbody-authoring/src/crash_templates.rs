@@ -24,7 +24,21 @@ pub fn template(design: &str) -> Result<Template, String> {
         return Ok(Template { desc, settings: crate::vehicle_compare::settings(), zones: ZoneMap::default() });
     }
     let built = rig::rig_vehicle(design, None, None)?;
-    let files = rig::mod_files(&built);
+    template_from_files(design, &rig::mod_files(&built))
+}
+
+/// Whether [`template`] builds `design` from code alone, with no mod folder (the barrier).
+pub fn from_code(design: &str) -> bool {
+    design == MDB214
+}
+
+/// A generated design's template from its mod folder's files (path relative to the folder,
+/// bytes), as [`template`] makes it from the files the rigger writes: the `.jbeam` parts and
+/// the `.pc` loaded as the solver loads them, the lab's solver settings, and `crash.json`'s
+/// zones. The web crash lab builds the suite's templates with it from the folder the site
+/// build generates (`__mods/<design>_new`, the same rigger on the same code), whose render
+/// model and skins it draws.
+pub fn template_from_files(design: &str, files: &[(String, Vec<u8>)]) -> Result<Template, String> {
     let txt: Vec<(String, String)> = files.iter().filter(|(p, _)| p.ends_with(".jbeam")).map(|(p, b)| (p.clone(), String::from_utf8_lossy(b).into_owned())).collect();
     let pc = files.iter().find(|(p, _)| p.ends_with(".pc")).map(|(_, b)| String::from_utf8_lossy(b).into_owned());
     let refs: Vec<(&str, &str)> = txt.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();

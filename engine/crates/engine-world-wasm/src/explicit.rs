@@ -26,6 +26,14 @@ mod crash_lab;
 // Driving: raycast wheels' input and poses.
 #[path = "explicit_drive.rs"]
 mod drive;
+// The crash reference suite's scenarios, their GPU reads and reports.
+#[path = "crash_ref.rs"]
+mod crash_ref;
+pub use crash_ref::{crash_reference_registry, registry as crash_reference_registry_json};
+// The built-in test vehicles as text (the hi-res JBeam car, the procedural sedan's .truck).
+#[path = "explicit_vehicles.rs"]
+mod vehicles;
+pub use vehicles::explicit_sedan_truck;
 
 /// Steps per second.
 const RATE: f64 = 2000.0;
@@ -77,6 +85,8 @@ pub struct ExplicitSim {
     /// cars' state (`traffic`).
     drive_poses: drive::Poses,
     ai: Vec<drive::AiCar>,
+    /// `spec.crashRef`: the crash reference run (its recorder and report).
+    crash: Option<std::rc::Rc<std::cell::RefCell<crash_ref::CrashRun>>>,
 }
 
 /// What [`ExplicitSim::spawn`] spawns: the vehicles, the static boxes and shapes,
@@ -87,6 +97,7 @@ struct Spawn {
     shapes: Vec<StaticShape>,
     pull: Option<Pull>,
     scene: String,
+    crash: Option<crash_ref::CrashRun>,
 }
 
 /// A door pull ([`engine_softbody::crash_rigs::add_door_pull`]): vehicle 0's rig
@@ -301,6 +312,27 @@ fn build_raycast(
         return Ok((sim, desc, w));
     }
     Err("a vehicle needs `truck`, `jbeam` or `desc`".into())
+}
+
+/// The node a vehicle's pose reads follow: of the non-tyre nodes nearest its node box's
+/// centre (a tenth, at least 8), the one with the most beams (body structure, not a panel
+/// that may come off).
+fn reference_node(sim: &ExplicitBeams) -> u32 {
+    let (lo, hi) = bounds(sim);
+    let centre = 0.5 * (lo + hi);
+    let mut near: Vec<u32> = (0..sim.nodes.len() as u32)
+        .filter(|&i| sim.nodes[i as usize].flags & NODE_TYRE == 0)
+        .collect();
+    near.sort_by(|&a, &b| {
+        let da = sim.nodes[a as usize].pos.distance_squared(centre);
+        let db = sim.nodes[b as usize].pos.distance_squared(centre);
+        da.total_cmp(&db)
+    });
+    near.truncate((near.len() / 10).max(8));
+    near.iter()
+        .copied()
+        .max_by_key(|&i| (sim.incidence[i as usize].len(), std::cmp::Reverse(i)))
+        .unwrap_or(0)
 }
 
 /// Turn every node about the vertical axis through the origin by `angle`. A whole
@@ -839,6 +871,10 @@ impl ExplicitSim {
 
     /// The vehicles `spec` spawns and the scene around them (CPU only).
     fn spawn(spec: &serde_json::Value) -> Result<Spawn, String> {
+        // A crash reference scenario: its own fleet (crash_ref.rs), nothing else of the spec.
+        if let Some(c) = spec.get("crashRef") {
+            return crash_ref::spawn(c);
+        }
         let flag = |k: &str| spec.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
         let settings = ExplicitBeamsSettings {
             fast_inv_sqrt: flag("fastInvSqrt"),
@@ -969,23 +1005,7 @@ impl ExplicitSim {
             }
             let (lo, hi) = bounds(&sim);
             let centre = 0.5 * (lo + hi);
-            // The camera's reference: of the non-tyre nodes nearest the centre (a
-            // tenth, at least 8), the one with the most beams (body structure,
-            // not a panel that may come off).
-            let mut near: Vec<u32> = (0..sim.nodes.len() as u32)
-                .filter(|&i| sim.nodes[i as usize].flags & NODE_TYRE == 0)
-                .collect();
-            near.sort_by(|&a, &b| {
-                let da = sim.nodes[a as usize].pos.distance_squared(centre);
-                let db = sim.nodes[b as usize].pos.distance_squared(centre);
-                da.total_cmp(&db)
-            });
-            near.truncate((near.len() / 10).max(8));
-            let reference = near
-                .iter()
-                .copied()
-                .max_by_key(|&i| (sim.incidence[i as usize].len(), std::cmp::Reverse(i)))
-                .unwrap_or(0);
+            let reference = reference_node(&sim);
             if scene == "doorpull" && vi == 0 {
                 pull = Some(door_pull(&mut sim, spec, forward, lateral));
             }
@@ -1050,6 +1070,7 @@ impl ExplicitSim {
             shapes,
             pull,
             scene: scene.to_string(),
+            crash: None,
         })
     }
 
@@ -1066,10 +1087,14 @@ impl ExplicitSim {
             shapes,
             pull,
             scene,
+            crash,
         } = spawn;
         let scene = scene.as_str();
         let sims: Vec<ExplicitBeams> = vehicles.iter().map(|v| v.sim.clone()).collect();
         let mut gpu = ExplicitBeamsGpu::new(device, queue, &sims);
+        if let Some(c) = &crash {
+            crash_ref::configure(&mut gpu, c)?;
+        }
         let timed = spec.get("timing").and_then(|x| x.as_bool()).unwrap_or(true)
             && gpu.enable_frame_timing(TIMED_FRAMES);
 
@@ -1117,6 +1142,7 @@ impl ExplicitSim {
             pull,
             drive_poses: Default::default(),
             ai,
+            crash: crash.map(|c| std::rc::Rc::new(std::cell::RefCell::new(c))),
         })
     }
 }
@@ -1468,39 +1494,5 @@ impl ExplicitSim {
             }
             Ok(JsValue::UNDEFINED)
         })
-    }
-}
-
-/// The high-resolution test car (`engine_softbody::hires`) as JBeam text, tuned for
-/// the explicit solver's 0.5 ms step (2 kg nodes, 1.5 MN/m over 0.15 m beams, the
-/// stiffness of beams shorter than 0.15 m capped), as its tests run it.
-#[wasm_bindgen(js_name = hiresCarJbeam)]
-pub fn hires_car_jbeam() -> String {
-    use engine_softbody::hires::{hires_car_jbeam, HiresParams};
-    hires_car_jbeam(&HiresParams {
-        node_weight: 2.0,
-        spring: 1.5e6,
-        damp: 150.0,
-        stiffness_length: 0.15,
-        ..Default::default()
-    })
-    .0
-}
-
-/// The procedural sedan for the explicit solver, as `.truck` text: the acceptance
-/// runs' car (`CarParams::sedan()`, 10 kg minimum node mass;
-/// `docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck` is its bare
-/// body), with its soft tyres when `tyres`.
-#[wasm_bindgen(js_name = explicitSedanTruck)]
-pub fn explicit_sedan_truck(tyres: bool) -> String {
-    use engine_softbody::procedural::{car_truck, car_truck_bare, CarParams};
-    let p = CarParams {
-        minimass: 10.0,
-        ..CarParams::sedan()
-    };
-    if tyres {
-        car_truck(&p)
-    } else {
-        car_truck_bare(&p)
     }
 }

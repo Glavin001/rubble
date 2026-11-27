@@ -16,6 +16,16 @@ takes. The same definition, sampling, metrics and criteria run everywhere:
 |---|---|
 | CPU reference | `cargo run --release -p engine-softbody-lab --example crash_ref -- S02 [--runs 8] [--contact discrete\|edge\|continuous] [--json]` |
 | CUDA on Modal | `tools/modal/gpu_run.sh --build modal [--fanout-tests] -- -p engine-cuda --test crash_reference` (`CRASH_CONTACT`, `CRASH_RUNS`, `CRASH_REPORTS=DIR`) |
+| Browser (WebGPU crash lab) | `softbody.html?solver=explicit&crashRef=S02[&run=0][&contact=edge][&cam=side]` (scene picker: "Reference crashes") |
+| Browser, stills and report | from `crates/engine-webgpu`: `python3 ../../scripts/with-gpu-lock.py --limit 300 -- node crash-ref-record.mjs --crashRef S02 [--cam side] [--contact edge] [--video]` (to `out/crash-reference/<id>-<contact>-run<k>/`) |
+
+In the browser the page sends the id; `engine-world-wasm` (`src/crash_ref.rs`) builds the
+fleet with `CrashScenario::build`, reads the GPU state at every sample step and judges the
+`CrashReport` with the same recorder. The generated designs' templates come from their mod
+folders (`__mods/<design>_new`, which the site build generates with the same rigger:
+`crash_templates::template_from_files`, the constructor `template` uses on the rigger's
+output; a native test holds the two equal), so the body drawn is the physics' own. Bodies
+without a skin of their own (the FMVSS 214 barrier) are drawn as their beams.
 
 Each run prints every criterion with its band and measured value; tier 0 and tier 1
 failures fail the run. The executor provides only `Runner` (step, read state); the metrics

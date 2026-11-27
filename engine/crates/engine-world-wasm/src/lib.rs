@@ -61,7 +61,7 @@ pub use lab::{check_lab_chunk_order, LabRun, LabScene, LabSettleJob};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
 pub use engine_fracture_wasm;
 pub use scene::WebSnapshot;
-pub use explicit::{explicit_sedan_truck, ExplicitSim};
+pub use explicit::{crash_reference_registry, crash_reference_registry_json, explicit_sedan_truck, ExplicitSim};
 
 fn err(e: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&e.to_string()).into()
