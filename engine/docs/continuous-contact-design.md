@@ -888,6 +888,20 @@ Neither is adopted: no combination meets rule 8 in all three, and each makes som
 The zones that remain under the exact solve now remove more each; they are where the next work
 is.
 
+**The acceptance suite, 8 runs each, velocity contact** (`DAT_RESPONSE=vel`, the exact solve off;
+M3, `out/suite8/one.sh`, 2026-11-27): all 11 pass. In every run: 0 crossings, every impact
+resolved, linear momentum to rounding, angular momentum under 2 N·m·s a step, no fixed-point
+overflow.
+
+| Crash | Paint, worst during / from 0.3 s | Wall time (8 runs, parallel) |
+|---|---|---|
+| Side 30, side 60, side 90 | 0 / 0 mm | 63 / 34 / 50 s |
+| Head 60, head 100, head 130, offset 100 | 0 / 0 mm | 74 / 37 / 33 / 55 s |
+| Head 30 pressed | 0 / 0 mm | 145 s |
+| Side 60 pressed | 14 / 14 mm | 119 s |
+| Head 60 pressed | 5 / 5 mm | 85 s |
+| Ball 100 | 44 / 0 mm | 13 s |
+
 **Where the remaining zones form** (head 100, 0.3 s; `CcdStats::zones_relist`): all in the step's
 first solve, none in the response's re-listed solves.
 - Exact solve off: from APGD solves left unsettled.
