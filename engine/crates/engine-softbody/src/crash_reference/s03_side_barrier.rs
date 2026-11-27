@@ -74,10 +74,14 @@ pub(super) fn scenario() -> CrashScenario {
         cameras: &[
             // Ahead of the car and out on the struck side, looking back at the doors.
             // (World frame: the sedan spans z −3.9 to 1.0, the face's middle at z ≈ −1.3.)
-            Camera { name: "front three-quarter", eye: [5.5, 1.6, 3.5], target: [0.9, 0.7, -1.3] },
-            Camera { name: "top", eye: [0.01, 12.0, -1.4], target: [0.0, 0.0, -1.4] },
+            // Closer than the first cut, as the reference frame: the doors and the barrier's face fill it.
+            Camera { name: "front three-quarter", eye: [4.0, 1.5, 2.6], target: [0.2, 0.7, -1.2] },
+            // Straight down, the car's length across the frame (the eye a centimetre to −x fixes the
+            // picture's up as +x: the barrier comes from the top); wide enough for the car's slide
+            // (2.5 to 4 m to −x by the run's end, more with discrete contact).
+            Camera { name: "top", eye: [-1.41, 9.0, -1.4], target: [-1.4, 0.7, -1.4] },
             // On the car's axis ahead of it: the side hit in elevation.
-            Camera { name: "side", eye: [0.0, 1.0, 8.0], target: [0.0, 0.7, -1.4] },
+            Camera { name: "side", eye: [-0.5, 1.3, 5.0], target: [-0.5, 0.7, -0.5] },
         ],
         moments: &[
             Moment { name: "before", after_impact_ms: -10.0 },

@@ -1173,25 +1173,48 @@ fn xpos(i: u32, v: u32) -> vec3f {
       if (vis.dataTextures?.length) modTextures(importSrc, vis.dataTextures).then((layers) => bodyR.setDataTextures(layers, 1024));
     };
     const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length || importSrc?.skin) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
+    // A crash reference run's other generated designs (S09's 4x4 beside the wagon): each
+    // vehicle's design is Rust's (crashInfo().bodies, in vehicle order), its visual that
+    // design's mod folder's, built once (the first design's is bodyVisual()).
+    const designVis = new Map();
+    const crashDesignVisual = (i) => {
+      const d = xsim.crashInfo()?.bodies?.[i]?.design;
+      const m = crashFolders.mods.find((x) => x.design === d);
+      if (!m) return null;
+      if (m === crashFolders.mods[0]) return bodyVisual();
+      if (!designVis.has(d)) {
+        const r = modVisual(m.mod, { native: JBEAM_NATIVE, raycast: RAYCAST });
+        // One texture array serves every car (setTextures): a second design's maps would
+        // replace the first's, so it shades untextured (the generated designs have none).
+        if (r.visual.textures?.length || r.visual.dataTextures?.length) console.warn(`crash reference: ${d}'s textures are not drawn (one texture set per page)`);
+        designVis.set(d, r.visual);
+      }
+      return designVis.get(d);
+    };
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
     const syncBody = () => {
       const pos = labR.positionsBuffer();
       if (!pos) return false;
       if (bodyFor.layout !== xlayout) {
         for (const id of bodyIds) bodyR.removeCar(id);
-        // The body goes on the vehicles it was built for (vehicle 0's kind): a
-        // scene's other bodies (the FMVSS 214 barrier) are drawn solid, and
-        // beams a rig added past the body's own (the door pull's cables) as cables.
-        const vis = bodyVisual();
-        const own = (v) => v.name === xlayout.vehicles[0].name && v.nodes >= vis.nodeCount;
-        bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null,
+        // The body goes on the vehicles it was built for (vehicle 0's kind; in a crash
+        // reference run, each generated design's own): a scene's other bodies (the
+        // FMVSS 214 barrier) are drawn solid, and beams a rig added past the body's own
+        // (the door pull's cables) as cables.
+        const visOf = xlayout.vehicles.map((v, i) => {
+          const vis = crashFolders ? crashDesignVisual(i) : v.name === xlayout.vehicles[0].name ? bodyVisual() : null;
+          return vis && v.nodes >= vis.nodeCount ? vis : null;
+        });
+        const own = (v) => !!visOf[xlayout.vehicles.indexOf(v)];
+        bodyIds = xlayout.vehicles.filter(own).map((v) => { const vis = visOf[xlayout.vehicles.indexOf(v)]; return bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null,
           // Drive mode: the wheels' pieces ride the raycast wheels' records.
-          wheelRecords: RAYCAST ? xsim.wheelRecords(xlayout.vehicles.indexOf(v)) : null }));
+          wheelRecords: RAYCAST ? xsim.wheelRecords(xlayout.vehicles.indexOf(v)) : null }); });
         let tri = 0;
         const solidTris = [];
         let cables = [0, 0];
-        for (const v of xlayout.vehicles) {
-          if (!own(v)) solidTris.push([tri, v.triangles]);
+        for (const [i, v] of xlayout.vehicles.entries()) {
+          const vis = visOf[i];
+          if (!vis) solidTris.push([tri, v.triangles]);
           else if (v.beams > vis.beamRest0.length && cables[1] === 0) cables = [v.beamOffset + vis.beamRest0.length, v.beamOffset + v.beams];
           tri += v.triangles;
         }

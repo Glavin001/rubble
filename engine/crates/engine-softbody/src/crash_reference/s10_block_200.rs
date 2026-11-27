@@ -38,9 +38,16 @@ pub(super) fn scenario() -> CrashScenario {
         },
         secs_after_impact: 2.0,
         cameras: &[
-            Camera { name: "side", eye: [12.0, 1.5, 4.0], target: [0.0, 1.0, 4.0] },
-            Camera { name: "aftermath", eye: [-7.0, 4.0, 0.0], target: [0.5, 0.5, 6.0] },
-            Camera { name: "top", eye: [0.5, 16.0, 5.0], target: [0.5, 0.0, 5.01] },
+            // Close, from the side away from the block (the wagon spans z 1.7 to 6.5 at impact): from
+            // the struck side the block hides the car swinging round it. High enough for the rear
+            // rising (60° vertical field of view).
+            Camera { name: "side", eye: [-5.2, 1.6, 4.6], target: [-0.3, 1.4, 4.6] },
+            // On the wreck where it ends: past the block, about 8 m to −x (its centre near z 17.8).
+            Camera { name: "aftermath", eye: [-4.3, 2.4, 21.6], target: [-7.8, 0.6, 17.8] },
+            // Straight down on the whole path, travelling left to right (the eye a centimetre to −x
+            // of the target fixes the picture's up as +x): the block, and the wreck about 10 m past
+            // it and 8 m to the side.
+            Camera { name: "top", eye: [-4.01, 12.8, 10.5], target: [-4.0, 0.6, 10.5] },
         ],
         moments: &[
             Moment { name: "before", after_impact_ms: -10.0 },

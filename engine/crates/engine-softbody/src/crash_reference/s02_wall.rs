@@ -28,8 +28,13 @@ pub(super) fn scenario() -> CrashScenario {
         },
         secs_after_impact: 0.5,
         cameras: &[
-            Camera { name: "side", eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },
-            Camera { name: "top", eye: [0.01, 12.0, -1.5], target: [0.0, 0.0, -1.5] },
+            // Framed as the reference footage (60° vertical field of view, 16:9): the SUV (z −2.3 to
+            // 2.2 at impact) fills about two thirds of the width, the wall at the left of the side view.
+            Camera { name: "side", eye: [4.6, 1.1, -0.3], target: [0.0, 0.8, -0.3] },
+            // Straight down, the car's length across the frame, travelling right to left into the wall
+            // at the left as in the reference's top view (the eye a centimetre to +x of the target
+            // fixes the picture's up as −x).
+            Camera { name: "top", eye: [0.01, 5.6, 0.0], target: [0.0, 0.8, 0.0] },
         ],
         moments: &[
             Moment { name: "before", after_impact_ms: -10.0 },
