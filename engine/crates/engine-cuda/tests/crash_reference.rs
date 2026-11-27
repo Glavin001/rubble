@@ -4,6 +4,7 @@
 //!
 //! `CRASH_CONTACT=discrete|edge|continuous` (default edge), `CRASH_RUNS=N`, `CRASH_RUN_FROM=K`
 //! (runs K .. K + N, for a scenario whose runs take longer than one container),
+//! `CRASH_SKIP=S06,..` (those scenarios' tests pass at once: a sweep runs them apart),
 //! `CRASH_REPORTS=DIR` (each run's report as JSON), `CRASH_REPORT_LINES=1` (each run's
 //! report without its time histories on stdout, in numbered parts after `CRASH_REPORT_PART
 //! ID-contact-run k/n `: how a sweep on Modal reads them back from the log, `tools/crash-reference/sweep.py`).
@@ -31,6 +32,10 @@ fn contact() -> Contact {
 
 fn scenario(id: &str) {
     if !gpu() {
+        return;
+    }
+    if std::env::var("CRASH_SKIP").is_ok_and(|x| x.split(',').any(|k| k.trim().eq_ignore_ascii_case(id))) {
+        eprintln!("{id}: skipped (CRASH_SKIP)");
         return;
     }
     let s = cr::get(id).expect("a registered scenario");

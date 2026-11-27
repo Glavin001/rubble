@@ -4,7 +4,7 @@ jittered runs, on the CPU reference or on CUDA on Modal (engine/docs/crash-refer
 "Results").
 
     python3 tools/crash-reference/sweep.py --cpu  [--jobs 8] [--ids S01,S02] [--contacts edge]   (from engine/)
-    python3 tools/crash-reference/sweep.py --cuda [--gpu T4] [--ids S01,S02] [--contacts edge] [--run-from 4 --runs 2]
+    python3 tools/crash-reference/sweep.py --cuda [--gpu T4] [--ids S06] [--skip S06] [--contacts edge] [--run-from 4 --runs 2]
     python3 tools/crash-reference/sweep.py --summarize          (the tables again, no runs)
 
 Writes out/crash-reference/sweep/<backend>/<ID>-<contact>-<run>.json (each run's
@@ -83,8 +83,10 @@ def cuda(args) -> None:
     for c in args.contacts:
         cmd += ["--variant", f"{c}:CRASH_CONTACT={c}"]
     cmd += ["--", "-p", "engine-cuda", "--test", "crash_reference"]
+    if args.skip:
+        cmd[cmd.index("--fanout-tests") + 1:cmd.index("--fanout-tests") + 1] = ["--env", f"CRASH_SKIP={','.join(args.skip)}"]
     if args.ids:
-        # (libtest filters by name: the scenarios' tests are sNN.)
+        # (libtest filters by name: the scenarios' tests are sNN; a fan-out takes one filter.)
         cmd += ["--"] + [s.lower() for s in args.ids]
     t0 = time.time()
     tag = time.strftime("%H%M%S")
@@ -105,6 +107,7 @@ def cuda(args) -> None:
 
 
 PART = "CRASH_REPORT_PART "
+PART_CHARS = 1000  # (engine-cuda/tests/crash_reference.rs: the parts' length)
 
 
 def read_log(log: Path, d: Path) -> int:
@@ -126,6 +129,16 @@ def read_log(log: Path, d: Path) -> int:
         i = line.find(MARK)
         if i >= 0:
             whole.append(line[i + len(MARK):])
+    # A part cut short (every part but the last is PART_CHARS long) whose rest came on a line
+    # of its own, without a label: put the two back together when the lengths say so.
+    orphans = [x for x in lines if x and not x.startswith("[") and PART not in x and not x.startswith(" ")]
+    for key, ps in parts.items():
+        for k, (total, text) in list(ps.items()):
+            if k < total and len(text) < PART_CHARS:
+                fit = [o for o in orphans if len(text) + len(o) == PART_CHARS]
+                if len(fit) == 1:
+                    ps[k] = (total, text + fit[0])
+                    orphans.remove(fit[0])
     for key, ps in parts.items():
         total = next(iter(ps.values()))[0]
         if sorted(ps) != list(range(1, total + 1)):
@@ -233,7 +246,7 @@ def compare() -> str:
     lines = ["### CUDA against the CPU reference (min to max over the runs: CPU / CUDA)", "",
              "| Scenario | Contact | Verdicts | Asserted criteria's values (CPU / CUDA) | Headline metrics (CPU / CUDA) |",
              "|---|---|---|---|---|"]
-    disagree = []
+    disagree, differ = [], []
     for key in sorted(set(a) | set(b), key=lambda k: (k[0], CONTACTS.index(k[1]))):
         sid, c = key
         if key not in a or key not in b:
@@ -241,10 +254,15 @@ def compare() -> str:
             continue
         ra, rb = a[key], b[key]
         va, vb = verdicts(ra), verdicts(rb)
-        diff = [k for k in va if vb.get(k, ("", "?"))[1] != va[k][1]]
+        # A verdict: whether the criterion fails the setting (FAIL) or not (pass, known).
+        diff = [k for k in va if (vb.get(k, ("", "?"))[1] == "FAIL") != (va[k][1] == "FAIL")]
+        other = [k for k in va if k not in diff and vb.get(k, ("", "?"))[1] != va[k][1]]
         for k in diff:
             disagree.append(f"- {sid} {c}, {k}: CPU {va[k][0]}, CUDA {vb.get(k, ('not judged', ''))[0]}")
-        ver = "agree" if not diff else f"**disagree on {len(diff)}**"
+        for k in other:
+            differ.append(f"- {sid} {c}, {k}: CPU {va[k][0]}, CUDA {vb.get(k, ('not judged', ''))[0]}")
+        ver = ("agree" if not diff else f"**disagree on {len(diff)}**") + (f" ({len(other)} known failure(s) on one only)" if other else "")
+        n = f"{len(ra)} / {len(rb)} runs"
         crit = []
         for i, cr in enumerate(ra[0]["results"]):
             if not cr["asserted"]:
@@ -255,8 +273,9 @@ def compare() -> str:
             crit.append(f"{mark}{cr['name']}: {x} / {y}{mark}")
         keys = headline_keys(ra[0]["metrics"])
         head = "; ".join(f"{k} {span([r['metrics'].get(k) for r in ra])} / {span([r['metrics'].get(k) for r in rb])}" for k in keys)
-        lines.append(f"| {sid} | {c} | {ver} | {'; '.join(crit)} | {head} |")
-    lines += ["", "Verdict disagreements:", ""] + (disagree or ["- none"])
+        lines.append(f"| {sid} | {c} | {ver}; {n} | {'; '.join(crit)} | {head} |")
+    lines += ["", "Verdict disagreements (the criterion fails the setting on one executor only):", ""] + (disagree or ["- none"])
+    lines += ["", "Known failures that occurred on one executor only (neither fails the setting):", ""] + (differ or ["- none"])
     return "\n".join(lines) + "\n"
 
 
@@ -306,6 +325,7 @@ def main() -> None:
     g.add_argument("--read-log", metavar="LOG", help="read a --cuda run's log back into reports")
     ap.add_argument("--ids", type=lambda s: [x.strip().upper() for x in s.split(",") if x.strip()])
     ap.add_argument("--contacts", type=lambda s: s.split(","), default=CONTACTS, help="the settings to run (default all three; --cuda: one variant each)")
+    ap.add_argument("--skip", type=lambda s: [x.strip().upper() for x in s.split(",") if x.strip()], help="--cuda: scenarios whose tests pass at once (CRASH_SKIP)")
     ap.add_argument("--run-from", type=int, default=0, help="--cuda: the first run (CRASH_RUN_FROM)")
     ap.add_argument("--runs", type=int, default=RUNS, help="--cuda: runs a container (CRASH_RUNS), from --run-from")
     ap.add_argument("--per-run", action="store_true", help="--cpu: one process a run")
