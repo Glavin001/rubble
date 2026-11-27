@@ -18,6 +18,9 @@ pub mod metrics;
 mod s01_offset;
 mod s02_wall;
 mod s03_side_barrier;
+mod s04_underride;
+mod s05_truck_tbone;
+mod s06_sandwich;
 mod s07_wall_190;
 mod s08_head_on;
 mod s09_car_vs_suv;
@@ -254,6 +257,9 @@ pub fn all() -> Vec<CrashScenario> {
         s01_offset::scenario(),
         s02_wall::scenario(),
         s03_side_barrier::scenario(),
+        s04_underride::scenario(),
+        s05_truck_tbone::scenario(),
+        s06_sandwich::scenario(),
         s07_wall_190::scenario(),
         s08_head_on::scenario(),
         s09_car_vs_suv::scenario(),

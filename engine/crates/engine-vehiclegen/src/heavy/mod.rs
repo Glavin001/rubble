@@ -49,9 +49,35 @@
 //! * [`front_underrun`] (`&Underrun`) → the front bumper with its front
 //!   underrun protection beam (UN R93) on brackets to the rails' front ends.
 //!
+//! For a semi-trailer:
+//!
+//! * [`cargo_box`] (`&CargoBox`) → a van body: a closed six-node-a-station shell
+//!   (floor edges, roof edges, and floor nodes over the rails, which are not
+//!   collision nodes: the hull stays over the edges), carrying the floor, the
+//!   load (`load_kg`, a crash scene's gross) and the shell on its nodes, tied to
+//!   the rails from the floor's edges and seated on them over each rail.
+//!   [`box_node`] names its nodes for mounting.
+//! * [`rear_frame`] (`&RearFrame`) → the rear door frame and sill, a closed
+//!   eight-node box behind the cargo box, on the box's last stations and the
+//!   rails' rear ends.
+//! * [`rear_guard`] (`&RearGuard`) → the rear impact guard (FMVSS 223/224): a
+//!   square-tube bar whose chords yield at the tube's plastic moment, on two
+//!   supports (a post and a brace each) whose beams yield at their share of the
+//!   regulation's uniform load ([`support_forces`]: a lower-bound statics
+//!   solution) and break at σ_u/σ_y of it. The guard's module doc derives every
+//!   value from the regulation.
+//! * [`landing_gear`] (`&LandingGear`) → two legs standing on the ground (their
+//!   sand shoes' nodes on it) under the rails, on brackets to the rails and to
+//!   any other nodes the design names (`mount_to`: a van's floor), with
+//!   fore-and-aft braces and a cross brace.
+//! * A trailer's axles are [`beam_axle`]s tagged `F` and `R` (the tandem's front
+//!   and rear axle: the rigger reads wheels `FL`, `FR`, `RL`, `RR`).
+//!
 //! **Crash zones** (`crate::crash::Zone`), stated by each builder: the front
 //! underrun bumper `FrontLower`, the cab `Cabin`, axles, springs and wheels
-//! `Wheel`; the ladder frame `Other`, because a ladder frame has no counterpart
+//! `Wheel`; the rear impact guard `Rear` (a trailer's rear: the crash reference
+//! reads the guard as the trailer's `zone.rear`); the cargo box, rear frame,
+//! landing gear and kingpin plate `Other`; the ladder frame `Other`, because a ladder frame has no counterpart
 //! among a car body's sections (it is the front load path, the floor and the
 //! rear rails at once, and it is not the survival cell); [`block`] takes its
 //! part's zone (the truck's engine, tanks, battery box and fifth wheel:
@@ -198,7 +224,11 @@ mod axle;
 mod bumper;
 mod cab;
 mod frame;
+mod guard;
+mod trailer;
 pub use axle::*;
 pub use bumper::*;
 pub use cab::*;
 pub use frame::*;
+pub use guard::*;
+pub use trailer::*;

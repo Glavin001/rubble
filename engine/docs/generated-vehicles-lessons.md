@@ -612,8 +612,135 @@ trailer reuses them); rigger `gen2::parts_rig`; tests `engine-softbody-authoring
   wheelbase each side, cab width and height, frame length, front overhang
   (`parts_rig::gauges`).
 
+## 23. A parked semi-trailer `box_trailer`, its rear impact guard, and a laden tractor (2026-11-27)
+
+For the crash reference's S04 (a sedan under the trailer's rear), S05 (the tractor T-bones a
+sedan) and S06 (a sedan crushed between the tractor and the trailer). Design
+`designs/box_trailer.rs`; new part builders `heavy/guard.rs` (`RearGuard`, `rear_guard`) and
+`heavy/trailer.rs` (`CargoBox`, `RearFrame`, `LandingGear`); tests
+`engine-softbody-authoring/tests/box_trailer.rs`.
+
+- **(Fact) The class and its figures**, the US standard 53 ft dry van (the IIHS underride
+  tests use US trailers; its tandem fits the rigger's four wheels):
+  - length 53 ft (16.154 m), width 102 in (2.591 m), height 13 ft 6 in (4.115 m): the US
+    federal width and the usual height;
+  - kingpin 36 in (0.914 m) behind the front (a Vanguard VXP listing's "36 in pin setting");
+  - a sliding tandem, 49 in (1.245 m) spread (listings: Utility 4000D-X, Vanguard VXP);
+  - 40 ft (12.19 m) from the kingpin to the rear axle (the California kingpin-to-rear-axle
+    limit), so the rear overhang is 3.05 m;
+  - empty 14,000 lb (6,350 kg; a Con-way 53 ft dry-van brochure; 53 ft vans run
+    13,500-15,500 lb, otrucking.com);
+  - floor 50 in (1.27 m) over the ground: *estimate* (47-50 in is usual; a Con-way figure of
+    48.25 in could not be attributed to its label);
+  - tyres 295/75 R22.5 (1,014 mm) twin on 8.25 × 22.5 steel wheels, 1.82 m track: *estimate*;
+  - landing gear 1.70 m behind the kingpin, its legs at ±0.60 m: *estimate*; a pair's static
+    rating about 700 kN (*estimate*, the usual 155,000-160,000 lb).
+- **(Fact) The rear impact guard's rules** (49 CFR 571.223 and 571.224, read 2026-11-27 at
+  law.cornell.edu; 223 as amended in 2022 to CMVSS 223's levels). FMVSS 224: the guard's lower
+  edge at most 560 mm over the ground across its width, measured unladen; its ends within
+  100 mm of the sides and not past them; its rear face at most 305 mm ahead of the rear
+  extremity. FMVSS 223: a horizontal member at least 100 mm high; a forward quasi-static push
+  at 2-9 cm/min; at P1 (3/8 of the guard's width from the centre plane, either side) and at P2
+  (the centre plane), both 50 mm above the guard's bottom, 50,000 N with no more than 125 mm
+  of deflection; a uniform distributed load (a rigid block 203 mm high, wider than the outer
+  supports) of at least 350,000 N, absorbing at least 20,000 J plastically within the first
+  125 mm (or more than 700,000 N without the energy requirement); in every test no load path
+  eliminated. Ours models FMVSS 223/224 as amended (CMVSS 223 has the same 350 kN and 20 kJ;
+  UN R58, Europe's, is not modelled). The pre-2022 FMVSS 223 had other point loads (from
+  memory, not checked against the old text: 50 kN at P1 and P3, 100 kN at P2 with 5,650 J):
+  not used.
+- **(Decision) The guard is the minimally compliant one; nothing in it is a free number**
+  (`heavy/guard.rs` derives each value):
+  - lower edge 0.52 m at design, ends 75 mm in from the sides, rear face 0.10 m ahead of the
+    rear extremity (*estimates* inside the regulation's limits);
+  - the bar: the lightest standard 100 mm square tube whose plastic moment carries P1's 50 kN
+    outboard of a support, 100 × 100 × 6.3 mm in ASTM A500 Grade C (345 / 427 MPa): M_p
+    28.7 kN·m (5 mm: 23.4). Its four chords yield at M_p / (2·d), so the bar yields in
+    bending at the tube's plastic moment; each face's diagonal at the face's plastic shear;
+  - two supports at ±0.70 m (outboard of the rails, *estimate*), each a post (the bar's top to
+    the rails' last station) and a brace (to the station ahead), four beams each: their yields
+    from one statically admissible distribution of the 350 kN (the bar a rigid body on beams of
+    equal EA), each member's beams at its largest share, so the guard collapses at no less than
+    350 kN (the lower-bound theorem); breaking at σ_u/σ_y × yield, the connections
+    capacity-designed (*estimate* of the margin: the regulation only says nothing breaks in its
+    tests);
+  - 100 kg (*estimate*: the bar 44 kg plus supports and brackets).
+- **(Measurement) The guard against FMVSS 223** (`the_guard_carries_fmvss_223s_loads_before_its_attachments_fail`:
+  the trailer held, a kinematic platen at 0.08 m/s, the force the supports' beams hold):
+  | point | at 125 mm | largest before an attachment broke | energy in 125 mm | first break |
+  |---|---|---|---|---|
+  | P1 (50 kN) | 44 kN | 234 kN (none broke in 0.4 m) | 2.8 kJ | none |
+  | P2 (50 kN) | 22.5 kN | 98 kN (none broke in 0.4 m) | 1.4 kJ | none |
+  | uniform (350 kN, 20 kJ) | 464 kN | 604 kN | 48.9 kJ | the left brace at 206 mm |
+
+  Every point carries the regulation's load before an attachment fails (the asserted test).
+  P1 and P2 do not reach 50 kN within 125 mm: the bar's elastic stiffness is the step bound's
+  (§2: a 100 kg bar's light nodes cap its springs; its P2 stiffness is about 180 kN/m where a
+  real 100 × 100 × 6.3 tube simply supported over 1.4 m is 48·EI/L³ ≈ 12 MN/m, about 65 times
+  stiffer). Its strength
+  is real, its stiffness is not; a finding, not a band to widen.
+- **(Measurement) What a moving static box does to a point load.** Pushing a `StaticBox` 0.2 m
+  wide through the bar let the two P1 nodes slip out over its top after 26 mm (the force read
+  4 kN where the bar carries 50). A rigid platen is kinematic: the nodes it reaches are carried
+  with it.
+- **(Measurement) Ringing and drift, fixed in the layout** (each a rule now in the builders):
+  supports under the rails left the bar's ends cantilevered 0.8 m, ringing in plan at 6.7 Hz
+  with about 0.5 % modal damping for tens of seconds after the spawn's 2 cm drop; at ±0.70 m
+  the ends ring at about 3× the frequency and die in about 5 s (the bar's first modes take their
+  damping only from the beams' relative damping). An axle hung from one rail station hinged
+  (19 mm): the hangers reach two. The deck's 10.5 t on floor nodes at the walls only, tied to
+  the rails by near-level beams, left the rails over the tandem 18 mm off the box's line: floor
+  nodes over each rail seat it on the rail's station below (the box's stations now on the rails'
+  0.80 m). The landing gear on the rails alone drifted 18 mm: its brackets also take the floor's
+  nodes over it, and fore-and-aft braces stop the legs swinging as cantilevers. The 250 kg
+  kingpin plate on near-level bolts rocked: it bolts to the floor over the rails too.
+- **(Fix, the shared rigger) A hull face's ear clipping left a node on a triangle's edge.**
+  `parts_rig::hull` clips the best-shaped ear first; on the box's long sides (17 then 21
+  stations of collinear edge nodes) it cut an ear whose new edge ran over another ring point,
+  so one node sat on a triangle's edge (lint `skin_clearance`, 0.00 mm) and the last three
+  points were collinear (a triangle short, an open hole). An ear whose new edge passes over a
+  ring point is not taken (`on_segment`); test `a_long_box_with_collinear_edge_nodes_has_a_closed_hull`.
+  The truck's (and every other design's) generated files are byte for byte as before.
+- **(Measurement, the tests)** 374 nodes, 2,339 JBeam beams (3,547 in the
+  solver), 560 collision triangles, ω·h 1.849; 15,000 kg (nodes 14,920 + four 20 kg raycast
+  wheels). Parked 10 s: 0 bent, 0 broken, lowest point −0.1 mm, box height steady to 0.03 mm
+  from 2 to 10 s, kinetic energy per second 27.5 → 0.08 J (never rising), every node but the
+  guard's under 0.025 m/s at the end (the guard 0.06 m/s); `every_design` worst drift 4.5 mm (the
+  guard bar). Support split parked: the tandem 9,228 kg, the landing gear 5,773 kg, against the
+  lever rule on the design's own centre of mass (3.92 m ahead of the tandem's middle) 9,163 /
+  5,837 kg. Lint: every hard rule passes.
+- **(Finding) The raycast springs are sized for the mean wheel load, and a trailer's wheels do
+  not carry all of it.** `pack::core_plan` sizes every wheel for total/4 (and the per-axle
+  lever rule, `suspension_by_load`, needs exactly two wheel axles carrying everything: on a
+  tandem with the centre of mass 3.9 m ahead it would give a negative load). The tandem
+  carries 61 % of the trailer, so its springs keep 39 % of their 97 mm sag unused and the rear
+  stands about 40 mm high: the guard's lower edge parked is 0.570 m (0.525 m in the template,
+  FMVSS 224 at most 0.560). Proposed fix (engine-softbody `pack.rs`, not in this change): a
+  vehicle standing on non-wheel supports sizes its wheels for their share of the static load
+  (the lever rule between the wheel group and the other supports' line).
+- **(Measurement, not kept) A laden tractor.** The crash reference's templates are a design's
+  defaults, so a ballasted tractor needs a registry entry of its own. `truck_cab_laden`
+  (4,500 kg on the fifth wheel, 12 t, M/m 8.3) rigged and linted clean but failed
+  `every_design`: parked, its frame stood 13.5 mm out of shape at the rear rail (5 mm the bar;
+  cab 9 mm, tanks 9-10 mm), the 2 kHz node budget's soft frame (§22) under 4.7 t on two
+  stations. Not registered; S05 and S06 use `truck_cab` at its kerb (7.5 t, M/m 5.2). The
+  trailer's default is laden (`ballast_kg` 8,650: 15 t gross), since the trailer exists for
+  the crash scenes, and it passes the gate laden.
+- **(Crash zones)** The guard is the trailer's `Rear` (the crash reference reads it as
+  `trailer.zone.rear.*`: its bar's and supports' beams, bent, broken and plastic work); box,
+  rear frame, landing gear, kingpin plate and frame `Other`; axles and wheels `Wheel`.
+  `crash.json` gauges: the tandem's spread (as `wheelbase_left/right`), `kingpin_to_axle` (the
+  kingpin plate's rear edge to the rear axle), `box_width`, `box_height`, `frame_length` and
+  `guard_drop` (the rear sill's lowest node to the guard's: its change in a crash is the guard
+  pushed against the trailer).
+- **(Open)** Brakes: the crash scenes set no inputs, so a parked trailer's tandem rolls free
+  (a parked trailer's spring brakes are on) and only the landing gear's feet grip. The lamps'
+  lens tints are not drawn in the studio renders. The cargo box's walls are mass and stiffness
+  only (no panel to dent: `members` 80 / 160 kN a beam, *estimate*).
+
 ## Changelog
 
+- 2026-11-27: section 23, the parked 53 ft dry van `box_trailer` (sources, the FMVSS 223/224 guard and its strength test), the laden tractor, the hull's ear fix.
 - 2026-11-27: section 21, the 4x4's mass built up part by part (1,410 → 1,897 kg of nodes; the lint's `mass` passes), the axle split, strengths checked, S02 at the new mass.
 - 2026-11-27: section 22, the heavy tractor `truck_cab`, the parts-only rigger, published figures.
 - 2026-11-27: section 21, the 4x4's kerb (2000 kg, the Xterra's) and why the rigged mass stays 1410 kg; `crash.json`.
