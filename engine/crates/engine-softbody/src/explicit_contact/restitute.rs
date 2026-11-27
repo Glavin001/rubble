@@ -14,6 +14,19 @@ use glam::Vec3;
 /// keeps it to true impacts; until it exists e stays 0. The GPU's tables carry the same value.
 pub const CONTACT_RESTITUTION: f32 = 0.0;
 
+/// Velocity contact's restitution by default (`Dat::velocity_restitution`, `DAT_E`; `ccd_vel`):
+/// 0, until a restitution meets the owner's rule 8 (deciding-tradeoffs: e = 1 only on a pair
+/// newly closing, never above the energy before the pass, adopted only if the bars and crashes
+/// meet the energy bars). Measured 2026-11-27, conserved-energy work of contact over 0.6 s, 2 runs:
+/// - Newton's law in every row (J v⁺ ≥ −e·u⁻): bars at 5 m/s keep 0.997 (0.905 at e = 0), but
+///   coupled rows created +591 kJ in one head 100 run, +0.8 kJ ball 100, +1.0 kJ side 60.
+/// - Poisson's (inelastic solve, then e·λ_c on the impacts' rows) with a guard that solves the
+///   pass again with a smaller e when its rows did positive work: no energy created, but on
+///   pairs closing before the kick the guard fired in 2,700 passes (a crush's pressed nodes
+///   keep closing), and on pairs newly closing in 250-530; head 100 removed 16 %, more than at
+///   e = 0 (13.6 %), ball 100 5 %, side 60 2.5 %.
+pub const VELOCITY_RESTITUTION: f32 = 0.0;
+
 /// The restitution guard's sums are striped over this many lanes in a fixed order (the
 /// kernel's `ccRestitute`, whatever its workgroup's width), then added in lane order.
 pub const RESTITUTION_STRIPES: usize = 64;

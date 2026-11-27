@@ -28,8 +28,13 @@ pub(super) fn respond(vehicles: &mut [ExplicitBeams], dat: &mut Dat, recs: &mut 
     }
     let extra = sphere_pairs(&balls, surf, &x0e, &x1e, nv, dat.min_gap.max(0.002));
     let all: Vec<super::super::ccd::CcdPair> = pairs.iter().cloned().chain(extra.iter().cloned()).collect();
-    super::super::ccd::resolve(&all, &x0e, &mut x1e, &mut vse, &me, &ime, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpe, dat.restitution, Some(&mut dat.warm));
+    // The kicked velocities: the impact law's guard's reference (`ccd::resolve`).
+    dat.warm.vf = vse.clone();
+    super::super::ccd::resolve(&all, &x0e, &mut x1e, &mut vse, &me, &ime, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpe, dat.velocity_restitution, Some(&mut dat.warm));
     relist_velocity(dat, recs, own_reach, surf, off, &x0e, &mut x1e, &mut vse, &me, &ime, &vpe, reach_v, all.len(), &extra, st);
+    if std::env::var("DAT_MISS").is_ok() {
+        miss_dbg(surf, &x0e, &x1e, &all, recs);
+    }
     for (i, b) in balls.iter().enumerate() {
         if let Some(r) = vehicles[b.veh].rigid.as_mut() {
             r.bodies[b.body].vel = vse[nv + i][0];
@@ -137,6 +142,50 @@ fn relist_velocity(dat: &mut Dat, recs: &mut Vec<Rec>, own_reach: &mut [f32], su
         }
         n = more.len();
         st.relisted += 1;
-        super::super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.restitution, Some(&mut dat.warm));
+        super::super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.velocity_restitution, Some(&mut dat.warm));
+    }
+}
+
+/// A measurement (`DAT_MISS=1`): each vehicle node that ends the step on the other side of one of
+/// its own triangles' planes, inside it, having started outside on the other side; whether that
+/// node–triangle pair was a record and a CCD pair this step.
+fn miss_dbg(surf: &[Surface], x0: &[Vec<Vec3>], x1: &[Vec<Vec3>], pairs: &[super::super::ccd::CcdPair], recs: &[Rec]) {
+    let vol = |a: Vec3, b: Vec3, c: Vec3, p: Vec3| ((b - a).cross(c - a)).dot(p - a);
+    for v in 0..surf.len() {
+        for t in &surf[v].tris {
+            let (a0, a1) = (t.map(|k| x0[v][k as usize]), t.map(|k| x1[v][k as usize]));
+            for &i in &surf[v].nodes {
+                if t.contains(&i) {
+                    continue;
+                }
+                let (p0, p1) = (x0[v][i as usize], x1[v][i as usize]);
+                let (s0, s1) = (vol(a0[0], a0[1], a0[2], p0), vol(a1[0], a1[1], a1[2], p1));
+                if s0 * s1 >= 0.0 {
+                    continue;
+                }
+                // Inside the triangle at the end and at the start (projected), and close.
+                let c1 = super::super::closest_on_triangle(p1, a1[0], a1[1], a1[2]);
+                let c0 = super::super::closest_on_triangle(p0, a0[0], a0[1], a0[2]);
+                let n1 = (a1[1] - a1[0]).cross(a1[2] - a1[0]).normalize_or_zero();
+                let n0 = (a0[1] - a0[0]).cross(a0[2] - a0[0]).normalize_or_zero();
+                if (p1 - c1).cross(n1).length() > 1e-4 || (p0 - c0).cross(n0).length() > 1e-4 {
+                    continue;
+                }
+                let key = |k: &[(usize, u32); 4]| k.contains(&(v, i)) && t.iter().all(|&j| k.contains(&(v, j)));
+                let pair = pairs.iter().find(|q| key(&q.k));
+                let rec = recs.iter().find(|r| r.len == 4 && key(&r.k));
+                if let Some(q) = pair {
+                    use super::super::ccd::{accd, closest};
+                    let a: [Vec3; 4] = q.k.map(|(v, i)| x0[v][i as usize]);
+                    let dp: [Vec3; 4] = q.k.map(|(v, i)| x1[v][i as usize] - x0[v][i as usize]);
+                    let d0 = closest(q.nn, a).1.length();
+                    let cl = |t: f32| { let at = [0, 1, 2, 3].map(|j| a[j] + dp[j] * t); let (w, gv) = closest(q.nn, at); let n = gv.normalize_or_zero(); (0..4).map(|j| w[j] * dp[j].dot(n)).sum::<f32>() };
+                    let (t1, t2) = (accd(q.nn, a, dp, q.xi), accd(q.nn, a, dp, 0.5 * d0));
+                    let samples: Vec<String> = (0..=10).map(|k| { let t = k as f32 / 10.0; let at = [0, 1, 2, 3].map(|j| a[j] + dp[j] * t); format!("{:.2}", closest(q.nn, at).1.length() * 1e3) }).collect();
+                    eprintln!("MISS detail nn {} d0 {:.3} mm | accd xi {:?} closing {:?} | accd half {:?} closing {:?} | gap mm over t {:?}", q.nn, d0 * 1e3, t1, t1.map(cl), t2, t2.map(cl), samples);
+                }
+                eprintln!("MISS car {v} node {i} through {t:?}: start {:.1} mm end {:.1} mm, travel {:.1} mm | record {} (g {:?}, d {:?}) | pair {} (xi {:?})", (p0 - c0).length() * 1e3, (p1 - c1).length() * 1e3, (p1 - p0).length() * 1e3, rec.is_some(), rec.map(|r| r.g), rec.map(|r| r.d), pair.is_some(), pair.map(|q| q.xi));
+            }
+        }
     }
 }

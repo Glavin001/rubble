@@ -63,6 +63,8 @@ pub struct Dat {
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
     /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
+    /// Velocity contact's restitution (`DAT_E`, else [`super::restitute::VELOCITY_RESTITUTION`]).
+    pub velocity_restitution: f32,
     /// Subcycled penalty contact's stiffness scale (0: off; `DAT_PENALTY`): each pair under its
     /// thickness a spring k = scale·m/h_s² (m the pair's lightest node, h_s the sub-step: the
     /// soft-constraint stiffness of explicit crash codes at their own small step); the CCD then
@@ -166,6 +168,15 @@ impl DatStats {
         self.ccd.zone_nodes += o.ccd.zone_nodes;
         self.ccd.unresolved += o.ccd.unresolved;
         self.ccd.zone_spin += o.ccd.zone_spin;
+        self.ccd.exact += o.ccd.exact;
+        self.ccd.exact_rows += o.ccd.exact_rows;
+        self.ccd.exact_pivots += o.ccd.exact_pivots;
+        self.ccd.exact_big += o.ccd.exact_big;
+        self.ccd.exact_left += o.ccd.exact_left;
+        self.ccd.work_rows += o.ccd.work_rows;
+        self.ccd.work_zones += o.ccd.work_zones;
+        self.ccd.e_scaled += o.ccd.e_scaled;
+        self.ccd.restituted += o.ccd.restituted;
         (self.ccd.soft_rounds, self.ccd.soft_rows, self.ccd.soft_left, self.ccd.row_iters) = (self.ccd.soft_rounds + o.ccd.soft_rounds, self.ccd.soft_rows + o.ccd.soft_rows, self.ccd.soft_left + o.ccd.soft_left, self.ccd.row_iters + o.ccd.row_iters);
         self.ccd.ke += o.ccd.ke;
         self.ccd.dp = self.ccd.dp.max(o.ccd.dp);
@@ -197,7 +208,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), warm: Default::default(), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: std::env::var("DAT_CCD").ok().and_then(|v| v.parse().ok()).unwrap_or(8), zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), velocity_restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::VELOCITY_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), warm: Default::default(), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -448,6 +459,7 @@ impl ExplicitBeamsWorld {
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
         if dat.velocity {
             dat.warm.prev = std::mem::take(&mut dat.warm.next);
+            dat.warm.touched_prev = std::mem::take(&mut dat.warm.touched_next);
         }
         if dat.total.steps == 0 {
             st.ke_start = self.vehicles.iter().flat_map(|v| v.nodes.iter()).map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();

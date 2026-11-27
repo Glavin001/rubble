@@ -26,6 +26,9 @@ use super::ccd_rows::{ROW_GAP_SHARE, ROW_ITERS};
 use glam::Vec3;
 use std::collections::HashMap;
 
+#[path = "ccd_exact.rs"]
+mod exact;
+
 /// Warm starts (`Dat::warm`): each pair's impulse at the end of the last step, keyed by its four
 /// nodes, as the first iterate of the next step's solve (Box2D's and PhysX's accumulated
 /// impulses): a contact a crush presses for many steps starts near its answer.
@@ -33,6 +36,13 @@ use std::collections::HashMap;
 pub struct Warm {
     pub prev: HashMap<[(usize, u32); 4], f32>,
     pub next: HashMap<[(usize, u32); 4], f32>,
+    /// The step's kicked velocities before any response (a measurement's reference: the
+    /// phases' work, `CcdStats::work_rows`; empty when not measured).
+    pub vf: Vec<Vec<Vec3>>,
+    /// Every pair that was a row in the last step and in this one (keyed by its four nodes): a
+    /// pair newly closing is one that was not ([`VRow::imp`]).
+    pub touched_prev: std::collections::HashSet<[(usize, u32); 4]>,
+    pub touched_next: std::collections::HashSet<[(usize, u32); 4]>,
 }
 
 /// A pushing row's work past its bound, λ·excess (J, about twice the energy it may add; `DAT_PUSH_TOL`),
@@ -45,9 +55,10 @@ fn push_tol() -> f32 {
 }
 
 /// A pair already a row is linearised again only when it ends closer than this share of what it
-/// may close to (`DAT_RELIN`).
+/// may close to (`DAT_RELIN`): twice the settle test's slack ([`ROW_GAP_SHARE`]), so a row the
+/// solve settled is not linearised again by its own rounding.
 fn relin_share() -> f32 {
-    std::env::var("DAT_RELIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0 - ROW_GAP_SHARE)
+    std::env::var("DAT_RELIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0 - 2.0 * ROW_GAP_SHARE)
 }
 
 /// Or a pushing row parts past its bound by at most this share of the bound's speed (`DAT_PUSH_SHARE`):
@@ -56,9 +67,21 @@ fn push_share() -> f32 {
     std::env::var("DAT_PUSH_SHARE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0e-5)
 }
 
+/// The exact cluster solve (`ccd_exact`), a measurement behind `DAT_EXACT=1`, off: it replaces
+/// most rigid zones (head 100: 5,187 → 435 in 0.3 s) but lets panels deform where the zones held
+/// them, and the paint, which does not follow the collision skin there yet, shows it: ball 100
+/// 42 → 133 mm, side 90 → 86 mm, side 60 0 → 37 mm (the door top's paint, bound across a
+/// half-metre triangle), 2026-11-27. On once the generator's paint meets the skin there.
+fn exact_on() -> bool {
+    std::env::var("DAT_EXACT").is_ok_and(|v| v == "1")
+}
+
 fn pgs() -> bool {
     std::env::var("DAT_PGS").is_ok_and(|v| v == "1")
 }
+
+/// Units in the last place a row's closing may sit past its bound by rounding ([`Ctx::precision`]).
+pub(super) const ROUND_ULPS: f32 = 4.0;
 
 /// APGD's momentum restarts every this many iterations.
 pub(super) const APGD_RESTART: u32 = 16;
@@ -72,6 +95,11 @@ struct VRow {
     l: f32,
     /// The pair's separation along `n` at the step's start.
     s0: f32,
+    /// A true impact: the pair closes before the step's kick (u⁻ < 0) and was not a row in the
+    /// last step (newly closing). Poisson's restitution applies to it alone: a pair a crush keeps
+    /// closing step after step is pressed, and its restitution was the pressed contact's bounce
+    /// (the guard lowered e in 2,700 of head 100's passes, 2026-11-27).
+    imp: bool,
 }
 
 struct Ctx<'a> {
@@ -131,11 +159,46 @@ impl Ctx<'_> {
     /// no row pushing (λ > 0) does more than [`PUSH_TOL`] of work past its bound: a push past the
     /// bound does work λ·excess/2 on the conserved energy.
     fn settled(&self, rows: &[VRow], l: &[f32], vel: &[Vec<Vec3>]) -> bool {
-        let tol = push_tol();
-        rows.iter().zip(l).all(|(r, &l)| {
-            let g = Self::normal(r, vel) + r.b;
-            -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi && (l * g <= tol || g <= push_share() * r.b.abs())
-        })
+        let prec = self.precision(rows, l, vel);
+        rows.iter().zip(l).all(|(r, &l)| self.row_settled(r, l, vel, &prec))
+    }
+
+    fn row_settled(&self, r: &VRow, l: f32, vel: &[Vec<Vec3>], prec: &[Vec<f32>]) -> bool {
+        let g = Self::normal(r, vel) + r.b;
+        // Closing past the bound by at most ROW_GAP_SHARE of what it may close to: its gap, or its
+        // start distance when it began inside the gap (as the re-linearisation's test: with the
+        // gap alone here, a pair inside its gap settled where the rounds linearised it again
+        // every round, and the rounds ran out into rigid zones, 2026-11-27).
+        let rounding: f32 = (0..4).map(|j| r.w[j].abs() * prec[r.k[j].0][r.k[j].1 as usize]).sum();
+        -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi.min(r.s0.max(0.0)) && (l * g <= push_tol() || g <= push_share() * r.b.abs() || g <= rounding)
+    }
+
+    /// Each node's velocity as far as its storage and sums can tell it (m/s): [`ROUND_ULPS`] units
+    /// in the last place of its largest component and the fixed point's unit for each row added.
+    /// (Not the impulses' own rounding, f32's ε of Σ|λ·w/m|: it grows with λ, so a solve of huge
+    /// opposing impulses passed by its own size, and their lever arms turned head 100's cars by
+    /// 16 N·m·s in a step, 2026-11-27.) A row pushing past its bound by
+    /// less than its nodes' share of this is rounding: no solve in f32 settles it. (Head 100's
+    /// exact cluster solves left λ ≈ 9 N·s at g = 1.7e-6 m/s, one unit at 28 m/s: 1.6e-5 J
+    /// against [`PUSH_TOL`]; and near-parallel rows' large opposing impulses, 3–14e-6 m/s,
+    /// 2026-11-27.)
+    fn precision(&self, rows: &[VRow], l: &[f32], vel: &[Vec<Vec3>]) -> Vec<Vec<f32>> {
+        let mut sum: Vec<Vec<(f32, u32)>> = vel.iter().map(|v| vec![(0.0, 0); v.len()]).collect();
+        for (r, &l) in rows.iter().zip(l) {
+            for j in 0..4 {
+                let m = self.mi(r.k[j]);
+                if m > 0.0 && r.w[j] != 0.0 {
+                    let e = &mut sum[r.k[j].0][r.k[j].1 as usize];
+                    e.0 += (r.w[j] * m * l).abs();
+                    e.1 += 1;
+                }
+            }
+        }
+        vel.iter().zip(sum).map(|(v, s)| v.iter().zip(s).map(|(v, (a, n))| {
+            let x = v.abs().max_element().max(f32::MIN_POSITIVE);
+            let _ = a;
+            ROUND_ULPS * ((f32::from_bits(x.to_bits() + 1) - x) + n as f32 / VEL_FIXED)
+        }).collect()).collect()
     }
 
     /// APGD on the rows from their current λ: λ ≥ 0 ⟂ J v + b ≥ 0, v = base + M⁻¹Jᵀλ. Leaves
@@ -184,17 +247,89 @@ impl Ctx<'_> {
             ok = self.settled(rows, &l, vel);
         }
         st.row_iters += used as u64;
+        if !ok && std::env::var("DAT_CLUSTERS").is_ok() {
+            self.clusters_dbg("apgd", rows, &l, vel);
+        }
+        // The clusters APGD left unsettled, solved exactly (`ccd_exact`; `DAT_EXACT=1`, off).
+        if !ok && exact_on() {
+            // Kept only when it settles: a cluster too big, or a dependent row held bound, can
+            // leave a row closing, and then APGD's answer stays for the zones.
+            let mut lx = l.clone();
+            self.exact(rows, &mut lx, vel, st);
+            let mut vx = base.to_vec();
+            self.velocities(rows, &lx, 1.0, base, &mut vx);
+            ok = self.settled(rows, &lx, &vx);
+            if std::env::var("DAT_CLUSTERS").is_ok() {
+                let dv = |a: &[Vec<Vec3>]| a.iter().zip(base).flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| (*a - *b).length())).fold(0f32, f32::max);
+                let lmax = |l: &[f32]| l.iter().fold(0f32, |a, &b| a.max(b));
+                eprintln!("exactdv ok {ok} | apgd max dv {:.3} m/s, max l {:.3} | exact max dv {:.3} m/s, max l {:.3}", dv(vel), lmax(&l), dv(&vx), lmax(&lx));
+            }
+            if ok {
+                l = lx;
+                vel.clone_from_slice(&vx);
+            } else {
+                st.exact_left += 1;
+                if std::env::var("DAT_CLUSTERS").is_ok() {
+                    self.clusters_dbg("exact", rows, &lx, &vx);
+                }
+            }
+        }
         for (r, l) in rows.iter_mut().zip(l) {
             r.l = l;
         }
         ok
     }
 
+    /// A measurement (`DAT_CLUSTERS=1`): the rows left unsettled and the sizes of the clusters
+    /// that hold them.
+    fn clusters_dbg(&self, tag: &str, rows: &[VRow], l: &[f32], vel: &[Vec<Vec3>]) {
+        let comp = self.clusters(rows);
+        let prec = self.precision(rows, l, vel);
+        let mut size: HashMap<usize, (usize, usize)> = Default::default();
+        for i in 0..rows.len() {
+            let e = size.entry(comp[i]).or_default();
+            e.0 += 1;
+            if !self.row_settled(&rows[i], l[i], vel, &prec) {
+                e.1 += 1;
+            }
+        }
+        let mut v: Vec<(usize, usize)> = size.values().copied().filter(|x| x.1 > 0).collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        let worst = rows.iter().zip(l).filter(|(r, &l)| !self.row_settled(r, l, vel, &prec)).map(|(r, &l)| { let g = Self::normal(r, vel) + r.b; (-g * self.h / self.pairs[r.q].xi.min(r.s0.max(1e-9)), l * g, g, r.b) }).fold((0f32, 0f32, 0f32, 0f32), |a, b| if b.1 > a.1 { (a.0.max(b.0), b.1, b.2, b.3) } else { (a.0.max(b.0), a.1, a.2, a.3) });
+        eprintln!("clusters {tag} rows {} | clusters with unsettled (rows, unsettled): {:?} | worst closing/xi {:.3}, push work {:.2e} (g {:.2e}, b {:.2e})", rows.len(), &v[..v.len().min(8)], worst.0, worst.1, worst.2, worst.3);
+    }
+
     /// The rounds: rows from the pairs colliding over the paths, solved, positions following, until
     /// nothing new collides. True when resolved.
     #[allow(clippy::too_many_arguments)]
     fn rounds(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
-        self.rounds_inner(x1, vel, rounds, st, collide, vpre, e, warm)
+        // Poisson's restitution (Stronge; frictionless multi-contact: no energy gained for
+        // e ≤ 1): the impact solved inelastic first, its compression impulses λ_c; then e·λ_c
+        // added on the true impacts' rows alone, positions following; then the rounds again,
+        // inelastic, for what that extra parting meets. The kinetic energy's change is then
+        // (1 + e)(e − 1)/2·|Δv_c|²_M: 0 at e = 1. (Newton's law in the rows themselves,
+        // J v⁺ ≥ −e·u⁻ on every row at once, let coupled rows do +591 kJ of work over head
+        // 100 at e = 1, 2026-11-27.)
+        let mut rows = Vec::new();
+        let done = self.rounds_inner(x1, vel, rounds, st, collide, vpre, warm, &mut rows);
+        if !done || e <= 0.0 {
+            return done;
+        }
+        let imp: Vec<VRow> = rows.into_iter().filter(|r| r.imp && r.l > 0.0).collect();
+        if imp.is_empty() {
+            return done;
+        }
+        let l: Vec<f32> = imp.iter().map(|r| r.l).collect();
+        let base = vel.to_vec();
+        self.velocities(&imp, &l, e, &base, vel);
+        for v in 0..x1.len() {
+            for i in 0..x1[v].len() {
+                x1[v][i] += (vel[v][i] - base[v][i]) * self.h;
+            }
+        }
+        st.restituted += imp.len() as u64;
+        let mut more = Vec::new();
+        self.rounds_inner(x1, vel, rounds, st, collide, &[], warm, &mut more)
     }
 
     /// Projected Gauss–Seidel (`DAT_PGS=1`, a CPU measurement): each row in order moves its λ to
@@ -250,14 +385,16 @@ impl Ctx<'_> {
     /// impulse, b < 0, is no guess for the next step: seeded there, a node shared by many such
     /// rows started past 476 m/s and its fixed-point sums overflowed, head-on 100).
     fn keep(rows: &[VRow], warm: &mut Warm, done: bool) -> bool {
-        for r in rows.iter().filter(|r| r.l > 0.0 && r.b >= 0.0) {
+        // (`DAT_NOWARM=1`: none kept, a measurement.)
+        let none = std::env::var("DAT_NOWARM").is_ok();
+        for r in rows.iter().filter(|r| !none && r.l > 0.0 && r.b >= 0.0) {
             warm.next.insert(r.k, r.l);
         }
         done
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn rounds_inner(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
+    fn rounds_inner(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], warm: &mut Warm, out: &mut Vec<VRow>) -> bool {
         let pos = |x: &[Vec<Vec3>], k: &[(usize, u32); 4]| k.map(|(v, i)| x[v][i as usize]);
         let (vb, xb) = (vel.to_vec(), x1.to_vec());
         let mut rows: Vec<VRow> = Vec::new();
@@ -267,7 +404,7 @@ impl Ctx<'_> {
             let hit = collide(x1);
             st.rounds += 1;
             if hit.is_empty() {
-                return Self::keep(&rows, warm, true);
+                { let done = Self::keep(&rows, warm, true); *out = rows; return done; }
             }
             st.hits += hit.len() as u64;
             let mut fresh = 0usize;
@@ -285,10 +422,24 @@ impl Ctx<'_> {
                 if let Some(i) = old {
                     let r = &rows[i];
                     let s_end: f32 = (0..4).map(|j| r.w[j] * r.n.dot(b[j])).sum();
-                    if s_end > 0.0 && s_end >= relin_share() * r.s0.min(pr.xi) {
+                    // And the pair's true closest gap at the end, along the row's normal: the
+                    // row's own weights are those of its impact, and a feature that turned since
+                    // can let the node through while that stays positive (head 100: a node
+                    // 0.5 mm through its own triangle with the rounds "resolved", 2026-11-27).
+                    let s_true = closest(pr.nn, b).1.dot(r.n);
+                    if s_end.min(s_true) > 0.0 && s_end.min(s_true) >= relin_share() * r.s0.min(pr.xi) {
                         continue;
                     }
                 }
+                // A fresh row at its impact; a row linearised again at the step's end, where it
+                // is tested (at its impact again, a turned feature's row settled each round with
+                // the true end gap still under the test: the rounds ran out, 2026-11-27).
+                // (Only while the end is on the row's side: a pair through at the end is
+                // linearised at its impact, or its normal would point through.)
+                let t = match old {
+                    Some(i) if closest(pr.nn, b).1.dot(rows[i].n) > 0.0 => 1.0,
+                    _ => t,
+                };
                 let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
                 let (w, gv) = closest(pr.nn, at);
                 let n = gv.normalize_or_zero();
@@ -301,15 +452,9 @@ impl Ctx<'_> {
                 // (Measured from the step's start, as the CCD's paths are: the same bound taken
                 // from the rounds' start positions cut side 60's zones from 2,750 to 30 but let
                 // head 100 cross 7 times, 2026-11-27.)
-                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: warm.prev.get(&pr.k).copied().unwrap_or(0.0), s0 };
-                // Newton's law on a true impact: closing before the kick (u⁻ < 0) leaves parting at
-                // e·|u⁻| at least.
-                if e > 0.0 && !vpre.is_empty() {
-                    let u = Self::normal(&r, vpre);
-                    if u < 0.0 {
-                        r.b = r.b.min(e * u);
-                    }
-                }
+                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: warm.prev.get(&pr.k).copied().unwrap_or(0.0), s0, imp: false };
+                r.imp = !vpre.is_empty() && Self::normal(&r, vpre) < 0.0 && !warm.touched_prev.contains(&pr.k);
+                warm.touched_next.insert(pr.k);
                 match old {
                     Some(i) => {
                         relin += 1;
@@ -324,7 +469,7 @@ impl Ctx<'_> {
             }
             // Every pair still meeting its gap is a row the last solve settled: resolved.
             if fresh == 0 && settled {
-                return Self::keep(&rows, warm, true);
+                { let done = Self::keep(&rows, warm, true); *out = rows; return done; }
             }
             if std::env::var("DAT_VDBG").is_ok() {
                 eprintln!("vdbg round {} hits {} fresh {} relin {} settled {} rows {}", st.rounds, hit.len(), fresh, relin, settled, rows.len());
@@ -336,7 +481,9 @@ impl Ctx<'_> {
                 }
             }
         }
-        Self::keep(&rows, warm, false)
+        let done = Self::keep(&rows, warm, false);
+        *out = rows;
+        done
     }
 }
 
@@ -347,4 +494,33 @@ impl Ctx<'_> {
 pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
     let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(ROW_ITERS);
     Ctx { pairs, x0, im, h, iters }.rounds(x1, vel, rounds, st, collide, vpre, e, warm)
+}
+
+/// The contact's work m·(v − v_f)·(v⁻ + v)/2 is g(v) − g(v_f), g(v) = ½m(v·(v⁻ − v_f) + |v|²):
+/// a phase's work is g's change over it. 0 when not measured (`vf` empty).
+pub(super) fn shadow(vel: &[Vec<Vec3>], vpre: &[Vec<Vec3>], m: &[Vec<f32>], vf: &[Vec<Vec3>]) -> f64 {
+    if vpre.is_empty() || vf.len() != vel.len() {
+        return 0.0;
+    }
+    vel.iter().zip(vpre).zip(m).zip(vf).map(|(((v, p), m), f)| v.iter().zip(p).zip(m).zip(f).map(|(((v, p), &m), f)| 0.5 * m as f64 * (v.dot(*p - *f) as f64 + v.length_squared() as f64)).sum::<f64>()).sum()
+}
+
+/// [`velocity_rounds`] under the impact law's guard (the owner's rule: e never above the energy
+/// before the pass): a pass whose rows did positive work (`g`'s change past
+/// [`super::ccd::E_GUARD_TOL`]) is solved again from its start with e halved, then with e = 0.
+/// (Coupled rows' Newton laws did +591 kJ over a head 100 run at e = 1, 2026-11-27.)
+#[allow(clippy::too_many_arguments)]
+pub(super) fn guarded_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm, g: &dyn Fn(&[Vec<Vec3>]) -> f64, g_in: f64) -> bool {
+    let (x1s, vels) = (x1.to_vec(), vel.to_vec());
+    let mut e_now = e;
+    loop {
+        let done = velocity_rounds(pairs, x0, x1, vel, im, h, rounds, st, collide, vpre, e_now, warm);
+        if e_now == 0.0 || warm.vf.is_empty() || g(vel) - g_in <= super::ccd::E_GUARD_TOL {
+            return done;
+        }
+        st.e_scaled += 1;
+        e_now = if e_now > 0.5 * e { 0.5 * e } else { 0.0 };
+        x1.clone_from_slice(&x1s);
+        vel.clone_from_slice(&vels);
+    }
 }

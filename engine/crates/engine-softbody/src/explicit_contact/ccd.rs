@@ -115,7 +115,26 @@ pub struct CcdStats {
     pub soft_left: u64,
     /// Velocity rows (`DAT_RESPONSE=vel`): Jacobi iterations run, summed over rounds.
     pub row_iters: u64,
+    /// Exact cluster solves (`ccd_exact`): clusters solved, their rows and pivots, clusters too
+    /// big to solve, and solves still unsettled after them.
+    pub exact: u64,
+    pub exact_rows: u64,
+    pub exact_pivots: u64,
+    pub exact_big: u64,
+    pub exact_left: u64,
+    /// Velocity contact's work on the integrator's conserved energy (J): by its rows' solve and
+    /// by the impact zones after it (`f(v) = m(v·v⁻ + ½|v|²)/2` summed, its change).
+    pub work_rows: f64,
+    pub work_zones: f64,
+    /// Velocity contact's passes solved again with a smaller e by the impact law's guard.
+    pub e_scaled: u64,
+    /// Rows given Poisson's restitution impulse (velocity contact).
+    pub restituted: u64,
 }
+
+/// The impact law's guard's tolerance (J a pass): the rows' work on the conserved energy above
+/// this solves the pass again with a smaller e.
+pub(super) const E_GUARD_TOL: f64 = 1e-3;
 
 /// The closest points of a pair at positions `p` (four points): their weights (signed by
 /// side: + on the second side) and the gap vector from the first side to the second.
@@ -218,11 +237,19 @@ pub(super) fn resolve(
                 let dp = [0, 1, 2, 3].map(|j| b[j] - a[j]);
                 // An impact only while the pair still closes there (one inside its gap and
                 // parting is not).
-                accd(pr.nn, a, dp, pr.xi).filter(|&t| {
-                    let at = [0, 1, 2, 3].map(|j| a[j] + dp[j] * t);
+                let closing = |t: &f32| {
+                    let at = [0, 1, 2, 3].map(|j| a[j] + dp[j] * *t);
                     let (w, gv) = closest(pr.nn, at);
                     let n = gv.normalize_or_zero();
                     (0..4).map(|j| w[j] * dp[j].dot(n)).sum::<f32>() < 0.0
+                };
+                accd(pr.nn, a, dp, pr.xi).filter(closing).or_else(|| {
+                    // Velocity contact: a pair that starts inside its gap and parts there can
+                    // still turn and pass through later in the step; it is an impact when it
+                    // comes within half its start distance (head 100: a node 0.05 mm from its
+                    // own triangle ended 0.1 mm through it, 2026-11-27).
+                    let d0 = closest(pr.nn, a).1.length();
+                    (vel_only && d0 <= pr.xi && d0 > 0.0).then(|| accd(pr.nn, a, dp, 0.5 * d0).filter(closing)).flatten()
                 }).map(|t| (q, t))
             })
             .collect()
@@ -240,8 +267,15 @@ pub(super) fn resolve(
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
     // (DAT_RESPONSE=vel: velocity-only impulse contact, `ccd_vel::velocity_rounds`, in place of
     // these rounds and with no non-rigid zones (they move positions alone).)
+    let vf: Vec<Vec<Vec3>> = warm.as_ref().map_or(Vec::new(), |w| w.vf.clone());
+    let shadow = |vel: &[Vec<Vec3>]| super::ccd_vel::shadow(vel, vpre, m, &vf);
+    let f_in = if vel_only { shadow(vel) } else { 0.0 };
+    let mut f_rows = f_in;
     if let Some(warm) = warm {
-        if super::ccd_vel::velocity_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide, vpre, e, warm) {
+        let done = super::ccd_vel::guarded_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide, vpre, e, warm, &|v| shadow(v), f_in);
+        f_rows = shadow(vel);
+        st.work_rows += f_rows - f_in;
+        if done {
             finish(st, x1, vel);
             return;
         }
@@ -312,6 +346,18 @@ pub(super) fn resolve(
         finish(st, x1, vel);
         return;
     }
+    impact_zones(pairs, x0, x1, vel, m, im, h, zone_rounds, st, &collide);
+    if vel_only {
+        st.work_zones += shadow(vel) - f_rows;
+    }
+    finish(st, x1, vel);
+}
+
+/// Impact zones (Bridson 2002 §7.4) after the response's rounds: the nodes of still-colliding
+/// pairs, merged, each moved rigidly over the step, `zone_rounds` times or until nothing collides
+/// across zones; pairs still colliding then are counted (`unresolved`, an error).
+#[allow(clippy::too_many_arguments)]
+fn impact_zones(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], m: &[Vec<f32>], im: &[Vec<f32>], h: f32, zone_rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>) {
     // Impact zones: the nodes of still-colliding pairs, merged; each moves rigidly. A pair
     // whose nodes are all in one zone moves rigidly and cannot collide: it is not re-tested.
     let mut zone_of: std::collections::HashMap<(usize, u32), usize> = Default::default();
@@ -330,7 +376,6 @@ pub(super) fn resolve(
     for _ in 0..zone_rounds {
         let hit: Vec<(usize, f32)> = collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).collect();
         if hit.is_empty() {
-            finish(st, x1, vel);
             return;
         }
         for &(q, _) in &hit {
@@ -367,7 +412,6 @@ pub(super) fn resolve(
         }
     }
     st.unresolved += collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).count() as u64;
-    finish(st, x1, vel);
 }
 
 /// Non-rigid impact zones (Harmon et al. 2008, inelastic projection), `soft` rounds: every

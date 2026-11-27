@@ -756,6 +756,106 @@ Next: a solve exact for these near-parallel clusters. Candidates: a block solve 
 cluster (a direct LCP of tens of rows); or merging nearly parallel rows that share nodes into
 one, which is lossless only if their constraint is the same.
 
+## Velocity contact: two CCD holes, the rounds made to converge, an exact cluster solve (2026-11-27, evening)
+
+Head 100 unless named; one run of 0.3 s for counts, the energy tests' 2 runs of 0.6 s for energy.
+
+**What the unsettled solves are.** `DAT_CLUSTERS=1` prints, for every solve APGD leaves
+unsettled, the clusters of rows joined through shared nodes. Every unsettled row there keeps its
+gap. What fails is over-push: about 1e-3 J of work past the bound on near-parallel rows, in
+clusters of 116–192 rows at first and up to 1,100 rows later in the crush.
+
+**An exact solve of those clusters** (`ccd_exact.rs`, `DAT_EXACT=1`, off). It is the cluster's
+LCP in f64, dense A = J M⁻¹ Jᵀ, solved by Lawson–Hanson's active set. It starts from APGD's free
+set; a row whose Cholesky pivot is under 1e-6 of its diagonal is dependent and held bound. Its
+answer is kept only when the whole solve settles. Sums run in node order (a BTreeMap: with a
+HashMap, two runs differed). Head 100's zones fall from 5,187 to 435 in 0.3 s. It is off by
+default for what it lets be seen: panels deform where the rigid zones held them, and the paint
+doesn't follow the collision skin there yet. Ball 100 paint goes from 42 to 133 mm, side 90
+from 0 to 86 mm, side 60 from 0 to 37 mm. Side 60's case is the door top's paint vertex, bound
+to `sh_d1_ml`, `door_FL_o21` and `ebody34` across a half-metre triangle, 37 mm into the other
+car's hood. It comes back on once the generator fits the paint to the skin there.
+
+**Two CCD holes**, found with `DAT_MISS=1`, which lists every node that ends a step through one of
+its own car's triangles and whether that pair was a record and a CCD pair:
+- A pair starting inside its gap and parting at t = 0 was never reported, even when it turned
+  and passed through later in the step. The closing test ran only at the time of first reach,
+  which is 0 for a pair already inside its gap. A node 0.05 mm from its own triangle ended
+  0.1 mm through it. Now such a pair is also tested against half its start distance (velocity
+  contact only; the position response's kernels keep their test bit for bit).
+- A listed row was skipped while its separation along its own normal stayed positive. That
+  normal and those weights are from the impact, and a feature that turned since let a node
+  0.5 mm through with the rounds "resolved". Now the pair's true closest gap at the end, along
+  the row's normal, must pass the same test.
+Head 100 went from 0 crossings to 2–12 as trajectories changed under other edits, and back to 0
+with both fixes. The engine block's nodes through the front crossmember (`eng_*` through `bf_o02`,
+`whefr_f3`, `whefl_f3`) were the first case.
+
+**The rounds made to converge.**
+- Two tests disagreed. The settle test allowed closing 1 % of the gap; the re-linearisation
+  allowed 1 % of the start distance. A pair inside its gap settled where it was linearised again
+  every round, and the rounds ran out into zones ("fresh 1, relin 1, settled true" for 8 rounds,
+  `DAT_VDBG`). Now the settle test takes 1 % of min(start distance, gap), and re-linearisation
+  waits for twice that (`DAT_RELIN` 0.98).
+- A re-linearised row now takes its features at the step's end, where it is tested, while the
+  end is on the row's side. Linearised at the end with the node already through, its normal
+  pointed through: 8 crossings, found the same way.
+- `DAT_CCD` now sets the rounds (`Dat::new` had 8 fixed). 32 rounds changed nothing: the rounds
+  had stopped converging, they were not too few.
+
+**Rounding.** A pushing row is also settled when its excess is within its nodes' storage. That
+is 4 units in the last place of each node's largest velocity component, plus the fixed point's
+unit for each row added there (`Ctx::precision`). Not the impulses' own f32 rounding (ε·Σ|λw/m|):
+that grows with λ, so a solve of huge opposing impulses passed by its own size, and their lever
+arms turned head 100's cars by 16 N·m·s in a step.
+
+**Energy, measured right.** Velocity contact's measure is the contact's work on the conserved
+energy, m·(v⁺ − v_f)·(v⁻ + v⁺)/2. The mechanical energy also counts the stiff beams' share of
+the h·Δv position change: +265 kJ against −151 kJ of work in one head 100 run. The energy tests
+assert on the work in velocity mode: none created, at most 2 % removed (the owner's target, rule
+8). `CcdStats::work_rows` and `work_zones` split it, each phase's change of
+g(v) = ½m(v·(v⁻ − v_f) + |v|²).
+
+| e = 0 (default) | Contact's work, of the start's kinetic energy | Rows | Zones |
+|---|---|---|---|
+| Ball 100 | −2.9 kJ of 43 kJ (6.7 %) | −2.9 | 0 |
+| Side 60 | −5.2 kJ of 201 kJ (2.6 %) | −5.2 | 0 |
+| Head 100, run 0 / run 1 (exact solve on) | −151.5 / −239.6 kJ of 1,118 kJ (13.6 / 21 %) | −80 / −52 | −71 / −188 |
+
+(Ball and side 60 above were with the exact solve on too; their zones were 0.)
+
+**Restitution, tried and not adopted** (`DAT_E`; `restitute::VELOCITY_RESTITUTION` = 0 and why):
+- Newton's law in every row: the bars kept 0.997 (0.905 at e = 0), but coupled rows created
+  +591 kJ in a head 100 run.
+- Poisson's form (inelastic solve, then e·λ_c on the impacts' rows), with a guard that solves the
+  pass again with a smaller e when its rows did positive work: no energy created, but the guard
+  fired in hundreds to thousands of passes and head 100 removed more than at e = 0. Impacts were
+  first "closing before the kick" (a crush's pressed nodes keep closing), then "newly closing"
+  (no row the step before).
+
+**The suite with these fixes, the exact solve off** (one run each; `out/suite/run.sh`, the probe):
+every crash 0 crossings and no fixed-point overflow. The paint is 0 mm during and after in all of
+them but ball 100, which is 42 mm during and 0 after; it was 54 mm, and side 90 46 mm. Angular
+momentum per step is at most 1.1 N·m·s (head 130), where head 100, head 130 and offset 100 failed
+the 2 N·m·s bar this morning (2.06, 2.3, 3.5). Side 60 pressed, a lasting-paint failure, passes.
+
+**Why the exact solve stays off.**
+- With it, head 100's angular momentum per step rose to 3.6 N·m·s, past the bar (the owner's
+  hard rule 2). A row's impulse acts along its impact normal, but the step applies it from the
+  start positions, so each row's torque is the start gap's tangential part × λ. Larger, fewer
+  impulses move more.
+- It also makes the paint above worse.
+- Without it, the rigid zones' removal stays (graded rule 8). On the elastic bars at e = 0, velocity
+  contact without it falls into 355 zones and keeps 0.29 of the energy (0.905 with it).
+  Reverting each of tonight's other changes one at a time, and all together, leaves 298–458
+  zones, so they don't cause it.
+
+**Open.**
+- The rigid zones remain: head 60 7,902, side 90 5,192, side 60 2,969 in 1 s; head 100's
+  contact work −13.6 % at e = 0.
+- The exact solve waits on the generator's paint at the door top and on a torque-free form of
+  the rows.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

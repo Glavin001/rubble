@@ -35,8 +35,8 @@ fn continuous_probe() {
     let runs: usize = e("CC_RUNS", "1").parse().unwrap();
     let r = crash_mode(&scene, kmh, secs, runs, true, press, true, false, false, Some(true)).expect("the scene");
     let (x, c) = (&r[0].0, r[0].2.expect("continuous").ccd);
-    println!("PROBE {scene} {kmh} soft {} | worst {:.1} mm, after 0.3 s {:.1} mm, crossings {}, jitter {:.2} m/s | zones {} ({} nodes), soft rounds {} rows {} left {}, unresolved {}, energy {:.0} J, dp {:.1e}, dl {:.1e}, fixed overflows {} | {:.0} s",
-        e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, engine_softbody::explicit_contact::fixed_overflows(), t.elapsed().as_secs_f32());
+    println!("PROBE {scene} {kmh} soft {} | worst {:.1} mm, after 0.3 s {:.1} mm, crossings {}, jitter {:.2} m/s | zones {} ({} nodes, {} too spun), soft rounds {} rows {} left {}, unresolved {}, energy {:.0} J, dp {:.1e}, dl {:.1e}, fixed overflows {} | exact {} ({} rows, {} pivots, {} too big, {} left) | {:.0} s",
+        e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.zone_spin, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, engine_softbody::explicit_contact::fixed_overflows(), c.exact, c.exact_rows, c.exact_pivots, c.exact_big, c.exact_left, t.elapsed().as_secs_f32());
 }
 
 /// Contact never stands in for metal (AGENTS.md): over a crash the contact pass changes the
@@ -53,12 +53,20 @@ fn energy(scene: &str, kmh: f32, secs: f32) {
     for (k, x) in r.iter().enumerate() {
         let d = x.2.expect("continuous");
         let share = -d.contact_de / d.ke_start.max(1.0);
-        println!("| energy | {scene} {kmh} km/h run {k} | mechanical energy changed by contact {:.1} kJ ({:.2} % of the start's kinetic); contact's work {:.1} kJ (DAT_RESPONSE=vel) |", d.contact_de * 1e-3, -100.0 * share, d.contact_work * 1e-3);
-        assert!(d.contact_de <= 1e-3 * d.ke_start, "{scene} {kmh} run {k}: contact created {} J", d.contact_de);
+        println!("| energy | {scene} {kmh} km/h run {k} | mechanical energy changed by contact {:.1} kJ ({:.2} % of the start's kinetic); contact's work {:.1} kJ (DAT_RESPONSE=vel: rows {:.1} kJ, zones {:.1} kJ, zones {}, passes e lowered {}, rows restituted {}) |", d.contact_de * 1e-3, -100.0 * share, d.contact_work * 1e-3, d.ccd.work_rows * 1e-3, d.ccd.work_zones * 1e-3, d.ccd.zones, d.ccd.e_scaled, d.ccd.restituted);
+        // Velocity contact (DAT_RESPONSE=vel) moves positions only by its velocity change, so the
+        // integrator's conserved energy is its measure, the contact's work (as the elastic bars':
+        // `contact_known_solutions.rs`); the mechanical energy also counts the stiff beams' h·Δv
+        // share of the step.
+        let vel = std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel");
+        let (made, share) = if vel { (d.contact_work, -d.contact_work / d.ke_start.max(1.0)) } else { (d.contact_de, share) };
+        assert!(made <= 1e-3 * d.ke_start, "{scene} {kmh} run {k}: contact created {made} J");
         println!("| energy | {scene} {kmh} km/h run {k} | start {:.0} kJ, contact removed {:.1} kJ ({:.1} %; CCD response {:.1} kJ; guard scaled e down in {} of {} steps; zones {}) |", d.ke_start * 1e-3, -d.spec_ke * 1e-3, 100.0 * share, -d.ccd.ke * 1e-3, d.guarded, d.steps, d.ccd.zones);
         worst = worst.max(share);
     }
-    assert!(worst <= 0.01, "{scene} {kmh}: contact removed {:.1} % of the starting kinetic energy (at most 1 %)", 100.0 * worst);
+    // (Velocity contact: the owner's target, rule 8 of the deciding-tradeoffs skill, 2 %.)
+    let bar = if std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel") { 0.02 } else { 0.01 };
+    assert!(worst <= bar, "{scene} {kmh}: contact removed {:.1} % of the starting kinetic energy (at most {:.0} %)", 100.0 * worst, 100.0 * bar);
 }
 
 /// FAILS today (2026-11-26): the inelastic impacts delete the struck nodes' closing energy.
