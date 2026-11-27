@@ -527,8 +527,8 @@ pub struct Car {
     /// Damping ratio of the bumpers' beams (None: [`ZETA`] as every part; the census's bumper covers run at 0.07-0.33).
     pub bumper_zeta: Option<f32>,
     pub fixed_limits: HashMap<usize, (f32, f32)>, // per defined beam (deformLimit, deformLimitStress N): lessons §25.3
-    /// Per beam: JBeam `beamPrecompression` (a preloaded seal or bump stop).
-    pub precomp: HashMap<usize, f32>,
+    pub precomp: HashMap<usize, f32>, // per beam: JBeam `beamPrecompression` (a preloaded seal or bump stop)
+    pub crush_keys: HashMap<usize, serde_json::Map<String, serde_json::Value>>, // per beam: Rubble's crush-law keys (beam-yield-law.md)
     /// Per beam: values from its part's definition ([`Fixed`]).
     pub fixed: HashMap<usize, Fixed>,
     /// Per beam: the spring it was given before the step's bound (the row

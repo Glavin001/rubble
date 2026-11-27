@@ -169,6 +169,12 @@ pub struct FrontRules {
     /// cell ([`FrontRules::resolved`]). Off: every design's files as before.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub load_path: bool,
+    /// With [`Self::load_path`]: the load path's bays crush by Rubble's crush law
+    /// (`engine/docs/beam-yield-law.md`; CPU reference only): each bay's four chords one crush cell
+    /// (peak, plateau, drop from the section, its collapse moments kept while it folds), its
+    /// diagonals flat, every stroke to `deformLimit` past the solver's 0.1 m. Off: as before.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub crush_law: bool,
 }
 
 /// [`FrontRules::crash_box_bay_alone`]: the braces across a crash box's bay together carry
@@ -210,6 +216,7 @@ impl FrontRules {
                 "crush_from_section" => r.crush_from_section = true,
                 "crash_box_cell" => r.crash_box_cell = true,
                 "load_path" => r.load_path = true,
+                "crush_law" => r.crush_law = true,
                 _ => panic!("RUBBLE_FRONT_RULES: no rule {n}"),
             }
         }
@@ -226,6 +233,7 @@ impl FrontRules {
             crush_from_section: true,
             crash_box_cell: true,
             load_path: false,
+            crush_law: false,
         }
     }
     /// The rules the rigger applies: with [`FrontRules::load_path`] on, the earlier rules it
@@ -246,6 +254,7 @@ impl FrontRules {
             crush_from_section: true,
             crash_box_cell: false,
             load_path: true,
+            crush_law: self.crush_law,
         }
     }
 }

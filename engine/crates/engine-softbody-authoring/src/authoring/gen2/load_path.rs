@@ -32,14 +32,14 @@ use glam::DVec3;
 /// The stations along a side's rail, front to rear: (group tag, the corner tags in the order
 /// outboard top, outboard bottom, inboard top, inboard bottom). The definitions' nodes are the
 /// crash box's `u`/`d` (top and bottom on the lane) and the rail's bottom node (tag "").
-const STATIONS: [(&str, [&str; 4]); 4] = [("a1", ["u", "d", "ui", "di"]), ("a2", ["u", "d", "ui", "di"]), ("a4", ["u", "", "ui", "di"]), ("a5", ["u", "", "ui", "di"])];
+pub(super) const STATIONS: [(&str, [&str; 4]); 4] = [("a1", ["u", "d", "ui", "di"]), ("a2", ["u", "d", "ui", "di"]), ("a4", ["u", "", "ui", "di"]), ("a5", ["u", "", "ui", "di"])];
 /// The bays: (front station, rear station, the member's kind, its zone).
-const BAYS: [(usize, usize, &str, Zone); 3] = [(0, 1, "crash_box", Zone::CrashBox), (1, 2, "front_rail", Zone::FrontRail), (2, 3, "front_rail", Zone::FrontRail)];
+pub(super) const BAYS: [(usize, usize, &str, Zone); 3] = [(0, 1, "crash_box", Zone::CrashBox), (1, 2, "front_rail", Zone::FrontRail), (2, 3, "front_rail", Zone::FrontRail)];
 /// The long faces' diagonals of a bay carry together at most this share of its force along the
 /// member (engineering estimate: a quarter, the chords the rest; `front-load-path.md` §3.2).
 pub const DIAGONAL_SHARE: f64 = 0.25;
 /// A bay's long-face diagonals (front corner, rear corner): outboard, inboard, top, bottom faces.
-const FACES: [(usize, usize); 4] = [(0, 1), (2, 3), (0, 2), (1, 3)];
+pub(super) const FACES: [(usize, usize); 4] = [(0, 1), (2, 3), (0, 2), (1, 3)];
 /// The upper rail's chain, front to rear (`{s}` the side).
 const UPPER: [&str; 4] = ["sh_a3_u{s}", "sh_a8_f{s}", "sh_a8_m{s}", "sh_b2_o{s}"];
 
@@ -109,7 +109,7 @@ pub fn structure(st: &Structure, ph: &Physics) -> Structure {
 
 /// The crash-rate factor the character asks for: the section's in `real_crash` (front multiple
 /// 1), 1 in a character whose multiple stands for it ([`engine_vehiclegen::physics::CrashFeel`]).
-fn rate(m: &Member, ph: &Physics) -> f64 {
+pub(super) fn rate(m: &Member, ph: &Physics) -> f64 {
     if ph.crash.front_crush == 1.0 {
         vr::crash_rate_factor(m)
     } else {
@@ -133,6 +133,9 @@ pub fn flat_chords(st: &Structure, ph: &Physics) -> Vec<(String, String)> {
                 // (the long faces' diagonals carry their share of the bay's axial force: flat too)
                 for (a, b) in FACES {
                     out.push((n(f, a), n(r, b)));
+                    if ph.front_rules.crush_law {
+                        out.push((n(f, b), n(r, a)));
+                    }
                 }
             }
         }
@@ -193,7 +196,11 @@ pub fn lattice(st: &Structure, l: &mut Lattice, ph: &Physics) {
             let (kk, c, deform, lim) = zone.values();
             let target = m.crush_n() * feel * rate(m, ph);
             bay_force[bi] = target;
-            let faces = FACES.map(|(a, b)| (f[a], r[b]));
+            let mut faces = FACES.map(|(a, b)| (f[a], r[b])).to_vec();
+            if ph.front_rules.crush_law {
+                // (the crush law: both diagonals of each face, for the walls' shear: crush_law.rs)
+                faces.extend(FACES.map(|(a, b)| (f[b], r[a])));
+            }
             // The walls' folding force goes through their steel along the member, which the
             // corner chords stand for; the long faces' diagonals stand for the walls' shear and
             // keep the zone's yield, together at most [`DIAGONAL_SHARE`] of the force along the
@@ -202,7 +209,7 @@ pub fn lattice(st: &Structure, l: &mut Lattice, ph: &Physics) {
             let cos_sum: f64 = faces.iter().map(|&(a, b)| along(a, b)).sum();
             let tie = (deform * feel).min(DIAGONAL_SHARE * target / cos_sum);
             let diag_axial: f64 = faces.iter().map(|&(a, b)| tie * along(a, b)).sum();
-            for (a, b) in faces {
+            for &(a, b) in &faces {
                 l.beams.push(ShellBeam { a, b, class: Class::Brace, zone, k: kk, c, deform: tie, limit_expansion: lim });
             }
             // the chords take what the diagonals leave of the section's force
@@ -351,6 +358,7 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
         eprintln!("load path: {n_flat} chords flat, {n_stops} engine stops engage at the block's gap");
     }
     let _ = Part::Body;
+    super::crush_law::apply(r, inp);
 }
 
 /// An engine stop's rest length is at least this (m): the solver keeps a yielding beam's rest at

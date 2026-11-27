@@ -243,11 +243,9 @@ pub fn jbeam_files(
                     o.insert("deformLimitExpansion".into(), num(f.limit_expansion));
                 }
                 if let Some(&(dl, ls)) = car.fixed_limits.get(&j) { o.insert("deformLimit".into(), json!(dl)); o.insert("deformLimitStress".into(), num(ls)); }
+                if let Some(keys) = car.crush_keys.get(&j) { o.extend(keys.clone()); }
                 if let Some(pc) = car.precomp.get(&j) {
-                    o.insert(
-                        "beamPrecompression".into(),
-                        json!((*pc as f64 * 1e6).round() / 1e6),
-                    );
+                    o.insert("beamPrecompression".into(), json!((*pc as f64 * 1e6).round() / 1e6));
                 }
                 o.insert(
                     "breakGroup".into(),
