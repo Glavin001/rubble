@@ -55,12 +55,14 @@ pub struct Dat {
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
     /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
-    /// Penalty contact's stiffness scale (0: off; `DAT_PENALTY`): each pair under its thickness a
-    /// spring k = scale·m/h² (m the pair's lightest node, the soft-constraint stiffness of
-    /// explicit crash codes), forces in the beam pass; the CCD then only keeps the collision
-    /// mesh from crossing (gap `min_gap`), and the speculative pass is off.
+    /// Subcycled penalty contact's stiffness scale (0: off; `DAT_PENALTY`): each pair under its
+    /// thickness a spring k = scale·m/h_s² (m the pair's lightest node, h_s the sub-step: the
+    /// soft-constraint stiffness of explicit crash codes at their own small step); the CCD then
+    /// only keeps the collision mesh from crossing (gap `min_gap`), the speculative pass is off.
     pub penalty: f32,
     pub penalty_f: Vec<Vec<Vec3>>,
+    /// Penalty contact's sub-steps a step (`DAT_SUBSTEPS`, 32).
+    pub substeps: u32,
     pub min_gap: f32,
     /// A car against itself too (`DAT_SELF=0`: only car against car).
     pub self_contact: bool,
@@ -178,7 +180,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -453,12 +455,20 @@ impl ExplicitBeamsWorld {
         let refs: Vec<(Vec3, Vec3)> = (0..x0.len()).map(|v| (dx(v, 0), vel(v, 0))).collect();
         let mut own_reach = vec![0.0f32; x0.len()];
         let mut recs = list_pairs(dat, &x0, &surf, &off, &reach_v, &refs, &mut own_reach, &mut st);
-        // Penalty contact (`DAT_PENALTY`): the pairs' springs at this step's end positions, the
-        // forces the beam pass's sum takes next ([`ExplicitBeamsWorld::apply_penalty`]).
+        // Subcycled penalty contact (`DAT_PENALTY`, `DAT_SUBSTEPS`): the nodes of the listed pairs
+        // move over the step again in sub-steps with the pairs' springs ([`passes::penalty_substeps`]).
         if dat.penalty > 0.0 {
-            let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
-            let im0: Vec<Vec<f32>> = self.vehicles.iter().map(|v| (0..v.nodes.len()).map(|i| if v.nodes[i].has(NODE_IMMOVABLE) || v.is_retired(i) { 0.0 } else { 1.0 }).collect()).collect();
-            dat.penalty_f = passes::penalty_forces(&recs, &x0, &x1p, &m, &im0, dat.penalty);
+            let mut vel: Vec<Vec<Vec3>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
+            let moved = passes::penalty_substeps(&recs, &x0, &mut x1p, &mut vel, &im, dat.penalty, dat.substeps, dat.self_gap);
+            for (v, veh) in self.vehicles.iter_mut().enumerate() {
+                let o = veh.origin;
+                for &i in &moved[v] {
+                    let n = &mut veh.nodes[i as usize];
+                    n.vel = vel[v][i as usize];
+                    n.pos = x1p[v][i as usize] - ov[v][i as usize] - o;
+                }
+            }
+            x1 = x1p.clone();
         }
         // How far each node can close on anything this step (its step, or its speed times h,
         // whichever is longer: the speculative pass works on speeds). A pair whose two sides

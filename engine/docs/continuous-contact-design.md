@@ -514,6 +514,27 @@ spring is stable up to about m/h², so at h = 0.5 ms a contact spring lets surfa
 springs ~10⁵ times stiffer. At 2 kHz penalty contact needs centimetres of sinking (a cushion,
 ruled out) or the backstop doing the work.
 
+## Subcycled penalty contact, first version (2026-11-26, `DAT_PENALTY`, `DAT_SUBSTEPS`, off)
+
+The nodes of the listed pairs move over the step again in sub-steps (exact pair distance each
+sub-step, k = scale·m/h_s², kick then drift), the beams' forces held from the step. The elastic
+bars with continuous contact the only contact (`BARS_BARE=1`; with the bars' self-collision and
+discrete surface and edge contact on, bars at rest gain 147-195 J with no continuous contact at
+all, a separate fault):
+
+| bars 5 m/s | energy kept (exact 1) | rebound (exact ~1) | backstop impacts |
+|---|---|---|---|
+| impulse response, e = 0 | 0.977 | 0.83 | 2000 |
+| penalty, 32 sub-steps | 1.101 | 0.85 | 4 |
+| penalty, 64 sub-steps | 1.045 | 0.86 | 0 |
+| penalty, 32, bars at 20 m/s | 0.648 | 0.48 | 29 |
+
+The contact pass alone adds 636 J (32 sub-steps). Sub-stepping only the contact nodes with their
+beams' forces frozen is a splitting that is only energy-consistent when the frozen forces are
+slow, and a crashing node's beams are not. Next: the contact nodes and their beams sub-stepped
+together, the neighbours' positions interpolated over the sub-steps (Belytschko's mixed-time
+integration, crash codes' subcycling).
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

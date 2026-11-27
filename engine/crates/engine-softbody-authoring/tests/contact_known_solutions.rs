@@ -74,8 +74,13 @@ fn bar() -> SoftVehicleDesc {
 
 fn spawn(d: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> ExplicitBeams {
     let mut s = ExplicitBeams::from_desc_jbeam_raycast(d, at, vel, engine_softbody_authoring::vehicle_compare::settings()).expect("spawn").0;
-    s.surface_contact = true;
-    s.edge_contact = true;
+    // (BARS_BARE=1: no surface or edge contact, a diagnosis.)
+    let bare = std::env::var("BARS_BARE").is_ok_and(|x| x == "1");
+    s.surface_contact = !bare;
+    s.edge_contact = !bare;
+    if bare {
+        s.candidates.clear();
+    }
     s.finish();
     s
 }
@@ -94,8 +99,18 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
     let len = (SLICES - 1) as f32 * DX;
     let a = spawn(&d, Vec3::new(-len - 0.005, 5.0, 0.0), Vec3::X * v);
     let b = spawn(&d, Vec3::new(0.005, 5.0, 0.0), -Vec3::X * v);
+    let span = |s: &ExplicitBeams| s.nodes.iter().map(|n| s.origin.x + n.pos.x).fold((f32::MAX, f32::MIN), |(l, h), x| (l.min(x), h.max(x)));
+    println!("| start | bar A x {:?}, bar B x {:?} |", span(&a), span(&b));
     let mut w = ExplicitBeamsWorld::new(vec![a, b]);
     w.continuous = Some(Dat::new(0.08, 0.85));
+    // (BARS_CC=0: no continuous contact at all, a diagnosis.)
+    if std::env::var("BARS_CC").is_ok_and(|x| x == "0") {
+        w.continuous = None;
+    }
+    // (BARS_SELF=0: no self contact within a bar, a diagnosis.)
+    if let (true, Some(d)) = (std::env::var("BARS_SELF").is_ok_and(|x| x == "0"), w.continuous.as_mut()) {
+        d.self_contact = false;
+    }
     w.enable_ledger();
     let e0 = w.ledger.as_ref().unwrap().start;
     let own0: f64 = w.vehicles.iter().map(|s| {
@@ -129,8 +144,8 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
             ke + pe + g
         }).sum()
     };
-    let c = w.continuous.as_ref().unwrap().total;
-    println!("| contact | CCD impacts {}, zones {}, unresolved {}, speculative KE {:.1} J |", c.ccd.hits, c.ccd.zones, c.ccd.unresolved, c.spec_ke);
+    let c = w.continuous.as_ref().map(|d| d.total).unwrap_or_default();
+    println!("| contact | CCD impacts {}, zones {}, unresolved {}, speculative KE {:.1} J, mechanical energy changed in the contact pass {:.1} J (DAT_ENERGY=1) |", c.ccd.hits, c.ccd.zones, c.ccd.unresolved, c.spec_ke, c.contact_de);
     println!("| by hand | mechanical now {:.1} J, start {:.1} J (ledger {:.1} -> {:.1}) |", own(&w), own0, e0, l.mechanical());
     let (_, va) = motion(&w.vehicles[0]);
     let (_, vb) = motion(&w.vehicles[1]);
@@ -150,7 +165,9 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
 /// exactly; here at most 1 % lost: the discrete bar's own rounding and its contact).
 #[test]
 fn bars_head_on_conserve_energy() {
-    let (kept, _, _) = bars_head_on(5.0);
+    // (BARS_V: another speed, a diagnosis.)
+    let v = std::env::var("BARS_V").ok().and_then(|x| x.parse().ok()).unwrap_or(5.0);
+    let (kept, _, _) = bars_head_on(v);
     assert!(kept > 0.99 && kept < 1.0 + 1e-3, "kept {kept}");
 }
 

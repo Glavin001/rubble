@@ -157,31 +157,74 @@ pub(super) fn separate(recs: &[&Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], im
     }
 }
 
-/// Penalty contact's forces (explicit crash codes' soft-constraint contact): each pair whose
-/// gap at the step's end positions `x1` (linearised from its start record over the step's
-/// motion, as [`separate`]) is under its thickness gets a spring k·(d − gap) along its normal,
-/// k = `scale`·m/h² with m its lightest movable node's mass, shared over its nodes by its
-/// weights (equal and opposite: momentum kept; a spring's potential: no energy made).
-pub(super) fn penalty_forces(recs: &[Rec], x0: &[Vec<Vec3>], x1: &[Vec<Vec3>], m: &[Vec<f32>], movable: &[Vec<f32>], scale: f32) -> Vec<Vec<Vec3>> {
-    let mut f: Vec<Vec<Vec3>> = x1.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
-    for r in recs {
-        let dx = |j: usize| x1[r.k[j].0][r.k[j].1 as usize] - x0[r.k[j].0][r.k[j].1 as usize];
-        let gap = r.g + (0..r.len).map(|j| r.sign(j) * r.w[j] * dx(j).dot(r.n)).sum::<f32>();
-        if gap >= r.d {
-            continue;
-        }
-        let ml = (0..r.len).filter(|&j| r.w[j] > 0.0 && movable[r.k[j].0][r.k[j].1 as usize] > 0.0).map(|j| m[r.k[j].0][r.k[j].1 as usize]).fold(f32::MAX, f32::min);
+/// Subcycled penalty contact (multiple-time-step splitting: RESPA, Tuckerman, Berne and
+/// Martyna 1992; crash codes' contact subcycling). The node update has kicked every node by the
+/// step's slow forces (beams, gravity, ...). Here the nodes of the listed pairs move over the
+/// step again from their start `x0`, in `subs` sub-steps of h/subs, each a kick by the pairs'
+/// springs at the current positions then a drift: symplectic Euler at the sub-step, so the
+/// springs are integrated stably at stiffness k = `scale`·m/h_s² (m the pair's lightest movable
+/// node; explicit crash codes' soft constraint) and their energy comes back. A pair's gap is
+/// linearised from its start record (as [`separate`]); the spring k·(d − gap) acts along its
+/// normal, shared over its nodes by its weights, equal and opposite: momentum kept. `x1` and
+/// `vel` are updated in place; returns, per vehicle, the nodes moved. A pair's thickness is at
+/// least `shell`, the sheets' own (crash codes' shell thickness), so the springs act before
+/// the collision meshes touch.
+pub(super) fn penalty_substeps(recs: &[Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], scale: f32, subs: u32, shell: f32) -> Vec<Vec<u32>> {
+    let subs = subs.max(1);
+    let hs = STEP / subs as f32;
+    let mut moved: Vec<Vec<u32>> = x1.iter().map(|_| Vec::new()).collect();
+    let mut on: Vec<Vec<bool>> = x1.iter().map(|x| vec![false; x.len()]).collect();
+    let mut springs: Vec<(&Rec, f32)> = Vec::new();
+    for r in recs.iter().filter(|r| r.len == 4) {
+        let ml = (0..r.len).filter(|&j| r.w[j] > 0.0 && im[r.k[j].0][r.k[j].1 as usize] > 0.0).map(|j| 1.0 / im[r.k[j].0][r.k[j].1 as usize]).fold(f32::MAX, f32::min);
         if ml == f32::MAX {
             continue;
         }
-        let k = scale * ml / (STEP * STEP);
-        let p = k * (r.d - gap);
+        springs.push((r, scale * ml / (hs * hs)));
         for j in 0..r.len {
             let (v, i) = r.k[j];
-            if r.w[j] > 0.0 {
-                f[v][i as usize] += r.n * (r.sign(j) * r.w[j] * p);
+            if r.w[j] > 0.0 && im[v][i as usize] > 0.0 && !on[v][i as usize] {
+                on[v][i as usize] = true;
+                moved[v].push(i);
             }
         }
     }
-    f
+    if springs.is_empty() {
+        return moved;
+    }
+    for (v, m) in moved.iter().enumerate() {
+        for &i in m {
+            x1[v][i as usize] = x0[v][i as usize];
+        }
+    }
+    let mut f: Vec<Vec<Vec3>> = x1.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+    for _ in 0..subs {
+        for &(r, k) in &springs {
+            // The exact distance of the pair's primitives now (a function of the positions
+            // alone, so ½k(d − dist)² is a potential and its force, −k(d − dist)·∂dist/∂x =
+            // the closest points' signed weights along the unit gap, conserves energy).
+            let p = r.k.map(|(v, i)| x1[v][i as usize]);
+            let (w, gv) = super::super::ccd::closest(r.nn, p);
+            let dist = gv.length();
+            let d = r.d.max(shell);
+            if dist >= d || dist <= 0.0 {
+                continue;
+            }
+            let n = gv / dist;
+            let push = k * (d - dist);
+            for j in 0..4 {
+                let (v, i) = r.k[j];
+                f[v][i as usize] += n * (w[j] * push);
+            }
+        }
+        for (v, m) in moved.iter().enumerate() {
+            for &i in m {
+                let i = i as usize;
+                vel[v][i] += f[v][i] * (hs * im[v][i]);
+                f[v][i] = Vec3::ZERO;
+                x1[v][i] += vel[v][i] * hs;
+            }
+        }
+    }
+    moved
 }
