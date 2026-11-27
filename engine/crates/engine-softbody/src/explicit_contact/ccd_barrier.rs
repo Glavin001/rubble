@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 /// The barrier's reach past each pair's gap (m; `DAT_DHAT`).
 const DHAT: f32 = 1e-3;
-/// Gradient steps at most (`DAT_BARRIER_ITERS`).
-const ITERS: u32 = 200;
+/// Gauss–Newton steps at most (`DAT_BARRIER_ITERS`).
+const ITERS: u32 = 50;
 
 fn env(k: &str, d: f32) -> f32 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
@@ -96,9 +96,55 @@ pub(in super::super) fn barrier(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [V
                 }
             }
         }
-        let dir: Vec<Vec3> = g.iter().zip(&diag).map(|(g, &d)| (-*g / d).as_vec3()).collect();
+        // Gauss–Newton: H·dx = −g, H = M/h² + Σₚ κ·max(b″, 0)·JₚᵀJₚ (Jₚ = the pair's weights
+        // along its normal), by conjugate gradients, matrix-free, preconditioned by H's diagonal.
+        let act: Vec<(usize, [f32; 4], glam::DVec3, f64)> = pairs.iter().zip(&xi).enumerate().filter_map(|(q, (p, &gap))| {
+            let (w, gv) = closest(p.nn, at(&x, p));
+            let dist = gv.length() as f64;
+            let d = dist - gap as f64;
+            (d < dh && dist > 0.0).then(|| (q, w, gv.as_dvec3() / dist, (kappa * ddb(d, dh)).max(0.0)))
+        }).collect();
+        let hv = |v: &[glam::DVec3]| -> Vec<glam::DVec3> {
+            let mut o: Vec<glam::DVec3> = (0..v.len()).map(|i| v[i] * (m[i] / h2)).collect();
+            for &(q, w, n, k) in &act {
+                let kk = pairs[q].k;
+                let s: f64 = (0..4).filter_map(|j| idx.get(&kk[j]).map(|&i| w[j] as f64 * n.dot(v[i]))).sum();
+                for j in 0..4 {
+                    if let Some(&i) = idx.get(&kk[j]) {
+                        o[i] += n * (k * w[j] as f64 * s);
+                    }
+                }
+            }
+            o
+        };
+        let dot = |a: &[glam::DVec3], b: &[glam::DVec3]| -> f64 { a.iter().zip(b).map(|(a, b)| a.dot(*b)).sum() };
+        let mut dx = vec![glam::DVec3::ZERO; x.len()];
+        let mut r: Vec<glam::DVec3> = g.iter().map(|g| -*g).collect();
+        let mut z: Vec<glam::DVec3> = r.iter().zip(&diag).map(|(r, &d)| *r / d).collect();
+        let mut pp = z.clone();
+        let mut rz = dot(&r, &z);
+        let r0 = rz.abs().max(1e-300);
+        for _ in 0..env("DAT_BARRIER_CG", 30.0) as u32 {
+            let hp = hv(&pp);
+            let a = rz / dot(&pp, &hp).max(1e-300);
+            for i in 0..dx.len() {
+                dx[i] += pp[i] * a;
+                r[i] -= hp[i] * a;
+            }
+            z = r.iter().zip(&diag).map(|(r, &d)| *r / d).collect();
+            let rz1 = dot(&r, &z);
+            if rz1.abs() < 1e-12 * r0 {
+                break;
+            }
+            let beta = rz1 / rz;
+            rz = rz1;
+            for i in 0..pp.len() {
+                pp[i] = z[i] + pp[i] * beta;
+            }
+        }
+        let dir: Vec<Vec3> = dx.iter().map(|d| d.as_vec3()).collect();
         let big = dir.iter().fold(0.0f32, |a, d| a.max(d.length()));
-        if big < 1e-7 {
+        if big < env("DAT_BARRIER_TOL", 1e-8) {
             break;
         }
         // The longest step along `dir` before any pair reaches its gap, with room.

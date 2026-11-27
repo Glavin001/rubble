@@ -955,6 +955,16 @@ and backtracked. Head 100, 0.1 s: not yet a candidate.
   path from the start to them, which can cross. The barrier's own path is not that line.
 - 35 s of CPU for 0.1 s.
 
+Second version: Gauss–Newton directions (matrix-free conjugate gradients on
+H = M/h² + Σ κ·max(b″, 0)·JᵀJ), and the solve's own crossing-free path in place of the
+straight-line CCD test (every iterate and every move between them is crossing-free, so start
+and end are joined without crossing).
+- Better: 0 zones and 0 crossings.
+- Worse: still not converged. 434 solves hit the 50-iteration cap, linear momentum moves
+  4.9 N·s in a step, paint reaches 197 mm, and 0.1 s takes 119 s of CPU.
+- Why: the CCD-limited steps shrink as pairs near their gaps. IPC's full form adapts κ and d̂ for
+  this; not done here.
+
 What it needs: a Newton solve (the barrier's Hessian per pair) to converge in a few
 iterations; a CCD test that matches the straight path (end positions whose straight path from
 x₀ is clear, or the barrier's line search taken from x₀ along x − x₀ alone); and velocities
