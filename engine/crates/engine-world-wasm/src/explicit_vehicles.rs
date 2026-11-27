@@ -1,4 +1,4 @@
-//! The explicit solver's built-in test vehicles as text for the page (`softbody.html`): the
+//! The explicit solver's built-in test vehicles as text for the page (`crash-lab.html`): the
 //! high-resolution JBeam test car and the procedural sedan's `.truck`.
 
 use wasm_bindgen::prelude::*;

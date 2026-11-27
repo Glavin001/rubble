@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// End-to-end check of the soft-body demo's explicit solver (softbody.html?solver=explicit)
+// End-to-end check of the soft-body demo's explicit solver (crash-lab.html)
 // in Chrome WebGPU: for each test vehicle, the idle scene (settles, then the launch
 // key sets it rolling), the 100 km/h wall (it reaches the wall and crumples), and the
-// solver button (rebuilds the scene on the soft solver and back), and a few seconds
+// solver link (opens the scene on the soft solver's page and back), and a few seconds
 // of the page's own live loop (launch key, GPU time in the HUD). Fails on any page
 // or GPU error, and when a vehicle does not move or deform. Screenshots per run.
 //
@@ -115,7 +115,7 @@ const ready = async (solver) => {
   throw new Error(`the page did not start (${solver})`);
 };
 const open = async (query, solver) => {
-  await send('Page.navigate', { url: `${base}/softbody.html?${query}` });
+  await send('Page.navigate', { url: `${base}/${solver === 'explicit' ? 'crash-lab.html' : 'softbody.html'}?${query}` });
   await ready(solver);
 };
 const pageError = async () => (await evaluate('document.getElementById("err")?.textContent || ""')) || pageErrors[0] || '';
@@ -127,7 +127,7 @@ const RUNS = [
   // At rest it settles where it was spawned, nothing breaks; the launch key sets it
   // rolling at 100 km/h.
   ['idle', async (v) => {
-    await open(`solver=explicit&scene=yard&${v.query}`, 'explicit');
+    await open(`scene=yard&${v.query}`, 'explicit');
     const lay = await evaluate('window.__explicit.layout()');
     const a = await evaluate('window.__step(2000)'); // 1 s
     const d = a.damage[0];
@@ -141,7 +141,7 @@ const RUNS = [
   }],
   // 100 km/h into the wall (about 15 m ahead): it gets there and crumples.
   ['wall', async (v) => {
-    await open(`solver=explicit&scene=wall&${v.query}`, 'explicit');
+    await open(`scene=wall&${v.query}`, 'explicit');
     const a = await evaluate('window.__step(40)');
     // 1.5 s, the furthest it got along +Z (it may rebound off the wall).
     let b = a, reach = 0;
@@ -161,7 +161,7 @@ const RUNS = [
   // Live (the page's own frame loop at wall-clock 2 kHz): the launch key, frames
   // stepping, GPU time per frame in the HUD.
   ['live', async (v) => {
-    await open(`solver=explicit&scene=yard&${v.query}`, 'explicit');
+    await open(`scene=yard&${v.query}`, 'explicit');
     await evaluate(`dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL' }))`);
     const live = await evaluate('window.__live(3000)');
     const steps = await evaluate('window.__explicit.sim().steps()');
@@ -176,7 +176,7 @@ const RUNS = [
   // the read returns; it once ran after every frame of the task). The explicit
   // solver's readPoses (read_ranges_on) and the World's readBodies.
   ['reads', async (v) => {
-    await open(`solver=explicit&scene=wall&stopAt=0&${v.query}`, 'explicit');
+    await open(`scene=wall&stopAt=0&${v.query}`, 'explicit');
     await evaluate('window.__step(40)');
     const xz = await evaluate(`(async () => {
       const x = window.__explicit.sim(), rs = [];
@@ -196,21 +196,22 @@ const RUNS = [
     const f = (z) => z.map((x) => x.toFixed(4)).join(', ');
     return { ok, msg: `explicit readPoses z: ${f(xz)}; World readBodies z: ${f(sz)}` };
   }],
-  // The button rebuilds the scene on the soft solver (same vehicle, same spawn), and back.
+  // The solver link opens the soft solver's page (softbody.html: same vehicle, same spawn),
+  // and its link the crash lab's (crash-lab.html) again.
   ['toggle', async (v) => {
-    await open(`solver=explicit&scene=wall&${v.query}`, 'explicit');
+    await open(`scene=wall&${v.query}`, 'explicit');
     await evaluate('window.__step(200)');
     await evaluate(`document.getElementById('solverBtn').click()`);
     await ready('soft');
-    const url = await evaluate('location.search');
+    const url = await evaluate('location.pathname + location.search');
     const s = await evaluate('window.__step(240)'); // 1 s at 240 Hz
     const soft = s.damage?.length ?? 0;
     await shot(`${v.name}_toggle_soft`);
     await evaluate(`document.getElementById('solverBtn').click()`);
     await ready('explicit');
-    const back = await evaluate('location.search');
+    const back = await evaluate('location.pathname + location.search');
     const x = await evaluate('window.__step(200)');
-    const ok = !url.includes('solver=explicit') && back.includes('solver=explicit') && soft > 0 && finite(x);
+    const ok = url.includes('softbody.html') && !url.includes('solver=explicit') && back.includes('crash-lab.html') && soft > 0 && finite(x);
     return { ok, msg: `soft ${url} (${soft} soft bodies, ${s.damage?.[0]?.yielded ?? 0} bent after 1 s) → explicit ${back}` };
   }],
 ];

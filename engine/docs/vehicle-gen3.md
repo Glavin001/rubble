@@ -11,7 +11,7 @@ cargo run --release -p engine-softbody-lab --example gen2_export     # __mods/ge
 cargo run --release -p engine-softbody-lab --example gen3_rest -- 10 # in memory: per-part drift and warp parked
 cargo test --release -p engine-softbody-authoring --test gen3_rig -- --nocapture
 SURFACE_CONTACT=1 cargo run --release -p engine-softbody-lab --example vehicle_compare -- --cars gen2,etkk
-# page: softbody.html?solver=explicit&preset=wall56&mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast
+# page: crash-lab.html?preset=wall56&mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast
 ```
 
 ## Files
@@ -148,7 +148,7 @@ with 76 seams.
 
 ## In the browser
 
-`softbody.html?...&preset=wall56&mod=/__mods/gen2` (the GPU solver) draws the skinned
+`crash-lab.html?...&preset=wall56&mod=/__mods/gen2` (the GPU solver) draws the skinned
 `.glb` through `weightedVertex()`.
 
 - At rest it matches the static model.

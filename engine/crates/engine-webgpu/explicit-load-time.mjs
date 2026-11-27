@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The explicit solver page's load time in Chrome: softbody.html?solver=explicit (the
+// The explicit solver page's load time in Chrome: crash-lab.html (the
 // yard scene by default) from navigation to its first frame (the loading card's
 // "[loading] done in"), with the card's stages and each GPU kernel's compile as the
 // card lists them. Run twice with the same PROFILE for a warm (cached) load.
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
-const QUERY = process.argv[2] || 'solver=explicit&scene=yard';
+const QUERY = process.argv[2] || 'scene=yard';
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
 const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
@@ -75,7 +75,7 @@ ws.addEventListener('message', (e) => {
 });
 const send = (method, params = {}) => new Promise((r) => { const id = ++nextId; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
 await send('Runtime.enable');
-await send('Page.navigate', { url: `${base}/softbody.html?${QUERY}` });
+await send('Page.navigate', { url: `${base}/crash-lab.html?${QUERY}` });
 while (!done && !errors.length && Date.now() - t0 < 1_200_000) await new Promise((r) => setTimeout(r, 200));
 if (errors.length) { console.log('page errors:', errors.slice(0, 3)); process.exit(1); }
 console.log(done ? `first frame after ${((Date.now() - t0) / 1000).toFixed(1)} s (${QUERY})` : 'no first frame in 20 min');

@@ -18,7 +18,7 @@ takes. The same definition, sampling, metrics and criteria run everywhere:
 | CPU reference | `cargo run --release -p engine-softbody-lab --example crash_ref -- S02 [--runs 8 \| --run K] [--contact discrete\|edge\|continuous] [--json] [--out DIR]` |
 | CUDA on Modal | `tools/modal/gpu_run.sh --build modal [--fanout-tests] -- -p engine-cuda --test crash_reference` (`CRASH_CONTACT`, `CRASH_RUNS`, `CRASH_RUN_FROM`, `CRASH_SKIP`, `CRASH_REPORTS=DIR`, `CRASH_REPORT_LINES=1`) |
 | The whole suite, both executors | `python3 tools/crash-reference/sweep.py --cpu [--per-run] [--ids ..] [--contacts ..]`, `--cuda [--build local] [--ids S06 --run-from 0 --runs 3] [--skip S06]`, `--summarize` (to `out/crash-reference/sweep/`: each run's report, `summary-cpu.md`, `summary-cuda.md`, `compare.md`, `known-cpu.md`; "Results" below) |
-| Browser (WebGPU crash lab) | `softbody.html?solver=explicit&crashRef=S02[&run=0][&contact=edge][&cam=side]` (scene picker: "Reference crashes") |
+| Browser (WebGPU crash lab) | `crash-lab.html?crashRef=S02[&run=0][&contact=edge][&cam=side]` (scene picker: "Reference crashes") |
 | Browser, stills and report | from `crates/engine-webgpu`: `python3 ../../scripts/with-gpu-lock.py --limit 300 -- node crash-ref-record.mjs --crashRef S02 [--cam side] [--contact edge] [--video] [--all-cams]` (to `out/crash-reference/<id>-<contact>-run<k>/`; `--all-cams`: a still from every camera at every moment) |
 | Page against CPU | `python3 tools/crash-reference/compare.py CPU.json report.json [--all]` (the asserted criteria side by side) |
 | Curves against NHTSA's | `crash_ref -- S11 --json > s11.jsonl`, then `python3 -I tools/crash-reference/overlay.py docs/crash-reference/nhtsa out/crash-reference/overlays s11.jsonl` (section 4) |
@@ -32,6 +32,21 @@ cameras with the lab's, drawing options, grab), **Playback** (Shift+P: time) and
 H (or the bar's "focus") hides them all: the recorders' `clean=1` frame. Their layout at
 800 to 1920 px is checked by `crash-lab-ui-check.mjs --case S05|S02|wall56` (screenshots
 and overlap checks to `out/lab-ui/`).
+
+The crash lab is its own page, `crash-lab.html` (2026-11-27; it shared `softbody.html` with
+the soft AVBD solver before, which stays there). Old links,
+`softbody.html?solver=explicit…` (and `?crashRef=`, `?crashFamily=`, `?preset=` there),
+redirect to it with their other parameters and the fragment, for good. The page is a shell
+and a bootstrap; each module owns one thing and all page state is one object
+(`crash-lab-state.mjs`): the URL (`crash-lab-config.mjs`), the vehicle and its pickers
+(`crash-lab-vehicle.mjs`), the page's own controls and the plain views' panels (the arena,
+the traffic derby, `?lab=0`: `crash-lab-controls.mjs`), the World and device
+(`world-device.mjs`), the explicit sim (`crash-lab-sim.mjs`), drawing (`crash-lab-draw.mjs`,
+`crash-lab-shader.mjs`, `crash-lab-body.mjs`), camera and input (`crash-lab-camera.mjs`,
+`view-math.mjs`), the frame loop (`crash-lab-loop.mjs`), the lab in its panels
+(`crash-lab-mount.mjs`) and the automation hooks (`crash-lab-hooks.mjs`).
+`crash-lab-page-check.mjs` checks the redirects, the first paint, the plain views and the
+soft page.
 
 In the browser the page sends the id; `engine-world-wasm` (`src/crash_ref.rs`) builds the
 fleet with `CrashScenario::build`, reads the GPU state at every sample step and judges the

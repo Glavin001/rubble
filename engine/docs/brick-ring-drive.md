@@ -28,7 +28,7 @@ raycast wheels, and 110,440 AVBD rigid bricks, coupled both ways
   World's sleep on (0.5 s, demo.html's `?sleep=on`; `?sleep=0` on the page restores the
   demo's). The ring settles in about 3 s and only what the car disturbs is awake.
 - **Raycast wheels.** The cars drive on the explicit solver's raycast wheels on their hubs
-  (`engine_softbody::explicit_drive`, as softbody.html's drive scenes): the converted ETK has
+  (`engine_softbody::explicit_drive`, as crash-lab.html's drive scenes): the converted ETK has
   no tyres (BeamNG's shared content). The rays meet the vehicles' own ground, not the
   bricks: a car drives over loose bricks on its body's nodes.
 - **The ground slab** is the demo's static box, in its own collision category that the

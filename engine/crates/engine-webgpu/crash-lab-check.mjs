@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// End-to-end check of the crash-test lab (softbody.html ?solver=explicit with the
+// End-to-end check of the crash-test lab (crash-lab.html with the
 // lab on, crash-lab.mjs and crash-lab-render.mjs) in Chrome WebGPU: each preset
 // (wall 56, pole 29 at 75°, head-on 2 × 50, drop 15 m) is stepped through its
 // impact in small frames; the impact is detected (not before the vehicle can have
@@ -158,7 +158,7 @@ const ready = async (solver) => {
 };
 
 const open = async (query) => {
-  await send('Page.navigate', { url: `${base}/softbody.html?${query}&${CARS[CAR]}` });
+  await send('Page.navigate', { url: `${base}/crash-lab.html?${query}&${CARS[CAR]}` });
   await ready('explicit');
   if (!(await evaluate('!!window.__lab'))) throw new Error('the lab is not on');
 };
@@ -237,7 +237,7 @@ const RUNS = Object.fromEntries(Object.entries(PRESET_RUNS).map(([name, [query, 
 // Grab: a resting car's frontmost node pulled 2.5 m up and 1.5 m forward hard
 // enough to tear: the node moves, beams break; release stops it.
 RUNS.grab = async () => {
-  await open('solver=explicit&xscene=idle&slow=1');
+  await open('xscene=idle&slow=1');
   await lab('L.advance(1000, 34)');
   const node = await lab(`(() => { const p = L.lab.st.lastState.pos; let best = 0; for (let i = 0; i < p.length / 3; i++) if (p[3 * i + 2] > p[3 * best + 2]) best = i; return best; })()`);
   const start = await lab(`Array.from(L.lab.st.lastState.pos.slice(${node} * 3, ${node} * 3 + 3))`);

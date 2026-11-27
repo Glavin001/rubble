@@ -1,5 +1,5 @@
 //! The crash-test lab's reads and the node grab on [`ExplicitSim`]
-//! (`engine-webgpu/softbody.html?solver=explicit`, `crash-lab-render.mjs`).
+//! (`engine-webgpu/crash-lab.html`, `crash-lab-render.mjs`).
 //!
 //! - **Grab** ([`ExplicitSim::set_grab`]): BeamNG-style node grabbing, the solver's
 //!   [`Grab`] (an external spring–damper on one node, the CPU reference's node pass

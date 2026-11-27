@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Every converted community vehicle (community_cache's __mods/index.json) in the
-// browser crash lab (softbody.html ?solver=explicit, JBeam mode, raycast wheels):
+// browser crash lab (crash-lab.html, JBeam mode, raycast wheels):
 // loads, rests 2 s (its broken and bent beams), then the 56 km/h wall (wall56) for
 // 1 s. Prints a table (vehicle, configuration, MB, nodes, beams, rest, wall) and
 // writes a still of each wall run. Local content only: the folder holds no mods
@@ -75,7 +75,7 @@ await send('Runtime.enable');
 await send('Page.enable');
 const open = async (q) => {
   errors = [];
-  await send('Page.navigate', { url: `${base}/softbody.html?${q}` });
+  await send('Page.navigate', { url: `${base}/crash-lab.html?${q}` });
   for (let i = 0; i < 1800; i++) {
     if (await evaluate('window.__ready === true').catch(() => false)) return;
     if (errors.length) throw new Error(errors.join('; '));
@@ -91,8 +91,8 @@ for (const c of cars) {
   const PREFER = ['etkk/kr6.pc', 'ccf/f4_sport_M.pc', 'gavril_vertex/gavril_vertex.pc', 'fullsuv/mid-sport.pc', 'boathauler/gooseneck.pc', 'bh_yacht48/yacht48.pc'];
   const first = c.configs.find((k) => PREFER.includes(k.pc)) ?? c.configs[0];
   for (const k of PCS.length ? c.configs.filter((x) => PCS.includes(x.pc.split('/').pop())) : ALL ? c.configs : [first]) {
-    const q = `solver=explicit&mod=/__mods/${c.folder}&pc=${encodeURIComponent(k.pc)}${(k.wheels ?? 1) > 0 ? '&wheels=raycast' : ''}`;
-    const row = { car: c.label, pc: k.pc, mb: c.megabytes, nodes: k.nodes, beams: k.beams, rest: '', wall: '', url: `/softbody.html?${q}&preset=${(k.wheels ?? 1) > 0 ? 'wall56' : 'drop15'}` };
+    const q = `mod=/__mods/${c.folder}&pc=${encodeURIComponent(k.pc)}${(k.wheels ?? 1) > 0 ? '&wheels=raycast' : ''}`;
+    const row = { car: c.label, pc: k.pc, mb: c.megabytes, nodes: k.nodes, beams: k.beams, rest: '', wall: '', url: `/crash-lab.html?${q}&preset=${(k.wheels ?? 1) > 0 ? 'wall56' : 'drop15'}` };
     try {
       await open(`${q}&xscene=${REST_SCENE}&cam=left`);
       const d = await step(4000);

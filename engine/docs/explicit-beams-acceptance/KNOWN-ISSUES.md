@@ -64,7 +64,7 @@ Known issues:
   - It uses the soft solver's tuning, with no 10 kg minimum node mass.
   - On the explicit solver it bends 138 beams at rest and breaks about 57 while
     coasting at 100 km/h.
-  - So `softbody.html?solver=explicit` uses the acceptance sedan instead.
+  - So `crash-lab.html` uses the acceptance sedan instead.
 
 ## What replaces them
 

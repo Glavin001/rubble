@@ -76,7 +76,7 @@ try {
   };
   const draw = () => evaluate('window.__lab?.draw?.() ?? null');
   const open = async (query) => {
-    const url = `${base}/softbody.html?${query}`;
+    const url = `${base}/crash-lab.html?${query}`;
     console.log(url);
     await send('Page.navigate', { url });
     const t0 = Date.now();
@@ -113,9 +113,9 @@ try {
     for (const [w, h] of SIZES) {
       await size(w, h);
       slow = 4000;
-      await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&crashRef=S02&run=0&contact=edge` });
+      await send('Page.navigate', { url: `${base}/crash-lab.html?crashRef=S02&run=0&contact=edge` });
       await sleep(2500);
-      const s = await evaluate(`({ lab: document.body.classList.contains('lab-on'), info: getComputedStyle(document.getElementById('info')).display, card: !!document.getElementById('loading'), scene: document.getElementById('labSceneBody')?.innerText ?? null })`).catch((e) => ({ e: String(e) }));
+      const s = await evaluate(`({ lab: document.body.classList.contains('lab-on'), info: document.getElementById('info') ? getComputedStyle(document.getElementById('info')).display : 'none', card: !!document.getElementById('loading'), scene: document.getElementById('labSceneBody')?.innerText ?? null })`).catch((e) => ({ e: String(e) }));
       record[`loading-${w}x${h}`] = s;
       if (!s.lab || s.info !== 'none') problems.push(`loading ${w}x${h}: the lab's shell is not up while loading (${JSON.stringify(s)})`);
       await png(`loading-${w}x${h}`);
@@ -127,7 +127,7 @@ try {
       if (card.overlaps) problems.push(`loading ${w}x${h}: the progress card overlaps ${card.overlaps} panel(s) (${JSON.stringify(card)})`);
       await png(`loading-card-${w}x${h}`);
       slow = 0;
-      await open('solver=explicit&crashRef=S02&run=0&contact=edge');
+      await open('crashRef=S02&run=0&contact=edge');
       await draw();
       await png(`loaded-${w}x${h}`);
     }
@@ -136,7 +136,7 @@ try {
   if (ONLY.includes('S02')) {
     // A reference crash: its parameters; the speed, then the car, changed.
     await size(1280, 720);
-    await open('solver=explicit&crashRef=S02&run=0&contact=edge');
+    await open('crashRef=S02&run=0&contact=edge');
     const s0 = await state();
     record.S02_start = s0;
     await advance(160);
@@ -180,7 +180,7 @@ try {
   if (ONLY.includes('wall56')) {
     // A lab preset on the page's car: its speed changed at run time.
     await size(1280, 720);
-    await open('solver=explicit&preset=wall56');
+    await open('preset=wall56');
     const w0 = await state();
     record.wall56_start = w0;
     await advance(200);
@@ -201,7 +201,7 @@ try {
   if (ONLY.includes('pole')) {
     // A family opened directly (the generated sedan into a pole), its offset changed.
     await size(1280, 720);
-    await open('solver=explicit&crashFamily=pole');
+    await open('crashFamily=pole');
     record.pole_start = await state();
     await advance(150);
     await draw();
@@ -218,9 +218,9 @@ try {
   if (ONLY.includes('soft')) {
     // The soft (AVBD) page and the explicit plain view (the arena) still load as before: no
     // lab frame, their own panels.
-    for (const q of ['scene=wall', 'solver=explicit&xscene=arena&n=16']) {
+    for (const q of ['softbody.html?scene=wall', 'crash-lab.html?xscene=arena&n=16']) {
       await size(1280, 720);
-      await send('Page.navigate', { url: `${base}/softbody.html?${q}` });
+      await send('Page.navigate', { url: `${base}/${q}` });
       let st = {};
       for (let i = 0; i < 300 && !st.ready; i++) { await sleep(400); st = await evaluate(`({ ready: window.__ready === true, failed: window.__failed ?? null, lab: document.body.classList.contains('lab-on'), info: getComputedStyle(document.getElementById('info')).display })`).catch(() => ({})); if (st.failed) break; }
       record[`plain ${q}`] = st;

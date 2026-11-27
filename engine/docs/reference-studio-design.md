@@ -100,7 +100,7 @@ the id-based spawn; `crashSetBox(i, centre, half)`, `crashSetBody(i, at, yaw, sp
 live edits; `crashOutline(schema, camera)` (the step 1 `rubble_instance` computed in wasm on
 the live state, so the ghost follows the simulation); `crashCompare(...)` (the step 1
 `compare`, in wasm, so the studio's table no longer needs the native server for maths).
-The crash lab page (`softbody.html?crashRef=`) gets the same desc path so a studio scenario
+The crash lab page (`crash-lab.html?crashRef=`) gets the same desc path so a studio scenario
 opens there too.
 
 ## The 3D view: plain three.js in a React component (confirmed, with one change)

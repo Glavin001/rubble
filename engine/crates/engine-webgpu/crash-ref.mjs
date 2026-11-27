@@ -1,4 +1,4 @@
-// The crash reference suite in the crash lab (softbody.html?solver=explicit&crashRef=S02
+// The crash reference suite in the crash lab (crash-lab.html?crashRef=S02
 // &run=0&contact=edge): the scenario's mod folders, its controls (contact setting, run,
 // its own cameras), the reference footage's links and the criteria panel.
 //

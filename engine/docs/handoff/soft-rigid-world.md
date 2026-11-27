@@ -131,7 +131,7 @@ Pages (serve `engine/crates/engine-webgpu` after building the wasm; see `CONTRIB
 | `one-world.html` | House plus the ETK |
 | `explicit-world.html?n=1\|4\|16` | The crash town |
 | `crash-orbit.html?snap=a.json[,b.json]` | 360° orbit of a saved post-crash car state |
-| `softbody.html?mod=`, `showcase-car.html` | Vehicle labs |
+| `crash-lab.html?mod=`, `showcase-car.html` | Vehicle labs |
 | `demo.html?scene=ring110k` | The rigid baseline |
 
 **BeamNG cars (the ETK) are local only:** the community cache writes them to `engine/crates/engine-webgpu/__mods/`, which is gitignored (see CONTRIBUTING.md). Without it, pages fall back to the sedan or show a "local only" message.

@@ -42,7 +42,7 @@ The rebound check was added after the guard's first real trip on 2026-11-13 (a 3
 
 ## Where it is wired
 
-`stability-stop.mjs` (the panel; no logic) with `ExplicitSim.health()` in `softbody.html` and `WebWorld.explicitHealth()` in `one-world.html`, `explicit-world.html` and `brick-ring-drive.html`. `vehicle-lab.html` is on another branch and takes the same two lines when it merges.
+`stability-stop.mjs` (the panel; no logic) with `ExplicitSim.health()` in `crash-lab.html` (crash-lab-sim.mjs) and `WebWorld.explicitHealth()` in `one-world.html`, `explicit-world.html` and `brick-ring-drive.html`. `vehicle-lab.html` is on another branch and takes the same two lines when it merges.
 
 ## Kernel compiles left behind (a related cause of slow loads)
 

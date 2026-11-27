@@ -19,7 +19,7 @@
 //! default `engine/tools/vehicle-gen/out/<design>` when it holds a build,
 //! else `engine/scenes/vehicles/<design>`. `--out` defaults to
 //! `engine/crates/engine-webgpu/__mods/<design>` (gitignored), which the page
-//! loads as `softbody.html?solver=explicit&mod=/__mods/<design>&pc=<design>/<design>.pc&wheels=raycast`.
+//! loads as `crash-lab.html?mod=/__mods/<design>&pc=<design>/<design>.pc&wheels=raycast`.
 //! Guide: `engine/docs/generated-vehicles.md`.
 use engine_softbody_authoring::authoring::gen2::rig as lattice;
 use engine_softbody_authoring::authoring::rig;

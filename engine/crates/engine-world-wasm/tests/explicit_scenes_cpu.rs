@@ -16,7 +16,7 @@ fn env(k: &str, d: f64) -> f64 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
-/// `softbody.html?solver=explicit&car=showcase&xscene=tbone&speed=118&carSpeed=61&at=0&angle=90`
+/// `crash-lab.html?car=showcase&xscene=tbone&speed=118&carSpeed=61&at=0&angle=90`
 /// (reported 2026-11-14: the struck car's kinetic energy left every bound at
 /// t = 1.17 s; on this reference a 55 g skin node of the struck car left a frame at
 /// 2,810 m/s and the cars' kinetic energy rose 285 kJ in one frame). Two cars on flat

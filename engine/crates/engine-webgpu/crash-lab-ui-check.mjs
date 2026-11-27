@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The crash lab's layout (softbody.html?solver=explicit, crash-lab-ui.mjs) in headless
+// The crash lab's layout (crash-lab.html, crash-lab-ui.mjs) in headless
 // Chrome at several window sizes: a screenshot of each state (as loaded, every panel
 // collapsed, every panel open, focus mode, the results open once the run is done, a
 // keyboard-only pass) and a check that no two panels overlap, none leaves the window
@@ -134,7 +134,7 @@ try {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
-  const url = `${base}/softbody.html?solver=explicit&paused=1&${QUERY}`;
+  const url = `${base}/crash-lab.html?paused=1&${QUERY}`;
   console.log(url);
   await send('Page.navigate', { url });
   const t0 = Date.now();

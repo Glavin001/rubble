@@ -3111,7 +3111,7 @@ opening's edge, the doors' belt edges included, is black rubber.
   flattened onto the floor, each layer darkening it by up to 0.3 by its
   height, spread a little along its horizontal normal, so the car sits on the
   floor wherever it is and however it has turned. The crash lab draws both
-  on its navy floor when the body is shown (`softbody.html?labReflect=0`
+  on its navy floor when the body is shown (`crash-lab.html?labReflect=0`
   off, `=0.2` the reflectance; 0.16 by default; the floor then leaves no
   depth). The crash lab's backdrop is a navy cyclorama with a lit horizon
   band. The paint deepens toward grazing (flop); tail lenses are a deep
@@ -3217,7 +3217,7 @@ vehicle the same visual format as the authored car, so
   for the authored car (the finest whose median edge spans 3 pixels).
 * **Pages.** wasm `jbeamVisual(spec, meshes)`; `showcase-car.html?mod=<folder>`
   renders a mod's visual at rest (no solver; `?n=` copies); the crash lab
-  loads `softbody.html?...&mod=<folder>&jbeamMode=native` (a folder served
+  loads `crash-lab.html?...&mod=<folder>&jbeamMode=native` (a folder served
   with a `files.json` listing). `showcase-car-check.mjs mod_*` and
   `crash-lab-check.mjs --car supercar|tutorial` use the gitignored
   `inspiration/beamng-mods` (`RUBBLE_MODS`), skipped when absent.

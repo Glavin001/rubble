@@ -1,4 +1,4 @@
-// Records the crash-test lab (softbody.html ?solver=explicit with the lab on) as a video:
+// Records the crash-test lab (crash-lab.html with the lab on) as a video:
 // each preset runs frame-locked (the page's own physics and renderer, stepped from here),
 // real time up to just before the impact, exactly 20x slow motion through it, then real
 // time again; the wall crash is shown a second time in the beam-strain view. Frames are
@@ -127,7 +127,7 @@ const ready = async () => {
 // --query a=b&c=d: appended to every page's query (bind=legacy, alt=0: a
 // visual A/B on identical physics).
 const EXTRA = opt('--query', '');
-const open = async (query) => { await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&${query}&${CARS[CAR]}${EXTRA ? '&' + EXTRA : ''}` }); await ready(); };
+const open = async (query) => { await send('Page.navigate', { url: `${base}/crash-lab.html?${query}&${CARS[CAR]}${EXTRA ? '&' + EXTRA : ''}` }); await ready(); };
 const lab = (expr) => evaluate(`(async () => { const L = window.__lab; return ${expr}; })()`);
 const HZ = 2000, FPS = 60;
 // The lab's readout follows its own slow-motion setting; keep it truthful.

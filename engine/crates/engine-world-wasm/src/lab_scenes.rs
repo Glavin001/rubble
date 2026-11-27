@@ -1,4 +1,4 @@
-//! The crash lab's own scenes and presets (`softbody.html?solver=explicit`), as data the page
+//! The crash lab's own scenes and presets (`crash-lab.html`), as data the page
 //! reads (`crashLabCatalog`): each scene of `ExplicitSim`'s spawn (`explicit.rs`
 //! `crash_scene`, `arena`) with its parameters, declared with the same [`Param`] as the
 //! crash reference families, and each one-click preset as a scene and values. The page has

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// End-to-end check of driving on the explicit solver (softbody.html ?solver=explicit,
+// End-to-end check of driving on the explicit solver (crash-lab.html,
 // raycast wheels: engine_softbody::explicit_drive, slang/kernels/explicit_beams_drive.slang)
 // in Chrome WebGPU. Per drive scene and car: the page loads, the car settles on its
 // four wheels, speed rises with throttle (W), the car turns with steer (A/D), the
@@ -150,7 +150,7 @@ const ready = async (solver) => {
 };
 
 const open = async (query) => {
-  await send('Page.navigate', { url: `${base}/softbody.html?${query}&${CARS[CAR]}` });
+  await send('Page.navigate', { url: `${base}/crash-lab.html?${query}&${CARS[CAR]}` });
   await ready('explicit');
   if (!(await evaluate('!!window.__lab'))) throw new Error('the lab is not on');
 };
@@ -170,7 +170,7 @@ const unwrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 
 const RUNS = {};
 RUNS.yard = async () => {
-  await open('solver=explicit&xscene=yard');
+  await open('xscene=yard');
   await clean(true);
   await drive({ forward: 0, steer: 0 }, 1.5);
   const rest = await player();
@@ -220,7 +220,7 @@ const steerTo = (p, x, z) => {
 };
 RUNS.crash = async () => {
   // Right of the poles (z = 34, x ≤ 0) and on, full throttle, into the yard's wall (z = 60).
-  await open('solver=explicit&xscene=yard');
+  await open('xscene=yard');
   await clean(true);
   await drive({ forward: 0 }, 1.0);
   let s = await lab('L.state()');
@@ -243,7 +243,7 @@ RUNS.crash = async () => {
 
 RUNS.drive = async () => {
   // ?drive=1 on an ordinary explicit scene (at rest): its car on raycast wheels, driven.
-  await open('solver=explicit&xscene=idle&drive=1&slow=1');
+  await open('xscene=idle&drive=1&slow=1');
   await clean(true);
   await drive({ forward: 0 }, 1.0);
   const a = await player();
@@ -258,7 +258,7 @@ RUNS.drive = async () => {
 RUNS.traffic = async () => {
   // The traffic derby: the cars drive themselves (ExplicitSim.autopilot); the plain
   // view (no lab). Live (real time) for 8 s.
-  await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&xscene=traffic&cars=6&${CARS[CAR]}` });
+  await send('Page.navigate', { url: `${base}/crash-lab.html?xscene=traffic&cars=6&${CARS[CAR]}` });
   await ready('explicit');
   const read = () => evaluate('window.__explicit.readDrive().then((d) => d.vehicles.map((v) => ({ speed: v.speed, c: v.centre, down: v.wheels.filter((w) => w.contact).length })))');
   const a = await read();

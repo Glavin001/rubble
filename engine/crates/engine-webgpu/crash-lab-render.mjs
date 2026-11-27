@@ -1,5 +1,5 @@
-// Crash-test lab renderer for the explicit node–beam solver (softbody.html
-// ?solver=explicit): beams as round shaded tubes, nodes as sphere impostors, a
+// Crash-test lab renderer for the explicit node–beam solver (crash-lab.html,
+// crash-lab-draw.mjs): beams as round shaded tubes, nodes as sphere impostors, a
 // translucent ghost (or solid) collision skin, the grab line, and a dark studio
 // background and floor. Rendering only: every number comes from the solver's GPU
 // buffers (ExplicitSim nodesBuffer / miscBuffer / beamsBuffer, its render records

@@ -1,7 +1,7 @@
 //! The showcase sedan's visual skin stays sound under any abuse: crashes into
 //! a wall (once and repeatedly), a car into the rear door, random impacts,
 //! and the page's node grab pulling panels 0.5, 2 and 10 m and letting go.
-//! The car and its skin are the page's (`softbody.html?solver=explicit&car=
+//! The car and its skin are the page's (`crash-lab.html?car=
 //! showcase`, drive yard): the medium sedan on raycast wheels
 //! (`skin::raycast_visual`), the explicit solver at its defaults with drag.
 //! What is drawn is the renderer's: [`deform_beams`] positions, triangles cut

@@ -2384,7 +2384,7 @@ node-only staying the default bit for bit.
 
 **Switch.** `ExplicitBeams::surface_contact` (CPU, `explicit_surface.rs`); vehicle flag
 131072 `FLAG_SURFACE` (GPU, `explicit_beams_surface.slang`); spec field
-`surfaceContact` (`ExplicitSim`); page `?surfaceContact=1` (softbody.html, the crash
+`surfaceContact` (`ExplicitSim`); page `?surfaceContact=1` (crash-lab.html, the crash
 lab keeps it). Off: nothing runs (a uniform early return on the GPU).
 
 **Features (no double counting).** Node contact keeps every node; a triangle takes the

@@ -22,7 +22,9 @@ WebGPU demo `vehicle.html`): see [docs/vehicles.md](docs/vehicles.md).
 
 Soft-body vehicles (node–beam cars that crumple and tear; Rigs of Rods `.truck` and BeamNG `.jbeam`
 import; particles and plastic, breakable beams in the same AVBD step; crash-test WebGPU demo
-`softbody.html`): see [docs/softbody.md](docs/softbody.md).
+`softbody.html`): see [docs/softbody.md](docs/softbody.md). The same cars on the explicit 2 kHz
+node–beam solver, with reference crashes and crash-test presets: the crash lab, `crash-lab.html`
+([docs/crash-reference.md](docs/crash-reference.md)).
 
 ## Quick start (Metal)
 

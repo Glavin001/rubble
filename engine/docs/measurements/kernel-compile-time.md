@@ -37,7 +37,7 @@ Cold compiles (`explicit-wgsl-check.mjs` with `EXPLICIT_WGSL_COLD=1`), one modul
 | Module | Before | After |
 |---|---|---|
 | `explicit_beams_wide_nosurf` (one car, no surface contact) | 7.2 s (user's page) | 7.0 s |
-| one car with surface contact, softbody.html | about 45 s (user's page: the frame in segments plus nine surface pipelines) | 10.0 s (`explicit_beams_wide_nocpl`, one pipeline) |
+| one car with surface contact, softbody.html (now crash-lab.html) | about 45 s (user's page: the frame in segments plus nine surface pipelines) | 10.0 s (`explicit_beams_wide_nocpl`, one pipeline) |
 | the nine surface pipelines (World pages, with coupling) | 17.3 s side by side; one alone up to 89 s (commit `3e0aa017`) | 0.6 to 1.7 s each, 11 s in all one after another |
 | `explicit_beams_solo_wide` | still compiling at 78 s beside two others (user's page) | 31.8 s; `_nocpl` 10.3 s |
 | `explicit_beams_contact_wide` | still compiling at 128 to 210 s beside two others | 166.3 s; `_nocpl` 33.6 s |
@@ -46,7 +46,7 @@ Cold compiles (`explicit-wgsl-check.mjs` with `EXPLICIT_WGSL_COLD=1`), one modul
 | `explicit_beams_contact_wide_nosurf` | not measured | 24.0 s |
 | `explicit_beams_contact_big_wide_nosurf` | not measured | 12.9 s; not compiled for 4 vehicles or fewer |
 
-What a first load compiles on softbody.html (no coupling), one after another:
+What a first load compiles on softbody.html (now crash-lab.html; no coupling), one after another:
 
 | Scene | Before | After |
 |---|---|---|

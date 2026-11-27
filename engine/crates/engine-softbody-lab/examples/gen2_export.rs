@@ -7,7 +7,7 @@
 //! cargo run --release -p engine-softbody-lab --example gen2_export -- [out-dir]
 //! ```
 //! `out-dir` defaults to `engine/crates/engine-webgpu/__mods/gen2` (gitignored),
-//! which the page loads as `softbody.html?solver=explicit&mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast`.
+//! which the page loads as `crash-lab.html?mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast`.
 use engine_softbody_authoring::authoring::gen2::{self, build::*, gen3, rig};
 use std::collections::BTreeMap;
 

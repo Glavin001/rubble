@@ -1,4 +1,4 @@
-// The crash lab's scenes as configurations (softbody.html ?solver=explicit): the scene picker
+// The crash lab's scenes as configurations (crash-lab.html): the scene picker
 // grouped by scenario family, and a scene's parameters as controls in the Scene panel.
 //
 // Nothing about a scene is defined here. The reference crashes and the scenario families
@@ -31,7 +31,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 export const paramDefault = (p) => p.kind.default;
 
 /**
- * The page's tables from the lab's catalogue, in the shapes softbody.html reads them:
+ * The page's tables from the lab's catalogue, in the shapes the page reads them (crash-lab-config.mjs):
  * `XSCENES` (id → title), `XPARAMS` (id → [[key, "label unit", default, [min, max, step]]]:
  * km/h ones go to the solver in m/s), `XCRASH`, `XDRIVE` (sets of ids), `XPILL` (id → () =>
  * the pill from the values now, `P(key, default)`) and `LAB_PRESETS` (id → { label, xscene,

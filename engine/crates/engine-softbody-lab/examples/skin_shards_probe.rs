@@ -1,5 +1,5 @@
 //! Diagnostic: the showcase sedan's visual skin after crashes, as the page
-//! `softbody.html?solver=explicit&car=showcase` (drive yard, raycast wheels)
+//! `crash-lab.html?car=showcase` (drive yard, raycast wheels)
 //! draws it. CPU only. Per scene it reports, per frame and at the end:
 //! flung nodes (far past the car's rest radius from its centroid) with their
 //! beams and speed history; the skin's visible edge stretch (the renderer's

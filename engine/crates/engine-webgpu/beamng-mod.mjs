@@ -1,7 +1,7 @@
 // A converted BeamNG vehicle folder (engine-softbody's community_cache writes them to
 // engine-webgpu/__mods/<folder>, each with a files.json of its files' paths): fetched
 // for the wasm, which parses and builds everything (the JBeam vehicle, its flexbody
-// visual, its textures). Shared by the pages that load one (softbody.html ?mod=,
+// visual, its textures). Shared by the pages that load one (crash-lab.html ?mod=,
 // one-world.html). Community content is data: only its .jbeam, .pc, .dae,
 // .materials.json, .glb/.rskin and image files are read, and nothing in it runs.
 import { jbeamVisual, jbeamVisualSkinned, decodeTexture } from './rubble-world.mjs';

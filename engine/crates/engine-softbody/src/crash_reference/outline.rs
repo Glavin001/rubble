@@ -12,7 +12,7 @@
 //! rear, the node nearest the centre plane (or the mean of a symmetric pair), which is
 //! what shows a tent fold.
 //!
-//! Projection is the web crash lab's (`softbody.html` `viewProj`): look-at with world up +Y,
+//! Projection is the web crash lab's (`crash-lab.html`, `view-math.mjs` `viewProj`): look-at with world up +Y,
 //! perspective with a 60° vertical field of view, pixels from the top-left corner.
 
 use super::{metrics::robust_fit, Camera, Section, Template};

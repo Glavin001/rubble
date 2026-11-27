@@ -1,5 +1,5 @@
 // Records a crash reference scenario (engine_softbody::crash_reference, docs/crash-reference.md)
-// in the web crash lab: softbody.html?solver=explicit&crashRef=ID, frame-locked in headless
+// in the web crash lab: crash-lab.html?crashRef=ID, frame-locked in headless
 // Chrome (the page's own physics, renderer and report, stepped from here). Saves a still at
 // each of the scenario's moments (ms after first contact, from the registry) from its own
 // camera, the criteria panel at the end, the run's CrashReport as judged by the page (Rust,
@@ -87,11 +87,11 @@ try {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
-  const q = new URLSearchParams({ solver: 'explicit', crashRef: ID, run: String(RUN), contact: CONTACT, paused: '1' });
+  const q = new URLSearchParams({ crashRef: ID, run: String(RUN), contact: CONTACT, paused: '1' });
   if (CAM) q.set('cam', CAM);
   // --query a=b&c=d: more of the page's options (skin3=ghost&skeleton=1&color=strain: the beams).
   for (const [k, v] of new URLSearchParams(opt('--query', ''))) q.set(k, v);
-  const url = `${base}/softbody.html?${q}`;
+  const url = `${base}/crash-lab.html?${q}`;
   console.log(url);
   await send('Page.navigate', { url });
   const t0 = Date.now();

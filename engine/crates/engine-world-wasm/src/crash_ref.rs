@@ -1,6 +1,6 @@
 //! The crash reference suite (`engine_softbody::crash_reference`,
 //! `engine/docs/crash-reference.md`) in the web crash lab
-//! (`softbody.html?solver=explicit&crashRef=S02&run=0&contact=edge`).
+//! (`crash-lab.html?crashRef=S02&run=0&contact=edge`).
 //!
 //! Nothing about a scenario is described here or in the page. The registry the page lists
 //! is [`crash_reference::all`] as JSON ([`registry`]); a scenario's fleet is

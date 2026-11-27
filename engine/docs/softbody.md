@@ -538,10 +538,13 @@ reference runs remain to do.
 
 ## The explicit solver in the demo
 
-The HUD's solver button (`?solver=explicit`) rebuilds the scene with the vehicle on
-the explicit 2 kHz node–beam solver instead ([explicit-beams.md](explicit-beams.md):
-Rigs of Rods parity, `ExplicitBeamsGpu`), and back. The URL keeps the state, so a
-link opens either solver.
+The explicit 2 kHz node–beam solver ([explicit-beams.md](explicit-beams.md): Rigs of
+Rods parity, `ExplicitBeamsGpu`) has its own page, the crash lab (`crash-lab.html`;
+[crash-reference.md](crash-reference.md) has its panels). The HUD's solver link opens
+the same scene and vehicle there, and the crash lab's link opens them here again; the
+URL keeps the state, so a link opens either solver. Old links to
+`softbody.html?solver=explicit…` redirect to `crash-lab.html` with their other
+parameters, for good.
 
 * **Vehicles** (`?car=`): `sedan` (on the explicit side the acceptance runs'
   procedural sedan, `CarParams::sedan()` at a 10 kg minimum node mass, with soft
@@ -573,7 +576,7 @@ link opens either solver.
 
 ```bash
 python3 -m http.server 8791 --directory engine   # the page and the acceptance vehicles
-# http://127.0.0.1:8791/crates/engine-webgpu/softbody.html?solver=explicit&scene=wall&truck=../../docs/explicit-beams-acceptance/vehicles/rubble_hires_jbeam.truck
+# http://127.0.0.1:8791/crates/engine-webgpu/crash-lab.html?scene=wall&truck=../../docs/explicit-beams-acceptance/vehicles/rubble_hires_jbeam.truck
 CONTENT=<RigsOfRods/content> node --experimental-websocket crates/engine-webgpu/explicit-check.mjs
 ```
 

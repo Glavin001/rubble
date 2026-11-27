@@ -1,6 +1,6 @@
 # Showcase sedan skin: shards, confetti and saw-tooth (2026-11-13)
 
-The page `softbody.html?solver=explicit&car=showcase` (drive yard, raycast
+The page `crash-lab.html?car=showcase` (drive yard, raycast
 wheels, explicit 2 kHz solver) drew the authored sedan's visual skin after
 crashes and node grabs as long blades, a confetti of flipped slivers, holes
 and saw-tooth seams. Measured on the CPU reference only (no GPU, no browser):
@@ -393,7 +393,7 @@ The renderer mirrors `eval_breaks`; both skin modules validate with naga
 --example wgsl_validate -- out/wgsl/*.wgsl`; naga 24 needs `LOD_PX` as a float,
 which the dump writes). Not run on a GPU or in Chrome (Tint's uniformity
 rules are stricter: `nodeComponents` loops on `workgroupUniformLoad`). Check:
-1. `softbody.html?solver=explicit&car=showcase` (drive yard), Chrome.
+1. `crash-lab.html?car=showcase` (drive yard), Chrome.
 2. Drive into the wall at 70 km/h: the bonnet and bumper dent and stay
    drawn; holes only where the beam overlay (V) shows broken beams.
 3. Drive into a parked car's rear door: the door dents, no hole into the

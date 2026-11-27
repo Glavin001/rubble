@@ -200,7 +200,7 @@ So the floppy rear panels yield where they stretch.
 - The renderer's `skin()` and `deform_beams` do the same.
 - Without the fallback, a pulled-off door drew 263 triangles of skin joining it to the car; with the fallback it draws 0.
 - Once a lid pops or a latch breaks, its edge rides the lid's own nodes. Those nodes are up to 0.15 m inboard, so the drift grows (above).
-- Measuring: `showcaseCar({ bind: 'legacy' })` (and `?bind=legacy` on softbody.html and showcase-car.html, and `crash-lab-record.mjs --query bind=legacy`) selects the binding from before this work on the same build. `alt: false` (`?alt=0`) drops the fallback.
+- Measuring: `showcaseCar({ bind: 'legacy' })` (and `?bind=legacy` on crash-lab.html and showcase-car.html, and `crash-lab-record.mjs --query bind=legacy`) selects the binding from before this work on the same build. `alt: false` (`?alt=0`) drops the fallback.
 - On identical physics, the doorpull's torn door edge and sill shards appear with the legacy binding too, so they are physics. They differ from the 4e9db94a recording because the physics changed in the merge.
 - C5: 10 cars at 16 m (`perf_n10`, Apple M-series) take 4.0 ms (sedan) and 4.1 ms (sedan1), about 0.41 ms a car. Legacy takes 4.2–4.3 ms. The panels' drawn edges lie up to 0.15 m past their last node row. About 31 % of body vertices ride a shut-line triangle. In the crashes, up to 215 of about 1700 such samples stretch past 1.5×, and the renderer tears them at 2.5×. The physics' own collision triangles stretch the same way.
 

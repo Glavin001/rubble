@@ -41,7 +41,7 @@ SURFACE_CONTACT=1 cargo run --release -p engine-softbody-lab --example vehicle_c
 # Clips: CPU reference simulation, skinned mesh rendered in Blender (frames in out/film)
 sh engine/tools/vehicle-gen/tools/film_all.sh sedan
 # The page
-softbody.html?solver=explicit&preset=wall56&mod=/__mods/sedan&pc=sedan/sedan.pc&wheels=raycast
+crash-lab.html?preset=wall56&mod=/__mods/sedan&pc=sedan/sedan.pc&wheels=raycast
 ```
 
 In code:
@@ -263,7 +263,7 @@ The rigger takes any design through the same input trait. What each needs:
   (the named masses ride the body).
 - **Mod size:** the Rust sedan's mod is about 85 MB, mostly the `.rskin`
   (308k render vertices).
-- **On the GPU page:** record `softbody.html?mod=/__mods/sedan` in Chrome (the
+- **On the GPU page:** record `crash-lab.html?mod=/__mods/sedan` in Chrome (the
   GPU World run is native here; the clips are CPU reference rendered in
   Blender).
 
