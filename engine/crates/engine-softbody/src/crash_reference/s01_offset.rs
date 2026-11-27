@@ -12,10 +12,6 @@
 
 use super::*;
 
-const KMH: f32 = 64.0;
-/// The share of the car's width the block covers, from its left (+X) side.
-const OVERLAP: f32 = 0.4;
-
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
         id: "S01".into(),
@@ -23,21 +19,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[112, 126], real_test: "Euro NCAP offset deformable barrier (ODB), 40 % overlap, 64 km/h" },
         designs: names(&["sedan"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let e = extent("sedan");
-            let v = KMH / 3.6 * j.speed;
-            // A tenth of a second of travel before the block.
-            let gap = 0.1 * v;
-            let face = e.hi.z + gap;
-            // A rigid block 2 m tall and 1 m deep over the left 40 % of the car's width,
-            // running a metre past its side.
-            let (x0, x1) = (e.hi.x - OVERLAP * e.width(), e.hi.x + 1.0);
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
-                boxes: vec![(Vec3::new(0.5 * (x0 + x1), 1.0, face + 0.5), Vec3::new(0.5 * (x1 - x0), 1.0, 0.5))],
-                impact_s: 0.1,
-            }
-        }),
+        modified_from: None,
+        // A rigid block 2 m tall and 1 m deep over the left 40 % of the car's width, running a
+        // metre past its side, a tenth of a second of travel ahead.
+        layout: family::preset(&families::BLOCK, &[("car", "sedan".into()), ("speed", 64.0.into()), ("overlap", 0.4.into()), ("height", 2.0.into()), ("depth", 1.0.into()), ("lead", 0.1.into())]),
         // The car is back off the block by 0.1 s and rolls away on free wheels; the yaw is
         // settled by 0.4 s.
         secs_after_impact: 1.0,

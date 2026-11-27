@@ -726,42 +726,7 @@ pub fn place(world: &mut World, def: &SoftSceneDef) -> anyhow::Result<Placed> {
     let p = |k: &str, d: f64| def.p(k, d);
     if def.explicit {
         // The explicit sim's static shapes, for rendering (it collides with its own).
-        for row in &def.explicit_boxes {
-            let g = |i: usize, d: f64| row.get(i).copied().unwrap_or(d);
-            let (hx, hy, hz) = (g(3, 0.0), g(4, 0.0), g(5, 0.0));
-            let geometry = match g(10, 0.0) as u32 {
-                2 => {
-                    let pts: Vec<glam::Vec3> = (0..32u32)
-                        .map(|i| {
-                            let a = (i >> 1) as f64 * pi / 8.0;
-                            let y = if i & 1 != 0 { hy } else { -hy };
-                            glam::Vec3::from_array(f3([hx * a.cos(), y, hx * a.sin()]))
-                        })
-                        .collect();
-                    Geometry::Hull {
-                        hull: ConvexHull::from_points(&pts)
-                            .map_err(|e| anyhow::anyhow!("hull: {e:?}"))?,
-                        transform: Transform::IDENTITY,
-                    }
-                }
-                3 => Geometry::Capsule {
-                    center: [0.0; 3],
-                    radius: hx as f32,
-                    half_len: hy as f32,
-                },
-                4 => Geometry::Sphere {
-                    center: [0.0; 3],
-                    radius: hx as f32,
-                },
-                _ => Builder::cuboid([hx, hy, hz]),
-            };
-            let body = b.world.create_body(&BodyDef {
-                position: f3([g(0, 0.0), g(1, 0.0), g(2, 0.0)]),
-                rotation: f4([g(6, 0.0), g(7, 0.0), g(8, 0.0), g(9, 1.0)]),
-                ..BodyDef::default()
-            })?;
-            b.shape_on(body, geometry, MAT_PROP)?;
-        }
+        super::explicit_boxes::place(b.world, &def.explicit_boxes)?;
     } else {
         match def.scene.as_str() {
             "yard" => {

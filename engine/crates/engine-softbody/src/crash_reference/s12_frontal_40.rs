@@ -11,10 +11,10 @@
 //! First principles: 11.11 m/s, 89 kJ; crush scales with speed above the no-damage speed
 //! (Campbell, targets §2.2): (40 − 8)/(56.3 − 8) = 0.66 of the 56 km/h crush.
 
-use super::s11_ncap_frontal_56::{frontal_laws, wall_layout};
+use super::s11_ncap_frontal_56::{frontal_laws, wall_preset};
 use super::*;
 
-pub const KMH: f32 = 40.0;
+pub const KMH: f64 = 40.0;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -23,7 +23,8 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA FMVSS 208 rigid barrier, 40 km/h (tests 9692, 7793: Toyota Camry)" },
         designs: names(&["sedan"]),
         recreated: false,
-        layout: code(|extent, j| wall_layout(extent("sedan"), KMH / 3.6 * j.speed, j)),
+        modified_from: None,
+        layout: wall_preset(KMH),
         secs_after_impact: 0.4,
         cameras: vec![
             Camera { name: "side".into(), eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },

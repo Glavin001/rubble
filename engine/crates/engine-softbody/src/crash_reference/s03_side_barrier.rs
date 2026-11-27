@@ -33,13 +33,9 @@
 //! perpendicular at 50 km/h, so none of its bands cite them: they are estimates, reported.
 
 use super::*;
-use crate::crash_rigs::MDB_FACE;
 
-const KMH: f32 = 50.0;
 /// Simulated seconds after first contact: the pulse (about 0.1 s) and the car shoved clear.
 pub const AFTER_IMPACT_S: f32 = 0.6;
-/// The barrier's run-up before contact (s).
-const RUN_UP_S: f32 = 0.4;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -48,29 +44,11 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[146, 151], real_test: "IIHS / Euro NCAP side impact (run with the FMVSS 214 barrier, perpendicular), 50 km/h" },
         designs: names(&["sedan", "mdb214"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let (e, b) = (extent("sedan"), extent("mdb214"));
-            let v = KMH / 3.6 * j.speed;
-            let (front, rear) = e.axles.unwrap_or((e.lo.z + 0.2 * e.length(), e.lo.z + 0.8 * e.length()));
-            // The spawn puts the lowest node 2 cm up; the car stands on its raycast wheels,
-            // so it is raised until their lowest point is (the web lab's spawn rule), and
-            // only settles by its suspension's sag before the hit.
-            let mid = 0.5 * (front + rear);
-            // FMVSS 214 S8.10: the face's forward edge on the impact reference line.
-            let irl = if front - rear <= 2.896 { mid + 0.94 } else { front - 0.508 };
-            let face_z = irl - 0.5 * MDB_FACE[0] + j.lateral;
-            // The barrier faces −X (yaw −90°): its bumper's front, `b.hi.z` ahead of its
-            // origin, a run-up short of the car's left side.
-            let x = e.hi.x + RUN_UP_S * v + b.hi.z;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![
-                    Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0),
-                    Body::new("barrier", "mdb214", Vec3::new(x, 0.0, face_z), -0.5 * std::f32::consts::PI + j.yaw, v),
-                ],
-                boxes: Vec::new(),
-                impact_s: RUN_UP_S,
-            }
-        }),
+        modified_from: None,
+        // The barrier square to the car's left side (no crab), its face's forward edge on FMVSS
+        // 214's impact reference line, a run-up short of it. (The car stands on its raycast
+        // wheels and only settles by its suspension's sag before the hit.)
+        layout: family::preset(&families::SIDE_BARRIER, &[("car", "sedan".into()), ("barrier", "mdb214".into()), ("speed", 50.0.into()), ("crab", 0.0.into()), ("aim", 0.0.into()), ("run_up", 0.4.into())]),
         secs_after_impact: AFTER_IMPACT_S,
         cameras: vec![
             // Ahead of the car and out on the struck side, looking back at the doors.

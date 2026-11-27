@@ -11,35 +11,11 @@
 
 import { COLOR_MODES, SKIN_MODES, PART_COLORS, partCss, strainGradientCss } from './crash-lab-render.mjs';
 import { createLabLayout } from './crash-lab-ui.mjs';
+import { pickerOptions } from './crash-lab-scene.mjs';
 
-/** One-click presets: the explicit scene, its fields (XPARAMS keys), pills, camera. */
-export const LAB_PRESETS = {
-  wall56: { label: 'Wall · 56 km/h', xscene: 'wall', params: { speed: 56 }, pills: ['WALL · 56 KM/H'], cam: 'three' },
-  // An oblique side pole: sliding at 75° to the car's axis into a pole at the door,
-  // 0.8 m away (a car sliding on its tyres would stop short of the usual run-up).
-  pole29: { label: 'Pole · 29 km/h', xscene: 'sidepole', params: { speed: 29, angle: 75, at: 0.3, runUp: 0.8 }, pills: ['POLE · 29 KM/H'], cam: 'threeFront' },
-  headon50: { label: 'Head-on · 2 x 50 km/h', xscene: 'headon', params: { speed: 50, speed2: 50 }, pills: ['HEAD-ON · 2 x 50 KM/H'], cam: 'side' },
-  drop15: { label: 'Dropped from 15 m', xscene: 'drop', params: { height: 15 }, pills: ['DROPPED FROM 15 M'], cam: 'side' },
-  // engine/docs/beamng-realism-plan.md P10. FMVSS 214's moving barrier is
-  // 1,368 kg crabbed 27° at 54 km/h into the driver's side; until the scenes
-  // have a barrier, the striker is a second car (1,450 kg: within 6 %) driven
-  // at 54 km/h, its heading 27° off square, into the front door.
-  tbone214: { label: 'Side · FMVSS 214-like · 54 km/h', xscene: 'tbone', params: { speed: 54, at: 0.55, angle: 63 }, pills: ['SIDE · 54 KM/H · 27° CRAB', 'FMVSS 214-LIKE (CAR STRIKER)'], cam: 'three' },
-  // Car to car at 80 km/h, 90°, at the B-pillar: the severe T-bone in which a
-  // door may come off (when its hinges and latch pass their strength).
-  tbone80: { label: 'T-bone · car to car · 80 km/h', xscene: 'tbone', params: { speed: 80, at: 0.15 }, pills: ['T-BONE · 80 KM/H'], cam: 'three' },
-  // IIHS small overlap: 64 km/h, 25 % of the width into a rigid barrier.
-  overlap64: { label: 'Small overlap · 25 % · 64 km/h', xscene: 'wall', params: { speed: 64, overlap: 0.25 }, pills: ['SMALL OVERLAP · 25 % · 64 KM/H'], cam: 'threeFront' },
-  // A post glancing down the side at 50 km/h: the front corner, door and
-  // mirror take it (12 cm of the width overlaps the post).
-  swipe50: { label: 'Post sideswipe · 50 km/h', xscene: 'pole', params: { speed: 50, offset: 0.82 }, pills: ['POST SIDESWIPE · 50 KM/H'], cam: 'threeFront' },
-  // FMVSS 214 S7 with the standard's barrier: 1,367.6 kg, its honeycomb face
-  // (310 kPa main block, 1,689 kPa bumper), crabbed 27°, 33.5 mph into the driver's
-  // side, its forward edge on the impact reference line (crash_rigs.rs).
-  mdb214: { label: 'Side · FMVSS 214 MDB · 54 km/h', xscene: 'mdb214', params: { speed: 53.9, crab: 27 }, pills: ['FMVSS 214 · MDB · 54 KM/H', '1,368 KG · 27° CRAB'], cam: 'three' },
-  // The front door's latch edge pulled out through six skin nodes by one rig.
-  doorpull: { label: 'Door pull · 0.5 m/s', xscene: 'doorpull', params: { pullSpeed: 0.5, doorNodes: 6 }, pills: ['DOOR PULL · 0.5 M/S'], cam: 'threeFront' },
-};
+// The one-click presets (wall56, pole29, ...) and the lab's scenes are Rust's catalogue
+// (engine-world-wasm lab_scenes.rs, `crashLabCatalog`); crash-lab-scene.mjs `labTables`
+// gives the page its tables from it.
 
 /** Slow-motion factors (displayed time per simulated time). */
 export const SLOW = [1, 2, 4, 10, 20, 50];
@@ -80,7 +56,42 @@ const CSS = `
 #labPanel .tag { color: #ffcf5a; font-weight: 700; letter-spacing: 0.1em; }
 #labPanel .tag:empty { display: none; }
 .lab-clean #info, .lab-clean #hud, .lab-clean #status, .lab-clean #labPanel { display: none !important; }
+/* While the engine loads: the panels' final places, their controls to come; the progress
+   card centred over the 3D area right of the left column (never over a panel). */
+.lab-shell-wait { color: #9aa6be; padding: 4px 0; }
+body.lab-on .rb-card { left: calc(50% + 150px); min-width: min(560px, calc(100vw - 340px)); max-width: min(720px, calc(100vw - 340px)); }
 `;
+
+/**
+ * The lab's frame before the engine loads (softbody.html calls it at once in lab mode): the
+ * HUD's places, the panels (crash-lab-ui.mjs) with a line saying what they will hold, the
+ * raw page panels hidden. `createCrashLab({ shell })` fills it. `title`: the scene's name
+ * when known.
+ */
+export function createLabShell({ title = '' } = {}) {
+  const style = document.createElement('style');
+  style.textContent = CSS;
+  document.head.appendChild(style);
+  document.body.classList.add('lab-on');
+  const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return document.body.appendChild(t.content.firstChild); };
+  const pillsEl = el('<div class="lab-ui" id="labPills"></div>');
+  const timeEl = el('<div class="lab-ui" id="labTime"><div class="big pre">0.000 s</div><div class="sub">LOADING</div></div>');
+  const countsEl = el('<div class="lab-ui" id="labCounts"></div>');
+  const legendEl = el('<div class="lab-ui" id="labLegend"></div>');
+  let clean = false;
+  const shell = { pillsEl, timeEl, countsEl, legendEl, onFocus: null };
+  shell.ui = createLabLayout({ pills: pillsEl, time: timeEl, counts: countsEl, legend: legendEl, focus: () => shell.focus?.() ?? clean, setFocus: (on) => (shell.onFocus ? shell.onFocus(on) : (clean = on)) });
+  const wait = (t) => `<div class="lab-shell-wait">${t}</div>`;
+  shell.ui.bodies.scene.innerHTML = wait(title ? `${title.replace(/[&<>]/g, '')}: loading…` : 'Loading the scene…');
+  shell.ui.bodies.view.innerHTML = wait('Cameras and drawing: once the engine is up.');
+  shell.ui.bodies.playback.innerHTML = `<div class="r">${['restart', 'pause', 'frame ▸', 'step ▸'].map((t) => `<button disabled>${t}</button>`).join('')}<span class="lab-shell-wait">loading the engine…</span></div>`;
+  shell.ui.bodies.results.innerHTML = wait('Measured once the run starts.');
+  // Not a lab page after all (the scene turned out to be a plain view): the page as it was.
+  shell.destroy = () => { document.body.classList.remove('lab-on'); for (const id of ['labLeft', 'labRight', 'labPanel', 'labUnfocus', 'labCounts', 'labLegend']) document.getElementById(id)?.remove(); style.remove(); };
+  shell.setTitle = (t) => { const w = shell.ui.bodies.scene.querySelector('.lab-shell-wait'); if (w) w.textContent = `${t}: loading…`; };
+  shell.ui.relayout();
+  return shell;
+}
 
 /**
  * @param {object} ctx
@@ -101,17 +112,16 @@ const CSS = `
  */
 export function createCrashLab(ctx) {
   const { qs, canvas, renderer } = ctx;
-  const style = document.createElement('style');
-  style.textContent = CSS;
-  document.head.appendChild(style);
-  document.body.classList.add('lab-on');
-  const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return document.body.appendChild(t.content.firstChild); };
-  const pillsEl = el('<div class="lab-ui" id="labPills"></div>');
-  const timeEl = el('<div class="lab-ui" id="labTime"><div class="big">0 ms</div><div class="sub"></div></div>');
-  const countsEl = el('<div class="lab-ui" id="labCounts"></div>');
-  const legendEl = el('<div class="lab-ui" id="labLegend"></div>');
-  const ui = createLabLayout({ pills: pillsEl, time: timeEl, counts: countsEl, legend: legendEl, focus: () => st.clean, setFocus: (on) => setClean(on) });
-  const preset = ctx.preset ? LAB_PRESETS[ctx.preset] : null;
+  // The frame built before the engine loaded (createLabShell), or one now.
+  const shell = ctx.shell ?? createLabShell();
+  const { pillsEl, timeEl, countsEl, legendEl, ui } = shell;
+  shell.focus = () => st.clean;
+  shell.onFocus = (on) => setClean(on);
+  for (const b of Object.values(ui.bodies)) b.replaceChildren();
+  const preset = ctx.preset ? ctx.presets?.[ctx.preset] : null;
+  // A crash reference run's first contact (a step): its scenario's, which a change of its
+  // values moves.
+  const impactAt = () => (typeof ctx.impactAt === 'function' ? ctx.impactAt() : ctx.impactAt);
   // 'body' only when the page draws an authored body (ctx.body).
   const skinModes = ctx.body ? SKIN_MODES : SKIN_MODES.filter((m) => m !== 'body');
 
@@ -156,9 +166,12 @@ export function createCrashLab(ctx) {
   // The layout (crash-lab-ui.mjs: each panel's one responsibility): the scene picker in
   // Scene, time in Playback, how it is drawn and from where in View. The page and
   // crash-ref.mjs add theirs (lab.ui.bodies).
-  const sceneOpts = `${ctx.refs?.length ? `<optgroup label="Reference crashes">${ctx.refs.map((r) => `<option value="r:${r.id}"${r.id === ctx.refId ? ' selected' : ''}>${r.id} · ${r.title}</option>`).join('')}</optgroup>` : ''}<optgroup label="Crash-test presets">${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="p:${k}"${k === ctx.preset && !ctx.refId ? ' selected' : ''}>${p.label}</option>`).join('')}</optgroup><optgroup label="Scenes">${Object.entries(ctx.scenes ?? {}).map(([k, t]) => `<option value="s:${k}"${!ctx.preset && !ctx.refId && k === ctx.xscene ? ' selected' : ''}>${t.replace(/^Explicit: (.)/, (_, c) => c.toUpperCase())}</option>`).join('')}</optgroup>`;
+  // Grouped by scenario family (crash-lab-scene.mjs): each family's reference crashes, the
+  // lab's presets and scenes that stage it, and the family itself to configure.
+  const current = ctx.familyId ? `f:${ctx.familyId}` : ctx.refId ? `r:${ctx.refId}` : ctx.preset ? `p:${ctx.preset}` : `s:${ctx.xscene}`;
+  const sceneOpts = pickerOptions({ registry: ctx.registry ?? { scenarios: ctx.refs ?? [], families: [] }, catalog: ctx.catalog ?? { scenes: [], presets: [] }, current });
   const into = (parent, html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); parent.append(...t.content.childNodes); };
-  into(ui.bodies.scene, `<div class="r"><select id="labPreset" aria-label="Scene" title="What is simulated: a reference crash, a crash-test preset or any explicit scene (its knobs below)">${sceneOpts}</select></div>`);
+  into(ui.bodies.scene, `<div class="r"><select id="labPreset" aria-label="Scene" title="What is simulated, by kind of crash: its reference crashes, the lab's presets and scenes, or the family itself to configure (its parameters below)">${sceneOpts}</select></div>`);
   into(ui.bodies.playback, `<div class="r">
       <button id="labRestart" title="Restart the run (R)" aria-keyshortcuts="R">restart</button>
       <button id="labPlay" title="Play or pause (Space)" aria-keyshortcuts="Space">pause</button>
@@ -229,6 +242,7 @@ export function createCrashLab(ctx) {
     const [kind, k] = e.target.value.split(':');
     if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
     if (kind === 'r') { location.href = ctx.refUrl(k); return; }
+    if (kind === 'f') { location.href = ctx.familyUrl(k); return; }
     // The page's vehicle and options (softbody.html keepVehicle) carry across.
     const u = new URL(location.href); const s = new URLSearchParams(); window.__keepVehicle?.(s); s.set('solver', 'explicit'); s.set('preset', k); u.search = s.toString(); location.href = u.href;
   };
@@ -256,8 +270,11 @@ export function createCrashLab(ctx) {
   // ---------------------------------------------------------------- HUD
   function pills() {
     const custom = qs.get('pills');
+    // A preset's own pills while its values are the preset's; else the scene's, from its values
+    // now (ctx.pill may be a function of them).
+    const own = typeof ctx.pill === 'function' ? ctx.pill() : ctx.pill;
     const list = custom ? custom.split(',').map((s) => s.trim()).filter(Boolean)
-      : [...(preset?.pills ?? [ctx.pill ?? ctx.xscene.toUpperCase()])];
+      : [...((!ctx.modified?.() && preset?.pills) || [own ?? ctx.xscene.toUpperCase()])];
     const o = renderer.opts;
     const sub = custom ? [] : [o.skin === 'off' ? (o.nodes ? 'NODE + BEAM' : 'THE SKELETON') : o.skin === 'ghost' ? 'THE SKELETON · GHOST BODY' : o.skin === 'body' ? 'BODY SKINNED TO THE NODES' : 'COLLISION SKIN'];
     pillsEl.innerHTML = list.map((t) => `<div class="lab-pill">${t}</div>`).join('') + sub.map((t) => `<div class="lab-pill sub">${t}</div>`).join('');
@@ -320,9 +337,12 @@ export function createCrashLab(ctx) {
   const frameSteps = () => Math.max(1, Math.round(STEP_RATE / 60 / (st.auto && st.impactStep == null ? 1 : st.slow)));
   function frameStep() { st.replay = -1; st.paused = true; st.pending += frameSteps(); syncPanel(); }
   function physicsStep() { st.replay = -1; st.paused = true; st.pending += 1; syncPanel(); }
-  function restart() {
+  function clearRun() {
     releaseGrab();
     st.impactStep = null; st.ring = []; st.ringBytes = 0; st.replay = -1; st.pending = 0; st.lastState = null; st.focus = null; st.focusAt = null;
+  }
+  function restart() {
+    clearRun();
     ctx.restart();
     ctx.pacer.reset(slowNow());
     syncPanel();
@@ -374,7 +394,8 @@ export function createCrashLab(ctx) {
   }
   function onState(s) {
     // A crash reference run's first contact is its scenario's (ctx.impactAt, a step).
-    if (st.impactStep == null && (ctx.impactAt != null ? s.step >= ctx.impactAt : s.impact)) { st.impactStep = ctx.impactAt ?? s.step; syncPanel(); }
+    const at = impactAt();
+    if (st.impactStep == null && (at != null ? s.step >= at : s.impact)) { st.impactStep = at ?? s.step; syncPanel(); }
     if (!st.lastState || s.step >= st.lastState.step) st.lastState = s;
     // The scene's focus: the box centre of every node (a flung piece ignored by
     // using the 2nd–98th percentile would cost a sort; the box is fine for presets).
@@ -573,6 +594,9 @@ export function createCrashLab(ctx) {
     },
     /** The scene was rebuilt (restart): rebind and recount. */
     rebuilt() { st.focusAt = null; renderer.setSim(ctx.sim(), ctx.layout()); counts(); legend(); },
+    /** The scene was placed again with other values (the page rebuilt the sim): a new run
+     * from its start, the camera kept. */
+    replaced() { clearRun(); ctx.pacer.reset(slowNow()); st.focusAt = null; renderer.setSim(ctx.sim(), ctx.layout()); counts(); syncPanel(); },
     timeText,
     /** The solver step on display (the replayed frame's, else the live one). */
     shownStep: () => (st.replay >= 0 && st.ring[st.replay] ? st.ring[st.replay].step : ctx.sim().steps()),

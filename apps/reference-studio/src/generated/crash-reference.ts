@@ -93,7 +93,7 @@ known: boolean, known_occurs?: Occurs | null, known_note?: string | null, };
 
 export type Tier = "invariant" | "physics" | "shape";
 
-export type Registry = { scenarios: Array<ScenarioInfo>, contacts: Array<Contact>, runs: number, sampleSteps: number, dt: number, };
+export type Registry = { scenarios: Array<ScenarioInfo>, families: Array<FamilyInfo>, contacts: Array<Contact>, runs: number, sampleSteps: number, dt: number, };
 
 export type ScenarioInfo = { id: string, title: string, reference: ReferenceInfo, designs: Array<string>, 
 /**
@@ -111,7 +111,17 @@ contact: Contact,
 /**
  * A recreated scenario's description.
  */
-desc?: ScenarioDesc, };
+desc?: ScenarioDesc, 
+/**
+ * The scenario family it is a preset of ([`family`]; `Registry::families` has its
+ * parameters), and its values: the controls a page shows start from these.
+ */
+family?: string, values?: Values, 
+/**
+ * Laid out from values other than its preset's: the scenario it was modified from (its
+ * criteria are then the law-based ones only).
+ */
+modifiedFrom?: string, };
 
 export type ReferenceInfo = { video: string, atS: Array<number>, 
 /**
@@ -129,6 +139,24 @@ known: Array<KnownInfo>, };
 export type BasisInfo = { kind: string, source?: string, };
 
 export type KnownInfo = { contacts: Array<Contact>, occurs: Occurs, note: string, };
+
+export type FamilyInfo = { id: string, title: string, about: string, params: Array<Param>, defaults: Values, 
+/**
+ * Whether it places static boxes.
+ */
+boxes: boolean, 
+/**
+ * The reference scenarios that are its presets, in order.
+ */
+presets: Array<string>, };
+
+export type Param = { key: string, label: string, unit: string, help: string, kind: ParamKind, };
+
+export type ParamKind = { "kind": "number", min: number, max: number, step: number, default: number, } | { "kind": "design", default: string, choices: Array<string>, } | { "kind": "flag", default: boolean, } | { "kind": "choice", default: string, choices: Array<string>, };
+
+export type Value = number | boolean | string;
+
+export type Values = { [key in string]: Value };
 
 export type Occurs = "every_run" | "some_runs";
 

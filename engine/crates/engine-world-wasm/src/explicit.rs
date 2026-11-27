@@ -581,8 +581,8 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32, a
     let deg = |k: &str, d: f64| (num(spec, k, d) as f32).to_radians();
     let v = num(spec, "speed", 27.78) as f32;
     let run_up = |v: f32| 1.0 + 0.5 * v;
-    // `runUp`: the gap (m) between the vehicle and what it hits, default 1 + v/2 s.
-    let gap = num(spec, "runUp", f64::from(run_up(v))) as f32;
+    // `runUp`: the gap (m) between the vehicle and what it hits; absent or 0: 1 + v/2 s.
+    let gap = Some(num(spec, "runUp", 0.0) as f32).filter(|g| *g > 0.0).unwrap_or(run_up(v));
     let spot = |at: Vec3, yaw: f32, speed: f32, boxes: Vec<(Vec3, Vec3)>, vel: Option<Vec3>| ArenaSpot { at, yaw, speed, boxes, vel, lift: 0.0, mdb: false };
     let pole = |x: f32, z: f32| (Vec3::new(x, 2.0, z), Vec3::new(0.1, 2.0, 0.1));
     let overlap = (num(spec, "overlap", 1.0) as f32).clamp(0.05, 1.0);
@@ -705,7 +705,7 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32, a
             // Facing −X (yaw −90°), its face's middle at the struck side when it hits.
             let contact = Vec3::new(0.5 * width, 0.0, irl - half_face);
             let dir = Vec3::new(-crab.cos(), 0.0, -crab.sin());
-            let gap = num(spec, "runUp", f64::from(run_up(v))) as f32;
+            let gap = Some(num(spec, "runUp", 0.0) as f32).filter(|g| *g > 0.0).unwrap_or(run_up(v));
             let mut barrier = spot(contact - dir * gap, -0.5 * PI, v, Vec::new(), Some(dir * v));
             barrier.mdb = true;
             (vec![spot(Vec3::new(0.0, 0.0, 0.5 * length), 0.0, 0.0, Vec::new(), None), barrier], Vec::new())

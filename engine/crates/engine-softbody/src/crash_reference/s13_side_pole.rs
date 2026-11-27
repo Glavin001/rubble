@@ -29,12 +29,8 @@ use super::*;
 pub const KMH: f32 = 32.0;
 /// The travel's angle from the car's forward axis (deg).
 pub const ANGLE_DEG: f32 = 75.0;
-/// The pole's half width (m): 254 mm.
-pub const POLE_HALF: f32 = 0.127;
-/// The driver's head CG in the design's frame: left of the centre line, behind the front axle
-/// (m; see the module notes).
-pub const HEAD_LEFT: f32 = 0.38;
-pub const HEAD_BEHIND_AXLE: f32 = 2.146;
+// The pole: 254 mm wide. The driver's head CG in the design's frame (the aim): 0.38 m left of
+// the centre line, 2.146 m behind the front axle (see the module notes).
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -43,27 +39,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA NCAP / FMVSS 214 oblique pole, 32 km/h, 75°, 254 mm (tests 7523, 8558: 2012-14 Toyota Camry)" },
         designs: names(&["sedan"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let e = extent("sedan");
-            let v = KMH / 3.6 * j.speed;
-            let a = ANGLE_DEG.to_radians();
-            // Travel: toward the car's left (+X at yaw 0) and a little forward (+Z).
-            let u = Vec3::new(a.sin(), 0.0, a.cos());
-            let cot = a.cos() / a.sin();
-            let front = e.axles.map_or(e.hi.z, |x| x.0);
-            let (hx, hz) = (HEAD_LEFT, front - HEAD_BEHIND_AXLE);
-            // The impact line on the side's outermost plane, and the pole's centre on the
-            // travel line through the head, a half width out from that plane.
-            let side = e.hi.x;
-            let z_irl = hz + (side - hx) * cot;
-            let pole = (Vec3::new(side + POLE_HALF, 2.0, z_irl + POLE_HALF * cot), Vec3::new(POLE_HALF, 2.0, POLE_HALF));
-            let impact_s = 0.1;
-            let across = Vec3::new(-u.z, 0.0, u.x);
-            let at = -u * (v * impact_s) + across * j.lateral;
-            let mut car = Body::new("car", "sedan", at, j.yaw, v).on_carrier();
-            car.vel = Some(u * v);
-            Layout { box_yaw: Vec::new(), bodies: vec![car], boxes: vec![pole], impact_s }
-        }),
+        modified_from: None,
+        // Travel 75° from the forward axis toward the car's left, the pole's centre on the
+        // travel line through the driver's head, a tenth of a second ahead.
+        layout: family::preset(&families::SIDE_POLE, &[("car", "sedan".into()), ("speed", f64::from(KMH).into()), ("angle", f64::from(ANGLE_DEG).into()), ("pole_width", 0.254.into()), ("aim_left", 0.38.into()), ("aim_behind_axle", 2.146.into()), ("lead", 0.1.into())]),
         secs_after_impact: 0.3,
         // World coordinates at contact: the car's origin at 0, the pole at about (1.07, −1.96).
         cameras: vec![

@@ -11,10 +11,6 @@ use super::*;
 use super::s07_wall_190::WAGON_KG;
 
 const KMH: f32 = 200.0;
-/// The share of the car's width the block covers, from its left (+X) side.
-const OVERLAP: f32 = 0.4;
-/// The block's width (m): it covers OVERLAP of the car and stands out past its left side.
-const BLOCK_WIDTH: f32 = 0.9;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -23,20 +19,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[393], real_test: "narrow rigid block, 40 % of the width, 200 km/h (no standard test)" },
         designs: names(&["wagon"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let e = extent("wagon");
-            let v = KMH / 3.6 * j.speed;
-            // A tenth of a second of travel before the block.
-            let gap = 0.1 * v;
-            let face = e.hi.z + gap;
-            let x0 = e.hi.x - OVERLAP * e.width();
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![Body::new("car", "wagon", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
-                // A concrete block 0.9 m wide, 2 m tall and 2 m deep.
-                boxes: vec![(Vec3::new(x0 + 0.5 * BLOCK_WIDTH, 1.0, face + 1.0), Vec3::new(0.5 * BLOCK_WIDTH, 1.0, 1.0))],
-                impact_s: 0.1,
-            }
-        }),
+        modified_from: None,
+        // A concrete block 0.9 m wide, 2 m tall and 2 m deep from the overlap's edge, a tenth of
+        // a second ahead.
+        layout: family::preset(&families::BLOCK, &[("car", "wagon".into()), ("speed", f64::from(KMH).into()), ("overlap", 0.4.into()), ("block_width", 0.9.into()), ("height", 2.0.into()), ("depth", 2.0.into()), ("lead", 0.1.into())]),
         secs_after_impact: 2.0,
         cameras: vec![
             // Close, from the side away from the block (the wagon spans z 1.7 to 6.5 at impact): from

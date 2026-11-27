@@ -36,6 +36,7 @@ pub mod broadside;
 pub mod compare;
 pub mod city_scene;
 pub mod director;
+pub mod explicit_boxes;
 pub mod hills;
 pub mod impact;
 pub mod motion;

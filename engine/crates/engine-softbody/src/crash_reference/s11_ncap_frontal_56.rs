@@ -23,7 +23,7 @@
 use super::*;
 
 /// 35 mph.
-pub const KMH: f32 = 56.3;
+pub const KMH: f64 = 56.3;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -32,7 +32,8 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA NCAP frontal rigid barrier, 56.3 km/h (tests 8545, 7520: 2012-14 Toyota Camry)" },
         designs: names(&["sedan"]),
         recreated: false,
-        layout: code(|extent, j| wall_layout(extent("sedan"), KMH / 3.6 * j.speed, j)),
+        modified_from: None,
+        layout: wall_preset(KMH),
         secs_after_impact: 0.4,
         cameras: vec![
             Camera { name: "side".into(), eye: [9.0, 1.2, -1.5], target: [0.0, 0.7, -1.5] },
@@ -65,15 +66,10 @@ pub(super) fn scenario() -> CrashScenario {
     }
 }
 
-/// A full-width rigid wall a tenth of a second ahead of the car's front (S02's), the car at
-/// `v` (the jitter's speed applied) moved and turned by the jitter.
-pub(super) fn wall_layout(e: Extent, v: f32, j: Jitter) -> Layout {
-    let face = e.hi.z + 0.1 * v;
-    Layout { box_yaw: Vec::new(),
-        bodies: vec![Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
-        boxes: vec![(Vec3::new(0.0, 2.0, face + 0.5), Vec3::new(0.5 * e.width() + 1.0, 2.0, 0.5))],
-        impact_s: 0.1,
-    }
+/// The generated sedan at `kmh` into a full-width rigid wall (4 m tall, 1 m deep, a metre
+/// past each side) a tenth of a second ahead of its front (S02's wall).
+pub(super) fn wall_preset(kmh: f64) -> LayoutSource {
+    family::preset(&families::BLOCK, &[("car", "sedan".into()), ("speed", kmh.into()), ("overlap", 1.0.into()), ("height", 4.0.into()), ("depth", 1.0.into()), ("lead", 0.1.into())])
 }
 
 /// The laws of a car into a fixed wall: finite, no energy created (0.1 % of `ke_kj` kJ),

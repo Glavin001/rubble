@@ -21,8 +21,6 @@
 
 use super::*;
 
-const KMH: f32 = 70.0;
-const RUN_UP_S: f32 = 0.4;
 pub const AFTER_IMPACT_S: f32 = 1.0;
 
 pub(super) fn scenario() -> CrashScenario {
@@ -32,23 +30,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[203, 209], real_test: "TV test: a loaded truck at about 70-80 km/h into the side of a stationary car" },
         designs: names(&["truck_cab", "sedan"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let (c, t) = (extent("sedan"), extent("truck_cab"));
-            let v = KMH / 3.6 * j.speed;
-            let (front, rear) = c.axles.unwrap_or((c.lo.z + 0.2 * c.length(), c.lo.z + 0.8 * c.length()));
-            let mid = 0.5 * (front + rear);
-            // The truck faces −X (yaw −90°), its bumper (`t.hi.z` ahead of its origin) a
-            // run-up off the car's left side; its centre line (its own x = 0) on `mid`.
-            let x = c.hi.x + RUN_UP_S * v + t.hi.z;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![
-                    Body::new("truck", "truck_cab", Vec3::new(x, 0.0, mid + j.lateral), -0.5 * std::f32::consts::PI + j.yaw, v),
-                    Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0),
-                ],
-                boxes: vec![],
-                impact_s: RUN_UP_S,
-            }
-        }),
+        modified_from: None,
+        // The truck faces −X (yaw −90°), its bumper a run-up off the car's left side, its centre
+        // line on the middle of the car's wheelbase; the car stands.
+        layout: family::preset_named(&families::TBONE, &["truck", "car"], &[("striker", "truck_cab".into()), ("struck", "sedan".into()), ("speed", 70.0.into()), ("struck_speed", 0.0.into()), ("aim", 0.0.into()), ("angle", 0.0.into()), ("run_up", 0.4.into())]),
         secs_after_impact: AFTER_IMPACT_S,
         // The truck strikes the car's left side (x ≈ 0.9) at z ≈ −1.4 and carries it along −X.
         cameras: vec![

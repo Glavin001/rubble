@@ -12,12 +12,43 @@
 //! recorded for every run passes in all of them (remove the entry).
 //! `--params`: a design's parameters (e.g. a physics block with other front rules): the
 //! scenarios as written, their designs generated from those parameters.
+//! `--set name=value` (repeatable): a family parameter of every scenario named
+//! (`crash_reference::family`; `--list` shows each one's family and values), e.g.
+//! `crash_ref S11 --set speed=64 --set car=wagon`: the scenario laid out from those values
+//! and judged by the law-based criteria alone (its own bands were derived for its own
+//! numbers). `--family ID [--set ...]`: the family opened directly (`--families` lists them
+//! and their parameters).
 
-use engine_softbody::crash_reference::{self as cr, Contact, CpuRunner, Jitter};
+use engine_softbody::crash_reference::{self as cr, family, Contact, CpuRunner, Jitter};
+
+/// Every `--set name=value`, in order.
+fn sets(a: &[String]) -> Result<Vec<(String, String)>, String> {
+    a.windows(2).filter(|w| w[0] == "--set").map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).ok_or(format!("--set {}: want name=value", w[1]))).collect()
+}
+
+/// `s` with the `--set` values applied (none: as it is).
+fn with_sets(s: cr::CrashScenario, sets: &[(String, String)]) -> Result<cr::CrashScenario, String> {
+    if sets.is_empty() {
+        return Ok(s);
+    }
+    let (f, base) = s.family().ok_or(format!("{}: --set needs a family preset", s.id))?;
+    let v = f.parse_onto(base, sets)?;
+    s.with_values(&v)
+}
 
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
+    let sets = sets(&a)?;
+    if a.iter().any(|x| x == "--families") {
+        for f in cr::families::all() {
+            println!("{} {}", f.id, f.title);
+            for p in (f.params)() {
+                println!("  {} ({}{}): {:?}{}", p.key, p.label, if p.unit.is_empty() { String::new() } else { format!(", {}", p.unit) }, p.kind, if p.help.is_empty() { String::new() } else { format!(" — {}", p.help) });
+            }
+        }
+        return Ok(());
+    }
     // `--export ID`: the Rust scenario as data (`CrashScenario::to_desc`, run 0), printed as JSON.
     if let Some(id) = flag("--export") {
         let s = cr::get(&id).ok_or(format!("no scenario {id}"))?;
@@ -27,7 +58,8 @@ fn main() -> Result<(), String> {
     }
     if a.iter().any(|x| x == "--list") {
         for s in cr::all() {
-            println!("{} {}", s.id, s.title);
+            let fam = s.family().map(|(f, v)| format!(" [{}: {}]", f.id, v.0.iter().map(|(k, x)| format!("{k}={}", match x { family::Value::Num(n) => n.to_string(), family::Value::Flag(b) => b.to_string(), family::Value::Text(t) => t.clone() })).collect::<Vec<_>>().join(" "))).unwrap_or_default();
+            println!("{} {}{fam}", s.id, s.title);
         }
         return Ok(());
     }
@@ -41,6 +73,11 @@ fn main() -> Result<(), String> {
     let params = flag("--params").map_or(Ok(Vec::new()), |v| engine_softbody_authoring::crash_templates::params_from_list(&v))?;
     let ids: Vec<&String> = a.iter().take_while(|x| !x.starts_with("--")).collect();
     let mut list: Vec<(cr::CrashScenario, Contact)> = Vec::new();
+    if let Some(f) = flag("--family") {
+        let fam = family::get(&f).ok_or(format!("no scenario family {f}"))?;
+        let v = fam.parse_onto(&fam.values(&family::Values::default())?, &sets)?;
+        list.push((family::scenario(fam, &v)?, contact.unwrap_or(Contact::Edge)));
+    }
     for (i, x) in a.iter().enumerate() {
         if x == "--scenario" {
             let file = a.get(i + 1).ok_or("--scenario FILE.json")?;
@@ -51,7 +88,9 @@ fn main() -> Result<(), String> {
         }
     }
     if list.is_empty() || !ids.is_empty() {
-        list.extend(cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(&s.id))).map(|s| (s, contact.unwrap_or(Contact::Edge))));
+        for s in cr::all().into_iter().filter(|s| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(&s.id))) {
+            list.push((with_sets(s, &sets)?, contact.unwrap_or(Contact::Edge)));
+        }
     }
     let mut failed = Vec::new();
     for (s, contact) in list {
