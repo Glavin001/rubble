@@ -21,7 +21,25 @@
   "moment": null,
   "camera": null
  },
- "camera": null,
+ "camera": {
+  "eye": [
+   5.2,
+   1,
+   -0.6
+  ],
+  "target": [
+   0,
+   0.7,
+   -0.6
+  ],
+  "up": [
+   0,
+   1,
+   0
+  ],
+  "fov_y_deg": 60,
+  "region": null
+ },
  "regions": [
   {
    "id": "real",
@@ -480,5 +498,5 @@
    }
   }
  ],
- "updated": "2026-11-27T11:51:37.620Z"
+ "updated": "2026-11-27T12:38:36.467Z"
 }

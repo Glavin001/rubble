@@ -1298,15 +1298,19 @@ fn xpos(i: u32, v: u32) -> vec3f {
     if (qs.get('cam') && CAM_MODES.some(([m]) => m === qs.get('cam'))) camMode = qs.get('cam');
     {
       const camSel = document.getElementById('camSel'), tSel = document.getElementById('camTargetSel'), fSel = document.getElementById('camFromSel');
-      for (const [m, label] of CAM_MODES) camSel.add(new Option(label, m));
+      // The crash lab's camera group has the orbit cameras and the chase (follow): here
+      // only the car-relative views, '' while one of the group's is on.
+      if (LAB) { camSel.add(new Option('car views…', '')); camSel.title = 'Cameras on the vehicle (C cycles every camera)'; }
+      for (const [m, label] of CAM_MODES) if (!LAB || (m !== 'orbit' && m !== 'chase')) camSel.add(new Option(label, m));
       camSubjects.forEach((x, i) => { tSel.add(new Option(x.name, i)); fSel.add(new Option(x.name, i)); });
       const sync = () => {
-        camSel.value = camMode; tSel.value = camTarget2; fSel.value = camFrom;
+        camSel.value = LAB && (camMode === 'orbit' || camMode === 'chase') ? '' : camMode; tSel.value = camTarget2; fSel.value = camFrom;
+        camSel.classList.toggle('on', camSel.value !== '');
         const mount = camMode === 'mount';
         fSel.style.display = mount ? '' : 'none'; document.getElementById('camFromLbl').style.display = mount ? '' : 'none';
-        tSel.style.display = camMode === 'orbit' ? 'none' : '';
+        tSel.style.display = camMode === 'orbit' || (LAB && camSel.value === '') ? 'none' : '';
       };
-      camSel.onchange = (e) => { camMode = camSel.value; if (camMode === 'orbit') orbit.target = null; sync(); e.target.blur(); };
+      camSel.onchange = (e) => { if (!camSel.value) { sync(); return; } camMode = camSel.value;if (camMode === 'orbit') orbit.target = null; sync(); e.target.blur(); };
       tSel.onchange = (e) => { camTarget2 = Number(tSel.value); e.target.blur(); };
       fSel.onchange = (e) => { camFrom = Number(fSel.value); e.target.blur(); };
       window.__camSync = sync;
@@ -1320,7 +1324,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
       orbit.yaw -= (e.clientX - drag.x) * 0.005;
       orbit.pitch = Math.max(-0.2, Math.min(1.4, orbit.pitch + (e.clientY - drag.y) * 0.005));
       drag = { x: e.clientX, y: e.clientY };
-      if (camMode === 'chase') camMode = 'orbit';
+      if (camMode === 'chase') { camMode = 'orbit'; window.__camSync?.(); }
     });
     canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(3, Math.min(ARENA ? 3000 : 120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
     const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -2237,12 +2241,63 @@ fn xpos(i: u32, v: u32) -> vec3f {
           // (A fixed camera, a reference crash's own, brings its target.)
           camMode = 'orbit'; orbit = { ...orbit, yaw: o.yaw, pitch: o.pitch, dist: o.dist, target: o.target ?? orbit.target }; window.__camSync?.();
         },
-        view: () => labView, inverse: mat4Inv, restart: () => resetScene(), fail, pacer,
+        view: () => labView, inverse: mat4Inv, restart: () => resetScene(), fail, pacer, camMode: () => camMode,
       });
       lab.read();
+      const ui = lab.ui;
       if (crashScenario) {
         crashRef = createCrashRef({ registry: crashReg, scenario: crashScenario, sim: () => xsim, lab, contact: CRASH_CONTACT, run: CRASH_RUN, fail,
-          url: (change) => refUrl(crashScenario.id, change) });
+          url: (change) => refUrl(crashScenario.id, change),
+          mount: { results: ui.bodies.results, scene: ui.bodies.scene, summary: (html) => ui.summary('results', html) } });
+      }
+      // The page's own controls into the lab's panels (crash-lab-ui.mjs: one place each).
+      // The rest of #info and #hud is hidden in the lab: "beams (V)" is the lab's skeleton
+      // (K, V) and "reset (R)" its restart (R).
+      {
+        const $ = (id) => document.getElementById(id);
+        const div = (cls, ...kids) => { const d = document.createElement('div'); d.className = cls; d.append(...kids); return d; };
+        const sub = (t) => { const d = div('sub'); d.textContent = t; return d; };
+        const scn = ui.bodies.scene;
+        // Scene: the free scenes' vehicle, knobs and solver (a reference crash's are its
+        // scenario's: hidden there, not disabled).
+        if (!crashScenario) {
+          scn.append(sub('vehicle'), div('r', $('carSel'), $('modSel'), $('bindSel'), $('truckFile').parentElement, $('jbeamDir').parentElement), $('truckInfo'));
+          const knobs = $('paramRow');
+          for (const b of knobs.querySelectorAll('button')) { b.textContent = 'apply'; b.title = 'Rebuild the scene with these values (a slider applies on release)'; }
+          if (knobs.children.length) scn.append(sub('knobs'), knobs);
+          scn.append(sub('solver'), $('optRow'), div('r', $('solverBtn')));
+        }
+        const title = $('infoTitle');
+        title.classList.add('muted');
+        title.style.marginTop = '6px';
+        scn.append(title);
+        // View: the car-relative cameras join the lab's camera group.
+        $('labCamMore').append($('camSel'), $('camTargetSel'), $('camFromLbl'), $('camFromSel'));
+        const camSync = window.__camSync;
+        window.__camSync = () => { camSync?.(); lab.sync(); };
+        window.__camSync();
+        // Results: the live readouts (speed, damage, the solver's and GPU's numbers), under
+        // a reference crash's criteria.
+        const live = document.createElement('details');
+        live.className = 'lab-live';
+        live.open = !crashScenario;
+        live.innerHTML = '<summary class="sub">live readouts</summary>';
+        live.append($('speed'), $('xstats'), $('damage'), $('events'));
+        ui.bodies.results.append(live);
+        const css = document.createElement('style');
+        css.textContent = `.lab-live > summary { cursor: pointer; } .lab-live #speed { font-size: 20px; font-weight: 700; margin: 4px 0; } .lab-live #speed small { font-size: 12px; color: #9aa4b2; }
+          .lab-live .damage { font: 11px/1.45 ui-monospace, monospace; color: #c4cfe4; margin-top: 4px; } #infoTitle b { color: #c4cfe4; font-weight: 600; }`;
+        document.head.appendChild(css);
+        if (!crashScenario) {
+          // The collapsed Results line of a free scene: speed and the player's damage.
+          const line = () => {
+            const d = ($('damage').innerHTML.split('<br>')[0] ?? '').replace(/<[^>]*>/g, '').replace(/^.*?: /, '');
+            ui.summary('results', `${$('speed').textContent.trim()}${d && d !== '—' ? ` · ${d}` : ''}`);
+          };
+          line();
+          setInterval(line, 300);
+        }
+        ui.relayout();
       }
       // Automation: n steps in frames of `chunk` (each read: impact to that chunk),
       // then a drawn frame; the lab's state.

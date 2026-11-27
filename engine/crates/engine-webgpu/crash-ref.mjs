@@ -54,22 +54,36 @@ export function crashRefCams(scenario) {
   return Object.fromEntries(scenario.cameras.map((c) => [`ref:${c.name}`, orbitOf(c)]));
 }
 
+// The results' styles. The lab's layout (crash-lab-ui.mjs) gives the panel its frame;
+// without one (ctx.mount absent) the panel stands alone at the right, as it used to.
 const CSS = `
-#crashRef { position: absolute; top: 118px; right: 16px; width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 260px); overflow: auto; background: rgba(10, 16, 30, 0.86); border: 1px solid rgba(160, 190, 255, 0.16); border-radius: 10px; padding: 10px 12px; font: 12px/1.4 system-ui, sans-serif; color: #dfe6f3; backdrop-filter: blur(8px); z-index: 5; }
-#crashRef h3 { margin: 0 0 4px; font-size: 13px; letter-spacing: 0.02em; }
-#crashRef .r { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 5px 0; }
-#crashRef button, #crashRef select { background: #18233a; color: #e6ecf7; border: 1px solid #2c3b5c; border-radius: 6px; padding: 2px 7px; font: inherit; cursor: pointer; }
-#crashRef button.on { background: #2b4f8a; border-color: #4a78c4; }
-#crashRef label { color: #9fb0cf; }
+#crashRef.alone { position: absolute; top: 118px; right: 16px; width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 260px); overflow: auto; background: rgba(10, 16, 30, 0.86); border: 1px solid rgba(160, 190, 255, 0.16); border-radius: 10px; padding: 10px 12px; font: 12px/1.4 system-ui, sans-serif; color: #dfe6f3; backdrop-filter: blur(8px); z-index: 5; }
+#crashRef .cr-head { margin: 4px 0 6px; }
+#crashRef .cr-head b { display: block; font-size: 12.5px; color: #e9eef7; }
+#crashRef .muted { color: #9aa6be; }
 #crashRef a { color: #8fc1ff; }
-#crashRef table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-#crashRef td { padding: 3px 4px; vertical-align: top; border-top: 1px solid #1f2b45; }
-#crashRef td.v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#crashRef .r { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 5px 0; }
+#crashRef .note { margin: 6px 0; padding: 5px 8px; border-radius: 6px; background: rgba(42, 51, 68, 0.7); color: #c4cfe4; }
+#crashRef .grp { margin: 8px 0 2px; color: #9fb0cf; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+#crashRef ul { list-style: none; margin: 0; padding: 0; }
+#crashRef li { border-top: 1px solid #1f2b45; }
+#crashRef li > details > summary { display: flex; align-items: baseline; gap: 6px; padding: 4px 2px; cursor: pointer; list-style: none; }
+#crashRef li > details > summary::-webkit-details-marker { display: none; }
+#crashRef li > details > summary:hover { background: rgba(43, 79, 138, 0.22); }
+#crashRef .n { flex: 1; min-width: 0; color: #dfe6f3; }
+#crashRef .v { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+#crashRef .b { color: #9aa6be; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+#crashRef .vb { display: flex; flex-direction: column; align-items: flex-end; flex: none; max-width: 45%; }
+#crashRef .vb .b { font-size: 11px; }
+#crashRef .st { margin: 4px 0; }
+#crashRef .d { padding: 0 4px 6px 4px; color: #aab8d4; }
+#crashRef .d code { color: #c4cfe4; font: 11px ui-monospace, monospace; }
 #crashRef .m { padding: 1px 6px; border-radius: 4px; font-weight: 700; font-size: 11px; white-space: nowrap; }
-#crashRef .pass { background: #1d5a37; } #crashRef .fail { background: #8a1f2b; } #crashRef .known { background: #7a5a12; }
-#crashRef .in { background: #26405f; } #crashRef .out { background: #5a4a1d; } #crashRef .wait { background: #2a3344; color: #9fb0cf; }
-#crashRef details { color: #aab8d4; } #crashRef summary { cursor: pointer; }
-#crashRef .muted { color: #8d9bb8; }
+#crashRef .pass, .lab-toggle .m.pass { background: #1d5a37; } #crashRef .fail, .lab-toggle .m.fail { background: #8a1f2b; } #crashRef .known, .lab-toggle .m.known { background: #7a5a12; }
+#crashRef .in { background: #26405f; } #crashRef .out { background: #5a4a1d; } #crashRef .wait, .lab-toggle .m.wait { background: #2a3344; color: #c4cfe4; }
+.lab-toggle .m { padding: 0 5px; border-radius: 4px; font-weight: 700; font-size: 11px; color: #e9eef7; }
+#crashRef .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3a4660; flex: none; align-self: center; }
+#crashRef details.rep > summary { cursor: pointer; margin: 8px 0 2px; color: #9fb0cf; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
 .lab-clean #crashRef { display: none !important; }
 `;
 
@@ -81,7 +95,10 @@ const basisText = (b) => (b?.kind === 'law' ? `law: ${b.source}` : b?.kind === '
 /**
  * The run's panel and sampling. `ctx`: { registry, scenario, sim() (the ExplicitSim), lab
  * (createCrashLab's), url(params) (this page with crashRef params changed), contact, run,
- * fail }.
+ * fail, mount? }. `mount` (the lab's layout): `{ results, scene, summary(html) }`: the
+ * criteria go in `results`, the contact and run pickers in `scene`, and the one-line state
+ * to `summary` (what the collapsed Results panel shows). The scenario's cameras are the
+ * lab's (its camera group, ctx.cams).
  */
 export function createCrashRef(ctx) {
   const { registry, scenario: s } = ctx;
@@ -90,30 +107,33 @@ export function createCrashRef(ctx) {
   document.head.appendChild(style);
   const el = document.createElement('div');
   el.id = 'crashRef';
-  document.body.appendChild(el);
+  if (!ctx.mount) el.className = 'alone';
+  (ctx.mount?.results ?? document.body).appendChild(el);
   const links = s.reference.links.map((u, i) => {
     const t = s.reference.atS[i];
     return `<a href="${esc(u)}" target="_blank" rel="noopener">${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}</a>`;
   }).join(' · ');
-  el.innerHTML = `<h3>${esc(s.id)} · ${esc(s.title)}</h3>
-    <div class="muted">${esc(s.reference.realTest)} · reference video ${links}</div>
-    <div class="r"><label>contact</label><select id="crContact">${registry.contacts.map((c) => `<option${c === ctx.contact ? ' selected' : ''}>${c}</option>`).join('')}</select>
-      <label>run</label><select id="crRun" title="Run 0 is nominal; runs 1–${registry.runs - 1} jitter the speed, the path and the heading slightly (Jitter::run)">${Array.from({ length: registry.runs }, (_, k) => `<option value="${k}"${k === ctx.run ? ' selected' : ''}>${k}${k === 0 ? ' (nominal)' : ''}</option>`).join('')}</select></div>
-    <div class="r"><label>camera</label>${s.cameras.map((c) => `<button data-crcam="${esc(c.name)}">${esc(c.name)}</button>`).join('')}</div>
-    <div class="r"><label>moments</label>${s.moments.map((m) => `<span class="muted">${esc(m.name)} ${m.after_impact_ms} ms</span>`).join(' · ')}</div>
-    <div class="r" id="crStatus"></div>
-    <table id="crTable"></table>`;
-  const $ = (id) => el.querySelector('#' + id);
+  // The run's own settings: what is simulated (the Scene panel).
+  const pick = document.createElement('div');
+  pick.className = 'r';
+  pick.innerHTML = `<label class="lbl" for="crContact">contact</label><select id="crContact" title="The contact setting this run uses (registry contacts)">${registry.contacts.map((c) => `<option${c === ctx.contact ? ' selected' : ''}>${c}</option>`).join('')}</select>
+      <label for="crRun">run</label><select id="crRun" title="Run 0 is nominal; runs 1–${registry.runs - 1} jitter the speed, the path and the heading slightly (Jitter::run)">${Array.from({ length: registry.runs }, (_, k) => `<option value="${k}"${k === ctx.run ? ' selected' : ''}>${k}${k === 0 ? ' (nominal)' : ''}</option>`).join('')}</select>`;
+  (ctx.mount?.scene ?? el).appendChild(pick);
+  el.insertAdjacentHTML('beforeend', `<div class="cr-head"><b>${esc(s.id)} · ${esc(s.title)}</b>
+      <div class="muted">${esc(s.reference.realTest)} · reference video ${links}</div>
+      <div class="muted">moments: ${s.moments.map((m) => `${esc(m.name)} ${m.after_impact_ms} ms`).join(' · ')}</div></div>
+    <div class="st" id="crStatus"></div>
+    <div id="crTable"></div>`);
+  const $ = (id) => document.getElementById(id);
   $('crContact').onchange = (e) => { location.href = ctx.url({ contact: e.target.value }); };
   $('crRun').onchange = (e) => { location.href = ctx.url({ run: e.target.value }); };
-  const camName = (c) => `ref:${c}`;
-  for (const b of el.querySelectorAll('[data-crcam]')) b.onclick = (e) => { ctx.lab.camera(camName(b.dataset.crcam)); sync(); e.target.blur(); };
-  const sync = () => { for (const b of el.querySelectorAll('[data-crcam]')) b.classList.toggle('on', ctx.lab.st.cam === camName(b.dataset.crcam)); };
+  // (The cameras are the lab's: its camera group marks the active one.)
+  const sync = () => ctx.lab.sync?.();
 
   // ------------------------------------------------------------ sampling and the report
   let info = null, pushed = 0, report = null, sim = null, error = null;
   // A new run (the first, a restart): its sample 0, the state at spawn, before any frame.
-  const reset = () => { sim = ctx.sim(); info = sim.crashInfo(); pushed = 0; report = null; error = null; draw(); sampled(); };
+  const reset = () => { sim = ctx.sim(); info = sim.crashInfo(); pushed = 0; report = null; error = null; tableKey = null; draw(); sampled(); };
   /** After every frame the page submits: the sample of these steps, when they are one. */
   function sampled() {
     const x = ctx.sim();
@@ -128,21 +148,41 @@ export function createCrashRef(ctx) {
       else if (pushed % 25 === 0) draw();
     }, (e) => { error = String(e?.message ?? e); draw(); ctx.fail(e); });
   }
+  let tableKey = null;
   function draw() {
+    const results = report?.results ?? null;
     const status = error ? `<span class="m fail">error</span> ${esc(error)}`
       : report ? `<span class="m pass">done</span> the report of ${info.samples} samples (every ${info.sampleSteps} steps, ${(info.totalSteps / 2000).toFixed(2)} s), judged by Rust`
       : `<span class="m wait">running</span> sample ${pushed} of ${info?.samples ?? '…'} · impact at ${info ? (info.impactS * 1000).toFixed(0) : '…'} ms`;
     $('crStatus').innerHTML = status;
-    const results = report?.results ?? null;
-    const rows = s.criteria.map((c, i) => {
-      const r = results?.[i];
-      const mark = !r ? ['wait', '…'] : r.asserted ? (r.pass ? ['pass', 'pass'] : r.known ? ['known', 'known failure'] : ['fail', 'FAIL']) : (r.pass ? ['in', 'in band'] : ['out', 'out of band']);
-      const tier = c.asserted ? c.tier : `${c.tier}, reported`;
-      return `<tr><td><span class="m ${mark[0]}">${mark[1]}</span></td><td><div>${esc(c.name)}</div>
-        <details><summary class="muted">${esc(c.metric)} · ${tier}</summary><div>${esc(c.why)}</div><div><i>${esc(basisText(c.basis))}</i></div>${r?.known_note ? `<div class="muted">known failure (${esc(r.known_occurs ?? '')}): ${esc(r.known_note)}</div>` : ''}</details></td>
-        <td class="v">${r ? fmt(r.value) : '—'}<div class="muted">${band(c)}</div></td></tr>`;
-    });
-    $('crTable').innerHTML = rows.join('');
+    // The collapsed panel's line: the run's progress, then its verdict.
+    const asserted = s.criteria.map((c, i) => [c, results?.[i]]).filter(([c]) => c.asserted);
+    const reported = s.criteria.map((c, i) => [c, results?.[i]]).filter(([c]) => !c.asserted);
+    if (ctx.mount?.summary) {
+      if (error) ctx.mount.summary('<span class="m fail">error</span>');
+      else if (!results) ctx.mount.summary(`running · sample ${pushed} of ${info?.samples ?? '…'}`);
+      else {
+        const pass = asserted.filter(([, r]) => r?.pass).length;
+        const known = asserted.filter(([, r]) => r && !r.pass && r.known).length, fail = asserted.length - pass - known;
+        const inBand = reported.filter(([, r]) => r?.pass).length;
+        ctx.mount.summary(`<span class="m ${fail ? 'fail' : known ? 'known' : 'pass'}">${pass} pass${known ? ` · ${known} known failure${known > 1 ? 's' : ''}` : ''} · ${fail} fail</span> ${reported.length} reported (${inBand} in band)`);
+      }
+    }
+    // One row per criterion: its mark, name, value and band on a line; the metric, tier,
+    // basis and why behind it. Before the report no value is known (Rust judges the run
+    // at its end): one note says so, the rows show their bands.
+    const row = ([c, r]) => {
+      const mark = !r ? '<span class="dot" aria-hidden="true"></span>' : `<span class="m ${r.asserted ? (r.pass ? 'pass' : r.known ? 'known' : 'fail') : r.pass ? 'in' : 'out'}">${r.asserted ? (r.pass ? 'pass' : r.known ? 'known failure' : 'FAIL') : r.pass ? 'in band' : 'out of band'}</span>`;
+      return `<li><details><summary>${mark}<span class="n">${esc(c.name)}</span><span class="vb">${r ? `<span class="v">${fmt(r.value)}</span>` : ''}<span class="b">${band(c)}</span></span></summary>
+        <div class="d"><code>${esc(c.metric)}</code> · ${c.asserted ? c.tier : `${c.tier}, reported`} · <i>${esc(basisText(c.basis))}</i><div>${esc(c.why)}</div>${r?.known_note ? `<div>known failure (${esc(r.known_occurs ?? '')}): ${esc(r.known_note)}</div>` : ''}</div></details></li>`;
+    };
+    const key = `${results ? 'r' : error ? 'e' : 'w'}${info?.samples}`;
+    if (key === tableKey) return;
+    tableKey = key;
+    const open = $('crTable').querySelector('details.rep')?.open ?? false;
+    $('crTable').innerHTML = (results || error ? '' : `<div class="note">Values are measured when the run ends (sample ${info?.samples ?? '…'}); the bands are below.</div>`)
+      + `<div class="grp">Asserted · ${asserted.length} · failing one fails the run</div><ul>${asserted.map(row).join('')}</ul>`
+      + (reported.length ? `<details class="rep"${open ? ' open' : ''}><summary>Reported · ${reported.length} · never a failure</summary><ul>${reported.map(row).join('')}</ul></details>` : '');
   }
   reset();
   sync();
