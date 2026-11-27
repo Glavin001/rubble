@@ -216,7 +216,10 @@ async function main() {
   const S = <T = any>(expr: string) => c.evaluate<T>(`(async () => { const s = window.studio; ${expr} })()`);
   if (REAL) {
     await seed(c, (rel) => rel.startsWith('structures/') || rel === 'scenarios/s02-data.json' || rel === 'shots/S02.json' || rel.startsWith('frames/S02') || rel.startsWith('library/S02/'));
-    await go('#/library', 2500);
+    // Reopen the workspace with the copied files (a reload: the same URL).
+    await c.send('Page.reload', {});
+    await sleep(2500);
+    await c.evaluate('new Promise((r) => { const t = () => (window.studio && document.querySelector(".topbar .badge") ? r(true) : setTimeout(t, 100)); t(); })');
     await S("return s.link_scenario({ shot: 'S02', scenario: 's02-data' })");
     const o = await S("return s.open_scene({ scenario: 's02-data', shot: 'S02' })");
     check(o.bodies[0]?.design === 'suv_4x4', `S02 as data opened: ${o.bodies[0]?.nodes} nodes, first contact ${o.first_contact_ms?.toFixed(1)} ms`);
