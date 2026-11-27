@@ -327,12 +327,13 @@ const PRESETS: &[Preset] = &[
     ),
     // softbody.html
     p("soft", "Soft-body vehicles", Soft, "softbody.html", ""),
+    // The explicit solver's page (the crash lab; softbody.html?solver=explicit redirects there).
     p(
         "soft-arena",
         "Explicit fleet arena",
         Soft,
-        "softbody.html",
-        "solver=explicit&xscene=arena",
+        "crash-lab.html",
+        "xscene=arena",
     ),
     p(
         "soft-crates",

@@ -19,8 +19,9 @@
     .row label.p:has(input[type=range]) { display: flex; align-items: center; gap: 6px; width: 100%; }
     .row input[type=range] { flex: 1; min-width: 120px; accent-color: #5b9cff; }
     .row .pv { min-width: 40px; text-align: right; color: #e6e9ef; font-variant-numeric: tabular-nums; }
-    button, select, label.file { background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
-    button:hover, label.file:hover { background: #26324a; }
+    button, select, label.file, a.btn { background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    a.btn { display: inline-block; text-decoration: none; }
+    button:hover, label.file:hover, a.btn:hover { background: #26324a; }
     #status { bottom: 10px; left: 10px; font: 12px ui-monospace, monospace; }
     #err { position: absolute; bottom: 40px; left: 10px; right: 10px; color: #ff8a80; white-space: pre-wrap; font: 12px ui-monospace, monospace; }
     .damage { font: 12px ui-monospace, monospace; }
@@ -28,13 +29,16 @@
     .lab-page #info, .lab-page #hud, .lab-page #status { display: none !important; }
   </style>
   <script>
-    // The crash lab (the explicit solver's lab view; not the arena, the traffic derby or
-    // ?lab=0): the raw panels never paint; its panel shell is built as the module starts
-    // (crash-lab.mjs createLabShell).
+    // The explicit solver's pages moved to crash-lab.html (the crash lab): this URL with
+    // ?solver=explicit (or a reference crash, a family or a lab preset) redirects there, for
+    // good, its other parameters and the fragment kept. Nothing below loads.
     { const q = new URLSearchParams(location.search);
-      window.__labPage = (q.get('solver') === 'explicit' || q.has('crashRef') || q.has('crashFamily') || q.has('preset')) && q.get('lab') !== '0'
-        && !['arena', 'traffic'].includes(q.get('xscene') ?? (q.get('scene') === 'traffic' ? 'traffic' : ''));
-      if (window.__labPage) document.documentElement.classList.add('lab-page'); }
+      if (q.get('solver') === 'explicit' || q.has('crashRef') || q.has('crashFamily') || q.has('preset')) {
+        q.delete('solver');
+        const s = q.toString();
+        location.replace(`crash-lab.html${s ? `?${s}` : ''}${location.hash}`);
+        document.write('<plaintext style="display:none">');
+      } }
   </script>
 </head>
 <body>
@@ -79,7 +83,7 @@
     <div class="muted" id="truckInfo"></div>
   </div>
   <div class="panel" id="hud">
-    <div><button id="solverBtn" title="Rebuild this scene with the other solver (?solver=explicit)">solver</button></div>
+    <div><a id="solverBtn" class="btn" href="crash-lab.html" title="The explicit 2 kHz solver's page, the crash lab, with this scene and vehicle (crash-lab.html)">solver: soft AVBD ⇄ explicit 2 kHz</a></div>
     <div class="damage" id="xstats"></div>
     <div id="speed">0 <small>km/h</small></div>
     <div class="damage" id="damage">—</div>
@@ -254,7 +258,7 @@
       const u = new URL(location.href);
       if (carSel.value === 'gen') {
         for (const k of ['car', 'truck', 'jbeamMode']) u.searchParams.delete(k);
-        u.searchParams.set('solver', 'explicit'); u.searchParams.set('mod', GEN.mod); u.searchParams.set('pc', GEN.pc); u.searchParams.set('wheels', 'raycast');
+        u.pathname = u.pathname.replace(/softbody\.html$/, 'crash-lab.html'); u.searchParams.set('mod', GEN.mod); u.searchParams.set('pc', GEN.pc); u.searchParams.set('wheels', 'raycast');
         location.href = u.href; return;
       }
       u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') for (const k of ['truck', 'mod', 'pc', 'wheels']) u.searchParams.delete(k); location.href = u.href; };
@@ -281,7 +285,7 @@
       const [mod, pc, wheels] = modSel.value.split('|');
       const u = new URL(location.href);
       for (const k of ['car', 'truck', 'jbeamMode']) u.searchParams.delete(k);
-      u.searchParams.set('solver', 'explicit');
+      u.pathname = u.pathname.replace(/softbody\.html$/, 'crash-lab.html');
       u.searchParams.set('mod', mod);
       u.searchParams.set('pc', pc);
       // Raycast wheels when it has wheels (a boat has none).
@@ -298,9 +302,8 @@
     const keep = (u) => { keepVehicle(u.searchParams); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
-    // (The explicit label names its profile once the vehicles spawn: labelProfile.)
-    solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
-    solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
+    // The explicit 2 kHz solver: the crash lab's page with this scene and vehicle.
+    solverBtn.href = `crash-lab.html${location.search}${location.hash}`;
     // The explicit solver's scenes (XSCENES; their knobs XPARAMS: the catalogue's, above);
     // each soft scene maps to the nearest.
     const XMAP = { yard: 'yard', crates: 'idle', traffic: 'traffic', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
