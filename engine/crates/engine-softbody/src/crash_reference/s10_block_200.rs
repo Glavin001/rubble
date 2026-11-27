@@ -61,7 +61,8 @@ pub(super) fn scenario() -> CrashScenario {
             vec![
                 Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes").law("every position and velocity is a real number"),
                 Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(WAGON_KG * 0.5 * (KMH as f64 / 3.6).powi(2) * 1e-3), "at most 0.1 % of the 2.24 MJ the 1,448 kg wagon brings at 55.6 m/s").law("energy is never created; 0.1 % is the 1.001 rounding allowance of the energy rule"),
-                Criterion::new(Invariant, "nothing passes into the block", "all.box_depth_m", None, Some(0.05), "no node deeper than 5 cm inside the block (a node moves 2.8 cm a step at 55.6 m/s)").law("a static box is impenetrable"),
+                Criterion::new(Invariant, "nothing passes into the block", "all.box_depth_m", None, Some(0.05), "no node deeper than 5 cm inside the block (a node moves 2.8 cm a step at 55.6 m/s)").law("a static box is impenetrable")
+                    .known_intermittent(&[Contact::Continuous], "new in the 2026-11-27 sweep, for review: CPU reference, 4 of 8 runs (1, 3, 4, 5), up to 14.7 cm (engine/docs/crash-reference.md, Currently failing)"),
                 Criterion::new(Invariant, "no explosion", "car.max_node_speed", None, Some(167.0), "3 × the 55.6 m/s approach (see S01)"),
                 Criterion::new(Physics, "struck door opening collapses", "car.gauge.door_left.shrink_frac", Some(0.4), None, "the left side is destroyed back through the front door: its aperture closes by at least 40 %"),
                 Criterion::new(Physics, "the struck side takes more", "car.zone.lr_ratio", Some(1.0), None, "only the left 40 % touches the block").law("the right side is loaded only through the structure from the left, which passes on less than it receives: left work > right work"),

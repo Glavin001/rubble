@@ -66,7 +66,7 @@ const CSS = `
 #crashRef td { padding: 3px 4px; vertical-align: top; border-top: 1px solid #1f2b45; }
 #crashRef td.v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 #crashRef .m { padding: 1px 6px; border-radius: 4px; font-weight: 700; font-size: 11px; white-space: nowrap; }
-#crashRef .pass { background: #1d5a37; } #crashRef .fail { background: #8a1f2b; }
+#crashRef .pass { background: #1d5a37; } #crashRef .fail { background: #8a1f2b; } #crashRef .known { background: #7a5a12; }
 #crashRef .in { background: #26405f; } #crashRef .out { background: #5a4a1d; } #crashRef .wait { background: #2a3344; color: #9fb0cf; }
 #crashRef details { color: #aab8d4; } #crashRef summary { cursor: pointer; }
 #crashRef .muted { color: #8d9bb8; }
@@ -136,10 +136,10 @@ export function createCrashRef(ctx) {
     const results = report?.results ?? null;
     const rows = s.criteria.map((c, i) => {
       const r = results?.[i];
-      const mark = !r ? ['wait', '…'] : r.asserted ? (r.pass ? ['pass', 'pass'] : ['fail', 'FAIL']) : (r.pass ? ['in', 'in band'] : ['out', 'out of band']);
+      const mark = !r ? ['wait', '…'] : r.asserted ? (r.pass ? ['pass', 'pass'] : r.known ? ['known', 'known failure'] : ['fail', 'FAIL']) : (r.pass ? ['in', 'in band'] : ['out', 'out of band']);
       const tier = c.asserted ? c.tier : `${c.tier}, reported`;
       return `<tr><td><span class="m ${mark[0]}">${mark[1]}</span></td><td><div>${esc(c.name)}</div>
-        <details><summary class="muted">${esc(c.metric)} · ${tier}</summary><div>${esc(c.why)}</div><div><i>${esc(basisText(c.basis))}</i></div></details></td>
+        <details><summary class="muted">${esc(c.metric)} · ${tier}</summary><div>${esc(c.why)}</div><div><i>${esc(basisText(c.basis))}</i></div>${r?.known_note ? `<div class="muted">known failure (${esc(r.known_occurs ?? '')}): ${esc(r.known_note)}</div>` : ''}</details></td>
         <td class="v">${r ? fmt(r.value) : '—'}<div class="muted">${band(c)}</div></td></tr>`;
     });
     $('crTable').innerHTML = rows.join('');

@@ -104,7 +104,7 @@ impl CrashRun {
         if self.pushed == self.samples && self.report.is_none() {
             if let (Some(rec), Some(s)) = (self.rec.take(), cr::get(&self.id)) {
                 let (metrics, series) = rec.finish_with_series();
-                let results = (s.criteria)().iter().map(|c| c.judge(&metrics)).collect();
+                let results = cr::judge(&s, &metrics, self.built.contact);
                 self.report = Some(CrashReport { id: s.id.into(), contact: self.built.contact, run: self.run, metrics, results, series: Some(series) });
             }
         }
@@ -276,8 +276,9 @@ impl ExplicitSim {
     }
 
     /// The run's [`CrashReport`] once every sample is in (`{ id, contact, run, metrics,
-    /// results: [{ name, metric, value, lo, hi, tier, pass, asserted, why, basis }] }`),
-    /// else null.
+    /// results: [{ name, metric, value, lo, hi, tier, pass, asserted, why, basis, known,
+    /// known_occurs?, known_note? }] }`: `known`, a known failure recorded for the run's
+    /// contact setting), else null.
     #[wasm_bindgen(js_name = crashReport)]
     pub fn crash_report(&self) -> Result<JsValue, JsValue> {
         let r = run_of(self)?.borrow();

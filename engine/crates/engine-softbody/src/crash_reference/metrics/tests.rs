@@ -976,3 +976,6 @@ fn crash_series_side_crush_in_the_fitted_frame() {
     near(&m, "car.side_crush_left_peak", 0.1, 1e-4);
     near(&m, "car.side_crush_right_residual", 0.0, 1e-4);
 }
+
+// (Split out: this file is at the 1000-line limit.)
+mod com_order;

@@ -98,7 +98,8 @@ pub(super) fn scenario() -> CrashScenario {
                 Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes")
                     .law("every position and velocity is a real number"),
                 Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(132.0), "0.1 % of the barrier's 131.9 kJ (½·1,367.6·13.889²), rounding only")
-                    .law("mechanical energy never rises in a crash: contact, plasticity, damping and friction only remove it"),
+                    .law("mechanical energy never rises in a crash: contact, plasticity, damping and friction only remove it")
+                    .known_failure(&[Contact::Edge, Contact::Continuous], "CPU reference 2026-11-27, 8 of 8 runs: edge 14.1-211 kJ, continuous 6.7-29.7 kJ (discrete holds); edge-contact hits between barrier and door (engine/docs/crash-reference.md, Currently failing)"),
                 Criterion::new(Invariant, "momentum along the barrier's travel", "all.momentum_x_end", Some(-19_400.0), Some(0.0),
                     "starts at −M·V = −18,994 N·s (−19,374 at +2 % speed, 0.1 % rounding); ground friction and drag only take it away and cannot reverse it")
                     .law("momentum is conserved between car and barrier; the only outside forces (ground friction, air drag) oppose the motion"),

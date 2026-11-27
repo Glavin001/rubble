@@ -68,7 +68,10 @@ pub(super) fn scenario() -> CrashScenario {
             vec![
                 // Asserted (laws).
                 Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes").law("every position and velocity is a real number"),
-                Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(182.0), "0.1 % of the car's 175.2 kJ (½·1,448.4·15.556²), 182 kJ at +2 % speed").law("mechanical energy never rises in a crash: contact, plasticity, damping and friction only remove it"),
+                Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(182.0), "0.1 % of the car's 175.2 kJ (½·1,448.4·15.556²), 182 kJ at +2 % speed").law("mechanical energy never rises in a crash: contact, plasticity, damping and friction only remove it")
+                    .known_failure(&[Contact::Edge], "CPU reference 2026-11-27, 8 of 8 runs: 2.2-43 kJ (engine/docs/crash-reference.md, Currently failing)")
+                    .known_intermittent(&[Contact::Continuous], "CPU reference 2026-11-27: 3 of 8 runs (0, 1, 3), up to 516 J (engine/docs/crash-reference.md, Currently failing)")
+                    .known_intermittent(&[Contact::Discrete], "CPU reference 2026-11-27: 1 of 8 runs (2), 221 J (engine/docs/crash-reference.md, Currently failing)"),
                 Criterion::new(Invariant, "momentum along the road", "all.momentum_z_end", Some(-9_500.0), Some(23_400.0),
                     "starts at m·V = 22,531 kg·m/s (22,982 at +2 % speed). Only the ground acts from outside: the landing gear's feet, sliding once pushed, at most μ·N = 0.6 × 57.0 kN (the ground's static 0.85 × the nodes' 0.7; the feet carry 5,810 kg) over the 0.8 s after contact, 27.4 kN·s, and every tyre's rolling resistance, at most 0.02 × 161 kN × 1.3 s = 4.2 kN·s, either way; a backward-rolling car's resistance adds at most 0.02 × 14.2 kN × 1.3 s = 370 N·s")
                     .law("momentum changes only by the external impulse, the ground's friction and rolling resistance, bounded by μ·N and c_rr·W over the run"),

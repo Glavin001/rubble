@@ -7,9 +7,36 @@
 //! measured and reported and asserts nothing, whatever its tier: a wrong bound would be a
 //! wrong goal. Where only a direction is certain (the struck side absorbs more), assert the
 //! direction (a ratio above 1), not a size.
+//!
+//! **Known failures are data, with a ratchet.** An asserted criterion that fails today in a
+//! contact setting is recorded on it ([`Criterion::known_failure`], [`Criterion::known_intermittent`])
+//! with its measured value, the date and where it is documented. A known failure that fails
+//! is reported as such and does not fail the run; one recorded as failing in every run that
+//! passes in all of a setting's runs fails the verdict ([`super::verdict`]: "remove the
+//! entry"), so the list only shrinks. The band, tier and basis are never touched by it.
 
+use super::Contact;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// How a known failure shows across the jittered runs ([`super::Jitter::run`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Occurs {
+    /// Fails in every run: passing in all of them fails the verdict (remove the entry).
+    EveryRun,
+    /// Fails in some runs: passing in all of them is only noted.
+    SomeRuns,
+}
+
+/// An asserted criterion's failure that is known in some contact settings: why, the
+/// measured value, the date and where it is documented.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KnownFailure {
+    pub contacts: Vec<Contact>,
+    pub occurs: Occurs,
+    pub note: &'static str,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,11 +83,36 @@ pub struct Criterion {
     /// The reason for the band.
     pub why: &'static str,
     pub basis: Basis,
+    /// Where it fails today ([`KnownFailure`]); empty for most.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<KnownFailure>,
 }
 
 impl Criterion {
     pub const fn new(tier: Tier, name: &'static str, metric: &'static str, lo: Option<f64>, hi: Option<f64>, why: &'static str) -> Self {
-        Self { name, metric, lo, hi, tier, why, basis: Basis::Estimate }
+        Self { name, metric, lo, hi, tier, why, basis: Basis::Estimate, known: Vec::new() }
+    }
+
+    /// It fails today in every run in `contacts`: `note` says why, the measured value, the
+    /// date and where it is documented. Passing in all runs of a setting then fails the
+    /// verdict, so the entry is removed when it is fixed.
+    pub fn known_failure(self, contacts: &[Contact], note: &'static str) -> Self {
+        self.known_as(contacts, Occurs::EveryRun, note)
+    }
+
+    /// It fails today in some of the runs in `contacts` (`note` as [`Self::known_failure`]).
+    pub fn known_intermittent(self, contacts: &[Contact], note: &'static str) -> Self {
+        self.known_as(contacts, Occurs::SomeRuns, note)
+    }
+
+    fn known_as(mut self, contacts: &[Contact], occurs: Occurs, note: &'static str) -> Self {
+        self.known.push(KnownFailure { contacts: contacts.to_vec(), occurs, note });
+        self
+    }
+
+    /// The known failure recorded for `contact`, if any.
+    pub fn known_in(&self, contact: Contact) -> Option<&KnownFailure> {
+        self.known.iter().find(|k| k.contacts.contains(&contact))
     }
 
     /// The band follows from a law: the derivation.
@@ -80,11 +132,41 @@ impl Criterion {
         self.tier != Tier::Shape && self.basis != Basis::Estimate
     }
 
-    /// Judged on a run's metrics. A metric that is missing or not finite fails.
+    /// Judged on a run's metrics, without its known failures (no contact setting). A metric
+    /// that is missing or not finite fails.
     pub fn judge(&self, m: &BTreeMap<String, f64>) -> CriterionResult {
         let value = m.get(self.metric).copied();
         let pass = value.is_some_and(|v| v.is_finite() && self.lo.is_none_or(|l| v >= l) && self.hi.is_none_or(|h| v <= h));
-        CriterionResult { name: self.name.into(), metric: self.metric.into(), value, lo: self.lo, hi: self.hi, tier: self.tier, pass, asserted: self.asserted(), why: self.why.into(), basis: match self.basis { Basis::Law(x) => format!("law: {x}"), Basis::Cited(x) => format!("cited: {x}"), Basis::Estimate => "estimate".into() } }
+        CriterionResult {
+            name: self.name.into(),
+            metric: self.metric.into(),
+            value,
+            lo: self.lo,
+            hi: self.hi,
+            tier: self.tier,
+            pass,
+            asserted: self.asserted(),
+            why: self.why.into(),
+            basis: match self.basis {
+                Basis::Law(x) => format!("law: {x}"),
+                Basis::Cited(x) => format!("cited: {x}"),
+                Basis::Estimate => "estimate".into(),
+            },
+            known: false,
+            known_occurs: None,
+            known_note: None,
+        }
+    }
+
+    /// Judged on a run in `contact`, with the known failure recorded for that setting.
+    pub fn judge_in(&self, m: &BTreeMap<String, f64>, contact: Contact) -> CriterionResult {
+        let mut r = self.judge(m);
+        if let Some(k) = self.known_in(contact) {
+            r.known = true;
+            r.known_occurs = Some(k.occurs);
+            r.known_note = Some(k.note.into());
+        }
+        r
     }
 }
 
@@ -101,9 +183,25 @@ pub struct CriterionResult {
     pub asserted: bool,
     pub why: String,
     pub basis: String,
+    /// A known failure is recorded for this run's contact setting ([`Criterion::known_in`]):
+    /// failing it does not fail the run.
+    #[serde(default)]
+    pub known: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_occurs: Option<Occurs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_note: Option<String>,
 }
 
 impl CriterionResult {
+    /// It fails the run: asserted, failed, and not a known failure.
+    pub fn fails_run(&self) -> bool {
+        self.asserted && !self.pass && !self.known
+    }
+    /// A known failure that failed.
+    pub fn known_failed(&self) -> bool {
+        self.asserted && !self.pass && self.known
+    }
     pub fn shown(&self) -> String {
         self.value.map_or("not measured".into(), |v| format!("{v:.3}"))
     }

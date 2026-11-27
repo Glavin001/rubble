@@ -13,7 +13,15 @@ impl CudaRunner {
         let mut g = CudaExplicitBeams::new(&built.fleet)?;
         g.set_vehicle_contact(true);
         g.set_group_split(true);
-        g.set_continuous(built.contact == Contact::Continuous).map_err(anyhow::Error::msg)?;
+        // Continuous contact as the lab sets it (`vehicle_lab::options::continuous_on`): on
+        // the split group path, with self split and the wide passes off. Edge contact is each
+        // vehicle's own (`ExplicitBeams::edge_contact`, set by `CrashScenario::build`).
+        let continuous = built.contact == Contact::Continuous;
+        g.set_continuous(continuous).map_err(anyhow::Error::msg)?;
+        if continuous {
+            g.set_self_split(false);
+            let _ = g.set_wide(false);
+        }
         // Each vehicle's raycast wheels, read back into for their spin.
         let drives = built.fleet.iter().map(|s| s.drive.as_deref().cloned()).collect();
         Ok(Self(g, drives))
@@ -44,5 +52,8 @@ impl Runner for CudaRunner {
             beams: self.0.beams().map_err(e)?.into_iter().map(|v| v.into_iter().map(|b| BeamState { rest: b.rest, broken: b.broken }).collect()).collect(),
             wheel_spin,
         })
+    }
+    fn continuous_engaged(&mut self) -> Option<bool> {
+        Some(self.0.continuous_ran())
     }
 }

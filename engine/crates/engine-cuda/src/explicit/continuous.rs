@@ -15,4 +15,13 @@ impl CudaExplicitBeams {
         self.planner.continuous = on;
         Ok(())
     }
+
+    /// Whether continuous contact has run on any frame so far: it is on, and a frame took
+    /// the split group path without self-collision split (`explicit_plan::continuous::on`).
+    /// The split group path needs vehicle contact between two vehicles or more
+    /// (`FramePlanner::contact_active`), so for one vehicle against static boxes the setting
+    /// is taken and never runs: such a run is an edge-contact run.
+    pub fn continuous_ran(&self) -> bool {
+        self.planner.continuous && !self.self_split && self.split_frames > 0
+    }
 }
