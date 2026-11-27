@@ -174,10 +174,11 @@ fn generated_designs_collision_skin_does_not_cross_itself() {
     passes("skin_self_crossing");
 }
 /// Continuous contact keeps a car's own surfaces 2 mm apart and excludes no pair, so the
-/// skin's own primitives sharing no node are at least that far apart at rest.
+/// skin's own primitives sharing no node are at least that far apart at rest. Every design:
+/// the vehicle lab refuses to spawn one that fails (the 4x4 did in the PR preview, 2026-11-27).
 #[test]
 fn generated_designs_collision_skin_keeps_its_clearance() {
-    passes("skin_clearance");
+    failing(|_, r| r == "skin_clearance");
 }
 #[test]
 fn generated_designs_collision_skin_has_no_holes() {

@@ -377,6 +377,25 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   including the sedan, where it runs into a larger opening) standing alone: the Mach 1's
   `skin_holes` now reports it, as the gasser and 4x4 already did for the tunnel's front end.
 
+- **(Fix, 2026-11-27) The 4x4's own skin clearance** (`gen2/rig.rs` `fender_top_x`,
+  `gen2/rig_fill.rs` `cover_bare`; the PR preview refused to spawn the 4x4 with continuous
+  contact on):
+  - *A fender's top row under the hood's edge.* The fender's top row stands 2.5 cm out from
+    the fender's inner edge, and the hood's edge row 2.5 cm in from the hood's edge, both on
+    the top surface. The 4x4's flared fenders narrow at their ends (x 0.65 against the hood's
+    0.78), so the two rows crossed at the same height, 0.47–1.6 mm apart (10 pairs).
+    **Rule:** a fender's top row is never inside the hood's own edge (|x| ≥ the hood's
+    half-width there).
+  - *A bare node's cover across a skinned quad.* `cover_bare` gives a skin node in no
+    triangle a fan to its two nearest skin neighbours and nearest shell node. At the 4x4's
+    rear the fan's shell edge was the other diagonal of a quad already skinned, 0.3 and
+    0.6 mm from that quad's diagonal (and one edge 0.8 mm from the rear bumper's).
+    **Rule:** the nearest choice whose faces keep `SKIN_CLEARANCE` from every placed face
+    (`near_skin`), nearest neighbours first.
+  - Sedan, police sedan, wagon and Mach 1 rigs are byte for byte as before. Every design
+    now passes `skin_clearance`. The lint test checks every design, not only the sedan, so a
+    car the lab would refuse fails at build time.
+
 ## Changelog
 
 - 2026-11-27: section 19, two coplanar overlaps fixed in the rigger (a hull face's inside point, a quad's second diagonal).
