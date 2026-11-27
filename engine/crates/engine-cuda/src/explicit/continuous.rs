@@ -21,6 +21,9 @@ impl CudaExplicitBeams {
     /// Velocity contact as continuous contact's response (engine-webgpu's
     /// `set_continuous_velocity`; off: the position response).
     pub fn set_continuous_velocity(&mut self, on: bool) -> Result<(), ExecError> {
+        if on && !plan::SPLIT_WHICH.contains(&"ccvel") {
+            return Err(ExecError::Backend("velocity contact's GPU module (ccvel) is not built".into()));
+        }
         self.planner.continuous.velocity = on;
         self.write_cc_mode()
     }

@@ -231,9 +231,12 @@ pub fn solo_rest_module_name(aero: bool, lanes: u32, vv: bool) -> String {
 
 /// The split group path's modules by `which` (`split_module_name`), each at the frame
 /// module's four variants (`split_modules`).
-pub const SPLIT_WHICH: [&str; 13] = [
+/// (Velocity contact's response module, `ccvel` (`EB_CC_VEL`), is not built: each kernel file it
+/// includes would rerun four more compiles an edit, past its line in fanout-allowlist.txt, an
+/// owner's decision; `ExplicitBeamsGpu::set_continuous_velocity` refuses meanwhile.)
+pub const SPLIT_WHICH: [&str; 12] = [
     "member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels", "groupbegin", "grouplevels", "grouplv",
-    "edges", "ccvel",
+    "edges",
 ];
 
 /// Every module of the split paths, which every host's build compiles from the one

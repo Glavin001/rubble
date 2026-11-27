@@ -30,9 +30,16 @@ impl ExplicitBeamsGpu {
     /// Velocity contact as continuous contact's response (off: the position response; the
     /// CPU's `Dat::velocity`). Its first GPU port has no warm starts and no relisting (the CPU's
     /// `Dat::warm_starts` and `Dat::relist` off), and no rigid spheres as bodies.
-    pub fn set_continuous_velocity(&mut self, on: bool) {
+    ///
+    /// Refused while its module is not built (`engine_kernel_manifest`'s `SPLIT_WHICH`: the
+    /// fan-out ratchet, an owner's decision).
+    pub fn set_continuous_velocity(&mut self, on: bool) -> Result<(), String> {
+        if on && !engine_exec::explicit_plan::SPLIT_WHICH.contains(&"ccvel") {
+            return Err("velocity contact's GPU module (ccvel) is not built".into());
+        }
         self.planner.continuous.velocity = on;
         self.write_cc_mode();
+        Ok(())
     }
 
     /// The response's mode into the tables' statics ([`engine_exec::explicit_plan::continuous::cc_mode_words`]).

@@ -68,6 +68,7 @@ fn continuous_head_on_steps_like_the_cpu() {
 /// through the first torn triangles (step 26: a break group's beams torn at a frame's end as
 /// within a frame, `explicit_beams_numerics.slang`'s gDropsAtFrameEnd).
 #[test]
+#[ignore = "velocity contact's GPU module (ccvel) is not built: the fan-out ratchet, an owner's decision"]
 fn continuous_velocity_head_on_steps_like_the_cpu() {
     let fleet = sedans_head_on();
     let Some(mut g) = gpu(&fleet) else {
@@ -78,7 +79,7 @@ fn continuous_velocity_head_on_steps_like_the_cpu() {
     g.set_vehicle_contact(true);
     g.set_group_split(true);
     g.set_continuous(true).expect("the sedan keeps its clearance");
-    g.set_continuous_velocity(true);
+    g.set_continuous_velocity(true).expect("velocity contact's module");
     let mut w = ExplicitBeamsWorld::new(fleet.clone());
     let mut d = engine_softbody::explicit_contact::Dat::new(0.08, 0.85);
     (d.velocity, d.warm_starts, d.relist) = (true, false, false);
@@ -181,7 +182,9 @@ fn continuous_cost() {
         g.set_vehicle_contact(true);
         g.set_group_split(true);
         g.set_continuous(on).expect("the sedan keeps its clearance");
-        g.set_continuous_velocity(vel);
+        if g.set_continuous_velocity(vel).is_err() {
+            continue;
+        }
         let mut ms = Vec::new();
         for _ in 0..8 {
             let t = std::time::Instant::now();

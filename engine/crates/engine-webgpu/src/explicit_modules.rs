@@ -20,15 +20,11 @@ use crate::{
 /// explicit_beams_fleet.slang, contact-groups-design.md §8); and the members' raycast
 /// wheels on each other (`explicit_beams_split_wheels`).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 52] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 48] = [
     ("explicit_beams_split_edges", kernel!("explicit_beams_split_edges")),
     ("explicit_beams_split_edges_wide", kernel!("explicit_beams_split_edges_wide")),
     ("explicit_beams_split_edges_aero", kernel!("explicit_beams_split_edges_aero")),
     ("explicit_beams_split_edges_aero_wide", kernel!("explicit_beams_split_edges_aero_wide")),
-    ("explicit_beams_split_ccvel", kernel!("explicit_beams_split_ccvel")),
-    ("explicit_beams_split_ccvel_wide", kernel!("explicit_beams_split_ccvel_wide")),
-    ("explicit_beams_split_ccvel_aero", kernel!("explicit_beams_split_ccvel_aero")),
-    ("explicit_beams_split_ccvel_aero_wide", kernel!("explicit_beams_split_ccvel_aero_wide")),
     ("explicit_beams_split_groupbegin", kernel!("explicit_beams_split_groupbegin")),
     ("explicit_beams_split_groupbegin_wide", kernel!("explicit_beams_split_groupbegin_wide")),
     ("explicit_beams_split_groupbegin_aero", kernel!("explicit_beams_split_groupbegin_aero")),
