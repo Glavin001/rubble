@@ -333,6 +333,52 @@ pub fn raycast_core(desc: &SoftVehicleDesc, opts: &SpawnOptions) -> Option<CoreP
     Some(core_plan(desc, &mut masses, opts))
 }
 
+/// Each wheel's static load over the mean wheel load, when the vehicle's wheels ask for
+/// their suspension sized by load ([`crate::desc::SoftWheel::load_sized`]; else all 1):
+/// the lever rule between its two axles (wheels grouped by their hubs along `forward`,
+/// within 0.3 m), each axle's load shared by its wheels. A vehicle with other than two
+/// axles keeps the mean (all 1).
+fn wheel_load_scale(desc: &SoftVehicleDesc, forward: Vec3) -> Vec<f32> {
+    let n = desc.wheels.len();
+    if n == 0 || !desc.wheels.iter().any(|w| w.load_sized) {
+        return vec![1.0; n];
+    }
+    let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
+    let hub: Vec<f32> = desc.wheels.iter().map(|w| (0.5 * (p(w.node1) + p(w.node2))).dot(forward)).collect();
+    let mut axles: Vec<(f32, Vec<usize>)> = Vec::new();
+    for (i, &x) in hub.iter().enumerate() {
+        match axles.iter_mut().find(|a| (a.0 - x).abs() < 0.3) {
+            Some(a) => a.1.push(i),
+            None => axles.push((x, vec![i])),
+        }
+    }
+    if axles.len() != 2 {
+        return vec![1.0; n];
+    }
+    let mut total = 0.0f64;
+    let mut moment = 0.0f64;
+    for (i, m) in desc.nodes.iter().map(|nd| nd.mass.max(1.0e-3)).enumerate() {
+        total += m as f64;
+        moment += m as f64 * p(i as u32).dot(forward) as f64;
+    }
+    for (w, &x) in desc.wheels.iter().zip(&hub) {
+        total += w.mass as f64;
+        moment += w.mass as f64 * x as f64;
+    }
+    let xg = moment / total;
+    let (xa, xb) = (axles[0].0 as f64, axles[1].0 as f64);
+    let la = total * (xg - xb) / (xa - xb);
+    let lb = total - la;
+    let mean = total / n as f64;
+    let mut out = vec![1.0; n];
+    for (axle, load) in [(&axles[0], la), (&axles[1], lb)] {
+        for &i in &axle.1 {
+            out[i] = (load / axle.1.len() as f64 / mean) as f32;
+        }
+    }
+    out
+}
+
 fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) -> CorePlan {
     let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
     let frame = frame_nodes(desc);
@@ -393,8 +439,8 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         .map(|w| (0.5 * (p(w.node1) + p(w.node2))).dot(forward))
         .fold(f32::MIN, f32::max);
     let brake = 0.9 * 9.81 * total_mass / nw;
-    let mut wheels = Vec::new();
-    for w in &desc.wheels {
+    let (mut wheels, load_scale) = (Vec::new(), wheel_load_scale(desc, forward));
+    for (wi, w) in desc.wheels.iter().enumerate() {
         let hub = 0.5 * (p(w.node1) + p(w.node2)) - origin;
         let is_front = (hub + origin).dot(forward) > front - 0.3;
         let steerable = if any_steer { w.steerable } else { is_front };
@@ -406,7 +452,7 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
             inertia: Some(0.5 * w.mass * w.radius * w.radius),
             suspension_min: 0.02,
             suspension_max: max_len,
-            spring: Spring::StiffnessDamping { k, c },
+            spring: Spring::StiffnessDamping { k: k * load_scale[wi], c: c * load_scale[wi] },
             max_steer: if steerable {
                 if w.max_steer > 0.0 {
                     w.max_steer

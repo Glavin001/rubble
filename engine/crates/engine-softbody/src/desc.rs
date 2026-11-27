@@ -452,6 +452,10 @@ pub struct SoftWheel {
     pub propulsion: i32,
     pub steerable: bool,
     pub max_steer: f32,
+    /// The raycast suspension sized for this wheel's own static load
+    /// (`rubbleSuspensionByLoad`, Rubble's key; `pack::raycast_core`); false: for the
+    /// mean wheel load.
+    pub load_sized: bool,
 }
 
 impl Default for SoftWheel {
@@ -467,6 +471,7 @@ impl Default for SoftWheel {
             propulsion: 0,
             steerable: false,
             max_steer: 0.0,
+            load_sized: false,
         }
     }
 }

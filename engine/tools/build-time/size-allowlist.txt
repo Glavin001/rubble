@@ -18,7 +18,7 @@ crates/engine-scenes/src/lib.rs 1283
 crates/engine-schema/src/convex.rs 1387
 crates/engine-schema/src/feature_query.rs 1482
 crates/engine-slang-build/src/lib.rs 1082
-crates/engine-softbody-authoring/src/authoring/gen2/build.rs 1429
+crates/engine-softbody-authoring/src/authoring/gen2/build.rs 1430
 crates/engine-softbody-authoring/src/authoring/gen2/model.rs 3762
 crates/engine-softbody-authoring/src/authoring/gen2/rig.rs 4728
 crates/engine-softbody-authoring/src/authoring/gen2/sedan.rs 1565

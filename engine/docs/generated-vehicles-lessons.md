@@ -511,9 +511,111 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   fewest prefixes that give every node its zone (100 % of nodes on all six designs).
   The gauges are picked from geometry. `tests/crash_zones.rs` (authoring) holds both.
 
+## 22. A heavy vehicle: the 4x2 tractor unit `truck_cab` (2026-11-27)
+
+For the crash reference suite (a truck T-boning a sedan at ~70 km/h, a sedan crushed
+against a parked trailer). Design `designs/truck_cab.rs`; parts `engine-vehiclegen::heavy`
+(ladder frame, beam axles and raycast wheels, cab, front underrun, box parts, mounts: the
+trailer reuses them); rigger `gen2::parts_rig`; tests `engine-softbody-authoring/tests/truck_cab.rs`.
+
+- **(Fact) The class and its published figures.** A European 4x2 tractor of the Renault
+  Trucks T class, from its personalised specification sheet (T High T4X2 13L, model code
+  NLT_10XA036STD00, 17 Sept 2025, renault-trucks.co.uk): wheelbase 3,800 mm, front overhang
+  1,365, rear overhang 825, overall chassis length 5,990; frame width 851 mm (rear),
+  side member height 266 mm and thickness 8 mm; frame top 938–958 mm unladen; fifth wheel
+  1,152 mm over the ground, 675 mm ahead of the drive axle; track 2,109 / 1,854 mm; width
+  over the rear wheels 2,518 mm; cab width 2,534 mm; centre of gravity 1,159 mm behind the
+  front axle and 960 mm up; kerb 8,499 kg = 5,930 front + 2,569 rear (69.8 % front; full
+  AdBlue, 90 % fuel, a 75 kg driver; high sleeper cab 3,845 mm). Front underrun
+  protection: UN R93, its lower edge at most 400 mm over the ground (its test loads,
+  up to 160 kN at a rail's line). Not on the sheet, typical values: flange 90 mm, tyres
+  315/70 R22.5 (1,013 mm) on 9.00 × 22.5 steel wheels, frame steel S500MC-class
+  (500 / 600 MPa).
+- **(Decision) Ours:** a day cab with a standard roof (3.0 m), kerb 7,500 kg at the
+  sheet's split (5,233 / 2,267 kg). Mass budget (kg): cab with interior, glass and
+  driver 1,400; engine, gearbox and cooling 2,000; front axle with springs and steering
+  600; drive axle with air springs 1,000; wheels 2 × 105 front, 2 × 200 (twins) rear;
+  frame 840 (rails' steel 308, cross-members 125, frame-mounted equipment 407); bumper
+  with underrun beam 120; fuel tank 350; batteries/AdBlue/silencer box 400; fifth wheel
+  180. `ballast_kg` adds a stated gross on the fifth wheel.
+- **(Fact) The car rigger cannot rig a ladder-frame vehicle.** `rig::rig_with` (~3,000 lines)
+  lays a unibody lattice on a tube body with doors, hood, boot, fenders and the study's
+  131-node shell. A design made only of defined parts (`MechPart`s, an empty
+  `Structure`) goes to `gen2::parts_rig` instead (`parts_rig::applies`, a hook in
+  `vg_input::rig_only`): the definitions' nodes, masses, beams, mounts and links; springs
+  from the node budget under the step's bound; one closed convex collision hull per
+  colliding part (so a colliding part is convex in its nodes: the frame is two rails, not
+  one part); raycast wheels on `wheel_<corner>` parts; reference nodes on the frame.
+- **(Measurement) The census node budget is too soft for a heavy frame.** At Σk/m 8.5e6
+  (the cars') the truck's whole-car ω·h was 1.50 and the frame parked 6 mm out of shape
+  (18 mm at 10 bays). The step's bound, not the census, is the limit: the parts rig asks
+  for 2.0e7 and the power iteration takes back 15 % (ω·h 1.84). Fewer, heavier stations
+  also help: a chord's EA at the budget grows as the station spacing squared (node mass and
+  length both grow), so the rails have 7 stations (0.95 m) and one diagonal a face, not two.
+  Worst parked drift 18 mm → 4.5 mm.
+- **(Measurement) A part's mount must hold it in all three directions, not only in a
+  plane.** Tanks mounted at one station hinged (15 mm); on two stations with every beam
+  in the stations' planes they slid along the rail at 2 Hz (kinetic energy 0.25 J
+  decaying 10 %/s); fore-and-aft bracket legs between the stations fixed both (0.006 J).
+  Mount beams are at least 0.12 m (`MOUNT_MIN_LEN`; the solver's `MIN_REST`).
+- **(Measurement, the tests)** 160 nodes, 918 JBeam beams (1,330 in the solver), 216
+  collision triangles. Parked: worst drift 4.6 mm, 0 bent, 0 broken, lowest point −0.3 mm,
+  ride height steady to 0.01 mm from 2 to 4 s, kinetic energy peaks per second 0.20 /
+  0.034 / 0.019 / 0.012 / 0.009 J (never rises). Axle loads parked 5,203 / 2,293 kg
+  (69.4 % front; target 5,233 / 2,267). 30 km/h full-width rigid wall (260 kJ): rails
+  shortened 13.1 mm dynamic, 1.4 mm residual, no frame beam broken; bumper 193 mm dynamic;
+  the cab's front reaches the wall (the bumper stands 65 mm proud of it): both front cab
+  mounts (6 beams each) and the right belt rail between the cab's front and door pillars
+  break. Lint: every hard rule passes (coverage p99 0.072 m, ω·h 1.858).
+- **(Fix, an explicit setting) The raycast suspension was sized for the mean wheel load**
+  (`pack::core_plan`: one k and c for every wheel). The truck's front axle carries 1.39 ×
+  the mean, so it parked 38 mm nose-down past its design (`every_design`'s lowest point
+  −38 mm, its tyres drawn into the ground). `Physics::suspension_by_load` (off by default;
+  the truck turns it on) is written as the wheels' `rubbleSuspensionByLoad` and makes
+  `core_plan` size each wheel's spring and damper for its own axle's static load (the lever
+  rule between two axles; the same frequency and damping ratio, so the same sag): lowest
+  point −0.3 mm. With it off the six cars' generated files are byte for byte those of the
+  base (51f90c713) and their `every_design` lines identical.
+- **(Measurement) A mirror-symmetric rig was not given mirror-symmetric springs.** Two
+  causes: the underrun bumper's middle column stood 10 mm off the centre plane (`f64::signum(0.0)`
+  is 1: fixed), and the step's bound (`Car::assign_springs`' power iteration softens the beams
+  carrying the top mode) finds a pair of equal left and right modes as a combination of the
+  two and softened one side more (184 mirrored beams differed; at the census budget, with no
+  softening, 0). The 30 km/h wall then broke the left front cab mount alone. The parts rig now
+  gives each mirrored pair the lower of its two springs (`parts_rig::mirror_springs`: only
+  lower, so the bound holds): 0 differ, and both front mounts break. What still differs left
+  to right in the wall (one belt rail, one of the bumper's two middle beams) is at its
+  threshold: once one of two equal beams breaks the load leaves its mirror, and which goes
+  first is decided by float-level differences (the solver's summation order, the collision
+  hulls' diagonals, which the ear clipping does not mirror; the battery box's 400 kg against
+  the tank's 350 kg). With the masses made equal the same beams break.
+- **(Measurement) The frame's bending strength against the section's.** The published
+  side member, a C 266 × 90 × 8 mm in S500MC (σ_y 500 MPa): A 3,440 mm², I 3.44e7 mm⁴,
+  elastic modulus 2.59e5 mm³ (M_y 129 kN·m), plastic modulus 3.11e5 mm³ (two flanges
+  2 × 720 mm² × 129 mm plus the web 8 × 250² / 4), M_p = σ_y·Z_pl = 155 kN·m a rail. The
+  rigged rail is four chords of σ_y·A/4 = 430 kN at its corners, 0.266 m apart: it yields in
+  bending at 2 × 430 × 0.266 = 229 kN·m, 1.47 × M_p (1.77 × M_y), and breaks at 275 kN·m
+  (σ_u 600 MPa). The four 90 mm section ties (the flanges' width, under the solver's 0.1 m
+  `MIN_REST`) never yield, so the section cannot distort; its webs and diagonals yield at
+  215 kN. A real rail of this section is slender in its flanges (outstand c/t 10.3 against
+  the class-3 limit 14ε = 9.6 at 500 MPa) and buckles locally before M_y. Not changed: chords
+  of M_p / (2 × 0.266) = 292 kN would match the bending but put its axial squash at 1,168 kN
+  against the section's 1,720; a decision for the crash scenes.
+- **(Open)** Twin tyres are one raycast wheel 665 mm wide; the raycast wheel is the
+  loader's 20 kg (the rest of each wheel is on its part's nodes), so its spin inertia is
+  a twentieth of a real truck wheel's. A mesh with two materials' primitives had half its
+  vertices (the other primitive's, in no triangle of this one) counted as paint by the
+  coverage rule; the truck's meshes have one material each.
+- **(Crash zones)** The underrun bumper is `FrontLower`, the cab `Cabin`, axles and wheels
+  `Wheel`; the ladder frame, engine, tanks, battery box and fifth wheel `Other` (a ladder
+  frame has no counterpart among a car body's sections). `crash.json` gauges:
+  wheelbase each side, cab width and height, frame length, front overhang
+  (`parts_rig::gauges`).
+
 ## Changelog
 
 - 2026-11-27: section 21, the 4x4's mass built up part by part (1,410 → 1,897 kg of nodes; the lint's `mass` passes), the axle split, strengths checked, S02 at the new mass.
+- 2026-11-27: section 22, the heavy tractor `truck_cab`, the parts-only rigger, published figures.
 - 2026-11-27: section 21, the 4x4's kerb (2000 kg, the Xterra's) and why the rigged mass stays 1410 kg; `crash.json`.
 
 - 2026-11-27: section 20, glass binding: a pane interpolates its frame (the 4x4's windscreen spike).

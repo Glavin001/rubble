@@ -79,7 +79,8 @@ pub fn node_zones(inp: &VgInput, r: &Rig) -> Result<Vec<Zone>, String> {
         })
         .collect();
     let shell_ids: Vec<usize> = (0..nodes.len()).filter(|&i| shell.contains_key(nodes[i].name.as_str())).collect();
-    if shell_ids.is_empty() {
+    // (a design of defined parts alone has no shell: every node has its part's zone)
+    if shell_ids.is_empty() && own.iter().any(|z| z.is_none()) {
         return Err("no shell nodes in the rig".into());
     }
     Ok((0..nodes.len())
@@ -145,6 +146,10 @@ pub fn prefixes(named: &[(String, Zone)]) -> Vec<(String, Zone)> {
 /// The standard gauges, by node names picked from the parts' geometry. Empty when the
 /// car has no structure or no four wheels.
 pub fn gauges(inp: &VgInput, r: &Rig) -> Vec<Gauge> {
+    // (a heavy vehicle of defined parts: its own gauges)
+    if super::parts_rig::applies(inp) {
+        return super::parts_rig::gauges(inp, r);
+    }
     let Some(st) = inp.structure.as_ref() else { return Vec::new() };
     let nodes = &r.car.nodes;
     let id: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, n)| (n.name.as_str(), i)).collect();

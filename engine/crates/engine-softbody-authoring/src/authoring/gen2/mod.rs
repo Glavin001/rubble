@@ -16,6 +16,7 @@ pub mod export;
 pub mod gen3;
 pub mod mesh;
 pub mod model;
+pub mod parts_rig;
 pub mod rig;
 pub mod sedan;
 pub mod shape;

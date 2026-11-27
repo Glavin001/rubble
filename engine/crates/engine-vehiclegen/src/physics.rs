@@ -200,6 +200,13 @@ pub struct Physics {
     /// `"real_crash"`, or its numbers. Used by cars on the body definitions
     /// (`structure`); the earlier lattices have the zone yields above.
     pub crash: CrashFeel,
+    /// Size each raycast wheel's suspension for its own axle's static load (the same
+    /// frequency and damping ratio on every wheel), not for the mean wheel load. Off by
+    /// default (every car as before); a vehicle whose axles carry very different loads
+    /// (a tractor unit's front axle: 1.39 × the mean) turns it on, or it parks
+    /// nose-down past its design. Written to the JBeam as `rubbleSuspensionByLoad`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub suspension_by_load: bool,
 }
 
 impl Default for Physics {
@@ -256,6 +263,7 @@ impl Default for Physics {
             edge_spacing: 0.22,
             drag_cd: 0.30,
             crash: CrashFeel::default(),
+            suspension_by_load: false,
         }
     }
 }
