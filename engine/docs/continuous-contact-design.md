@@ -860,7 +860,14 @@ over-push accepted as resolved (`DAT_OVERPUSH=1`, a measurement, not adopted: mi
 | Head 100 | −134 / −161 kJ of 1,118 kJ (12–14 %); zones 5,209 / 9,046 | −179 / −121 kJ; zones 3,374 / 3,126 |
 
 Side 60's rigid zones did positive work on the conserved energy (+1.7 and +3.4 kJ). A rigid zone
-never raises the kinetic energy, but it can raise the integrator's conserved energy. Head 100's
+never raises the kinetic energy, but it can raise the integrator's conserved energy, and no
+zone can avoid it. Its velocity v⁺ = P·v_f is fixed by keeping the zone's linear and angular
+momentum, so there is no freedom to choose. Its work m·(v⁺ − v_f)·(v⁻ + v⁺)/2 with
+v⁻ = v_f − hF/m is −½|(I − P)v_f|²_M + ½·(I − P)v_f·hF. The second term is positive where the
+beams push a region's deformation outward (a recoil), so a zone frozen there creates energy
+(rule 1). The zones have to go, not be tuned. That needs the exact solve, made torque-free:
+each row's torque is g_t × λn, g_t the tangential part of its start gap with its impact
+weights. Head 100's
 rows (e = 0) remove 88–120 kJ by themselves.
 
 **Open.**
