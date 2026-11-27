@@ -937,6 +937,19 @@ first solve, none in the response's re-listed solves.
   is a row from the first round, linearised at the start with b = (s0 − ξ)/h ≥ 0. No help:
   4,475 zones alone, 6,812 with the exact solve and torque-free rows.
 
+**The next direction, proposed (not started; a change of method for the owner to approve).**
+Every variant measured moved the zone count, and none removed the fallback, because the rounds
+have no guarantee of ending. The established method that has one is barrier contact with a
+CCD-filtered line search (IPC: Li et al. 2020; GPU versions such as GIPC, 2024):
+- its iterations end by construction and never cross;
+- the barrier is a conservative potential acting only within a small distance d̂ (about 1 mm),
+  so it removes no energy by design (rule 4: elastic, not a cushion that absorbs);
+- it is an implicit solve, while the vehicles step explicitly at 2 kHz.
+
+Two ways in: an incremental potential per step on the contact set alone (the beams' forces held
+from the explicit step), or the barrier as a stiff conservative force integrated by the explicit
+step with a CCD step bound, which is closer to BeamNG's penalty contact but provably non-crossing.
+
 **Open.**
 - The rigid zones remain: head 60 7,902, side 90 5,192, side 60 2,969 in 1 s.
 - Head 100's contact work is −12 to −14 % at e = 0, past rule 8's 5 %.
