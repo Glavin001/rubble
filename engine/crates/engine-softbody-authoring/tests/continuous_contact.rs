@@ -81,7 +81,7 @@ fn energy(scene: &str, kmh: f32, secs: f32) {
     for (k, x) in r.iter().enumerate() {
         let d = x.2.expect("continuous");
         let share = -d.spec_ke / d.ke_start.max(1.0);
-        println!("| energy | {scene} {kmh} km/h run {k} | start {:.0} kJ, contact removed {:.1} kJ ({:.1} %; CCD response {:.1} kJ) |", d.ke_start * 1e-3, -d.spec_ke * 1e-3, 100.0 * share, -d.ccd.ke * 1e-3);
+        println!("| energy | {scene} {kmh} km/h run {k} | start {:.0} kJ, contact removed {:.1} kJ ({:.1} %; CCD response {:.1} kJ; guard scaled e down in {} of {} steps; zones {}) |", d.ke_start * 1e-3, -d.spec_ke * 1e-3, 100.0 * share, -d.ccd.ke * 1e-3, d.guarded, d.steps, d.ccd.zones);
         worst = worst.max(share);
     }
     assert!(worst <= 0.01, "{scene} {kmh}: contact removed {:.1} % of the starting kinetic energy (at most 1 %)", 100.0 * worst);

@@ -413,6 +413,25 @@ at the step a triangle tears (`continuous_pairs_list_like_the_cpu`).
 All 11 acceptance crashes pass it (head 130: 66 mm during, 0 after; offset 100: 39 mm during,
 25 mm after; 0 crossings everywhere).
 
+## The impact law's cap above 1, measured (2026-11-26, not adopted)
+
+The response's velocity change Δ is not an exact projection (mass splitting, zones), so θ = 1
+leaves energy out: the head 100 loses 2.9 %. The guard's θ is the largest that keeps kinetic
+energy at or under its value before the pass; letting θ go above 1 up to a cap recovers the
+rest and never creates energy (`DAT_E` = the cap). 8 runs (energy 2):
+
+| cap | energy head 100 | ball 100 | head 130 paint, during | others checked |
+|---|---|---|---|---|
+| 1 (default) | 2.8-2.9 % | 1.3-1.5 % | 66 mm | pass |
+| 1.1 | 1.4-1.7 % | | 42 mm | |
+| 1.15 | 1.0-1.1 % | | 3 mm | |
+| 1.2 | 0.8-1.0 % | | 75 mm | |
+| 1.25 | 0.6-0.7 % | 0.3 % | 75 mm (guard 70) | pass, offset 100 0 mm after |
+
+0 crossings in every run. The head 130's paint depth is chaotic in the cap (3 to 75 mm), not a
+trend. 1.25 is the smallest cap that puts every energy test under 1 %; it needs the paint guard
+during a hit at 8 cm: the owner's decision.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
