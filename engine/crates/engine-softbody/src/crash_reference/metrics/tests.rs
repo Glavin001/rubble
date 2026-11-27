@@ -841,3 +841,138 @@ fn crash_metrics_barrier_shear_lbeam_work() {
     let total = w + w2;
     assert!((total - (plastic + plastic2 + stored2)).abs() < 5e-3 * (plastic + plastic2 + stored2), "{total} vs {}", plastic + plastic2 + stored2);
 }
+
+/// A rigid body into a wall with a half-sine deceleration a(τ) = −A sin(πτ/T) from first
+/// contact (τ = t − t0), sampled every 4 ms as a run is: the series' scalars against their
+/// closed forms. v(τ) = v0 − (AT/π)(1 − cos(πτ/T)); it stops where cos(πτ/T) = 1 − πv0/(AT);
+/// x(τ) = v0 τ − (AT/π)(τ − (T/π) sin(πτ/T)); after T it leaves at v0 − 2AT/π. The force on
+/// the wall is M A sin(πτ/T) and its impulse M (v0 − v(T)).
+#[test]
+fn crash_series_half_sine_pulse_closed_form() {
+    use std::f64::consts::PI;
+    let d = lattice();
+    let mass: f64 = d.nodes.iter().map(|n| f64::from(n.mass)).sum();
+    let yaw = 0.3f32;
+    let (t, mut b) = scene(&[("car", &d, ZoneMap::default(), Vec3::ZERO, yaw, Vec3::ZERO)], vec![(Vec3::new(0.0, 1.0, 50.0), Vec3::new(5.0, 1.0, 0.5))]);
+    let (a, tp, v0, t0) = (40.0 * series::G0, 0.100, 15.6, 0.1);
+    b.layout.impact_s = t0 as f32;
+    let h = b.layout.bodies[0].heading().as_dvec3();
+    let vel = |tau: f64| if tau <= 0.0 { v0 } else { v0 - a * tp / PI * (1.0 - (PI * tau.min(tp) / tp).cos()) };
+    let x_at = |tau: f64| {
+        let c = |s: f64| v0 * s - a * tp / PI * (s - tp / PI * (PI * s / tp).sin());
+        if tau <= 0.0 {
+            v0 * tau
+        } else if tau <= tp {
+            c(tau)
+        } else {
+            c(tp) + vel(tp) * (tau - tp)
+        }
+    };
+    let x0 = sample(&b, 0.0);
+    let dt = f64::from(super::super::DT * super::super::SAMPLE_STEPS as f32);
+    let xs: Vec<Sample> = (0..=100)
+        .map(|k| {
+            let tk = k as f64 * dt;
+            let mut x = x0.clone();
+            x.t = tk as f32;
+            let (dx, v) = ((h * (x_at(tk - t0) - x_at(-t0))).as_vec3(), (h * vel(tk - t0)).as_vec3());
+            x.pos[0].iter_mut().for_each(|p| *p += dx);
+            x.vel[0].iter_mut().for_each(|w| *w = v);
+            x
+        })
+        .collect();
+    let mut r = Recorder::new(&t, &b);
+    for x in &xs {
+        r.push(x);
+    }
+    let (m, s) = r.finish_with_series();
+    let stop = tp / PI * (1.0 - PI * v0 / (a * tp)).acos();
+    let leave = vel(tp);
+    // The 8 ms box-car keeps a sine to sin(πΔ/T)/(πΔ/T), Δ = 4 ms (0.26 %), and the
+    // samples nearest the peak are 2 ms either side of it (τ = 48 and 52 ms: 0.20 % more).
+    let boxcar = (PI * dt / tp).sin() / (PI * dt / tp);
+    let near_peak = (PI * 0.048 / tp).sin();
+    near(&m, "car.ref.nodes", 0.0, 0.0);
+    near(&m, "car.com.peak_decel_g", 40.0 * boxcar * near_peak, 1e-3);
+    // (48 or 52 ms: the two are equal but for rounding.)
+    assert!((m["car.com.peak_ms"] - 50.0).abs() - 2.0 < 1e-3, "{}", m["car.com.peak_ms"]);
+    near(&m, "car.com.stop_ms", 1000.0 * stop, 0.3);
+    near(&m, "car.com.dyn_crush", x_at(stop), 3e-4);
+    near(&m, "car.com.rebound", -leave, 1e-4);
+    near(&m, "car.com.restitution", -leave / v0, 1e-5);
+    near(&m, "car.com.vy_peak", 0.0, 1e-5);
+    near(&m, "all.box_force_peak_n", mass * a * boxcar * near_peak, 1e-4 * mass * a);
+    near(&m, "all.box_impulse_ns", mass * (v0 - leave), 1e-5 * mass * v0);
+    near(&m, "all.box_force_pre_n", 0.0, 1e-5 * mass * a);
+    // The curves: on the sample grid from first contact, and ∫F dt over the pulse = M Δv.
+    let k0 = s.t_ms.iter().position(|x| x.abs() < 1e-3).unwrap();
+    assert!((s.bodies[0].com.dx[k0]).abs() < 1e-5 && (s.bodies[0].com.vx[k0] - v0).abs() < 1e-5);
+    let impulse = signal::integrate(&s.box_force_n[k0..], dt, 0.0).last().copied().unwrap();
+    near(&BTreeMap::from([("impulse".to_string(), impulse)]), "impulse", mass * (v0 - leave), 2e-3 * mass * v0);
+    for (k, &tk) in s.t_ms.iter().enumerate() {
+        let tau = tk / 1000.0;
+        assert!((s.bodies[0].com.vx[k] - vel(tau)).abs() < 1e-5, "v at {tk}");
+        assert!((s.bodies[0].com.dx[k] - (x_at(tau) - x_at(0.0))).abs() < 5e-5, "x at {tk}");
+    }
+}
+
+/// The reference location: the cabin floor behind the B-pillar (the `cabin_width` gauge's
+/// node) and ahead of the rear axle, within 5 cm of the cabin's lowest node.
+#[test]
+fn crash_series_reference_nodes_by_position() {
+    let p = |n: &str, z: f32, y: f32| node(n, [0.5, y, z], 1.0);
+    let mut d = desc(
+        vec![
+            p("cab_f1", -1.0, 0.2),
+            p("cab_f2", -2.0, 0.2),
+            p("cab_f3", -2.4, 0.23),
+            p("cab_f4", -2.9, 0.2),
+            p("cab_hi", -2.0, 0.5),
+            p("cab_bp", -1.6, 0.9),
+            p("rr_low", -2.2, 0.1),
+            p("hub_f1", 0.0, 0.3),
+            p("hub_f2", 0.0, 0.3),
+            p("hub_r1", -2.8, 0.3),
+            p("hub_r2", -2.8, 0.3),
+        ],
+        &[],
+    );
+    d.wheels = vec![crate::desc::SoftWheel { node1: 7, node2: 8, ..Default::default() }, crate::desc::SoftWheel { node1: 9, node2: 10, ..Default::default() }];
+    let zones = ZoneMap { parts: vec![("cab_".into(), Section::Cabin), ("rr_".into(), Section::Rear), ("hub_".into(), Section::Wheel)], gauges: vec![super::super::Gauge { name: "cabin_width".into(), a: "cab_bp".into(), b: "cab_bp".into() }] };
+    let t = Template { desc: d, settings: Default::default(), zones };
+    assert_eq!(reference_nodes(&t), vec![1, 2]);
+    // Without wheels there is no rear axle: the centre of mass is the reference.
+    let mut bare = t.clone();
+    bare.desc.wheels.clear();
+    assert!(reference_nodes(&bare).is_empty());
+}
+
+/// Side crush: a door-band skin node pushed 0.1 m in on the left reads 0.1 m of left crush
+/// (residual and peak), nothing on the right, after the body has also turned and moved.
+#[test]
+fn crash_series_side_crush_in_the_fitted_frame() {
+    let mut n = Vec::new();
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                n.push(node(&format!("n{i}{j}{k}"), [-0.8 + 0.8 * i as f32, 0.5 * j as f32, -1.0 + k as f32], 1.0));
+            }
+        }
+    }
+    let mut d = desc(n, &[]);
+    let id = |i: usize, j: usize, k: usize| (9 * i + 3 * j + k) as u32;
+    // Left (+X) face and right face: a triangle with two door-band nodes (y = 0.5).
+    d.triangles.push(SoftTriangle { nodes: [id(2, 1, 0), id(2, 1, 1), id(2, 2, 1)], ..Default::default() });
+    d.triangles.push(SoftTriangle { nodes: [id(0, 1, 0), id(0, 1, 1), id(0, 2, 1)], ..Default::default() });
+    let (t, b) = scene(&[("car", &d, ZoneMap::default(), Vec3::ZERO, 0.0, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    let mut x1 = x0.clone();
+    x1.t = 0.004;
+    x1.pos[0][id(2, 1, 1) as usize].x -= 0.1;
+    // Then the whole body turned 20° about +Y and moved.
+    let x2 = moved(&x1, Mat3::from_rotation_y(0.35), Vec3::ZERO, Vec3::new(1.0, 0.0, 2.0), 0.008);
+    let m = run(&t, &b, &[x0, x1, x2]);
+    near(&m, "car.side_crush_left_residual", 0.1, 1e-4);
+    near(&m, "car.side_crush_left_peak", 0.1, 1e-4);
+    near(&m, "car.side_crush_right_residual", 0.0, 1e-4);
+}

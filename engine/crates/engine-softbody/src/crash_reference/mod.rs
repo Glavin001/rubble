@@ -22,6 +22,10 @@ mod s07_wall_190;
 mod s08_head_on;
 mod s09_car_vs_suv;
 mod s10_block_200;
+mod s11_ncap_frontal_56;
+mod s12_frontal_40;
+mod s13_side_pole;
+mod s14_ncap_side_mdb;
 
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
@@ -130,11 +134,19 @@ pub struct Body {
     /// Its velocity when it does not move along its heading (a crabbed barrier, a car carried
     /// sideways); None: `heading() * speed`.
     pub vel: Option<Vec3>,
+    /// It rides a side-impact carrier ([`crate::crash_rigs::on_carrier`]: its tyres on
+    /// low-friction pads, as a car launched sideways into a pole is in the real test).
+    pub carrier: bool,
 }
 
 impl Body {
     pub fn new(name: &'static str, design: &'static str, at: Vec3, yaw: f32, speed: f32) -> Self {
-        Self { name, design, at, yaw, speed, vel: None }
+        Self { name, design, at, yaw, speed, vel: None, carrier: false }
+    }
+    /// The same body on a side-impact carrier ([`Body::carrier`]).
+    pub fn on_carrier(mut self) -> Self {
+        self.carrier = true;
+        self
     }
     pub fn heading(&self) -> Vec3 {
         Vec3::new(self.yaw.sin(), 0.0, self.yaw.cos())
@@ -258,6 +270,10 @@ pub fn all() -> Vec<CrashScenario> {
         s08_head_on::scenario(),
         s09_car_vs_suv::scenario(),
         s10_block_200::scenario(),
+        s11_ncap_frontal_56::scenario(),
+        s12_frontal_40::scenario(),
+        s13_side_pole::scenario(),
+        s14_ncap_side_mdb::scenario(),
     ]
 }
 
@@ -307,6 +323,9 @@ impl CrashScenario {
             let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, b.at + Vec3::Y * lift, b.velocity(), t.settings)?;
             s.surface_contact = true;
             s.edge_contact = contact != Contact::Discrete;
+            if b.carrier {
+                crate::crash_rigs::on_carrier(&mut s);
+            }
             for &(c, h) in &layout.boxes {
                 s.boxes.push(StaticBox::centered(c, h));
             }
@@ -351,23 +370,82 @@ pub trait Runner {
     fn contact_removed(&mut self) -> Option<f64> {
         None
     }
+    /// Start a per-step trace (the 2 kHz time history, [`metrics::series::Fine`]): after every
+    /// step, the mean velocity of each location in `sets`, a body and its nodes (unweighted; no
+    /// nodes: the body's centre of mass, mass-weighted). False when the executor cannot trace;
+    /// the run then has its 4 ms series only.
+    fn start_trace(&mut self, _sets: &[(usize, Vec<usize>)]) -> bool {
+        false
+    }
+    /// The traced velocities since the last call: per step, per location.
+    fn take_trace(&mut self) -> Vec<Vec<glam::DVec3>> {
+        Vec::new()
+    }
 }
 
-/// The CPU reference.
-pub struct CpuRunner(pub ExplicitBeamsWorld);
+/// The CPU reference (and its per-step trace, when one is started).
+pub struct CpuRunner(pub ExplicitBeamsWorld, Option<Trace>);
+
+/// A per-step trace's node sets and the velocities taken since the last [`Runner::take_trace`].
+struct Trace {
+    sets: Vec<(usize, Vec<usize>)>,
+    buf: Vec<Vec<glam::DVec3>>,
+}
 
 impl CpuRunner {
     pub fn new(built: &Built) -> Self {
         let mut w = ExplicitBeamsWorld::new(built.fleet.clone());
         w.continuous = (built.contact == Contact::Continuous).then(|| Dat::new(0.08, 0.85));
-        Self(w)
+        Self(w, None)
     }
+}
+
+/// Each location's traced velocity: the mean over its nodes, or its body's mass-weighted
+/// centre of mass's.
+fn traced(w: &ExplicitBeamsWorld, sets: &[(usize, Vec<usize>)]) -> Vec<glam::DVec3> {
+    use glam::DVec3;
+    sets.iter()
+        .map(|(b, set)| {
+            let Some(v) = w.vehicles.get(*b) else { return DVec3::ZERO };
+            if set.is_empty() {
+                let (p, m) = v.nodes.iter().fold((DVec3::ZERO, 0.0), |(p, m), n| (p + f64::from(n.mass) * n.vel.as_dvec3(), m + f64::from(n.mass)));
+                p / f64::max(m, 1e-12)
+            } else {
+                set.iter().filter_map(|&i| v.nodes.get(i)).map(|n| n.vel.as_dvec3()).sum::<DVec3>() / set.len() as f64
+            }
+        })
+        .collect()
 }
 
 impl Runner for CpuRunner {
     fn frame(&mut self, steps: u32) -> Result<(), String> {
-        self.0.frame(steps);
+        match &mut self.1 {
+            // `ExplicitBeamsWorld::frame` without vehicle sleep (wings, rebase, the steps), each
+            // step observed; `engine-softbody-lab/tests/crash_series_rate.rs` holds a traced run
+            // and an untraced one to the same metrics, bit for bit.
+            Some(tr) if self.0.sleep.is_none() => {
+                for v in &mut self.0.vehicles {
+                    v.check_wings();
+                    v.rebase_origin();
+                }
+                for _ in 0..steps {
+                    self.0.step();
+                    tr.buf.push(traced(&self.0, &tr.sets));
+                }
+            }
+            _ => self.0.frame(steps),
+        }
         Ok(())
+    }
+    fn start_trace(&mut self, sets: &[(usize, Vec<usize>)]) -> bool {
+        if self.0.sleep.is_some() || sets.iter().any(|(b, _)| *b >= self.0.vehicles.len()) {
+            return false;
+        }
+        self.1 = Some(Trace { sets: sets.to_vec(), buf: Vec::new() });
+        true
+    }
+    fn take_trace(&mut self) -> Vec<Vec<glam::DVec3>> {
+        self.1.as_mut().map_or(Vec::new(), |t| std::mem::take(&mut t.buf))
     }
     fn sample(&mut self) -> Result<Sample, String> {
         let v = &self.0.vehicles;
@@ -392,6 +470,10 @@ pub struct CrashReport {
     pub run: usize,
     pub metrics: BTreeMap<String, f64>,
     pub results: Vec<CriterionResult>,
+    /// The run's time histories ([`metrics::series`]); None from an executor that keeps only
+    /// the metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<metrics::Series>,
 }
 
 impl CrashReport {
@@ -426,6 +508,7 @@ pub fn run(
 ) -> Result<CrashReport, String> {
     let mut rec = metrics::Recorder::new(templates, built);
     let n = s.samples(&built.layout);
+    let fine = runner.start_trace(&rec.trace_sets());
     for k in 0..=n {
         let mut x = runner.sample()?;
         x.t = k as f32 * DT * SAMPLE_STEPS as f32;
@@ -433,12 +516,15 @@ pub fn run(
         each(&x);
         if k < n {
             runner.frame(SAMPLE_STEPS)?;
+            if fine {
+                rec.push_trace(runner.take_trace());
+            }
         }
     }
-    let mut metrics = rec.finish();
+    let (mut metrics, series) = rec.finish_with_series();
     if let Some(j) = runner.contact_removed() {
         metrics.insert("all.contact_removed_j".into(), j);
     }
     let results = (s.criteria)().iter().map(|c| c.judge(&metrics)).collect();
-    Ok(CrashReport { id: s.id.into(), contact: built.contact, run, metrics, results })
+    Ok(CrashReport { id: s.id.into(), contact: built.contact, run, metrics, results, series: Some(series) })
 }

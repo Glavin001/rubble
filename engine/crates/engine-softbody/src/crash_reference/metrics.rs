@@ -49,18 +49,41 @@
 //! | `pair.<a>_<b>.crossings_max` | most edges of one's collision surface through the other's live triangles at any sample (`ExplicitBeamsWorld::mesh_crossings`, both ways; the hard rule is 0) |
 //! | `pair.<a>_<b>.crush_peak_ratio`, `.plastic_work_ratio` | larger over smaller of the two `crush_peak` (each floored at 0, + 1 mm) and `plastic_work_j` (+ 1 J) |
 //! | `pair.<a>_<b>.yaw_peak_diff_deg` | \|a's `yaw_peak_deg` − b's\| |
+//! | `v_travel_end` | the COM's velocity at the end along its initial velocity's direction (m/s; 0 for a body that starts at rest) |
+//! | `side_crush_{left,right}_{peak,residual}` | largest inward displacement of that side's skin nodes in the door band ([`SIDE_BAND`], [`SIDE_OUTER`]), in the body's fitted frame (the robust fit inverted), at any sample and at the last (m; NHTSA's side "maximum exterior crush", levels 1–4) |
+//! | `all.momentum_along_start`, `all.momentum_along_end` | horizontal momentum of every body at the start, and at the end along its direction (kg m/s) |
+//!
+//! Time histories ([`series`]: SAE axes of the body's first frame, x forward, y right; t from
+//! the layout's first contact; `ref` the reference location, the rear-seat crossmember's
+//! place [`series::reference_nodes`], `com` the centre of mass):
+//!
+//! | measure | meaning |
+//! |---|---|
+//! | `ref.nodes` | nodes averaged for the reference location (0: it is the centre of mass) |
+//! | `{ref,com}.peak_decel_g`, `.peak_ms` | largest −ax after contact (g; the 4 ms estimator: Δv over 8 ms) and when (ms) |
+//! | `{ref,com}.stop_ms`, `.dyn_crush`, `.mean_decel_g` | when vx first reaches 0 (t_m, ms), dx then (m, Hermite between samples), vx at contact / t_m (g); only when it stops |
+//! | `{ref,com}.rebound`, `.restitution` | −min vx from t_m to 200 ms after contact (m/s), over vx at contact; only when it stops |
+//! | `{ref,com}.vy_peak`, `.vy_peak_ms`, `.ay_peak_g`, `.ay_peak_ms`, `.dy_peak` | largest-magnitude lateral velocity (signed, + right) and when, lateral acceleration (signed) and when, lateral displacement |
+//! | `{ref,com}.dvy_peak`, `.dvy_peak_ms`, `.dvx_150ms`, `.dvy_150ms` | largest-magnitude change of vy from contact (signed) and when; vx and vy 150 ms after contact less at contact |
+//! | `{ref,com}.cfc60_peak_decel_g`, `.cfc60_peak_ms`, `.cfc60_ay_peak_g`, `.cfc60_ay_peak_ms` | the same peaks on the 2 kHz trace through SAE J211 CFC 60, from an executor that traces every step ([`super::Runner::start_trace`], the CPU reference) |
+//! | `all.box_force_peak_n`, `.box_force_peak_ms` | largest force on the static boxes after contact, −d(Σ m v)/dt along body 0's initial velocity (N), and when |
+//! | `all.box_force_pre_n` | its mean magnitude over the 40 ms before contact: friction and drag alone, the method's error floor (N) |
+//! | `all.box_impulse_ns` | momentum lost along that direction from contact to the end (N s): the boxes' impulse plus friction's |
 //!
 //! The executor may add `all.contact_removed_j` ([`super::run`]).
 
 mod beams;
 mod fit;
 mod graph;
+pub mod series;
+pub mod signal;
 mod wheels;
 mod zones;
 #[cfg(test)]
 mod tests;
 
 pub use fit::{robust_fit, weighted_fit, yaw_pitch_roll};
+pub use series::{reference_nodes, BodySeries, Kinematics, Series};
 pub use zones::{assign as assign_zones, Zone, SECTIONS};
 
 use super::{Built, Sample, Section, Template, Templates};
@@ -152,7 +175,26 @@ struct BodyRec {
     /// This sample's attached nodes (in its heaviest part) and COM.
     attached: Vec<bool>,
     com_now: DVec3,
+    /// Its time histories ([`series`]).
+    track: series::BodyTrack,
+    /// Its initial velocity's direction (zero when it starts at rest).
+    travel: DVec3,
+    /// Skin nodes of each side's door band ([`SIDE_BAND`]): [left, right], and the largest
+    /// inward displacement of any of them in the body's fitted frame, at any sample and at
+    /// the last.
+    side_nodes: [Vec<usize>; 2],
+    side_peak: [f64; 2],
+    side_last: [f64; 2],
 }
+
+/// The heights above the ground (m, at rest: above the wheels' lowest point) of the band of a
+/// side's skin whose crush is measured: NHTSA's side crush levels 1–4 (the reports' "maximum
+/// exterior crush" table: sill top about 0.30 m, occupant hip point 0.50–0.56, mid door 0.62,
+/// window sill 0.92–0.94); level 5, the window top (glass), and the sill's underside are left
+/// out.
+pub const SIDE_BAND: (f32, f32) = (0.25, 0.95);
+/// A side's skin: nodes at least this share of the half width out from the centre line.
+pub const SIDE_OUTER: f32 = 0.75;
 
 /// Two bodies (a < b in layout order) followed through a run.
 struct PairRec {
@@ -177,6 +219,12 @@ pub struct Recorder {
     e_gain: f64,
     box_depth: f64,
     pairs: BTreeMap<(usize, usize), PairRec>,
+    /// The scene's time histories ([`series`]) and the layout's first contact (s).
+    scene: series::SceneTrack,
+    impact_s: f64,
+    /// The executor's per-step trace ([`super::Runner::start_trace`]): per step, per location
+    /// ([`Self::trace_sets`]); the first entry from the first sample.
+    fine: Vec<Vec<DVec3>>,
 }
 
 /// The positions along `axis` of the nodes `keep` admits, sorted.
@@ -332,6 +380,13 @@ impl BodyRec {
         let index = |name: &str| d.nodes.iter().position(|n| n.name == name);
         let gauges = t.zones.gauges.iter().filter_map(|g| Some((g.name.clone(), index(&g.a)?, index(&g.b)?, Track::default()))).collect();
         let heading = b.heading();
+        let ref_nodes: Vec<usize> = series::reference_nodes(t).into_iter().filter(|&i| i < pos.len()).collect();
+        let track = series::BodyTrack::new(ref_nodes.clone(), ref_nodes.iter().map(|&i| d.nodes[i].name.clone()).collect());
+        let half = 0.5 * (hi - lo);
+        let wheel_low = super::Extent::of(d).wheel_low.unwrap_or_else(|| rest.iter().map(|p| p.y).fold(f32::MAX, f32::min));
+        let in_band = |p: &Vec3| p.y - wheel_low >= SIDE_BAND.0 && p.y - wheel_low <= SIDE_BAND.1;
+        let side_nodes = [1.0f32, -1.0].map(|s| (0..pos.len()).filter(|&i| skin[i] && !wheel_node[i] && in_band(&rest[i]) && s * (rest[i].x - mid) >= SIDE_OUTER * half).collect());
+        let v0 = b.velocity();
         Self {
             name: b.name,
             mass: s.nodes.iter().map(|n| n.mass).collect(),
@@ -366,6 +421,11 @@ impl BodyRec {
             parts0: 0,
             attached: Vec::new(),
             com_now: DVec3::ZERO,
+            track,
+            travel: v0.as_dvec3().normalize_or_zero(),
+            side_nodes,
+            side_peak: [0.0; 2],
+            side_last: [0.0; 2],
         }
     }
 
@@ -393,7 +453,15 @@ impl BodyRec {
         let main = (0..count).max_by(|a, b| part_mass[*a].total_cmp(&part_mass[*b])).unwrap_or(0);
         self.attached = label.iter().map(|l| *l == main).collect();
         self.com_now = com(pos, &self.mass);
-        let (r, _) = fit::robust_fit(&self.ref_pos, pos, &self.mass);
+        let (r, tr) = fit::robust_fit(&self.ref_pos, pos, &self.mass);
+        // Each side's crush: its door band's nodes back in the first sample's frame (the fit
+        // inverted), inward toward the centre line (left side: −left, right side: +left).
+        let left = self.left.as_dvec3();
+        for (k, s) in [1.0f64, -1.0].into_iter().enumerate() {
+            let inward = self.side_nodes[k].iter().filter_map(|&i| Some((pos.get(i)?, self.ref_pos.get(i)?))).map(|(q, p)| -s * (r.transpose() * (q.as_dvec3() - tr) - p.as_dvec3()).dot(left)).fold(0.0f64, f64::max);
+            self.side_peak[k] = self.side_peak[k].max(inward);
+            self.side_last[k] = inward;
+        }
         let (yaw, pitch, roll) = fit::yaw_pitch_roll(r, self.heading);
         self.yaw += wrap(yaw - self.yaw_raw);
         self.yaw_raw = yaw;
@@ -406,6 +474,7 @@ impl BodyRec {
         self.pitch_end = pitch;
         self.roll_peak = self.roll_peak.max(roll.abs());
         let v = com(vel, &self.mass);
+        self.track.push(pos, vel, self.com_now, v);
         self.vh.push((t, DVec3::new(v.x, 0.0, v.z)));
         self.speed_peak = self.speed_peak.max(v.length());
         self.max_node_speed = vel.iter().map(|v| f64::from(v.length())).fold(self.max_node_speed, f64::max);
@@ -450,12 +519,43 @@ impl Recorder {
                 pairs.insert((a, b), PairRec { gap: f64::INFINITY, reach: [f64::NEG_INFINITY; 2], skin_reach: [f64::NEG_INFINITY; 2], mesh, crossings: 0 });
             }
         }
-        Self { bodies, boxes: built.layout.boxes.clone(), first: None, last: None, finite: true, e_min: f64::INFINITY, e_gain: 0.0, box_depth: 0.0, pairs }
+        Self {
+            bodies,
+            boxes: built.layout.boxes.clone(),
+            first: None,
+            last: None,
+            finite: true,
+            e_min: f64::INFINITY,
+            e_gain: 0.0,
+            box_depth: 0.0,
+            pairs,
+            scene: series::SceneTrack::default(),
+            impact_s: f64::from(built.layout.impact_s),
+            fine: Vec::new(),
+        }
+    }
+
+    /// The locations of a per-step trace: each body's reference location (its nodes; none:
+    /// its centre of mass) and its centre of mass, in body order.
+    pub fn trace_sets(&self) -> Vec<(usize, Vec<usize>)> {
+        self.bodies.iter().enumerate().flat_map(|(k, b)| [(k, b.track.ref_nodes.clone()), (k, Vec::new())]).collect()
+    }
+
+    /// A frame's per-step trace (per step, per location of [`Self::trace_sets`]:
+    /// [`super::Runner::take_trace`]). The first sample's velocities start it.
+    pub fn push_trace(&mut self, steps: Vec<Vec<DVec3>>) {
+        if self.fine.is_empty() {
+            self.fine.push(self.bodies.iter().flat_map(|b| b.track.first_velocities()).collect());
+        }
+        self.fine.extend(steps);
     }
 
     pub fn push(&mut self, x: &Sample) {
         self.finite &= x.pos.iter().flatten().chain(x.vel.iter().flatten()).all(|p| p.is_finite());
         let t = f64::from(x.t);
+        let momentum: DVec3 = self.bodies.iter().zip(&x.vel).map(|(b, v)| v.iter().zip(&b.mass).map(|(v, m)| f64::from(*m) * v.as_dvec3()).sum::<DVec3>()).sum();
+        self.scene.t.push(t);
+        self.scene.momentum.push(momentum);
         let mut energy = 0.0;
         for (k, b) in self.bodies.iter_mut().enumerate() {
             let (Some(pos), Some(vel)) = (x.pos.get(k), x.vel.get(k)) else { continue };
@@ -507,7 +607,32 @@ impl Recorder {
         self.last = Some(x.clone());
     }
 
+    /// Every metric (as [`Self::finish_with_series`] without the time histories).
     pub fn finish(self) -> BTreeMap<String, f64> {
+        self.finish_with_series().0
+    }
+
+    /// Every metric and the run's time histories ([`series`]).
+    pub fn finish_with_series(self) -> (BTreeMap<String, f64>, Series) {
+        let mut m = self.metrics();
+        let tracks: Vec<&series::BodyTrack> = self.bodies.iter().map(|b| &b.track).collect();
+        let input = series::SeriesInput {
+            names: self.bodies.iter().map(|b| b.name).collect(),
+            masses: self.bodies.iter().map(|b| b.mass.iter().map(|x| f64::from(*x)).sum()).collect(),
+            headings: self.bodies.iter().map(|b| b.heading).collect(),
+            travel0: self.bodies.first().map_or(DVec3::Z, |b| if b.travel == DVec3::ZERO { b.heading.as_dvec3() } else { b.travel }),
+            tracks: &tracks,
+            scene: &self.scene,
+            impact_s: self.impact_s,
+            has_boxes: !self.boxes.is_empty(),
+            fine: &self.fine,
+            step_s: f64::from(super::DT),
+        };
+        let s = series::finish(input, &mut m);
+        (m, s)
+    }
+
+    fn metrics(&self) -> BTreeMap<String, f64> {
         let mut m = BTreeMap::new();
         let (Some(first), Some(last)) = (&self.first, &self.last) else { return m };
         let over = |x: &Sample, f: &dyn Fn(Vec3, f64) -> DVec3| -> DVec3 { self.bodies.iter().enumerate().map(|(k, b)| x.vel.get(k).map_or(DVec3::ZERO, |v| v.iter().zip(&b.mass).map(|(v, w)| f(*v, f64::from(*w))).sum())).sum() };
@@ -539,6 +664,8 @@ impl Recorder {
             ("box_depth_m", self.box_depth),
             ("plastic_work_j", total_work),
             ("com_speed_end", if mass > 0.0 { p1.length() / mass } else { 0.0 }),
+            ("momentum_along_start", DVec3::new(p0.x, 0.0, p0.z).length()),
+            ("momentum_along_end", DVec3::new(p1.x, 0.0, p1.z).dot(DVec3::new(p0.x, 0.0, p0.z).normalize_or_zero())),
         ] {
             m.insert(format!("all.{n}"), v);
         }
@@ -597,6 +724,11 @@ fn body_metrics(m: &mut BTreeMap<String, f64>, b: &BodyRec, last: &Sample, k: us
     put("vx_end", v1.x);
     put("vz_end", v1.z);
     put("dv_along", (v1 - b.v0).dot(h));
+    put("v_travel_end", v1.dot(b.travel));
+    for (k, side) in ["left", "right"].into_iter().enumerate() {
+        put(&format!("side_crush_{side}_peak"), b.side_peak[k]);
+        put(&format!("side_crush_{side}_residual"), b.side_last[k]);
+    }
     put("yaw_deg", b.yaw.to_degrees());
     put("yaw_peak_deg", b.yaw_peak.to_degrees());
     put("yaw_abs_peak_deg", b.yaw_abs_peak.to_degrees());
