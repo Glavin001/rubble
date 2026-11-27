@@ -850,9 +850,22 @@ the 2 N·m·s bar this morning (2.06, 2.3, 3.5). Side 60 pressed, a lasting-pain
   Reverting each of tonight's other changes one at a time, and all together, leaves 298–458
   zones, so they don't cause it.
 
+**Energy with the exact solve off** (the default; 2 runs of 0.6 s), and with a gap-keeping
+over-push accepted as resolved (`DAT_OVERPUSH=1`, a measurement, not adopted: mixed):
+
+| Contact's work | Exact solve off | Over-push accepted |
+|---|---|---|
+| Ball 100 | −7.3 / −7.4 kJ of 43 kJ (17 %); zones 142 | −4.7 / −3.7 kJ; zones 6 / 13 |
+| Side 60 | −9.9 / −10.5 kJ of 201 kJ (5 %); zones 2,960 / 2,390 | −7.5 / −11.3 kJ; zones 30 / 191 |
+| Head 100 | −134 / −161 kJ of 1,118 kJ (12–14 %); zones 5,209 / 9,046 | −179 / −121 kJ; zones 3,374 / 3,126 |
+
+Side 60's rigid zones did positive work on the conserved energy (+1.7 and +3.4 kJ). A rigid zone
+never raises the kinetic energy, but it can raise the integrator's conserved energy. Head 100's
+rows (e = 0) remove 88–120 kJ by themselves.
+
 **Open.**
-- The rigid zones remain: head 60 7,902, side 90 5,192, side 60 2,969 in 1 s; head 100's
-  contact work −13.6 % at e = 0.
+- The rigid zones remain: head 60 7,902, side 90 5,192, side 60 2,969 in 1 s.
+- Head 100's contact work is −12 to −14 % at e = 0, past rule 8's 5 %.
 - The exact solve waits on the generator's paint at the door top and on a torque-free form of
   the rows.
 

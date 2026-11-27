@@ -177,6 +177,7 @@ impl DatStats {
         self.ccd.work_zones += o.ccd.work_zones;
         self.ccd.e_scaled += o.ccd.e_scaled;
         self.ccd.restituted += o.ccd.restituted;
+        self.ccd.overpush += o.ccd.overpush;
         (self.ccd.soft_rounds, self.ccd.soft_rows, self.ccd.soft_left, self.ccd.row_iters) = (self.ccd.soft_rounds + o.ccd.soft_rounds, self.ccd.soft_rows + o.ccd.soft_rows, self.ccd.soft_left + o.ccd.soft_left, self.ccd.row_iters + o.ccd.row_iters);
         self.ccd.ke += o.ccd.ke;
         self.ccd.dp = self.ccd.dp.max(o.ccd.dp);

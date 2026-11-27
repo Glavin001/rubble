@@ -53,7 +53,7 @@ fn energy(scene: &str, kmh: f32, secs: f32) {
     for (k, x) in r.iter().enumerate() {
         let d = x.2.expect("continuous");
         let share = -d.contact_de / d.ke_start.max(1.0);
-        println!("| energy | {scene} {kmh} km/h run {k} | mechanical energy changed by contact {:.1} kJ ({:.2} % of the start's kinetic); contact's work {:.1} kJ (DAT_RESPONSE=vel: rows {:.1} kJ, zones {:.1} kJ, zones {}, passes e lowered {}, rows restituted {}) |", d.contact_de * 1e-3, -100.0 * share, d.contact_work * 1e-3, d.ccd.work_rows * 1e-3, d.ccd.work_zones * 1e-3, d.ccd.zones, d.ccd.e_scaled, d.ccd.restituted);
+        println!("| energy | {scene} {kmh} km/h run {k} | mechanical energy changed by contact {:.1} kJ ({:.2} % of the start's kinetic); contact's work {:.1} kJ (DAT_RESPONSE=vel: rows {:.1} kJ, zones {:.1} kJ, zones {}, passes e lowered {}, rows restituted {}, over-push taken {}) |", d.contact_de * 1e-3, -100.0 * share, d.contact_work * 1e-3, d.ccd.work_rows * 1e-3, d.ccd.work_zones * 1e-3, d.ccd.zones, d.ccd.e_scaled, d.ccd.restituted, d.ccd.overpush);
         // Velocity contact (DAT_RESPONSE=vel) moves positions only by its velocity change, so the
         // integrator's conserved energy is its measure, the contact's work (as the elastic bars':
         // `contact_known_solutions.rs`); the mechanical energy also counts the stiff beams' h·Δv

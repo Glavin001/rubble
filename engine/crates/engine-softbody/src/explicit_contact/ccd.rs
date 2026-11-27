@@ -130,6 +130,8 @@ pub struct CcdStats {
     pub e_scaled: u64,
     /// Rows given Poisson's restitution impulse (velocity contact).
     pub restituted: u64,
+    /// Solves taken as resolved with an over-push (`DAT_OVERPUSH=1`).
+    pub overpush: u64,
 }
 
 /// The impact law's guard's tolerance (J a pass): the rows' work on the conserved energy above

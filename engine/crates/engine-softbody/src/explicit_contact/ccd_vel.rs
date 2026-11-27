@@ -274,10 +274,22 @@ impl Ctx<'_> {
                 }
             }
         }
+        // A solve whose every row keeps its gap but some row pushes past its bound (over-push:
+        // a slightly faster parting) is taken as resolved (`DAT_OVERPUSH=1`, a measurement): the
+        // pass's work on the conserved energy is checked by the energy tests.
+        if !ok && std::env::var("DAT_OVERPUSH").is_ok_and(|v| v == "1") && rows.iter().all(|r| self.keeps_gap(r, vel)) {
+            ok = true;
+            st.overpush += 1;
+        }
         for (r, l) in rows.iter_mut().zip(l) {
             r.l = l;
         }
         ok
+    }
+
+    /// The row closes past its bound by at most [`ROW_GAP_SHARE`] of what it may close to.
+    fn keeps_gap(&self, r: &VRow, vel: &[Vec<Vec3>]) -> bool {
+        -(Self::normal(r, vel) + r.b) * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi.min(r.s0.max(0.0))
     }
 
     /// A measurement (`DAT_CLUSTERS=1`): the rows left unsettled and the sizes of the clusters
