@@ -118,6 +118,8 @@ pub struct DatStats {
     pub ke_start: f64,
     /// The restitution's guard: the steps it scaled e down to keep kinetic energy from rising.
     pub guarded: u64,
+    /// The vehicles' mechanical energy changed by the pass (J, summed; `DAT_ENERGY=1`).
+    pub contact_de: f64,
 }
 
 impl DatStats {

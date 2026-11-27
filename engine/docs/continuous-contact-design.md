@@ -481,6 +481,20 @@ e = 1): the rows rebuild every node's change from all rows' whole impulses each 
 - rigid zones switched off (`DAT_ZONES=0`, a measurement) remove more (3.1-3.4 %): the zones
   are not the main loss.
 
+## Energy against physics, not against ourselves (2026-11-26)
+
+- **Known solution:** two elastic bars head on (`tests/contact_known_solutions.rs`). Elastic
+  theory: energy kept exactly. e = 0 keeps it to 0.6 J; **e = 1 as written created 403 J on
+  275 J of kinetic energy** (a pressed contact bounced every step): the default is back to 0.
+- **The right measure** is the pass's change of the mechanical energy (kinetic, gravitational,
+  stored in the beams; `DAT_ENERGY=1`), not its kinetic change. At e = 0: head 100 −18 %, side
+  60 **+10 %**, ball 100 **+8 %** of the start's kinetic energy. The pass both removes and
+  creates energy: its position-only steps move nodes with no force doing the work, storing or
+  releasing energy in their beams.
+- So the fault is the response's form, not a tuning: contact must act through impulses on
+  velocities with positions following them (x1 = x0 + h·v), or as forces in the node update
+  (explicit crash codes' penalty contact). Either is energy-consistent by construction.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

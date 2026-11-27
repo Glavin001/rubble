@@ -534,7 +534,7 @@ impl ExplicitBeamsWorld {
                 v.step_nodes();
             }
             self.guard_final(&v0, None);
-            self.dat_truncate(x0);
+            self.dat_truncate_measured(x0);
             for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
                 v.step_rest();
             }
@@ -579,7 +579,7 @@ impl ExplicitBeamsWorld {
                 v.step_nodes();
             }
             self.guard_final(&v0, None);
-            self.dat_truncate(x0);
+            self.dat_truncate_measured(x0);
             for v in &mut self.vehicles {
                 v.step_rest();
             }
@@ -607,7 +607,7 @@ impl ExplicitBeamsWorld {
             v.step_nodes();
         }
         self.guard_final(&v0, Some((&mut ledger, &mut before)));
-        self.dat_truncate(x0);
+        self.dat_truncate_measured(x0);
         for (k, v) in self.vehicles.iter_mut().enumerate() {
             v.step_rest();
             ledger.account(k, v, &before[k]);
@@ -1709,4 +1709,29 @@ fn gas_energy(v: &ExplicitBeams, j: usize) -> f64 {
         };
     }
     sign * u
+}
+
+impl ExplicitBeamsWorld {
+    /// [`Self::dat_truncate`], and with `DAT_ENERGY=1` (a measurement) the change of the
+    /// vehicles' mechanical energy (kinetic, gravitational and stored, [`elastic_energy`]) across
+    /// it into the continuous counters' `contact_de`: what contact did to the energy, whatever
+    /// it moved, positions or velocities.
+    fn dat_truncate_measured(&mut self, x0: Option<dat::DatStart>) {
+        let on = self.continuous.is_some() && std::env::var("DAT_ENERGY").is_ok_and(|v| v == "1");
+        let mech = |w: &ExplicitBeamsWorld| -> f64 {
+            w.vehicles.iter().map(|v| {
+                let ke: f64 = v.nodes.iter().map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
+                let g: f64 = v.nodes.iter().map(|n| -(n.mass as f64) * crate::explicit_beams::GRAVITY as f64 * (v.origin.y + n.pos.y) as f64).sum();
+                ke + g + elastic_energy(v)
+            }).sum()
+        };
+        let e0 = if on { mech(self) } else { 0.0 };
+        self.dat_truncate(x0);
+        if on {
+            let de = mech(self) - e0;
+            if let Some(d) = self.continuous.as_mut() {
+                d.total.contact_de += de;
+            }
+        }
+    }
 }

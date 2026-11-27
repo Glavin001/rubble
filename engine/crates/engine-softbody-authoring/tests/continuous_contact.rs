@@ -72,15 +72,22 @@ fn continuous_probe() {
         e("DAT_SOFT", "0"), x[6] * 1e3, x[8] * 1e3, r[0].1, x[12], c.zones, c.zone_nodes, c.soft_rounds, c.soft_rows, c.soft_left, c.unresolved, c.ke, c.dp, c.dl, t.elapsed().as_secs_f32());
 }
 
-/// Contact never stands in for metal (AGENTS.md): over a crash the contact response (the
-/// speculative pass and the CCD response together) removes at most 1 % of the vehicles'
-/// starting kinetic energy; the crash's energy goes into the beams. 2 runs.
+/// Contact never stands in for metal (AGENTS.md): over a crash the contact pass changes the
+/// vehicles' mechanical energy (kinetic, gravitational and stored in the beams: what it did by
+/// moving velocities and positions both) by at most 1 % of their starting kinetic energy, and
+/// never raises it; the crash's energy goes into the beams. 2 runs. (The kinetic-only counter,
+/// `spec_ke`, also counts energy the pass moves into or out of the beams by its position
+/// steps; it is printed beside.)
 fn energy(scene: &str, kmh: f32, secs: f32) {
+    // (The measurement of the pass's mechanical energy, `ExplicitBeamsWorld::dat_truncate_measured`.)
+    std::env::set_var("DAT_ENERGY", "1");
     let r = crash_mode(scene, kmh, secs, 2, true, false, true, false, false, Some(true)).expect("the scene");
     let mut worst = 0.0f64;
     for (k, x) in r.iter().enumerate() {
         let d = x.2.expect("continuous");
-        let share = -d.spec_ke / d.ke_start.max(1.0);
+        let share = -d.contact_de / d.ke_start.max(1.0);
+        println!("| energy | {scene} {kmh} km/h run {k} | mechanical energy changed by contact {:.1} kJ ({:.2} % of the start's kinetic) |", d.contact_de * 1e-3, -100.0 * share);
+        assert!(d.contact_de <= 1e-3 * d.ke_start, "{scene} {kmh} run {k}: contact created {} J", d.contact_de);
         println!("| energy | {scene} {kmh} km/h run {k} | start {:.0} kJ, contact removed {:.1} kJ ({:.1} %; CCD response {:.1} kJ; guard scaled e down in {} of {} steps; zones {}) |", d.ke_start * 1e-3, -d.spec_ke * 1e-3, 100.0 * share, -d.ccd.ke * 1e-3, d.guarded, d.steps, d.ccd.zones);
         worst = worst.max(share);
     }

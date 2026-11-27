@@ -43,10 +43,12 @@ gen_sedan_paint::accept_side_60_pressed
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
 
-# Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): with Moreau's
-# impact law (e = 1) contact removes 2.8-2.9 % (head 100) and 1.3-1.5 % (ball 100) of the
-# starting kinetic energy, bar 1 % (side 60 passes at 0.2 %).
+# Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): the contact pass's
+# change of the mechanical energy (kinetic + gravitational + stored, DAT_ENERGY=1), e = 0: head 100
+# removes 18 %, side 60 creates 10 %, ball 100 creates 8 % of the start's kinetic energy (bar:
+# within 1 %, never created). Its position-only steps move nodes with no force doing the work.
 continuous_contact::continuous_energy_head_100
+continuous_contact::continuous_energy_side_60
 continuous_contact::continuous_energy_ball_100
 
 # Contact against known physics (tests/contact_known_solutions.rs, 2026-11-26): two elastic bars
