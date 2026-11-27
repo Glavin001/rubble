@@ -553,6 +553,11 @@ pub struct Pool {
     pub ids: Vec<u32>,
     pub pos: Vec<DVec3>,
     pub radius: Vec<f64>,
+    /// A sheet's fit ([`bind_sheet`]): the nodes may lie in one surface, so the fit
+    /// reproduces affine motion along the directions the nodes spread in and leaves
+    /// the others to the offset (M⁻¹ damped to (M² + τ²)⁻¹ M, τ = `EIG_MIN`²·W), and
+    /// it is well posed where they spread in two directions.
+    pub sheet: bool,
 }
 
 impl Pool {
@@ -570,7 +575,7 @@ impl Pool {
                 (R_SPACING * dk).max(R_MIN) * scale
             })
             .collect();
-        Pool { ids, pos, radius }
+        Pool { ids, pos, radius, sheet: false }
     }
 
     /// The fit's point weights at `x`: (pool index, A) for nodes in reach,
@@ -595,14 +600,27 @@ impl Pool {
             m0 += DMat3::from_cols(d * d.x, d * d.y, d * d.z) * o;
         }
         let m = m0 + DMat3::IDENTITY * (LAMBDA * w);
-        let mi = m.inverse();
         let e = x - ps;
-        let g = mi * e;
+        let tau = EIG_MIN * EIG_MIN * w;
+        let g = if self.sheet {
+            // Along a direction the nodes spread in (eigenvalue μ ≫ τ) μ/(μ² + τ²) is
+            // 1/μ, the affine fit; across the sheet (μ ≪ τ) it goes to 0, so the
+            // vertex's height off the nodes' surface is the offset's, not weights of
+            // both signs on the nodes' few millimetres out of it. Smooth in x.
+            (m * m + DMat3::IDENTITY * (tau * tau)).inverse() * (m * e)
+        } else {
+            m.inverse() * e
+        };
         let out: Vec<(usize, f64)> = om
             .iter()
             .map(|&(j, o)| (j, o / w + o * g.dot(self.pos[j] - ps)))
             .collect();
-        let ok = om.len() >= MIN_NODES && min_eig(m0) >= EIG_MIN * EIG_MIN * w;
+        let ok = om.len() >= MIN_NODES
+            && if self.sheet {
+                mid_eig(m0) >= tau
+            } else {
+                min_eig(m0) >= tau
+            };
         (out, ok)
     }
 
@@ -628,6 +646,28 @@ fn min_eig(a: DMat3) -> f64 {
     let r = (b.determinant() / 2.0).clamp(-1.0, 1.0);
     let phi = r.acos() / 3.0;
     q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos()
+}
+
+/// Middle eigenvalue of a symmetric 3 × 3 (the same closed form: the trace less
+/// the largest and the smallest).
+fn mid_eig(a: DMat3) -> f64 {
+    let (a11, a22, a33) = (a.x_axis.x, a.y_axis.y, a.z_axis.z);
+    let (a12, a13, a23) = (a.y_axis.x, a.z_axis.x, a.z_axis.y);
+    let p1 = a12 * a12 + a13 * a13 + a23 * a23;
+    let q = (a11 + a22 + a33) / 3.0;
+    if p1 < 1e-30 {
+        let mut d = [a11, a22, a33];
+        d.sort_by(|x, y| x.total_cmp(y));
+        return d[1];
+    }
+    let p2 = (a11 - q).powi(2) + (a22 - q).powi(2) + (a33 - q).powi(2) + 2.0 * p1;
+    let p = (p2 / 6.0).sqrt();
+    let b = (a - DMat3::IDENTITY * q) * (1.0 / p);
+    let r = (b.determinant() / 2.0).clamp(-1.0, 1.0);
+    let phi = r.acos() / 3.0;
+    let hi = q + 2.0 * p * phi.cos();
+    let lo = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
+    3.0 * q - hi - lo
 }
 
 /// The weight grid (A: 2⁻¹³, range ±4) and the gradient grid (∂A: 2⁻⁹ per
@@ -783,11 +823,36 @@ pub fn bind_with(
     nrms: &[Vec3],
     amp_max: Option<f64>,
 ) -> Result<(Vec<Vert>, f64), String> {
+    bind_opts(ids, pos, verts, nrms, amp_max, false)
+}
+
+/// [`bind`] over nodes that lie in one surface (a panel's nodes on its collision
+/// skin, [`Pool::sheet`]): the fit follows the surface's motion and the vertex keeps
+/// its rest height off it in the offset. Rest and rigid motion exact as [`bind`].
+pub fn bind_sheet(
+    ids: &[u32],
+    pos: &[Vec3],
+    verts: &[Vec3],
+    nrms: &[Vec3],
+) -> Result<(Vec<Vert>, f64), String> {
+    bind_opts(ids, pos, verts, nrms, None, true)
+}
+
+fn bind_opts(
+    ids: &[u32],
+    pos: &[Vec3],
+    verts: &[Vec3],
+    nrms: &[Vec3],
+    amp_max: Option<f64>,
+    sheet: bool,
+) -> Result<(Vec<Vert>, f64), String> {
     let dpos: Vec<DVec3> = pos.iter().map(|p| p.as_dvec3()).collect();
     let mut scale = 1.0;
     for _ in 0..12 {
-        let pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
-        let frame = Pool::new(ids.to_vec(), dpos.clone(), scale * FRAME_SCALE);
+        let mut pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
+        let mut frame = Pool::new(ids.to_vec(), dpos.clone(), scale * FRAME_SCALE);
+        pool.sheet = sheet;
+        frame.sheet = sheet;
         let mut out = Vec::with_capacity(verts.len());
         let mut failed = false;
         for (x, n) in verts.iter().zip(nrms) {
