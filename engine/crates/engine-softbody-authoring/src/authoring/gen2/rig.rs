@@ -2744,7 +2744,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let cols = span(fe_lo.z + 0.03, fe_hi.z - 0.05, 5);
         let mut grid: Vec<Vec<Option<usize>>> = vec![Vec::new(), Vec::new(), Vec::new()];
         for (k, &z) in cols.iter().enumerate() {
-            let xi = inner_x_at(&fen, z, 0.04).unwrap_or(0.6) + 0.025;
+            // The top row 2.5 cm out from the fender's inner edge, and never inside the hood's
+            // own edge: a fender narrowing at its ends (the 4x4's flares) would run its top row
+            // under the hood's edge row (2.5 cm in from the hood's edge) at the same height,
+            // 0.5 mm apart, where continuous contact keeps a car's own skin 2 mm apart (the
+            // lint's `skin_clearance`). A fender already outside the hood is as before.
+            let xi = (inner_x_at(&fen, z, 0.04).unwrap_or(0.6) + 0.025).max(half_w_at(&hood_top, z, 0.04).unwrap_or(0.0));
             let topp = top(z, xi);
             let mut bottom = low_at(&fen, z, 0.04).unwrap_or(0.4) + 0.025;
             if let Some(a) = inp.arch_y(z) {

@@ -562,10 +562,17 @@ pub(super) fn cover_bare(r: &mut Rig, inp: &dyn RigInput) {
             v
         };
         let (s, h) = (near(&skin), near(&|j| body(j) && r.car.nodes[j].name.starts_with("sh_")));
-        if let (Some(&a), Some(&b), Some(&c)) = (s.first(), s.get(1), h.first()) {
-            for n in [[i, a, c], [i, c, b], [i, b, a]] {
-                add.push(Tri { n, part: Part::Body, group: None, sub: None, inner: true });
-            }
+        // The nearest choice whose faces keep the skin's clearance from every face placed
+        // (`near_skin`): the 4x4's rear, the nearest shell node made the faces' shell edge the
+        // other diagonal of a quad already skinned, 0.3 mm from its own diagonal.
+        let placed: Vec<Tri> = r.car.tris.iter().chain(&add).cloned().collect();
+        let choice = (0..s.len().min(4))
+            .flat_map(|ka| (ka + 1..s.len().min(4)).map(move |kb| (ka, kb)))
+            .flat_map(|(ka, kb)| (0..h.len().min(4)).map(move |kc| (ka, kb, kc)))
+            .map(|(ka, kb, kc)| [[i, s[ka], h[kc]], [i, h[kc], s[kb]], [i, s[kb], s[ka]]])
+            .find(|faces| faces.iter().all(|&f| !near_skin(r, f, &placed)));
+        for n in choice.into_iter().flatten() {
+            add.push(Tri { n, part: Part::Body, group: None, sub: None, inner: true });
         }
     }
     r.car.tris.extend(add);
