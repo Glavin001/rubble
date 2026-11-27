@@ -1063,6 +1063,11 @@ Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
 | 512 iterations | 2,356 | 756 | 371,438 |
 | projected Gauss–Seidel (`DAT_PGS=1`) | 2,318 | 756 | 23,558 |
 | duplicate rows inactive (`DAT_DEDUP=1`) | 2,115 | 759 | 23,665 |
+| PGS, 128 iterations | 2,452 | | |
+| duplicates inactive, Jacobi-scaled Gershgorin | 2,434 | | |
+
+(A PGS-at-128 row once read as identical to the default: zsh had passed `$cfg` unsplit, so neither
+switch was set. Rerun with each switch its own argument.)
 
 - **What is unsettled** (`DAT_CLUSTERS`): every unsettled solve has a pushing row past its bound
   (median work 0.28 J; for example 0.13 m/s past a 31 m/s bound). 72 % also have a row closing past
@@ -1088,6 +1093,9 @@ Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
   - **Gershgorin on the Jacobi-scaled matrix** (`DAT_PRECOND=scaled`; still diag ⪰ A, the
     kernel's per-node sums): dᵢ = √Aᵢᵢ Σⱼ |wᵢⱼ| mⱼ⁻¹ Σₖ |wₖⱼ|/√Aₖₖ. Head 100 for 0.05 s: 2,460
     zones against 2,523. Only a little: the crowded nodes still limit it.
+  - **Neither iterations nor diagonals end the rounds:** 512 iterations a round still leave 2,356
+    zones, and 493 of the 745 rounds change rows (fresh or re-linearised). Both the inner solve
+    and the outer loop keep the eight rounds from resolving.
   - **What the evidence points to:** a block solve per crowded node, or contact that merges a
     node's rows (one vertex against one vertex is one constraint, not twenty), rather than a
     better diagonal.
