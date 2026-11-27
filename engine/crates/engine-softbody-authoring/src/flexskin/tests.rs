@@ -315,3 +315,62 @@ fn a_pane_across_an_opening_interpolates_its_frame() {
         rise(&held)
     );
 }
+
+/// A panel's collision skin: one layer of nodes, 4 mm out of plane at most (a
+/// gently curved door skin), and paint up to 4 cm above it (the paint's bulge
+/// between the skin's nodes).
+fn sheet() -> (Vec<u32>, Vec<Vec3>, Vec<Vec3>, Vec<Vec3>) {
+    let mut p = Vec::new();
+    for i in 0..5 {
+        for j in 0..3 {
+            p.push(Vec3::new(i as f32 * 0.25, j as f32 * 0.3, 0.004 * (i as f32 * 0.9).sin()));
+        }
+    }
+    let v: Vec<Vec3> = (0..200)
+        .map(|k| {
+            let f = k as f32;
+            Vec3::new(0.05 + 0.9 * (f * 0.37).fract(), 0.05 + 0.5 * (f * 0.61).fract(), 0.04 * (f * 0.13).fract())
+        })
+        .collect();
+    let n = vec![Vec3::Z; v.len()];
+    ((0..p.len() as u32).collect(), p, v, n)
+}
+
+#[test]
+fn a_sheet_fit_follows_its_surface_and_keeps_the_height_in_the_offset() {
+    let (ids, p, v, n) = sheet();
+    let amp = |sk: &[Vert]| sk.iter().map(amplification).fold(0.0, f64::max);
+    // The volume fit cannot use one layer: it grows its kernels until the 4 mm of
+    // curvature gives it a third direction, then reaches the paint's height with
+    // weights of both signs.
+    let free = bind(&ids, &p, &v, &n);
+    let (sk, _) = bind_sheet(&ids, &p, &v, &n, None).unwrap();
+    println!(
+        "amplification: volume fit {}, sheet fit {:.2}",
+        free.as_ref().map_or("no fit".to_string(), |f| format!("{:.2}", amp(&f.0))),
+        amp(&sk)
+    );
+    assert!(amp(&sk) < 1.6, "the sheet fit extrapolates: {}", amp(&sk));
+    if let Ok((f, _)) = &free {
+        assert!(amp(f) > amp(&sk), "the case no longer needs the sheet fit");
+    }
+    // Rest and any rigid motion exact.
+    let q = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-0.3);
+    let t = Vec3::new(3.0, -1.0, 2.0);
+    let moved: Vec<Vec3> = p.iter().map(|x| q * *x + t).collect();
+    for ((s, x), nn) in sk.iter().zip(&v).zip(&n) {
+        let (a, an) = eval(&s.w, s.off, s.nrm, &p);
+        assert!(a.distance(*x) < 2e-5 && an.angle_between(*nn) < 1e-3, "rest");
+        let (b, bn) = eval(&s.w, s.off, s.nrm, &moved);
+        assert!(b.distance(q * *x + t) < 2e-5, "rigid {}", b.distance(q * *x + t));
+        assert!(bn.angle_between(q * *nn) < 1e-3);
+    }
+    // One node pushed 5 cm into the panel (a dent): no vertex moves more than the
+    // node, and none the other way.
+    let mut d = p.clone();
+    d[7].z -= 0.05;
+    for (s, x) in sk.iter().zip(&v) {
+        let dz = eval(&s.w, s.off, s.nrm, &d).0.z - x.z;
+        assert!(dz <= 1e-3 && dz >= -0.05 * 1.05, "a vertex moved {dz} m for the node's -0.05");
+    }
+}

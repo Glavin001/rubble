@@ -693,6 +693,17 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
                     // The car's paint inside the ball (m), as one car's paint inside the other.
                     let b = &w.vehicles[0].rigid.as_ref().expect("ball").bodies[0];
                     deep_last = paint(&v, &rest, &w.vehicles[0]).iter().flatten().map(|p| BALL_R - p.distance(b.pos)).fold(0.0f32, f32::max);
+                    // (BALL_WHERE=1, run 0: the paint vertex deepest in the ball and its nodes.)
+                    if k == 0 && deep_last > 0.03 && std::env::var("BALL_WHERE").is_ok_and(|x| x == "1") {
+                        let x = &w.vehicles[0];
+                        let np: Vec<Vec3> = x.nodes.iter().map(|n| x.origin + n.pos).collect();
+                        let pp = deform(&v, &np).0;
+                        if let Some(i) = (0..pp.len()).filter(|&i| v.material[i] == mat::PAINT).max_by(|&i, &j| (BALL_R - pp[i].distance(b.pos)).total_cmp(&(BALL_R - pp[j].distance(b.pos)))) {
+                            let piece = v.pieces.iter().find(|q| (q.1..q.1 + q.2).contains(&(i as u32))).map_or("?", |q| q.0.as_str());
+                            let nodes: Vec<String> = v.bind_nodes[i].iter().map(|&n| format!("{} moved {:.0} mm", d.nodes[n as usize].name, (np[n as usize] - x.origin - probe.nodes[n as usize].pos).length() * 1e3)).collect();
+                            println!("BALL t {:.3}: {:.0} mm, {piece} vertex {i}, rest {:.2}, nodes {nodes:?}", s as f32 / 2000.0, deep_last * 1e3, rest[i]);
+                        }
+                    }
                     deep = deep.max(deep_last);
                     if s as f32 / 2000.0 >= settled { lasting = lasting.max(deep_last); } else if deep_last > 0.01 { brief += 0.02; }
                 }

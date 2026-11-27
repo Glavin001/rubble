@@ -84,7 +84,7 @@ fn properties_do_not_depend_on_where_the_section_is_or_how_it_is_turned() {
     assert_close("mirror Zx", a.zx, b.zx, 1e-9);
 }
 
-/// The truck's side member (`generated-vehicles-lessons.md` §22): C 266 × 90 × 8 mm in
+/// The truck's side member (`generated-vehicles-lessons.md` §23): C 266 × 90 × 8 mm in
 /// S500MC. By hand: A 3,440 mm², I 3.44e7 mm⁴, Z_pl 3.11e5 mm³, M_p 155 kN·m.
 #[test]
 fn the_truck_rail_c_channel() {

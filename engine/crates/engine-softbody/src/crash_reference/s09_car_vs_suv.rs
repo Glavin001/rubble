@@ -1,7 +1,7 @@
 //! S9: a car and a heavier, taller SUV head-on, each at 55 km/h, 50 % overlap on their
 //! drivers' (left) sides (video 6:15): the generated `wagon` (body `car`) and the generated
 //! 4x4 (`suv_4x4`, body `suv`; its mass built up part by part,
-//! `engine/docs/generated-vehicles-lessons.md` §21).
+//! `engine/docs/generated-vehicles-lessons.md` §22).
 //!
 //! Reference frames: the SUV rides over the car's hood; the car's front is crushed back to the
 //! screen and its rear is thrown up; the SUV's front is damaged much less; the pair moves on

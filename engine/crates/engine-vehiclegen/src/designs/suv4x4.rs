@@ -108,7 +108,7 @@ fn suv_physics() -> Physics {
 /// Kerb mass (kg): a mid-size body-on-frame 4x4 on this 2.70 m wheelbase (the 2012
 /// Nissan Xterra Pro-4X 4WD, also 2.70 m: 4,417-4,425 lb published, 2,004-2,007 kg).
 /// The rigger takes the car's mass from its parts, not from this: [`mass`] builds the
-/// parts up to it (`engine/docs/generated-vehicles-lessons.md` §21), and the lint's
+/// parts up to it (`engine/docs/generated-vehicles-lessons.md` §22), and the lint's
 /// `mass` rule holds the two together.
 pub const SUV_KERB_KG: f32 = 2000.0;
 

@@ -1,5 +1,5 @@
 //! The generated 4x4 at its own mass (`engine-vehiclegen` `designs/suv4x4/mass.rs`,
-//! `engine/docs/generated-vehicles-lessons.md` §21), parked on its raycast wheels: it
+//! `engine/docs/generated-vehicles-lessons.md` §22), parked on its raycast wheels: it
 //! settles, no beam yields or breaks, its ride height holds still and its kinetic energy
 //! does not grow once it has settled. Also prints its mass, the axle split and the ride
 //! height (the numbers the lessons doc records).

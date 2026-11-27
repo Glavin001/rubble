@@ -1,5 +1,5 @@
 //! S2: an SUV into a full-width rigid wall at 50 km/h (Euro NCAP full width; video 2:10): the
-//! generated 4x4 (`suv_4x4`, 2,000 kg kerb; `engine/docs/generated-vehicles-lessons.md` §21).
+//! generated 4x4 (`suv_4x4`, 2,000 kg kerb; `engine/docs/generated-vehicles-lessons.md` §22).
 //!
 //! First principles: 13.9 m/s stopped by a front built for 17–33 g gives 0.3–0.6 m of crush;
 //! the load is symmetric, so the car neither yaws nor drifts; the wall does not move.

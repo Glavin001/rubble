@@ -2,10 +2,10 @@
 //! a loaded conventional truck into a stationary car's side).
 //!
 //! The truck is the generated 4x2 cab-over tractor solo, at its kerb (`truck_cab`,
-//! M = 7,500 kg; `generated-vehicles-lessons.md` §22-23). Its `ballast_kg` (a load on the
+//! M = 7,500 kg; `generated-vehicles-lessons.md` §23-24). Its `ballast_kg` (a load on the
 //! fifth wheel) is not used: the suite's templates are each design's defaults, and a
 //! registered laden variant (4.5 t of ballast, 12 t) failed the design gate, its frame 13.5 mm
-//! out of shape parked (lessons §23). M/m = 5.2 against the generated sedan (`car`,
+//! out of shape parked (lessons §24). M/m = 5.2 against the generated sedan (`car`,
 //! m = 1,448.4 kg). The truck runs square into the car's left (+X) side, its centre line on
 //! the middle of the car's wheelbase. The car is raised onto its wheels and settles for
 //! [`RUN_UP_S`] before the truck reaches it. Nothing brakes.

@@ -38,9 +38,8 @@ gen_sedan_contact::unequal_head_on_no_overlap
 gen_sedan_contact::offset_head_on_no_overlap
 # What is seen (paint cutting paint); written ahead of the fix, 2026-11-24.
 gen_sedan_paint::own_paint_ends_apart
-# The owner's bar (paint depth, 2026-11-25; band contact only). Head 30 pressed: 10 mm from 0.3 s
-# against 10 mm since the doors' 2 cm edge columns (a90376e2); head 60 now passes (37 mm).
-gen_sedan_paint::accept_head_30_pressed
+# The owner's bar (paint depth, 2026-11-25; band contact only). Head 60 and head 30 pressed pass
+# since the doors' 2 cm edge columns and paint bound to the collision skin (2026-11-27).
 gen_sedan_paint::accept_head_100
 gen_sedan_paint::accept_side_90
 gen_sedan_paint::accept_side_60_pressed
@@ -48,7 +47,7 @@ gen_sedan_paint::accept_side_60_pressed
 # The vehicle lint on every generated design (tests/generated_vehicle_lint.rs, 2026-11-24): the
 # collision skin's defects, found by hand in the S4 crash study, now caught at build time.
 # (The 4x4's mass passes since 2026-11-27: 1897 kg against 1920 kg, its parts built up to an
-# SUV's, generated-vehicles-lessons.md §21.)
+# SUV's, generated-vehicles-lessons.md §22.)
 generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
 generated_vehicle_lint::every_other_design_passes_every_rule
 

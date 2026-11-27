@@ -3,7 +3,7 @@
 //!
 //! The car is the generated sedan (`car`, m = 1,448.4 kg, as S03 measures it); the trailer
 //! the generated 53 ft dry van (`box_trailer`, `trailer`, M = 15,000 kg laden: kerb 6,350 +
-//! 8,650 on the deck; `generated-vehicles-lessons.md` §23), parked on its landing gear and
+//! 8,650 on the deck; `generated-vehicles-lessons.md` §24), parked on its landing gear and
 //! its tandem, its rear impact guard built to FMVSS 223/224 (the bar's lower edge 0.52 m up
 //! at design, its supports collapsing at the regulation's 350 kN distributed). Centred, the
 //! car square to the trailer. Nothing brakes: the scenario sets no inputs, so the trailer's

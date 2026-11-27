@@ -3,7 +3,7 @@
 //! Every part is defined once in [`crate::heavy`] (its nodes, masses, beams, mounts and
 //! its solid); the rigger's parts-only path rigs it.
 //!
-//! **The class and its figures** (`engine/docs/generated-vehicles-lessons.md` §23, with
+//! **The class and its figures** (`engine/docs/generated-vehicles-lessons.md` §24, with
 //! sources; *estimate* marks an engineering estimate): the US standard dry van, 53 ft
 //! long, 102 in (2.59 m) wide, 13 ft 6 in (4.11 m) high; kingpin 36 in (0.914 m) behind
 //! the front; a sliding tandem with a 49 in (1.245 m) spread, set at 40 ft (12.19 m) from

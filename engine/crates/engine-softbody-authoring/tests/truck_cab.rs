@@ -5,7 +5,7 @@
 //! * rest: parked on flat ground it settles and stays (node speeds after 2 s,
 //!   no beam yielded or broken, ride height stable);
 //! * mass and axle split against the published figures
-//!   (`generated-vehicles-lessons.md` §22: 7,500 kg, 69.8 % front);
+//!   (`generated-vehicles-lessons.md` §23: 7,500 kg, 69.8 % front);
 //! * a 30 km/h full-width rigid wall: finite, the frame's shortening and the
 //!   beams it bent and broke, part by part;
 //! * no energy created at rest.

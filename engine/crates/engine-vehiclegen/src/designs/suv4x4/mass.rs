@@ -1,4 +1,4 @@
-//! The 4x4's mass, part by part (`engine/docs/generated-vehicles-lessons.md` §21).
+//! The 4x4's mass, part by part (`engine/docs/generated-vehicles-lessons.md` §22).
 //!
 //! The car is built on the sedan's definitions (its shell groups, `mechanical::sedan_parts`,
 //! the Accord's closures), which weigh 1,410 kg rigged. A mid-size body-on-frame 4x4 on the
@@ -126,7 +126,7 @@ pub fn mechanical(parts: &mut [MechPart]) {
 /// (`c_pillar`, from the rear header to 0.16 m above the back light's base) 0.014 m² of
 /// sheet against the sedan's 0.154 m², a 0.14 m pillar where the 4x4's D-pillar stands
 /// 1.1 m tall, so the rule would take mass off a pillar that is in fact larger
-/// (`engine/docs/generated-vehicles-lessons.md` §21).
+/// (`engine/docs/generated-vehicles-lessons.md` §22).
 pub fn shell(st: &mut Structure, rack: bool) -> [f64; 2] {
     let mut added = [0.0; 2];
     let spread = |st: &mut Structure, of: &dyn Fn(&ShellNode) -> bool, kg: f64| {

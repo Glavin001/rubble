@@ -3,7 +3,7 @@
 //!
 //! **The regulation it is built to** (US FMVSS No. 223 "Rear impact guards", 49 CFR
 //! 571.223, as amended in 2022 to the Canadian CMVSS No. 223's levels, and FMVSS No. 224
-//! for where it sits; `generated-vehicles-lessons.md` §23):
+//! for where it sits; `generated-vehicles-lessons.md` §24):
 //!
 //! * placement (224 S5.1): the bar's lower edge at most 560 mm over the ground across its
 //!   whole width, its outer ends within 100 mm of the trailer's sides (and not past them),
