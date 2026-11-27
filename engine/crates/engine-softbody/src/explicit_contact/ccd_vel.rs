@@ -50,6 +50,16 @@ fn relin_share() -> f32 {
     std::env::var("DAT_RELIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0 - ROW_GAP_SHARE)
 }
 
+/// Or a pushing row parts past its bound by at most this share of the bound's speed (`DAT_PUSH_SHARE`):
+/// the work bound alone asks a 55 m/s impact's row for 1e-6 m/s, below an f32's resolution there.
+fn push_share() -> f32 {
+    std::env::var("DAT_PUSH_SHARE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0e-5)
+}
+
+fn pgs() -> bool {
+    std::env::var("DAT_PGS").is_ok_and(|v| v == "1")
+}
+
 /// APGD's momentum restarts every this many iterations.
 pub(super) const APGD_RESTART: u32 = 16;
 
@@ -124,13 +134,16 @@ impl Ctx<'_> {
         let tol = push_tol();
         rows.iter().zip(l).all(|(r, &l)| {
             let g = Self::normal(r, vel) + r.b;
-            -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi && l * g <= tol
+            -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi && (l * g <= tol || g <= push_share() * r.b.abs())
         })
     }
 
     /// APGD on the rows from their current λ: λ ≥ 0 ⟂ J v + b ≥ 0, v = base + M⁻¹Jᵀλ. Leaves
     /// `vel` at the final λ; true when settled.
     fn solve(&self, rows: &mut [VRow], base: &[Vec<Vec3>], vel: &mut [Vec<Vec3>], st: &mut CcdStats) -> bool {
+        if pgs() {
+            return self.solve_pgs(rows, base, vel, st);
+        }
         // The preconditioner D ⪰ A (Gershgorin): row i's D is Σⱼ |wᵢⱼ|·sⱼ/mⱼ, sⱼ the sum of the
         // |w| of every row at node j. (Mass splitting's Σⱼ cⱼ·wᵢⱼ²/mⱼ, cⱼ the rows at j, falls
         // under A where barycentric weights are below 1, and the accelerated steps then
@@ -182,6 +195,55 @@ impl Ctx<'_> {
     #[allow(clippy::too_many_arguments)]
     fn rounds(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
         self.rounds_inner(x1, vel, rounds, st, collide, vpre, e, warm)
+    }
+
+    /// Projected Gauss–Seidel (`DAT_PGS=1`, a CPU measurement): each row in order moves its λ to
+    /// where its own constraint holds against the velocities the rows before it left (the exact
+    /// diagonal, Σ wⱼ²/mⱼ), the changes summed per node in 64 bits; settled as [`Self::solve`].
+    /// Sequential in a fixed order: deterministic on the CPU (a GPU needs colours).
+    fn solve_pgs(&self, rows: &mut [VRow], base: &[Vec<Vec3>], vel: &mut [Vec<Vec3>], st: &mut CcdStats) -> bool {
+        let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * self.mi(r.k[j])).sum()).collect();
+        let mut l: Vec<f32> = rows.iter().map(|r| r.l).collect();
+        // Velocities as f64 while sweeping (base + M⁻¹Jᵀλ), rebuilt exactly at the end.
+        let mut v: Vec<Vec<glam::DVec3>> = base.iter().map(|x| x.iter().map(|u| u.as_dvec3()).collect()).collect();
+        for (r, &lr) in rows.iter().zip(&l) {
+            for j in 0..4 {
+                let m = self.mi(r.k[j]);
+                if m > 0.0 && lr != 0.0 {
+                    v[r.k[j].0][r.k[j].1 as usize] += (r.n * (r.w[j] * m * lr)).as_dvec3();
+                }
+            }
+        }
+        self.velocities(rows, &l, 1.0, base, vel);
+        let mut ok = self.settled(rows, &l, vel);
+        let mut used = 0u32;
+        while !ok && used < self.iters {
+            used += 1;
+            for (i, r) in rows.iter().enumerate() {
+                if d[i] <= 0.0 {
+                    continue;
+                }
+                let cv: f64 = (0..4).map(|j| r.w[j] as f64 * r.n.as_dvec3().dot(v[r.k[j].0][r.k[j].1 as usize])).sum();
+                let nl = (l[i] as f64 - (cv + r.b as f64) / d[i] as f64).max(0.0) as f32;
+                let dl = nl - l[i];
+                if dl != 0.0 {
+                    for j in 0..4 {
+                        let m = self.mi(r.k[j]);
+                        if m > 0.0 {
+                            v[r.k[j].0][r.k[j].1 as usize] += (r.n * (r.w[j] * m * dl)).as_dvec3();
+                        }
+                    }
+                    l[i] = nl;
+                }
+            }
+            self.velocities(rows, &l, 1.0, base, vel);
+            ok = self.settled(rows, &l, vel);
+        }
+        st.row_iters += used as u64;
+        for (r, l) in rows.iter_mut().zip(l) {
+            r.l = l;
+        }
+        ok
     }
 
     /// The rows' impulses into the next step's warm starts: pressed contacts only (an impact's

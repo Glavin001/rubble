@@ -730,6 +730,32 @@ vertex is skinned partly to `door_FL_i12`, an inner node in no collision triangl
 holds an inner node, so paint that follows one goes where the skin does not. The fix is in the
 generator's skin binding, which is visual only.
 
+## Velocity contact: where the zones come from (2026-11-27, measured)
+
+Head 100, e = 1, full paint gap.
+
+**The zones are the energy sink.** Contact's work is −172 kJ of 1,117 kJ (15.4 %). With the zones
+off (`DAT_ZONES=0`, a measurement) the rows alone do −57.9 kJ (5.2 %), but 7 pairs then cross.
+
+**Why the rounds don't finish.** The stuck solves hold rows on shared nodes with nearly
+opposite normals: different pairs (no duplicates: 0 or 1 a solve), whose constraints are nearly
+parallel. One row over-pushes (λ ≈ 12 N·s while the pair parts 0.3–1.6 m/s faster than its
+bound); its neighbour stops just short. An ill-conditioned system like this converges slowly
+under every iterative method.
+
+| Variant | Zones | Notes |
+|---|---|---|
+| APGD (default) | 1,972 | |
+| Projected Gauss–Seidel (`DAT_PGS=1`), 32 / 128 / 512 iterations | 1,833 / 2,185 / 1,820 | |
+| Over-push bound relative to the row's speed, 1e-5 (`DAT_PUSH_SHARE`) | (above) | kept: the work bound asked a 55 m/s row for 1e-6 m/s, below f32 resolution |
+| Rounds stopped when nothing new collides, settled or not, APGD | 1,298 | paint 31 mm |
+| Same, Gauss–Seidel | 260 | paint 82 mm, angular momentum 19 N·m·s a step |
+| e = 0 (Gauss–Seidel) | 5,033 | not restitution's multi-impact paradox |
+
+Next: a solve exact for these near-parallel clusters. Candidates: a block solve per small node
+cluster (a direct LCP of tens of rows); or merging nearly parallel rows that share nodes into
+one, which is lossless only if their constraint is the same.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
