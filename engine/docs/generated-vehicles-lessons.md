@@ -431,8 +431,91 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   rigid headlamps 4.6–9.1, rigid pieces' centroid weights); none was seen to spike, but a
   rigid piece's frame extrapolated that far turns with the nodes' bending.
 
+## 21. Paint binds to the collision skin (2026-11-27)
+
+- **(Measurement) The side 60 pressed paint failure.** In velocity contact (`DAT_RESPONSE=vel
+  DAT_E=1`) `continuous_side_60_pressed` failed its paint guard, 52 mm lasting against 30 mm,
+  with 0 crossings. `PAINT_WHERE=1`: car B's front-left door paint, bound to `door_FL_f1`,
+  `door_FL_o22` and `door_FL_i12`, the last an inner-panel node on no outer collision triangle.
+- **(Fact) Contact holds the outer skin only.** A car meets another's live outer triangles (the
+  paint guard's surface, the contact offsets, edge contact). The paint was bound by
+  `flexskin::bind` over every structural node of its part, inner panels and frames included.
+  Before the fix, on every design, almost all body paint had weight off the skin:
+
+| Design | Body-paint vertices | Weighted off the outer skin | Most Σ\|A\| off it |
+|---|---|---|---|
+| sedan, police_sedan | 301,290 | 289,942 | 2.60 |
+| wagon | 319,902 | 317,337 | 2.02 |
+| mach1_1969 / gasser | 403,137 / 371,901 | 385,397 / 354,161 | 7.26 |
+| suv_4x4 | 304,660 | 302,779 | 2.13 |
+
+- **(Fix) `gen3::binds_to_skin`, `flexskin::bind_sheet`.** A body-paint mesh (deforming, not
+  glass, a `paint` primitive) binds only to nodes on the outer skin (`gen3::outer_skin_nodes`):
+  its own part's, and where the outer triangle nearest a vertex is another part's, that
+  triangle's nodes.
+  - *The triangle under it.* The B-pillar's own nodes (`sh_b*`) are inside the doors' skin:
+    with the shell's skin alone its paint followed the roof rail and the sill 0.5 m away and
+    stayed out while the pillar crushed (side 60 pressed: 154 mm during the hit). A door's paint
+    past its own skin's edge (the front door's top rear corner by the pillar) is the same case:
+    with the door's skin alone the ball went 94 mm into the paint there, against 63.
+  - *A sheet's fit.* Skin nodes lie in one surface, where the volume fit (`bind`) has no third
+    direction: it fails (the Mach 1's trunk lid, 10 nodes) or reaches the paint's height with
+    weights of both signs. The sheet fit damps M⁻¹ to (M² + τ²)⁻¹M, τ = `SHEET_SPREAD`²·W:
+    smooth, affine along the surface, the height left to the offset, well posed where the nodes
+    spread in two directions. `SHEET_SPREAD` 5 cm, not `EIG_MIN`'s 12 mm: a door's edge column
+    bows 2–4 cm, and fitting that made its jamb paint (15 cm in from the skin) weigh it −2.0 and
+    +2.4 (Σ\|A\| 5.95), and side 90's door paint, tied to the C-pillar through it, stayed out as
+    the door went in (83 mm during the hit; 46 with 5 cm).
+  - *No amplification bound.* `GLASS_AMP_MAX`'s 3.0 has no fit for the 4x4's tailgate (10
+    nodes) on the way there; panels had none before either. `RIG_PAINT_ANY_NODE=1`: as before.
+- **(Result)** 0 body-paint vertices weighted off the skin on every design. Rest: every vertex
+  within 0.002 mm of the art before and after (the offset makes rest exact by construction).
+  The jbeam and `.pc` of every design are byte for byte the same (`DUMP_DIR` and `diff`); only
+  the `.rskin` changes (the sedan's 123.8 → 120.9 MB: fewer nodes a vertex). Amplification
+  (Σ\|A\|), before → after: sedan doors 3.83 → 1.42 and 2.54 → 1.57, body 3.28 → 1.87, hood
+  1.89 → 1.18, trunk 3.09 → 1.23, front bumper 2.20 → 2.26; wagon doors 3.83 → 1.42, tailgate
+  2.47 → 1.15; Mach 1 fenders 5.42 → 2.53 / 3.17, headlamp housings 7.26 → 1.9, body
+  3.40 → 4.48 (the one rise); 4x4 fenders 8.06 → 1.62, front bumper 3.82 → 1.95.
+
+- **(Result) The acceptance suite** (`tests/continuous_contact.rs`, 8 runs, generated sedan;
+  worst during the hit / from 0.3 s after it, mm; 0 crossings in every run, before and after;
+  physics unchanged, so only the paint numbers can move):
+
+| Scene | Velocity contact, before | after | Default mode, before | after |
+|---|---|---|---|---|
+| side 30 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| side 60 | 6 / 3 | 0 / 0 | 0 / 0 | 0 / 0 |
+| head 30 pressed | 3 / 0 | 0 / 0 | 8 / 8 | 0 / 0 |
+| head 60 pressed | 7 / 0 | 0 / 0 | 39 / 0 | 21 / 0 |
+| head 60 | 7 / 0 | 0 / 0 | 8 / 0 | 9 / 0 |
+| side 90 | 46 / 0 | 46 / 0 | 47 / 0 | 47 / 0 |
+| ball 100 | 63 / 0 | 54 / 0 | 19 / 0 | 39 / 0 |
+| side 60 pressed | 52 / 52 **fail** | 48 / 48 **fail** | 0 / 0 | 4 / 4 |
+| head 100, head 130, offset 100 | | | 22, 30, 59 / 0 | 13, 43, 26 / 0 |
+
+  Every scene passes in the default mode, before and after; the energy tests fail as listed
+  (`tests-expected-failures.txt`), unchanged.
+- **(Open) Side 60 pressed, velocity contact, still fails, on run 0 alone.** Runs 1–7 went from
+  7, 42, 7, 52, 25, 12, 0 mm to 0. Run 0 is 48.2 mm before and after: car B's front door paint at
+  its lower rear, bound to its own skin nodes only (`door_FL_o20`, `o21`, `o10`). It stands
+  31–56 mm off its own triangle, within that triangle's contact offsets, and 47 mm into car A's
+  sill: the two cars' offset surfaces overlap there. That is the contact's or the skin fit's,
+  not the binding's. Another case of the same kind: the door's paint over its top rear corner
+  stands 4 cm past the skin's top node `door_FL_f1`, whose offset is 2.7 mm (generator: fit the
+  skin to the paint there).
+- **Checks:** `tests/paint_binds_skin.rs` fails a design whose body paint puts any weight on a
+  node off the outer skin, or sits over 1 mm from the art at rest;
+  `flexskin::tests::a_sheet_fit_follows_its_surface_and_keeps_the_height_in_the_offset` holds
+  the sheet fit (one layer of nodes: the volume fit finds no fit, the sheet fit binds at Σ\|A\|
+  1.00, rest and rigid motion exact, a dent never moves a vertex more than the node). Also run:
+  `gen3_rig` rest fidelity (spawn 0.13 mm, parked 0.54 mm / 0.81°, bar 1 mm / 1°), `every_design`,
+  `generated_vehicle_lint` (as listed: holes, other designs), `flexskin` unit tests: all as before.
+- **Not changed:** glass (visual only, spans openings with no node: `GLASS_AMP_MAX`), rigid
+  pieces (mirrors, lamps: one frame at the centroid), the interior and the running gear.
+
 ## Changelog
 
+- 2026-11-27: section 21, paint binds to the collision skin (side 60 pressed's door paint on an inner node).
 - 2026-11-27: section 20, glass binding: a pane interpolates its frame (the 4x4's windscreen spike).
 - 2026-11-27: section 19, two coplanar overlaps fixed in the rigger (a hull face's inside point, a quad's second diagonal).
 - 2026-11-24: section 18, adding a vehicle (the registry, variant or standalone, what the rigger needs, the gate); mach1_gasser (pose, per-axle wheels) and suv_4x4 registered.
