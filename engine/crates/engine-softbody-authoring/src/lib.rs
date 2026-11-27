@@ -7,6 +7,7 @@
 //! which build on `engine-softbody`, do not compile (or recompile after an edit) the
 //! authoring code: about 50k lines that only the tools, tests and the showcase need.
 
+pub mod crash_templates;
 pub mod paint_overlap;
 pub mod authoring;
 pub mod flexmesh;
