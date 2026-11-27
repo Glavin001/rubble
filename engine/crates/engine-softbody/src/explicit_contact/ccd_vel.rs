@@ -72,6 +72,10 @@ fn push_share() -> f32 {
 /// them, and the paint, which does not follow the collision skin there yet, shows it: ball 100
 /// 42 → 133 mm, side 90 → 86 mm, side 60 0 → 37 mm (the door top's paint, bound across a
 /// half-metre triangle), 2026-11-27. On once the generator's paint meets the skin there.
+fn lever() -> bool {
+    std::env::var("DAT_LEVER").is_ok_and(|v| v == "1")
+}
+
 fn exact_on() -> bool {
     std::env::var("DAT_EXACT").is_ok_and(|v| v == "1")
 }
@@ -454,9 +458,20 @@ impl Ctx<'_> {
                 };
                 let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
                 let (w, gv) = closest(pr.nn, at);
-                let n = gv.normalize_or_zero();
+                let mut n = gv.normalize_or_zero();
                 if n == Vec3::ZERO {
                     continue;
+                }
+                // Torque-free rows (`DAT_LEVER=1`, a measurement): the step applies an impulse
+                // from the start positions (x1 = x0 + h·v), so a row's torque is its start gap
+                // g₀ = Σ wⱼ·x0ⱼ crossed with λn; along g₀ it is none (frictionless contact's line
+                // of action through both points), taken where g₀ is within 60° of the impact's n.
+                if lever() {
+                    let g0: Vec3 = (0..4).map(|j| a[j] * w[j]).sum();
+                    let d = g0.normalize_or_zero();
+                    if d.dot(n) > 0.5 {
+                        n = d;
+                    }
                 }
                 fresh += 1;
                 let s0: f32 = (0..4).map(|j| w[j] * n.dot(a[j])).sum();

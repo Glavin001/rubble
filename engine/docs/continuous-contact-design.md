@@ -870,6 +870,24 @@ each row's torque is g_t × λn, g_t the tangential part of its start gap with i
 weights. Head 100's
 rows (e = 0) remove 88–120 kJ by themselves.
 
+**Torque-free rows** (`DAT_LEVER=1`, a measurement). The step applies an impulse from the start
+positions (x1 = x0 + h·v), so a row's torque is its start gap g₀ = Σ wⱼ·x0ⱼ crossed with λn. Along
+g₀ the torque is zero: frictionless contact's line of action through both points, at the
+positions the step uses. It is taken where g₀ is within 60° of the impact's normal.
+- Angular momentum per step in head 100 (0.3 s): 3.6 → 0.36 N·m·s with the exact solve, and
+  0.6 → 0.14 without it.
+- Energy (contact's work, 2 runs of 0.6 s):
+
+| | Ball 100 | Side 60 | Head 100 |
+|---|---|---|---|
+| Default (exact off) | 17 % | 5 % | 12–14 % |
+| Torque-free rows | 20 % | 6 % | 15–18 % |
+| Exact solve + torque-free rows | 7–8 %, zones 0–4 | 6 %, zones 130–386 | 19–20 %, zones 1,116–2,361 (zones −151 / −172 kJ) |
+
+Neither is adopted: no combination meets rule 8 in all three, and each makes some crash worse.
+The zones that remain under the exact solve now remove more each; they are where the next work
+is.
+
 **Open.**
 - The rigid zones remain: head 60 7,902, side 90 5,192, side 60 2,969 in 1 s.
 - Head 100's contact work is −12 to −14 % at e = 0, past rule 8's 5 %.
