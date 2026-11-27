@@ -34,6 +34,12 @@ RUN_SECONDS = {
     # Measured locally (15 s on an M-series Mac); a runner's estimate.
     ("engine-softbody-authoring", "test", "gen_sedan_contact"): 65,
     ("engine-softbody-authoring", "test", "gen_sedan_paint"): 480,
+    # Continuous contact's acceptance crashes (eleven scenes and three energy tests, 8 or 2
+    # runs each: 20-60 s each on an M-series Mac); a runner's estimate. It had no line and
+    # counted 2 s, so its shard ran past the job's 25 minutes (2026-11-27).
+    ("engine-softbody-authoring", "test", "continuous_contact"): 1100,
+    ("engine-softbody-authoring", "test", "generated_vehicle_lint"): 150,
+    ("engine-softbody-authoring", "test", "every_design"): 120,
     ("engine-softbody", "lib", "engine_softbody"): 25,
     ("engine-softbody-authoring", "test", "raycast_wheel_visual"): 25,
     ("engine-softbody-authoring", "test", "explicit_drive"): 16,
