@@ -15,8 +15,12 @@
 
 pub mod criteria;
 pub mod metrics;
+mod s01_offset;
 mod s02_wall;
 mod s03_side_barrier;
+mod s07_wall_190;
+mod s08_head_on;
+mod s10_block_200;
 
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
@@ -245,7 +249,14 @@ pub struct CrashScenario {
 
 /// Every scenario, in order.
 pub fn all() -> Vec<CrashScenario> {
-    vec![s02_wall::scenario(), s03_side_barrier::scenario()]
+    vec![
+        s01_offset::scenario(),
+        s02_wall::scenario(),
+        s03_side_barrier::scenario(),
+        s07_wall_190::scenario(),
+        s08_head_on::scenario(),
+        s10_block_200::scenario(),
+    ]
 }
 
 pub fn get(id: &str) -> Option<CrashScenario> {

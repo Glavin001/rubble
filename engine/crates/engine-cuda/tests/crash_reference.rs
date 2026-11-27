@@ -65,6 +65,11 @@ fn cuda_beside_cpu_s02() {
 }
 
 #[test]
+fn s01() {
+    scenario("S01");
+}
+
+#[test]
 fn s02() {
     scenario("S02");
 }
@@ -72,4 +77,19 @@ fn s02() {
 #[test]
 fn s03() {
     scenario("S03");
+}
+
+#[test]
+fn s07() {
+    scenario("S07");
+}
+
+#[test]
+fn s08() {
+    scenario("S08");
+}
+
+#[test]
+fn s10() {
+    scenario("S10");
 }
