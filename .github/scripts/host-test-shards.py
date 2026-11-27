@@ -44,6 +44,8 @@ RUN_SECONDS = {
     # The two pressed crashes (2 s each): side 60 pressed alone did not finish in 23 minutes
     # beside the others.
     ("engine-softbody-authoring", "test", "continuous_contact_pressed"): 1100,
+    # Velocity contact on three short crashes, 2 runs each (37 s on an M3, 2026-11-27).
+    ("engine-softbody-authoring", "test", "continuous_contact_velocity"): 150,
     ("engine-softbody-authoring", "test", "generated_vehicle_lint"): 150,
     ("engine-softbody-authoring", "test", "every_design"): 120,
     ("engine-softbody", "lib", "engine_softbody"): 25,
