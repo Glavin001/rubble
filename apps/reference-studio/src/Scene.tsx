@@ -484,7 +484,6 @@ function ImageOverlay({ frame, opacity }: { frame: Frame; opacity: number }) {
     const id = requestAnimationFrame(() => {
       try {
         const schema = currentStore().structure(inst.schema);
-        if (schema.rubble_view === 'car_frame') return setRubble(null);
         const o = scene.engine!.studio.outline(schema, { at_ms: st.ms, camera: scene.frameCamera(region?.id ?? null), width: Math.round(c.w), height: Math.round(c.h), body: 0 }) as { elements: Record<string, ElementValue>; loops: Record<string, Xy[][]> };
         setRubble(o);
       } catch {

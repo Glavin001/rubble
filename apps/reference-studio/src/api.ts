@@ -106,6 +106,13 @@ export async function tool<T = unknown>(name: string, input: Record<string, unkn
   try {
     const r = await o.call(name, input);
     await o.store.flush();
+    if (name === 'add_image') {
+      const f = r as Frame;
+      if (f.image && !urls.has(f.image.file)) {
+        const b = await o.store.image(f.image.file);
+        if (b) urls.set(f.image.file, URL.createObjectURL(new Blob([b as Uint8Array<ArrayBuffer>])));
+      }
+    }
     if (name === 'get_frame') {
       const f = r as FrameDoc;
       f.image_url = imageUrl(f.image?.file);

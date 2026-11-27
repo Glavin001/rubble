@@ -80,15 +80,15 @@ const b64 = (t: string): Uint8Array => {
 };
 
 /** A new data scenario's default: the generated sedan at 50 km/h toward +Z, a rigid wall
- * 6 m ahead (its face 5.75 m from the car's origin). */
+ * ahead (its face 3.35 m from the car's origin: about 0.17 s of travel from the sedan's nose). */
 export function defaultScenario(id: string, title: string): ScenarioDesc {
   return {
     id,
     title,
     notes: '',
     bodies: [{ name: 'car', design: 'sedan', at: [0, 0, 0], yaw_deg: 0, speed_kmh: 50, carrier: false }],
-    boxes: [{ name: 'wall', centre: [0, 1, 6], half: [2.5, 1, 0.25], yaw_deg: 0 }],
-    cameras: [{ name: 'side', eye: [8, 1.2, 2], target: [0, 0.7, 2] }],
+    boxes: [{ name: 'wall', centre: [0, 1, 3.6], half: [2.5, 1, 0.25], yaw_deg: 0 }],
+    cameras: [{ name: 'side', eye: [7, 1.2, 1.2], target: [0, 0.6, 1.2] }],
     moments: [
       { name: 'before', after_impact_ms: -10 },
       { name: 'peak', after_impact_ms: 70 },

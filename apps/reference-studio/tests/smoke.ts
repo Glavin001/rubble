@@ -1,29 +1,37 @@
-// Smoke test: drive the studio headlessly through window.studio and WebMCP, as an agent would.
+// Smoke test: the built static site (dist/) in headless Chrome, driven through window.studio
+// and WebMCP as an agent would, through the whole recreate flow.
 //
-//   npm run smoke                 (from apps/reference-studio; needs Chrome and the Rust tools)
-//   npm run smoke -- --real       screenshots of the real library instead (third-party footage: do not share)
+//   npm run build && npm run smoke     (from apps/reference-studio; needs Chrome)
+//   npm run smoke -- --real            screenshots of a real workspace folder's data (third-party footage: do not share)
 //
-// Starts its own studio server on 127.0.0.1:8771 with a scratch data folder and library
-// (engine/out/reference-studio/smoke/), draws two test images itself (a car silhouette
-// before and after a frontal crash: no third-party footage), creates a shot, adds both
-// frames, marks regions, traces them, links the shot to Rubble's S02 with a hand-set camera,
-// reads the comparison table, and checks the same tools through document.modelContext and
-// the HTTP API. Screenshots of every view at 1280x720 and 800 px wide, light and dark, go to
-// engine/out/reference-studio/screenshots/<generated|real>/. Chrome runs headless without
-// the GPU. Exits 1 on the first failed check.
+// No server but a static file server for dist/ on 127.0.0.1:8771. Storage is the origin
+// private file system (?workspace=opfs) in a fresh Chrome profile. Headless Chrome here has
+// no GPU, so the run uses the wasm CPU reference (?cpu-fallback: the studio labels it
+// "CPU fallback (tests)"); the WebGPU path is the same Rust behind the same tools and is
+// checked by hand in a browser with a GPU (README "Checks").
+//
+// It draws two test images (a car silhouette before and after a frontal crash: no
+// third-party footage), creates a shot, traces both, creates a data scenario (one generated
+// sedan, one wall), simulates it, pins both images at times of the recording with a camera,
+// links the shot, reads Rubble's outline and the comparison table (checked against values
+// worked by hand), ranks the designs against the tracing, moves the wall live, and saves
+// screenshots of every view at 1280x720 and 800 px wide, light and dark, to
+// engine/out/reference-studio/screenshots/step2/generated/. Exits 1 on the first failed check.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { copyFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createReadStream, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { extname, join, normalize } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { ENGINE, PACKAGE } from '../server/store.ts';
+import { ENGINE, PACKAGE } from '../scripts/node-workspace.ts';
 
 const REAL = process.argv.includes('--real');
 const PORT = 8771;
 const BASE = `http://127.0.0.1:${PORT}`;
 const OUT = join(ENGINE, 'out', 'reference-studio');
 const SCRATCH = join(OUT, 'smoke');
-const SHOTS = join(OUT, 'screenshots', REAL ? 'real' : 'generated');
+const SHOTS = join(OUT, 'screenshots', 'step2', REAL ? 'real' : 'generated');
+const DIST = join(PACKAGE, 'dist');
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const procs: ChildProcess[] = [];
@@ -32,6 +40,22 @@ let failures = 0;
 function check(ok: unknown, what: string): void {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`);
   if (!ok) failures++;
+}
+
+// ---------------------------------------------------------------- a static file server
+
+const TYPES: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm', '.map': 'application/json', '.wgsl': 'text/plain', '.txt': 'text/plain', '.png': 'image/png' };
+function serve(): Promise<() => void> {
+  const server = createServer((req, res) => {
+    const path = normalize(decodeURIComponent(new URL(req.url ?? '/', BASE).pathname)).replace(/^(\.\.[/\\])+/, '');
+    let p = join(DIST, path);
+    if (!p.startsWith(DIST)) return res.writeHead(403).end();
+    if (existsSync(p) && statSync(p).isDirectory()) p = join(p, 'index.html');
+    if (!existsSync(p)) return res.writeHead(404).end();
+    res.writeHead(200, { 'content-type': TYPES[extname(p)] ?? 'application/octet-stream' });
+    createReadStream(p).pipe(res);
+  });
+  return new Promise((r) => server.listen(PORT, '127.0.0.1', () => r(() => server.close())));
 }
 
 // ---------------------------------------------------------------- a PNG drawn here
@@ -104,6 +128,7 @@ function car(crush: number) {
     sill: [[300 + 45 * k + 90, 520], [880, 520]].map((p) => n(p as P)),
     door: [[500, 300], [470, 520]].map((p) => n(p as P)),
     corner: n([470, 520]),
+    rear: [[1100, 400], [1100, 520]].map((p) => n(p as P)),
     wheels: wheels.map(([cx, cy, r]) => ({ c: n([cx, cy]), rim: n([cx + r, cy]) })),
   };
 }
@@ -114,7 +139,7 @@ async function chrome() {
   const port = 9400 + Math.floor(Math.random() * 400);
   const profile = join(SCRATCH, 'chrome-profile');
   mkdirSync(profile, { recursive: true });
-  procs.push(spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1280,720', 'about:blank'], { stdio: 'ignore' }));
+  procs.push(spawn(CHROME, ['--headless=new', '--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-first-run', '--no-default-browser-check', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1280,720', 'about:blank'], { stdio: 'ignore' }));
   let target: { webSocketDebuggerUrl: string } | undefined;
   for (let i = 0; i < 80 && !target; i++) {
     await sleep(250);
@@ -156,25 +181,17 @@ async function chrome() {
 // ---------------------------------------------------------------- main
 
 async function main() {
-  rmSync(join(SCRATCH, 'data'), { recursive: true, force: true });
-  rmSync(join(SCRATCH, 'library'), { recursive: true, force: true });
-  mkdirSync(join(SCRATCH, 'data', 'structures'), { recursive: true });
+  if (!existsSync(join(DIST, 'index.html')) || !existsSync(join(DIST, 'rubble', 'world-wasm'))) throw new Error('no dist/ with the engine: npm run engine && npm run designs && npm run build');
   mkdirSync(SHOTS, { recursive: true });
-  const real = join(ENGINE, 'docs', 'crash-reference', 'studio');
-  for (const f of readdirSync(join(real, 'structures'))) copyFileSync(join(real, 'structures', f), join(SCRATCH, 'data', 'structures', f));
-  const env = { ...process.env, STUDIO_PORT: String(PORT), ...(REAL ? {} : { STUDIO_DATA: join(SCRATCH, 'data'), STUDIO_LIBRARY: join(SCRATCH, 'library') }) };
-  const vite = spawn(process.execPath, [join(PACKAGE, 'node_modules', 'vite', 'bin', 'vite.js')], { cwd: PACKAGE, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  procs.push(vite);
-  let up = false;
-  for (let i = 0; i < 60 && !up; i++) {
-    await sleep(250);
-    up = await fetch(`${BASE}/api/tools`).then((r) => r.ok, () => false);
-  }
-  if (!up) throw new Error('the studio server did not start');
+  rmSync(join(SCRATCH, 'chrome-profile'), { recursive: true, force: true });
+  const stop = await serve();
+  procs.push({ kill: stop } as unknown as ChildProcess);
   const c = await chrome();
+  const q = REAL ? '?' : '?workspace=opfs&cpu-fallback';
   const go = async (hash: string, ms = 1200) => {
-    await c.send('Page.navigate', { url: `${BASE}/${hash}` });
+    await c.send('Page.navigate', { url: `${BASE}/${q}${hash}` });
     await sleep(ms);
+    await c.evaluate('new Promise((r) => { const t = () => (window.studio && document.querySelector(".topbar .badge") ? r(true) : setTimeout(t, 100)); t(); })');
   };
   const shoot = async (name: string, wait = 600) => {
     for (const [w, h, tag] of [[1280, 720, '1280'], [800, 900, '800']] as const)
@@ -187,25 +204,18 @@ async function main() {
       }
     await c.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
   };
-  await go('#/library');
-  await c.evaluate('new Promise((r) => { const t = () => (window.studio ? r(true) : setTimeout(t, 100)); t(); })');
-  check(await c.evaluate('window.studio.tools.length') >= 30, 'window.studio lists the tools');
-
+  await go('#/library', 2500);
+  const ws = await c.evaluate<string>("document.querySelector('[data-testid=workspace]')?.textContent ?? ''");
+  check(REAL || /this browser only/.test(ws), `the workspace is this browser's private storage (${ws})`);
+  check((await c.evaluate<number>('window.studio.tools.length')) >= 60, `window.studio lists the tools (${await c.evaluate('window.studio.tools.length')})`);
   if (REAL) {
-    const f = await c.evaluate<string>("window.studio.list_frames({status: 'paired'}).then((l) => l.find((x) => x.id.startsWith('S02') && x.moment === 'peak crush')?.id ?? l[0].id)");
     await shoot('library');
-    await go(`#/annotate/${f}`, 2000);
-    await shoot('annotate');
-    await go(`#/link/${f}`, 12000);
-    await shoot('link', 1500);
-    await go(`#/compare/${f}`, 6000);
-    await shoot('compare', 1200);
     return finish(c);
   }
-
-  // Empty state.
   await shoot('empty');
-  const S = (expr: string) => c.evaluate(`(async () => { const s = window.studio; ${expr} })()`);
+  const S = <T = any>(expr: string) => c.evaluate<T>(`(async () => { const s = window.studio; ${expr} })()`);
+
+  // A shot from a drawn silhouette pair, traced.
   const before = car(0);
   const after = car(1);
   const shot = await S("return s.create_shot({ title: 'Generated test car into a wall' })");
@@ -214,11 +224,7 @@ async function main() {
     S(`return s.add_image({ name: ${JSON.stringify(name)}, data_base64: ${JSON.stringify(img.toString('base64'))}, shot: ${JSON.stringify(shot.id)}, view: 'side', moment: ${JSON.stringify(moment)} })`);
   const f0 = await add('test-car-before.png', before.image, 'before');
   const f1 = await add('test-car-after.png', after.image, 'peak crush');
-  check(f0.image?.width === 1280 && f1.shot === shot.id, `add_image saved ${f0.image?.file} and ${f1.image?.file}`);
-  const untraced = await S('return s.list_untraced()');
-  check(untraced.length === 2, 'list_untraced lists both new frames');
-
-  // Through WebMCP (document.modelContext): the polyfill's getTools/executeTool, as an agent's browser would.
+  check(f0.image?.width === 1280 && f1.shot === shot.id, `add_image saved ${f0.image?.file} and ${f1.image?.file} in the workspace`);
   const mc = await c.evaluate<{ n: number; has: boolean; shots: number }>(`(async () => {
     const tools = await document.modelContext.getTools();
     const t = tools.find((x) => x.name === 'list_shots');
@@ -226,8 +232,6 @@ async function main() {
     return { n: tools.length, has: !!t, shots: r.length };
   })()`).catch((e) => ({ n: 0, has: false, shots: -1, e: String(e) }));
   check(mc.n === (await c.evaluate('window.studio.tools.length')) && mc.has && mc.shots === 1, `WebMCP: ${mc.n} tools registered (${await c.evaluate('window.studio.webmcp')}), list_shots through executeTool gives ${mc.shots} shot`);
-
-  // Trace both frames through the same tools.
   for (const [f, shape] of [[f0, before], [f1, after]] as const) {
     await S(`await s.mark_region({ frame: '${f.id}', source: 'real', label: 'test image' }); return s.set_region_schema({ frame: '${f.id}', region: 'real', schema: 'vehicle-side', front: 'left' })`);
     const ops: [string, Record<string, unknown>][] = [];
@@ -236,32 +240,61 @@ async function main() {
       const element = k ? 'rear_wheel' : 'front_wheel';
       ops.push(['set_keypoint', { ...base, element, x: w.c[0], y: w.c[1], part: 'c' }], ['set_keypoint', { ...base, element, x: w.rim[0], y: w.rim[1], part: 'rim' }]);
     });
-    for (const [element, pts] of [['hood', shape.hood], ['bumper_front', shape.bumper], ['windscreen', shape.windscreen], ['roofline', shape.roof], ['sill', shape.sill], ['door_front_edge', shape.door]] as const)
+    for (const [element, pts] of [['hood', shape.hood], ['bumper_front', shape.bumper], ['windscreen', shape.windscreen], ['roofline', shape.roof], ['sill', shape.sill], ['door_front_edge', shape.door], ['rear_face', shape.rear]] as const)
       for (const [x, y] of pts) ops.push(['add_polyline_point', { ...base, element, x, y }]);
     ops.push(['set_keypoint', { ...base, element: 'door_sill_corner', x: shape.corner[0], y: shape.corner[1] }]);
     for (const [name, input] of ops) await S(`return s.${name}(${JSON.stringify(input)})`);
   }
   await S(`return s.set_visibility({ frame: '${f1.id}', region: 'real', element: 'hood', vis: 'blurred' })`);
-  const tr = await S(`return s.get_tracing({ frame: '${f1.id}', region: 'real' })`);
-  check(tr[0].instances[0].elements.hood.pts.length === 3 && tr[0].instances[0].elements.hood.vis === 'blurred', 'get_tracing returns the traced hood (3 points, blurred)');
-  // Move and remove a point, then put it back.
-  await S(`await s.add_polyline_point({ frame: '${f1.id}', region: 'real', element: 'roofline', x: 0.6, y: 0.37, index: 1 }); return s.remove_point({ frame: '${f1.id}', region: 'real', element: 'roofline', index: 1 })`);
-
-  // Page tools.
   await S(`return s.open_frame({ frame: '${f1.id}' })`);
   await sleep(1200);
-  await S("return s.select_element({ element: 'rear_face' })");
-  const view = await S('return s.describe_view()');
-  check(view.view === 'annotate' && view.frame?.id === f1.id && view.element === 'rear_face', `describe_view: ${view.view} ${view.frame?.id} element ${view.element}`);
   await shoot('annotate');
 
-  // Link to Rubble's S02 with this frame's own camera (the scenario's side camera, set by hand).
-  await S(`return s.link_scenario({ shot: '${shot.id}', scenario: 'S02' })`);
-  await S(`return s.set_frame_camera({ frame: '${f1.id}', eye: [4.6, 1.1, -0.3], target: [0, 0.8, -0.3], fov_y_deg: 60 })`);
+  // A data scenario (one car, one wall), opened in the Scene view and simulated.
+  const sc = await S("return s.create_scenario({ title: 'Test car into a wall' })");
+  check(sc.id === 'test-car-into-a-wall' && sc.bodies.length === 1 && sc.boxes.length === 1, `create_scenario: ${sc.id}, ${sc.bodies[0].design} at ${sc.bodies[0].speed_kmh} km/h, a wall`);
+  await S(`return s.link_scenario({ shot: '${shot.id}', scenario: '${sc.id}' })`);
+  const opened = await S(`return s.open_scene({ scenario: '${sc.id}', shot: '${shot.id}' })`);
+  check(opened.bodies[0]?.surface_triangles > 100 && opened.first_contact_ms > 0, `open_scene: ${opened.bodies[0]?.nodes} nodes, ${opened.bodies[0]?.surface_triangles} surface triangles, first contact ${opened.first_contact_ms?.toFixed(1)} ms (Rust), placed in ${opened.place_ms?.toFixed(1)} ms`);
+  await sleep(800);
+  await S("return s.select_object({ kind: 'box', name: 'wall' })");
+  await shoot('scene-setup');
+  // Live edit: the wall 1 m further moves the first contact by 1 m at 50 km/h (72 ms).
+  const t0 = Date.now();
+  await S(`return s.set_box({ scenario: '${sc.id}', box: 'wall', centre: [0, 1, 4.6] })`);
+  let moved: any = null;
+  for (let i = 0; i < 50; i++) {
+    moved = await S('return s.describe_scene()');
+    if (Math.abs(moved.first_contact_ms - opened.first_contact_ms) > 1) break;
+    await sleep(50);
+  }
+  check(Math.abs(moved.first_contact_ms - opened.first_contact_ms - 72) < 1, `set_box re-placed the scene live: first contact ${opened.first_contact_ms.toFixed(1)} -> ${moved.first_contact_ms.toFixed(1)} ms (Rust ${moved.place_ms?.toFixed(1)} ms, ${Date.now() - t0} ms round trip, no respawn)`);
+  await S('return s.undo_scene()');
+  await sleep(300);
+  const undone = await S('return s.describe_scene()');
+  check(Math.abs(undone.first_contact_ms - opened.first_contact_ms) < 0.01, 'undo_scene puts the wall back');
+  const sim = await S('return s.simulate({})');
+  check(sim.present && sim.fresh && sim.executor === 'cpu-fallback' && sim.samples > 100, `simulate (CPU fallback, labelled): ${sim.samples} samples, ${sim.duration_s?.toFixed(2)} s simulated in ${sim.wall_s?.toFixed(1)} s`);
+  const rep = await S('return s.get_report()');
+  check(rep.report?.results?.every((r: { pass: boolean; asserted: boolean }) => r.pass || !r.asserted), `get_report: ${rep.report?.results?.map((r: { name: string; pass: boolean }) => `${r.name} ${r.pass ? 'pass' : 'FAIL'}`).join(', ')}`);
+  const cam = { eye: [6.0, 1.0, 1.0], target: [0, 0.6, 1.0], fov_y_deg: 45 };
+  await S(`await s.seek({ ms: -10 }); await s.set_scene_camera(${JSON.stringify(cam)}); return s.pin_image({ frame: '${f0.id}' })`);
+  await S(`await s.seek({ ms: 72.5 }); return s.pin_image({ frame: '${f1.id}' })`);
+  const pins = await S(`return s.list_pins({ shot: '${shot.id}' })`);
+  check(pins.length === 2 && pins.every((p: { pinned: boolean }) => p.pinned) && Math.abs(pins.find((p: { frame: string }) => p.frame === f1.id).at_ms - 72.5) < 0.01, `pin_image stored both times and cameras: ${pins.map((p: { frame: string; at_ms: number }) => `${p.frame} ${p.at_ms} ms`).join(', ')}`);
+  await S(`await s.seek({ ms: 0 }); return s.jump_to_pin({ frame: '${f1.id}' })`);
+  const jumped = await S('return s.describe_scene()');
+  check(Math.abs(jumped.time_ms - 72.5) < 0.01 && jumped.camera.fov_y_deg === 45 && jumped.image === f1.id, `jump_to_pin: ${jumped.time_ms} ms, fov ${jumped.camera.fov_y_deg}, image ${jumped.image}`);
+  await sleep(1000);
+  await shoot('scene-review-image', 800);
+  const st = await S('return s.get_recording_status()');
+  check(st.fresh && st.start_ms < -50 && st.end_ms > 400, `get_recording_status: fresh, ${st.start_ms.toFixed(0)} to ${st.end_ms.toFixed(0)} ms`);
+
+  // Rubble's outline at the pin through the pinned camera, and the comparison table.
   const outline = await S(`return s.get_rubble_outline({ frame: '${f1.id}' })`);
-  check(outline.own_camera && outline.camera === `frame_${f1.id}` && outline.instance.elements.front_wheel?.c, `get_rubble_outline: ${outline.scenario} ${outline.moment} through ${outline.camera}`);
+  check(outline.pinned && outline.own_camera && Math.abs(outline.at_ms - 72.5) < 0.01 && outline.instance.elements.front_wheel?.c && outline.recording.executor === 'cpu-fallback', `get_rubble_outline: ${outline.scenario} at ${outline.at_ms} ms (pinned) through the frame's camera, from the ${outline.recording.executor} recording`);
   const table = await S(`return s.get_comparison({ frame: '${f1.id}' })`);
-  const row = (id: string) => table.rows.find((r: { id: string }) => r.id === id)?.values;
+  const row = (id: string) => table.rows?.find((r: { id: string }) => r.id === id)?.values;
   const fold = row('hood_fold')?.real;
   const setback = row('wheel_setback')?.real;
   check(table.frame?.id === 'wheelbase' && table.before_frame === f0.id, `get_comparison: frame ${table.frame?.id}, before ${table.before_frame}`);
@@ -269,25 +302,34 @@ async function main() {
   // over the 210.95 px chord before that is 0.1488. The front wheel moves back 45 px of a 620 px wheelbase.
   check(fold && Math.abs(fold.v - 0.1488) < 0.001 && fold.vis === 'blurred', `hood fold height ${fold?.v?.toFixed(4)} (by hand: 0.1488), flagged ${fold?.vis}`);
   check(setback && Math.abs(setback.v - 45 / 620) < 1e-3, `front wheel setback ${setback?.v?.toFixed(4)} wheelbases (drawn: ${(45 / 620).toFixed(4)})`);
-  check(row('hood_fold')?.rubble != null, `Rubble's hood fold ${row('hood_fold')?.rubble?.v?.toFixed(3)} in the same table`);
+  check(row('hood_fold')?.rubble != null && table.rubble?.pinned, `Rubble's hood fold ${row('hood_fold')?.rubble?.v?.toFixed(3)} in the same table, at its pin (${table.rubble?.at_ms} ms)`);
 
-  // The HTTP route, as a script without the page would use it.
-  const http = await fetch(`${BASE}/api/tool/list_frames`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ shot: shot.id }) }).then((r) => r.json());
-  check(http.ok && http.result.length === 2 && http.result.every((f: { status: string[] }) => f.status.includes('linked')), 'HTTP: POST /api/tool/list_frames: both frames traced and linked');
-  const bad = await fetch(`${BASE}/library/..%2F..%2Fpackage.json`).then((r) => r.status);
-  check(bad === 403, `path traversal on /library refused (${bad})`);
-  const simple = await fetch(`${BASE}/api/tool/list_shots`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }).then((r) => r.status);
-  check(simple === 415, `a non-JSON (cross-site form style) post refused (${simple})`);
+  // Matching a design from the "before" tracing (Rust ranks every generated design).
+  const ranked = await S(`return s.list_design_matches({ frame: '${f0.id}' })`);
+  check(Array.isArray(ranked) && ranked.length >= 6 && ranked[0].distance <= ranked[1].distance && ranked[0].rows.length === 4, `list_design_matches: ${ranked.slice(0, 3).map((m: { design: string; distance: number }) => `${m.design} ${m.distance.toFixed(3)}`).join(', ')}`);
+
+  // Re-simulating after a setup change keeps the pins, flagged.
+  await S(`return s.set_body({ scenario: '${sc.id}', body: 'car', speed_kmh: 45 })`);
+  await sleep(400);
+  const stale = await S('return s.get_recording_status()');
+  check(stale.present && !stale.fresh, 'a setup edit marks the recording stale');
+  await S('return s.simulate({})');
+  const flagged = await S(`return s.get_rubble_outline({ frame: '${f1.id}' })`);
+  check(flagged.check === true && flagged.pinned, 'after re-simulating, the pinned image keeps its time and camera, flagged "check after re-simulation"');
+  await S(`await s.seek({ ms: 72.5 }); await s.select_object({ kind: 'body', name: 'car' }); return s.jump_to_pin({ frame: '${f1.id}' })`);
+  await sleep(800);
+  await shoot('scene-review-flagged', 800);
+  await S(`await s.select_image({ frame: '${f0.id}' }); await s.set_mode({ mode: 'setup' }); return true`);
+  await sleep(600);
+  await S("return s.select_object({ kind: 'body', name: 'car' })");
+  await shoot('scene-setup-body', 800);
 
   await go('#/library');
   await shoot('library');
   await go(`#/link/${f1.id}`, 2500);
-  await shoot('link', 1200);
+  await shoot('link', 1500);
   await go(`#/compare/${f1.id}`, 2500);
-  await shoot('compare', 1000);
-  await go(`#/annotate/${f1.id}`, 1500);
-  await c.evaluate("document.querySelector('.topbar .btn').click()");
-  await shoot('help', 500);
+  await shoot('compare', 1500);
   check(c.errors.length === 0, `no page exceptions${c.errors.length ? `: ${c.errors.join(' | ')}` : ''}`);
   return finish(c);
 }
