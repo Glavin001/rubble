@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { DesignMatch } from './generated/crash-reference.ts';
+import type { CrashReport, CriterionResult, DesignMatch } from './generated/crash-reference.ts';
 import type { ElementValue, Frame, ScenarioInfo, Xy } from '../shared/model.ts';
 import { frameImage, tool, currentStore } from './api.ts';
 import type { Ctx } from './App.tsx';
@@ -394,6 +394,39 @@ function DesignMatches({ ctx, body }: { ctx: Ctx; body: string }) {
   );
 }
 
+/** The recorded run's report, as Rust judged it: each criterion's mark, value and band, and a
+ * known failure's note (`CriterionResult.known*`), as the crash lab's Results panel shows them. */
+function Results() {
+  const st = useScene();
+  const report = useMemo(() => (st.status?.has_report && scene.engine ? (scene.engine.studio.report() as CrashReport | null) : null), [st.status]);
+  if (!report) return null;
+  const asserted = report.results.filter((r) => r.asserted);
+  const pass = asserted.filter((r) => r.pass).length;
+  const known = asserted.filter((r) => !r.pass && r.known).length;
+  const fail = asserted.length - pass - known;
+  const band = (r: CriterionResult) => (r.lo != null && r.hi != null ? `[${r.lo}, ${r.hi}]` : r.lo != null ? `≥ ${r.lo}` : r.hi != null ? `≤ ${r.hi}` : 'any');
+  return (
+    <details className="results" open>
+      <summary>
+        Results <span className={`badge ${fail ? 'bad' : known ? 'warn' : 'ok'}`}>{pass} pass{known ? ` · ${known} known failure${known > 1 ? 's' : ''}` : ''} · {fail} fail</span>
+        {st.status?.executor === 'cpu-fallback' && <span className="badge warn">CPU fallback (tests)</span>}
+        {!st.status?.fresh && <span className="badge warn">stale</span>}
+      </summary>
+      <ul className="reslist">
+        {report.results.map((r) => {
+          const mark = r.asserted ? (r.pass ? ['ok', 'pass'] : r.known ? ['warn', 'known failure'] : ['bad', 'FAIL']) : r.pass ? ['', 'in band'] : ['', 'out of band'];
+          return (
+            <li key={r.metric + r.name}>
+              <span className={`badge ${mark[0]}`}>{mark[1]}</span> {r.name}: <span className="mono">{r.value == null ? '—' : Math.abs(r.value) >= 10 ? r.value.toFixed(1) : r.value.toPrecision(3)}</span> <span className="muted small">{band(r)}</span>
+              {r.known_note && <div className="muted small">known failure ({r.known_occurs ?? ''}): {r.known_note}</div>}
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
+
 function Timeline() {
   const st = useScene();
   const s = st.status;
@@ -628,6 +661,7 @@ export function SceneView({ ctx }: { ctx: Ctx }) {
                 {!info.boxes.length && <li className="muted small">none</li>}
               </ul>
               <Props ctx={ctx} list={list} />
+              <Results />
               <Images ctx={ctx} />
             </>
           )}

@@ -283,3 +283,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
   .view3d { min-height: 300px; height: 52vh; flex: none; }
   .sceneside { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
 }
+
+.results summary { cursor: pointer; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-weight: 600; }
+.reslist { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.badge.bad { color: var(--bad); border-color: var(--bad); }

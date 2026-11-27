@@ -36,6 +36,8 @@ pub fn typescript() -> String {
         registry::ReferenceInfo,
         registry::CriterionInfo,
         registry::BasisInfo,
+        registry::KnownInfo,
+        Occurs,
         recording::Header,
         recording::RecBody,
         outline::FreeCamera,

@@ -84,7 +84,12 @@ export type CriterionResult = { name: string, metric: string, value: number | nu
 /**
  * Failing it fails the run ([`Criterion::asserted`]).
  */
-asserted: boolean, why: string, basis: string, };
+asserted: boolean, why: string, basis: string, 
+/**
+ * A known failure is recorded for this run's contact setting ([`Criterion::known_in`]):
+ * failing it does not fail the run.
+ */
+known: boolean, known_occurs?: Occurs | null, known_note?: string | null, };
 
 export type Tier = "invariant" | "physics" | "shape";
 
@@ -114,9 +119,18 @@ export type ReferenceInfo = { video: string, atS: Array<number>,
  */
 links: Array<string>, realTest: string, };
 
-export type CriterionInfo = { name: string, metric: string, lo: number | null, hi: number | null, tier: Tier, why: string, basis: BasisInfo, asserted: boolean, };
+export type CriterionInfo = { name: string, metric: string, lo: number | null, hi: number | null, tier: Tier, why: string, basis: BasisInfo, asserted: boolean, 
+/**
+ * Where it is known to fail today ([`KnownFailure`]); empty for most (and for every
+ * recreated scenario's).
+ */
+known: Array<KnownInfo>, };
 
 export type BasisInfo = { kind: string, source?: string, };
+
+export type KnownInfo = { contacts: Array<Contact>, occurs: Occurs, note: string, };
+
+export type Occurs = "every_run" | "some_runs";
 
 export type Header = { scenario: string, 
 /**

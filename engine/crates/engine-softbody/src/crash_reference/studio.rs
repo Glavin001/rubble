@@ -308,7 +308,7 @@ impl Studio {
     /// Up to `samples` more samples of the CPU run; when it is complete its recording (with
     /// the report) becomes the studio's.
     pub fn cpu_step(&mut self, samples: u32) -> Result<CpuProgress, String> {
-        let criteria = (self.scene()?.scenario.criteria)();
+        let scenario = self.scene()?.scenario.clone();
         let id = self.scene()?.scenario.id.clone();
         let run = self.cpu.as_mut().ok_or("no CPU run started")?;
         for _ in 0..samples {
@@ -332,8 +332,11 @@ impl Studio {
             if let Some(j) = runner.contact_removed() {
                 metrics.insert("all.contact_removed_j".into(), j);
             }
-            let results = criteria.iter().map(|c| c.judge(&metrics)).collect();
+            if let Some(on) = runner.continuous_engaged() {
+                metrics.insert("all.continuous_engaged".into(), f64::from(u8::from(on)));
+            }
             let contact = recording.contact;
+            let results = judge(&scenario, &metrics, contact);
             recording.report = Some(CrashReport { id, contact, run: 0, metrics, results, series: Some(series) });
             self.recording = Some(recording);
             return Ok(CpuProgress { sample, samples: total, done: true });

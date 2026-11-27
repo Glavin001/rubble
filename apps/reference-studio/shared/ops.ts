@@ -732,6 +732,12 @@ export class Ops {
       try {
         const now = await this.rubbleLink(f);
         const was = await this.rubbleLink(before);
+        // A pinned image against an unpinned "before" (or the other way) would compare a time and
+        // camera chosen by hand with a named moment and camera: meaningless numbers. Say so.
+        if (before.id !== f.id && now.pinned !== was.pinned) {
+          const missing = now.pinned ? before.id : f.id;
+          throw new StudioError(`pin the before image to compare: ${missing} has no pin (time and camera) in the Scene view, ${now.pinned ? f.id : before.id} has one`);
+        }
         sources.push({ name: 'rubble', before: { rubble: this.spec(before, was, schema) }, now: { rubble: this.spec(f, now, schema) } });
         const when = now.pinned ? `${now.at_ms} ms (pinned)` : `${now.moment} (${now.at_ms} ms)`;
         used.push({ name: 'rubble', label: `Rubble ${now.scenario} ${when}`, source: 'rubble', region: '', before_region: '' });

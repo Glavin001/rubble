@@ -231,7 +231,7 @@ async function main() {
     await sleep(1200);
     await shoot('s02-real-image', 1000);
     const t = await S(`return s.get_comparison({ frame: '${f}' })`);
-    check(t.rubble && !t.rubble.error, `get_comparison of ${f} with Rubble at ${t.rubble?.at_ms} ms (${t.rubble?.recording?.executor})`);
+    check(/pin the before image to compare/.test(t.rubble?.error ?? ''), `get_comparison of ${f} (pinned) against its unpinned before frame: "${t.rubble?.error}"`);
     console.log(JSON.stringify(t.rows?.map((x: { id: string; values: Record<string, { v: number } | null> }) => [x.id, Object.fromEntries(Object.entries(x.values).map(([k, v]) => [k, v ? +v.v.toFixed(3) : null]))])));
     return finish(c);
   }
@@ -298,10 +298,14 @@ async function main() {
   const sim = await S('return s.simulate({})');
   check(sim.present && sim.fresh && sim.executor === executor && sim.samples > 100, `simulate (${executor}${WEBGPU ? '' : ', labelled'}): ${sim.samples} samples, ${sim.duration_s?.toFixed(2)} s simulated in ${sim.wall_s?.toFixed(1)} s`);
   const rep = await S('return s.get_report()');
+  await sleep(300);
+  check(await c.evaluate<boolean>("!!document.querySelector('.results .reslist li')"), 'the Scene view lists the report (Results)');
   check(rep.report?.results?.every((r: { pass: boolean; asserted: boolean }) => r.pass || !r.asserted), `get_report: ${rep.report?.results?.map((r: { name: string; pass: boolean }) => `${r.name} ${r.pass ? 'pass' : 'FAIL'}`).join(', ')}`);
   const cam = { eye: [6.0, 1.0, 1.0], target: [0, 0.6, 1.0], fov_y_deg: 45 };
-  await S(`await s.seek({ ms: -10 }); await s.set_scene_camera(${JSON.stringify(cam)}); return s.pin_image({ frame: '${f0.id}' })`);
-  await S(`await s.seek({ ms: 72.5 }); return s.pin_image({ frame: '${f1.id}' })`);
+  await S(`await s.seek({ ms: 72.5 }); await s.set_scene_camera(${JSON.stringify(cam)}); return s.pin_image({ frame: '${f1.id}' })`);
+  const half = await S(`return s.get_comparison({ frame: '${f1.id}' })`);
+  check(/pin the before image to compare/.test(half.rubble?.error ?? '') && !half.rows?.some((r: { values: Record<string, unknown> }) => 'rubble' in r.values), `with only the peak image pinned, the comparison says "${half.rubble?.error}" and shows no Rubble numbers`);
+  await S(`await s.seek({ ms: -10 }); return s.pin_image({ frame: '${f0.id}' })`);
   const pins = await S(`return s.list_pins({ shot: '${shot.id}' })`);
   check(pins.length === 2 && pins.every((p: { pinned: boolean }) => p.pinned) && Math.abs(pins.find((p: { frame: string }) => p.frame === f1.id).at_ms - 72.5) < 0.01, `pin_image stored both times and cameras: ${pins.map((p: { frame: string; at_ms: number }) => `${p.frame} ${p.at_ms} ms`).join(', ')}`);
   await S(`await s.seek({ ms: 0 }); return s.jump_to_pin({ frame: '${f1.id}' })`);

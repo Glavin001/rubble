@@ -18,6 +18,17 @@ pub struct CriterionInfo {
     pub why: String,
     pub basis: BasisInfo,
     pub asserted: bool,
+    /// Where it is known to fail today ([`KnownFailure`]); empty for most (and for every
+    /// recreated scenario's).
+    pub known: Vec<KnownInfo>,
+}
+
+/// [`KnownFailure`] as JSON.
+#[derive(Clone, Debug, Serialize, TS)]
+pub struct KnownInfo {
+    pub contacts: Vec<Contact>,
+    pub occurs: Occurs,
+    pub note: String,
 }
 
 /// [`Basis`] as JSON: `{ kind: 'law' | 'cited', source }` or `{ kind: 'estimate' }`.
@@ -36,7 +47,7 @@ impl From<&Criterion> for CriterionInfo {
             Basis::Cited(x) => BasisInfo { kind: "cited".into(), source: Some(x.into()) },
             Basis::Estimate => BasisInfo { kind: "estimate".into(), source: None },
         };
-        Self { name: c.name.into(), metric: c.metric.into(), lo: c.lo, hi: c.hi, tier: c.tier, why: c.why.into(), basis, asserted: c.asserted() }
+        Self { name: c.name.into(), metric: c.metric.into(), lo: c.lo, hi: c.hi, tier: c.tier, why: c.why.into(), basis, asserted: c.asserted(), known: c.known.iter().map(|k| KnownInfo { contacts: k.contacts.clone(), occurs: k.occurs, note: k.note.into() }).collect() }
     }
 }
 
