@@ -114,16 +114,19 @@ impl Ctx<'_> {
     /// APGD on the rows from their current λ: λ ≥ 0 ⟂ J v + b ≥ 0, v = base + M⁻¹Jᵀλ. Leaves
     /// `vel` at the final λ; true when settled.
     fn solve(&self, rows: &mut [VRow], base: &[Vec<Vec3>], vel: &mut [Vec<Vec3>], st: &mut CcdStats) -> bool {
-        let shape: Vec<Vec<u32>> = base.iter().map(|x| vec![0; x.len()]).collect();
-        let mut count = shape;
+        // The preconditioner D ⪰ A (Gershgorin): row i's D is Σⱼ |wᵢⱼ|·sⱼ/mⱼ, sⱼ the sum of the
+        // |w| of every row at node j. (Mass splitting's Σⱼ cⱼ·wᵢⱼ²/mⱼ, cⱼ the rows at j, falls
+        // under A where barycentric weights are below 1, and the accelerated steps then
+        // diverged on a head-on crush's 744 rows: 2026-11-27.)
+        let mut sum: Vec<Vec<f32>> = base.iter().map(|x| vec![0.0; x.len()]).collect();
         for r in rows.iter() {
             for j in 0..4 {
-                if r.w[j] != 0.0 && self.mi(r.k[j]) > 0.0 {
-                    count[r.k[j].0][r.k[j].1 as usize] += 1;
+                if self.mi(r.k[j]) > 0.0 {
+                    sum[r.k[j].0][r.k[j].1 as usize] += r.w[j].abs();
                 }
             }
         }
-        let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * self.mi(r.k[j]) * count[r.k[j].0][r.k[j].1 as usize] as f32).sum()).collect();
+        let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j].abs() * self.mi(r.k[j]) * sum[r.k[j].0][r.k[j].1 as usize]).sum()).collect();
         let mut l: Vec<f32> = rows.iter().map(|r| r.l).collect();
         let mut y = l.clone();
         let mut theta = 1.0f32;
