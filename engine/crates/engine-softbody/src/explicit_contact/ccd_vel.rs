@@ -89,6 +89,8 @@ fn pgs() -> bool {
 /// Units in the last place a row's closing may sit past its bound by rounding ([`Ctx::precision`]).
 pub(super) const ROUND_ULPS: f32 = 4.0;
 
+static TRACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// APGD's momentum restarts every this many iterations.
 pub(super) const APGD_RESTART: u32 = 16;
 
@@ -260,6 +262,10 @@ impl Ctx<'_> {
         if std::env::var("DAT_DUPS").is_ok() {
             dups_dbg(rows);
         }
+        // (`DAT_PRECOND=power`, a measurement: the exact diagonal Σ w²/m scaled by the largest
+        // eigenvalue of D⁻¹A, from ten power iterations of a fixed start, times 1.05 — APGD's
+        // step 1/L, where Gershgorin's bound is the rows-at-a-node times too small.)
+        let d: Vec<f32> = if std::env::var("DAT_PRECOND").is_ok_and(|v| v == "power") { self.power_diag(rows, base) } else { d };
         let mut l: Vec<f32> = rows.iter().map(|r| r.l).collect();
         let mut y = l.clone();
         let mut vy = base.to_vec();
@@ -283,6 +289,9 @@ impl Ctx<'_> {
             ok = self.settled(rows, &l, vel);
         }
         st.row_iters += used as u64;
+        if !ok && std::env::var("DAT_SOLVE_TRACE").is_ok() && !TRACED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            self.solve_trace(rows, &d, &l, base);
+        }
         if !ok && std::env::var("DAT_CLUSTERS").is_ok() {
             self.clusters_dbg("apgd", rows, &l, vel);
         }
@@ -321,6 +330,53 @@ impl Ctx<'_> {
             r.l = l;
         }
         ok
+    }
+
+    fn power_diag(&self, rows: &[VRow], base: &[Vec<Vec3>]) -> Vec<f32> {
+        let dj: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * self.mi(r.k[j])).sum()).collect();
+        let zero: Vec<Vec<Vec3>> = base.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
+        let mut v: Vec<f32> = vec![1.0; rows.len()];
+        let mut vel = zero.clone();
+        let mut lmax = 1.0f32;
+        for _ in 0..10 {
+            self.velocities(rows, &v, 1.0, &zero, &mut vel);
+            let u: Vec<f32> = rows.iter().zip(&dj).map(|(r, &d)| if d > 0.0 { Self::normal(r, &vel) / d } else { 0.0 }).collect();
+            let n = u.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+            if !(n > 0.0) {
+                break;
+            }
+            lmax = n / v.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+            v = u.iter().map(|x| x / n).collect();
+        }
+        dj.iter().map(|d| d * lmax * 1.05).collect()
+    }
+
+    /// A measurement (`DAT_SOLVE_TRACE=1`, the first unsettled solve of the process): APGD from
+    /// `l` on to 20,000 iterations, the worst push past the bound, closing and settle count.
+    fn solve_trace(&self, rows: &[VRow], d: &[f32], l0: &[f32], base: &[Vec<Vec3>]) {
+        let (mut l, mut y) = (l0.to_vec(), l0.to_vec());
+        let (mut vy, mut vel) = (base.to_vec(), base.to_vec());
+        for used in 1..=20000u32 {
+            self.velocities(rows, &y, 1.0, base, &mut vy);
+            let next: Vec<f32> = rows.iter().zip(&y).zip(d).map(|((r, &y), &d)| if d > 0.0 { (y - (Self::normal(r, &vy) + r.b) / d).max(0.0) } else { 0.0 }).collect();
+            if used % APGD_RESTART == 0 {
+                y.clone_from(&next);
+            } else {
+                let beta = f32::from_bits(APGD_BETA_BITS[(used % APGD_RESTART) as usize - 1]);
+                for ((y, &n), &o) in y.iter_mut().zip(&next).zip(&l) {
+                    *y = n + beta * (n - o);
+                }
+            }
+            l = next;
+            if used.is_power_of_two() || used % 5000 == 0 {
+                self.velocities(rows, &l, 1.0, base, &mut vel);
+                let prec = self.precision(rows, &l, &vel);
+                let unset = rows.iter().zip(&l).filter(|(r, &l)| !self.row_settled(r, l, &vel, &prec)).count();
+                let push = rows.iter().zip(&l).map(|(r, &l)| { let g = Self::normal(r, &vel) + r.b; if l > 0.0 { g / r.b.abs().max(1e-3) } else { 0.0 } }).fold(0f32, f32::max);
+                let close = rows.iter().map(|r| { let g = Self::normal(r, &vel) + r.b; -g * self.h / self.pairs[r.q].xi.min(r.s0.max(1e-9)) }).fold(0f32, f32::max);
+                eprintln!("TRACE it {used} rows {} unsettled {unset} | worst push past bound / bound {push:.2e}, worst closing / gap {close:.2e}", rows.len());
+            }
+        }
     }
 
     /// The row closes past its bound by at most [`ROW_GAP_SHARE`] of what it may close to.

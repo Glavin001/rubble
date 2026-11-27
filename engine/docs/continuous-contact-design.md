@@ -1070,11 +1070,18 @@ Head 100 for 0.05 s, generated sedan, velocity contact, 745 solves:
 - **Duplicate rows** (`DAT_DUPS`): 19 % of the rows are another row's constraint, typically one
   vertex against another vertex seen through every pair of their edges. Making them inactive
   removes 16 % of the zones and changes nothing else.
-- **What follows:** neither more iterations nor a better inner solver ends the rounds. Each round's
-  rows are linearised at the impact normals, and the next round's CCD meets the paths again
-  (the cycling found earlier). The outer loop, not the inner solve, is what has to converge.
-  That is a change of the contact's formulation (barrier contact, or rows that stay linearised
-  across rounds with a monotone set), not a tuning.
+- **What follows** (corrected the same day, below): the inner solve, not only the outer loop.
+  - Of 745 solves, 252 follow a round that changed no row (`DAT_VDBG`: no fresh and no
+    re-linearised rows); there the last solve just had not settled.
+  - The first unsettled solve run on (`DAT_SOLVE_TRACE=1`, 20,000 iterations): its worst push
+    (4.2e-3 of the bound) and its 20 unsettled rows do not change at all for 32 more iterations,
+    then all settle by iteration 64 and stay settled.
+  - With the exact diagonal scaled by a power-iteration eigenvalue estimate
+    (`DAT_PRECOND=power`, a larger step): the same stall, longer (64), settled by 128. Head 100
+    for 0.05 s: 2,522 zones against 2,523.
+  - So the step size is not why it stalls: the iterate sits still, then moves. The cause (an
+    update below a float's or the fixed-point sums' resolution, or the momentum's restarts) is
+    the next thing to find.
 
 ## The barrier prototype's non-convergence, explained (2026-11-27, CPU, `DAT_BARRIER=1`, off)
 
