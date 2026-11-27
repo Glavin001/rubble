@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 const DHAT: f32 = 1e-3;
 /// Gauss–Newton steps at most (`DAT_BARRIER_ITERS`).
 const ITERS: u32 = 50;
+/// A pair starting inside its gap keeps this share of its start distance as its gap.
+const START_SHARE: f32 = 0.9;
 
 fn env(k: &str, d: f32) -> f32 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
@@ -60,9 +62,10 @@ pub(in super::super) fn barrier(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [V
     let mut x: Vec<Vec3> = keys.iter().map(|k| x0[k.0][k.1 as usize]).collect();
     let kappa = env("DAT_KAPPA", 1.0) as f64 * (m.iter().sum::<f64>() / m.len() as f64) / (h as f64 * h as f64);
     let h2 = (h as f64) * (h as f64);
-    // Each pair's gap, held under half its start distance (a pair that began inside its gap).
+    // Each pair's gap, held under START_SHARE of its start distance (a pair that began inside its
+    // gap; at 0.5 a pressed pair's gap halved every step and the paint sank 120-197 mm).
     let at = |x: &[Vec3], p: &CcdPair| p.k.map(|k| idx.get(&k).map_or(x0[k.0][k.1 as usize], |&i| x[i]));
-    let xi: Vec<f32> = pairs.iter().map(|p| p.xi.min(0.5 * closest(p.nn, at(&x, p)).1.length())).collect();
+    let xi: Vec<f32> = pairs.iter().map(|p| p.xi.min(START_SHARE * closest(p.nn, at(&x, p)).1.length())).collect();
     let energy = |x: &[Vec3]| -> f64 {
         let mut e: f64 = (0..x.len()).map(|i| 0.5 * m[i] * (x[i] - xh[i]).length_squared() as f64 / h2).sum();
         for (p, &g) in pairs.iter().zip(&xi) {

@@ -964,6 +964,17 @@ and end are joined without crossing).
   4.9 N·s in a step, paint reaches 197 mm, and 0.1 s takes 119 s of CPU.
 - Why: the CCD-limited steps shrink as pairs near their gaps. IPC's full form adapts κ and d̂ for
   this; not done here.
+- κ and d̂ by hand (head 100, 0.05 s):
+
+| κ × m̄/h², d̂ | Paint | Momentum / angular momentum per step | Solves at the cap |
+|---|---|---|---|
+| 1, 1 mm | 153 mm | 4.6 N·s / 6.7 N·m·s | 303 |
+| 10, 10 mm | 122 mm | 4.0 / 3.5 | 309 |
+| 100, 5 mm | 126 mm | 2.1 / 3.1 | 185 |
+| 100, 5 mm, start gap 0.9 (not 0.5) of a pressed pair's distance | 51 mm | 6.5 / 5.0 | 198 |
+
+  All have 0 zones and 0 crossings. The paint was the prototype's own fault: a pressed pair's
+  gap halved every step. None converges.
 
 What it needs: a Newton solve (the barrier's Hessian per pair) to converge in a few
 iterations; a CCD test that matches the straight path (end positions whose straight path from
