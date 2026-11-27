@@ -568,6 +568,60 @@ No energy created in any run. The loss at speed is the rigid zones gluing the ba
 their gap keep being flagged until the rounds run out. Next: why pairs within their gap stay
 flagged (their rows are linearised at the impact, the closing test is not), then the zones.
 
+## Velocity contact made exact (2026-11-27, `DAT_RESPONSE=vel`, off; `explicit_contact/ccd_vel.rs`)
+
+What was wrong with the first version, in the order found:
+
+1. **Pairs stayed flagged.** A pair resting within its gap was listed again every round as a
+   new row, and the solve's stop test (no λ changes at all) is never met in floats. So every
+   step ran its 8 rounds and fell to the rigid zones. Fixes: one row per pair, kept with its λ.
+   The solve is settled when no row closes past 1 % of its gap over the step, and no pushing row
+   parts faster than its bound by more than 10⁻⁴ m/s (a push past its bound does work).
+2. **The measure.** Raw kinetic + elastic energy at the step's end swings with the bars'
+   ringing, because ωh ≈ 1. The bars test now judges the integrator's own conserved energy
+   (symplectic Euler, kick then drift): E = KE + V + (h/2)·Σ v·F(x). Without contact it is flat
+   to 0.1 J over 0.2 s. For the cars, the pass's work on that energy is
+   `contact_work` = Σ m·Δv·(v⁻ + v⁺)/2, v⁻ the velocity before the kick. A pressed contact does
+   none; an inelastic impact does −½μv². `contact_de` also counts the beams' energy a held node
+   keeps, which is not work.
+3. **The solve.** Mass-splitting Jacobi needed ~2000 iterations on the bars' 100 redundant rows
+   (8 end nodes). Fable's pick, APGD (Mazhar et al. 2015, Chrono): the same sweep with Nesterov
+   momentum, the mass-splitting diagonal as preconditioner, a fixed restart every 16 iterations
+   (no reduction, so deterministic). With the impact law below it takes about 1.5 iterations a
+   round.
+4. **The impact law.** With e = 0 the bars lose the end slices' inelastic impact,
+   ½·μ·v_rel² = 50 J at 5 m/s (measured 52.6). That loss is inherent to lumped mass.
+   - Fable first proposed Cirak–West's momentum reflection, v⁺ = v_f + (1+e)M⁻¹Jᵀλ. It created
+     +95 J: v_f is the kicked velocity, so a node its beams press bounces at hF/m every step,
+     which does work m·u² on the conserved energy.
+   - The law adopted is Newton's on the closing before the kick: J v⁺ ≥ −e·min(J v⁻, 0), as a
+     bound in the same rows (the larger of it and the gap's). Its work per row is
+     ½(u⁺ − u_f)(1 − e)u⁻: zero at e = 1 and ≤ 0 below. A pressed contact (u⁻ = 0) gets no bounce.
+
+Elastic bars, this contact alone (`VV_RANGE=0 BARS_BARE=1`), e = 1. Exact answer: kept 1, rebound 1.
+
+| | 0.3 m/s | 1 m/s | 2 m/s | 5 m/s | 10 m/s | 20 m/s |
+|---|---|---|---|---|---|---|
+| energy kept (conserved E over KE₀) | 0.953 | 0.988 | 0.994 | 0.996 | 0.993 | 0.137 |
+| rebound | 0.91 | 0.88 | 0.91 | 0.90 | 0.85 | 0.32 |
+
+None is created at any speed.
+- At 5 m/s the loss is the integrator's drift without contact: −1.75 J against −1.67 J.
+- At 0.3 m/s the 0.09 J lost is that drift on 2 J of kinetic energy.
+- At 20 m/s the bars close at 40 m/s, faster than their 37 m/s wave speed, so they are outside
+  the elastic regime: they crush and stick.
+- The rebound below 1 is the 11-slice bar's dispersion: the energy kept as ringing.
+
+**Two other contact passes create energy on the bars** (pre-existing; they act within a band, a
+cushion under AGENTS.md):
+- The discrete node-against-triangle vehicle pass adds +0.7 J in one step to two bars at rest
+  1 cm apart (`VV_RANGE=0` turns it off).
+- Each bar's own node-against-triangle self collision (`candidates`) fights the rows. Together
+  with the surface and edge passes, the bars at 5 m/s go from kept 0.996 to 2.89.
+
+Fable's fix for these: retire them where the velocity rows cover the same contact, or bound
+each hit's impulse to 0 ≤ J ≤ 2·m_eff·max(0, −u), which gives no impulse at relative rest.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
