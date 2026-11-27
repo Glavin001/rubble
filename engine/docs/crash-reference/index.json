@@ -1,0 +1,268 @@
+{
+ "video": "https://www.youtube.com/watch?v=Lqx2KKWI8aM",
+ "frames_dir": "~/Development/rubble-artifacts/crash-reference (not in git: third-party footage)",
+ "note": "video_s is approximate (the pasted frames carry no timestamp); refine when re-capturing.",
+ "frames": [
+  {
+   "scenario": "S01",
+   "file": "S01/S01_1m47s_wide_01.webp",
+   "video_s": 107,
+   "shows": "beamng",
+   "camera": "wide",
+   "moment": "setup",
+   "look_at": "The test hall: rigid offset block, fixed cameras."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_1m52s_side_02.webp",
+   "video_s": 112,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "first contact",
+   "look_at": "Front corner meets the barrier; nothing behind the bumper has moved."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_1m53s_side_03.webp",
+   "video_s": 113,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "early crush",
+   "look_at": "Bumper and headlamp gone; hood starts to buckle; front wheel still in its arch."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_1m54s_side_04.webp",
+   "video_s": 114,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "mid crush",
+   "look_at": "Hood folds upward; struck wheel pushed back toward the sill; door gaps unchanged."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_1m55s_side_05.webp",
+   "video_s": 115,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak crush",
+   "look_at": "Crush reaches the front wheel; A-pillar, doors and roof keep their shape; rear lifts slightly."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_1m56s_side_06.webp",
+   "video_s": 116,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "rebound",
+   "look_at": "Front destroyed to the firewall; cabin opening intact; airbags out (real)."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_2m06s_top_07.webp",
+   "video_s": 126,
+   "shows": "real+beamng",
+   "camera": "top",
+   "moment": "first contact",
+   "look_at": "40 % overlap on the driver's side; car straight."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_2m07s_top_08.webp",
+   "video_s": 127,
+   "shows": "real+beamng",
+   "camera": "top",
+   "moment": "peak crush",
+   "look_at": "Struck corner collapsed; car starts to rotate about it."
+  },
+  {
+   "scenario": "S01",
+   "file": "S01/S01_2m08s_top_09.webp",
+   "video_s": 128,
+   "shows": "real+beamng",
+   "camera": "top",
+   "moment": "rotation",
+   "look_at": "Car yawed about 20-30 degrees around the struck corner; rear swings out."
+  },
+  {
+   "scenario": "S02",
+   "file": "S02/S02_2m12s_side_01.webp",
+   "video_s": 132,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak crush",
+   "look_at": "Whole front crushed to the wheel arch; hood tented; door and A-pillar intact."
+  },
+  {
+   "scenario": "S02",
+   "file": "S02/S02_2m10s_side_02.webp",
+   "video_s": 130,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "first contact",
+   "look_at": "Full-width rigid wall, 50 km/h."
+  },
+  {
+   "scenario": "S02",
+   "file": "S02/S02_2m14s_top_03.webp",
+   "video_s": 134,
+   "shows": "real+beamng",
+   "camera": "top",
+   "moment": "first contact",
+   "look_at": "Square to the wall."
+  },
+  {
+   "scenario": "S02",
+   "file": "S02/S02_2m15s_top_04.webp",
+   "video_s": 135,
+   "shows": "real+beamng",
+   "camera": "top",
+   "moment": "peak crush",
+   "look_at": "Even crush across the width; no yaw; hood folded along a line across the car."
+  },
+  {
+   "scenario": "S03",
+   "file": "S03/S03_2m31s_front-three-quarter_01.webp",
+   "video_s": 151,
+   "shows": "beamng",
+   "camera": "front three-quarter",
+   "moment": "peak intrusion",
+   "look_at": "Sled face in both doors between the axles; B-pillar pushed in; roof rail bowed; nose and tail untouched."
+  },
+  {
+   "scenario": "S04",
+   "file": "S04/S04_2m59s_side_01.webp",
+   "video_s": 179,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "early crush",
+   "look_at": "Underride guard meets the car at hood height; hood and fenders crushed above the bumper line."
+  },
+  {
+   "scenario": "S04",
+   "file": "S04/S04_3m01s_side_02.webp",
+   "video_s": 181,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak crush",
+   "look_at": "Front crushed back to the screen base; front wheel pushed back; cabin stays out from under the box; trailer barely moves."
+  },
+  {
+   "scenario": "S05",
+   "file": "S05/S05_3m23s_front-of-car-low_01.webp",
+   "video_s": 203,
+   "shows": "real+beamng",
+   "camera": "front of car, low",
+   "moment": "carried",
+   "look_at": "Car wrapped around the truck's nose; struck side caved past the middle; car tilted and carried."
+  },
+  {
+   "scenario": "S06",
+   "file": "S06/S06_4m06s_side_01.webp",
+   "video_s": 246,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "first contact",
+   "look_at": "Truck drives the car toward the parked trailer's rear."
+  },
+  {
+   "scenario": "S06",
+   "file": "S06/S06_4m08s_side_02.webp",
+   "video_s": 248,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak crush",
+   "look_at": "Car all but gone between cab and trailer; nose under the trailer deck."
+  },
+  {
+   "scenario": "S06",
+   "file": "S06/S06_4m15s_side_03.webp",
+   "video_s": 255,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "aftermath",
+   "look_at": "Car about half length; roof flattened to the beltline; everything folded."
+  },
+  {
+   "scenario": "S07",
+   "file": "S07/S07_5m32s_side_01.webp",
+   "video_s": 332,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "first contact",
+   "look_at": "190 km/h into a concrete block."
+  },
+  {
+   "scenario": "S07",
+   "file": "S07/S07_5m33s_side_02.webp",
+   "video_s": 333,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "early crush",
+   "look_at": "Front gone to the front axle; crush entering the cabin; rear starts to rise."
+  },
+  {
+   "scenario": "S07",
+   "file": "S07/S07_5m34s_side_03.webp",
+   "video_s": 334,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "mid crush",
+   "look_at": "Crush through the cabin; roof buckled; rear high."
+  },
+  {
+   "scenario": "S07",
+   "file": "S07/S07_5m35s_side_04.webp",
+   "video_s": 335,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak",
+   "look_at": "Car standing on its nose against the block; doors and panels leaving."
+  },
+  {
+   "scenario": "S07",
+   "file": "S07/S07_5m40s_three-quarter_05.webp",
+   "video_s": 340,
+   "shows": "real+beamng",
+   "camera": "three-quarter",
+   "moment": "aftermath",
+   "look_at": "Wreck about half the car's length; rear axle on top."
+  },
+  {
+   "scenario": "S07",
+   "file": "S07/S07_5m42s_three-quarter-rear_06.webp",
+   "video_s": 342,
+   "shows": "real+beamng",
+   "camera": "three-quarter rear",
+   "moment": "aftermath",
+   "look_at": "Roof folded; doors and a wheel on the ground."
+  },
+  {
+   "scenario": "S08",
+   "file": "S08/S08_5m57s_side_01.webp",
+   "video_s": 357,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak crush",
+   "look_at": "Both fronts crushed to the wheel; hoods folded; both rears lifted; cabins intact."
+  },
+  {
+   "scenario": "S08",
+   "file": "S08/S08_6m00s_top_02.webp",
+   "video_s": 360,
+   "shows": "real+beamng",
+   "camera": "top",
+   "moment": "peak crush",
+   "look_at": "About half overlap; cars stay nearly in line."
+  },
+  {
+   "scenario": "S09",
+   "file": "S09/S09_6m15s_side_01.webp",
+   "video_s": 375,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak crush",
+   "look_at": "SUV rides over the car's hood; car's front crushed to the screen and its rear thrown up; SUV's front damaged far less."
+  }
+ ]
+}
