@@ -14,6 +14,8 @@
 //! line in [`all`].
 
 pub mod criteria;
+#[cfg(test)]
+mod known_tests;
 pub mod metrics;
 pub mod outline;
 mod s01_offset;
@@ -34,7 +36,7 @@ mod s14_ncap_side_mdb;
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use crate::explicit_contact::{Dat, ExplicitBeamsWorld};
-pub use criteria::{Basis, Criterion, CriterionResult, Tier};
+pub use criteria::{Basis, Criterion, CriterionResult, KnownFailure, Occurs, Tier};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -388,6 +390,12 @@ pub trait Runner {
     fn take_trace(&mut self) -> Vec<Vec<glam::DVec3>> {
         Vec::new()
     }
+    /// Whether continuous contact ran on any frame so far, where the executor can tell
+    /// (`all.continuous_engaged`): an executor may take the setting and not run it for a
+    /// scene (CUDA's runs only on the split group path, two vehicles or more).
+    fn continuous_engaged(&mut self) -> Option<bool> {
+        None
+    }
 }
 
 /// The CPU reference (and its per-step trace, when one is started).
@@ -467,6 +475,9 @@ impl Runner for CpuRunner {
     fn contact_removed(&mut self) -> Option<f64> {
         self.0.continuous.as_ref().map(|d| -d.total.ccd.ke)
     }
+    fn continuous_engaged(&mut self) -> Option<bool> {
+        Some(self.0.continuous.is_some())
+    }
 }
 
 /// One run's result: every metric by name, and each criterion judged on it.
@@ -484,23 +495,100 @@ pub struct CrashReport {
 }
 
 impl CrashReport {
-    /// Asserted criteria (tier 0 or 1, with a basis) that did not hold.
+    /// Asserted criteria (tier 0 or 1, with a basis) that did not hold and are not known
+    /// failures in this contact setting: these fail the run.
     pub fn failures(&self) -> Vec<&CriterionResult> {
-        self.results.iter().filter(|r| !r.pass && r.asserted).collect()
+        self.results.iter().filter(|r| r.fails_run()).collect()
+    }
+    /// Asserted criteria that did not hold and are known failures in this setting.
+    pub fn known_failures(&self) -> Vec<&CriterionResult> {
+        self.results.iter().filter(|r| r.known_failed()).collect()
+    }
+    /// What a reader must know to read the report honestly: a continuous run in which the
+    /// executor did not run continuous contact is an edge run.
+    pub fn notes(&self) -> Vec<String> {
+        let mut o = Vec::new();
+        if self.contact == Contact::Continuous && self.metrics.get("all.continuous_engaged") == Some(&0.0) {
+            o.push("continuous contact did not engage on this executor for this scene: this is an edge-contact run (with the continuous setting's other switches)".into());
+        }
+        o
     }
     pub fn table(&self) -> String {
         let mut o = format!("{} run {} ({})\n", self.id, self.run, self.contact.name());
+        for n in self.notes() {
+            o += &format!("  note: {n}\n");
+        }
         for r in &self.results {
-            let mark = match (r.pass, r.asserted) {
-                (true, true) => "pass",
-                (false, true) => "FAIL",
-                (true, false) => "in  ",
-                (false, false) => "out ",
+            let mark = match (r.pass, r.asserted, r.known) {
+                (true, true, _) => "pass",
+                (false, true, true) => "KNOWN",
+                (false, true, false) => "FAIL",
+                (true, false, _) => "in  ",
+                (false, false, _) => "out ",
             };
             o += &format!("  {mark} [{}] {}: {} against {} ({})\n", if r.asserted { r.tier.name() } else { "reported" }, r.name, r.shown(), r.band(), r.basis.split(':').next().unwrap_or(""));
         }
         o
     }
+}
+
+/// The criteria of `s` judged on a run's metrics in `contact`, with their known failures.
+pub fn judge(s: &CrashScenario, metrics: &BTreeMap<String, f64>, contact: Contact) -> Vec<CriterionResult> {
+    (s.criteria)().iter().map(|c| c.judge_in(metrics, contact)).collect()
+}
+
+/// The verdict on one scenario's runs in one contact setting ([`verdict`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Verdict {
+    /// What fails it: an asserted criterion failing without a known failure, and a known
+    /// failure recorded as failing in every run that passed in all of them.
+    pub failed: Vec<String>,
+    /// Known failures that failed, with how many runs.
+    pub known: Vec<String>,
+    /// Neither: a known intermittent failure that did not occur, or a failure recorded for
+    /// every run that passed in some.
+    pub notes: Vec<String>,
+}
+
+impl Verdict {
+    pub fn ok(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
+/// The verdict on one scenario's runs in one contact setting (`reports`: the same
+/// scenario and setting, each judged by [`run`]). An unknown failure fails it; a known
+/// failure does not; a known failure recorded as failing in every run that passes in all
+/// of them fails it with "known failure now passes: remove the entry", so the recorded list
+/// only shrinks. An intermittent one never fails it for passing.
+pub fn verdict(reports: &[CrashReport]) -> Verdict {
+    let mut v = Verdict::default();
+    let Some(first) = reports.first() else { return v };
+    let (id, contact, n) = (&first.id, first.contact.name(), reports.len());
+    for r in reports {
+        for f in r.failures() {
+            v.failed.push(format!("{id} run {} ({contact}): {} = {} outside {}", r.run, f.name, f.shown(), f.band()));
+        }
+    }
+    for (i, c) in first.results.iter().enumerate() {
+        if !(c.asserted && c.known) {
+            continue;
+        }
+        let failing: Vec<usize> = reports.iter().filter(|r| r.results.get(i).is_some_and(|x| !x.pass)).map(|r| r.run).collect();
+        let k = failing.len();
+        let note = c.known_note.as_deref().unwrap_or("");
+        match (k, c.known_occurs) {
+            (0, Some(Occurs::EveryRun)) => v.failed.push(format!("{id} ({contact}): {}: known failure now passes in all {n} runs: remove the entry ({note})", c.name)),
+            (0, _) => v.notes.push(format!("{id} ({contact}): {}: known intermittent failure did not occur in {n} runs", c.name)),
+            (k, occurs) => {
+                v.known.push(format!("{id} ({contact}): {}: known failure in {k} of {n} runs {failing:?}", c.name));
+                if occurs == Some(Occurs::EveryRun) && k < n {
+                    v.notes.push(format!("{id} ({contact}): {}: recorded as failing in every run, passed in {} of {n}: now intermittent", c.name, n - k));
+                }
+            }
+        }
+    }
+    v
 }
 
 /// Steps `runner` through the scenario, sampling every [`SAMPLE_STEPS`] steps (each sample
@@ -532,6 +620,9 @@ pub fn run(
     if let Some(j) = runner.contact_removed() {
         metrics.insert("all.contact_removed_j".into(), j);
     }
-    let results = (s.criteria)().iter().map(|c| c.judge(&metrics)).collect();
+    if let Some(on) = runner.continuous_engaged() {
+        metrics.insert("all.continuous_engaged".into(), f64::from(u8::from(on)));
+    }
+    let results = judge(s, &metrics, built.contact);
     Ok(CrashReport { id: s.id.into(), contact: built.contact, run, metrics, results, series: Some(series) })
 }

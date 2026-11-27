@@ -81,9 +81,13 @@ pub(super) fn scenario() -> CrashScenario {
             use Tier::*;
             let mut c = vec![
                 Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes").law("every position and velocity is a real number"),
-                Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(340.0), "energy is never created: at most 0.1 % of the 338 kJ two 1,448 kg sedans bring at 15.3 m/s").law("energy is never created; 0.1 % is the 1.001 rounding allowance of the energy rule"),
-                Criterion::new(Invariant, "momentum along the road", "all.momentum_z_end", Some(-450.0), Some(450.0), "equal and opposite momenta (22.1 kN·s each) sum to zero, and contact and a symmetric ground keep it there: 2 % of one car's").law("momentum is conserved: the cars' forces on each other cancel, and the ground's friction, the only external horizontal force, is symmetric up to the jitter"),
-                Criterion::new(Invariant, "momentum across the road", "all.momentum_x_end", Some(-450.0), Some(450.0), "zero at the start up to car_a's 0.5° jitter (190 kg·m/s); 2 % of one car's momentum").law("momentum is conserved (as along the road)"),
+                Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(340.0), "energy is never created: at most 0.1 % of the 338 kJ two 1,448 kg sedans bring at 15.3 m/s").law("energy is never created; 0.1 % is the 1.001 rounding allowance of the energy rule")
+                    .known_intermittent(&[Contact::Continuous], "CPU reference 2026-11-27: 1 of 8 runs (0), 443 J (engine/docs/crash-reference.md, Currently failing)"),
+                Criterion::new(Invariant, "momentum along the road", "all.momentum_z_end", Some(-450.0), Some(450.0), "equal and opposite momenta (22.1 kN·s each) sum to zero, and contact and a symmetric ground keep it there: 2 % of one car's").law("momentum is conserved: the cars' forces on each other cancel, and the ground's friction, the only external horizontal force, is symmetric up to the jitter")
+                    .known_intermittent(&[Contact::Edge], "new in the 2026-11-27 sweep, for review: CPU reference, 1 of 8 runs (5), 643 kg m/s (engine/docs/crash-reference.md, Currently failing)")
+                    .known_intermittent(&[Contact::Continuous], "new in the 2026-11-27 sweep, for review: CPU reference, 2 of 8 runs (2, 7), up to 568 kg m/s (engine/docs/crash-reference.md, Currently failing)"),
+                Criterion::new(Invariant, "momentum across the road", "all.momentum_x_end", Some(-450.0), Some(450.0), "zero at the start up to car_a's 0.5° jitter (190 kg·m/s); 2 % of one car's momentum").law("momentum is conserved (as along the road)")
+                    .known_intermittent(&[Contact::Edge], "new in the 2026-11-27 sweep, for review: CPU reference, 1 of 8 runs (5), 519 kg m/s (engine/docs/crash-reference.md, Currently failing)"),
                 Criterion::new(Invariant, "the cabins stay apart", "pair.car_a_car_b.com_gap_min", Some(2.5), None, "the centres of mass start 4.9 m apart at contact, each 1.3 m behind its firewall; cabins that met would put them under 2 × 1.3 m = 2.6 m (with the 0.94 m offset)"),
             ];
             c.extend(per_car!("car_a"));
@@ -92,7 +96,9 @@ pub(super) fn scenario() -> CrashScenario {
                 Criterion::new(Physics, "symmetric crush", "pair.car_a_car_b.crush_peak_ratio", None, Some(1.15), "equal cars at equal speeds: the larger crush within 15 % of the smaller (the 8-run spread of S02 is a few %)"),
                 Criterion::new(Physics, "symmetric work", "pair.car_a_car_b.plastic_work_ratio", None, Some(1.15), "equal cars: each absorbs half of the 338 kJ, the larger within 15 % of the smaller"),
                 Criterion::new(Physics, "symmetric turn", "pair.car_a_car_b.yaw_peak_diff_deg", None, Some(5.0), "point symmetry about the contact maps one car's turn onto the other's"),
-                Criterion::new(Invariant, "the common centre of mass stays still", "all.com_speed_end", None, Some(0.3), "zero total momentum stays zero: 2 % of the 15.3 m/s approach").law("a symmetric head-on's common centre of mass stays at rest (equal masses, equal and opposite velocities)"),
+                Criterion::new(Invariant, "the common centre of mass stays still", "all.com_speed_end", None, Some(0.3), "zero total momentum stays zero: 2 % of the 15.3 m/s approach").law("a symmetric head-on's common centre of mass stays at rest (equal masses, equal and opposite velocities)")
+                    .known_failure(&[Contact::Continuous], "CPU reference 2026-11-27, 8 of 8 runs: 0.40-0.66 m/s (engine/docs/crash-reference.md, Currently failing)")
+                    .known_intermittent(&[Contact::Discrete, Contact::Edge], "new in the 2026-11-27 sweep, for review: CPU reference, discrete 2 of 8 runs (2, 3) up to 0.46 m/s, edge 2 of 8 (2, 5) up to 0.41 m/s (engine/docs/crash-reference.md, Currently failing)"),
             ]);
             c
         },

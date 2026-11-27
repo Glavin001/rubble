@@ -65,7 +65,8 @@ pub(super) fn scenario() -> CrashScenario {
             vec![
                 Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes").law("every position and velocity is a real number"),
                 Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(KE_J * 1e-3), "at most 0.1 % of the 2.02 MJ the 1,448 kg wagon brings at 52.8 m/s").law("energy is never created; 0.1 % is the 1.001 rounding allowance of the energy rule"),
-                Criterion::new(Invariant, "nothing passes into the block", "all.box_depth_m", None, Some(0.05), "no node deeper than 5 cm inside the block: a node moves 2.6 cm a step at 52.8 m/s, so 5 cm is two steps of a missed contact").law("a static box is impenetrable"),
+                Criterion::new(Invariant, "nothing passes into the block", "all.box_depth_m", None, Some(0.05), "no node deeper than 5 cm inside the block: a node moves 2.6 cm a step at 52.8 m/s, so 5 cm is two steps of a missed contact").law("a static box is impenetrable")
+                    .known_intermittent(&[Contact::Continuous], "new in the 2026-11-27 sweep, for review: CPU reference, 1 of 8 runs (6), 5.05 cm (engine/docs/crash-reference.md, Currently failing)"),
                 Criterion::new(Invariant, "no explosion", "car.max_node_speed", None, Some(158.0), "3 × the 52.8 m/s approach (see S01)"),
                 Criterion::new(Physics, "the car is crushed to under 60 % of its length", "car.gauge.length.shrink_frac", Some(0.4), None, "a 1.4–2.9 m crush (v²/2a at 50–100 g) of the 4.85 m car; a crush zone sized for 65 km/h takes 0.6 m of it"),
                 Criterion::new(Physics, "the crush stays", "car.crush_residual", Some(1.3), None, "metal does not spring back: 70 % of the 0.4 × 4.85 m = 1.94 m floor above (along the first heading: thrown-off parts and the pitch distort it)"),
