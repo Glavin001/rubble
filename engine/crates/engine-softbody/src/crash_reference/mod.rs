@@ -111,11 +111,20 @@ pub struct Body {
     pub at: Vec3,
     pub yaw: f32,
     pub speed: f32,
+    /// Its velocity when it does not move along its heading (a crabbed barrier, a car carried
+    /// sideways); None: `heading() * speed`.
+    pub vel: Option<Vec3>,
 }
 
 impl Body {
+    pub fn new(name: &'static str, design: &'static str, at: Vec3, yaw: f32, speed: f32) -> Self {
+        Self { name, design, at, yaw, speed, vel: None }
+    }
     pub fn heading(&self) -> Vec3 {
         Vec3::new(self.yaw.sin(), 0.0, self.yaw.cos())
+    }
+    pub fn velocity(&self) -> Vec3 {
+        self.vel.unwrap_or(self.heading() * self.speed)
     }
 }
 
@@ -268,7 +277,7 @@ impl CrashScenario {
             let t = templates.get(b.design).ok_or_else(|| format!("{}: no template for design {}", self.id, b.design))?;
             let d = turned(&t.desc, b.yaw);
             let lift = 0.02 - Extent::of(&d).lo.y;
-            let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, b.at + Vec3::Y * lift, b.heading() * b.speed, t.settings)?;
+            let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, b.at + Vec3::Y * lift, b.velocity(), t.settings)?;
             s.surface_contact = true;
             s.edge_contact = contact != Contact::Discrete;
             for &(c, h) in &layout.boxes {

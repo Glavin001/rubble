@@ -20,7 +20,7 @@ pub(super) fn scenario() -> CrashScenario {
             let gap = 0.1 * v;
             let face = e.hi.z + gap;
             Layout {
-                bodies: vec![Body { name: "car", design: "sedan", at: Vec3::new(j.lateral, 0.0, 0.0), yaw: j.yaw, speed: v }],
+                bodies: vec![Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
                 boxes: vec![(Vec3::new(0.0, 2.0, face + 0.5), Vec3::new(0.5 * e.width() + 1.0, 2.0, 0.5))],
                 impact_s: 0.1,
             }
