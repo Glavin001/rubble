@@ -356,3 +356,54 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
 /// An engine stop's rest length is at least this (m): the solver keeps a yielding beam's rest at
 /// 0.1 m or more (`MIN_REST`), so a stop resting shorter would be pushed back to it.
 const MIN_ENGAGE: f32 = 0.12;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_vehiclegen::physics::FrontRules;
+    use engine_vehiclegen::structure::Grade;
+
+    fn member(kind: &'static str, t: f64) -> Member {
+        Member { name: kind.into(), kind, part: "structure_front", section: Section::Box { w: 0.07, h: 0.11 }, gauge: t, grade: Grade::Hsla, length: 0.2, sheet_area: 0.07, mesh: Default::default(), on_shell: false }
+    }
+
+    fn lane() -> Structure {
+        let mut st = Structure { members: vec![member("crash_box", 1.5e-3), member("front_rail", 1.8e-3)], nodes: vec![] };
+        for (s, sg) in [("l", 1.0), ("r", -1.0)] {
+            for (g, tag, z, y, kg) in [("A1", "u", 0.786, 0.495, 3.5), ("A1", "d", 0.786, 0.385, 3.5), ("A2", "u", 0.606, 0.495, 4.0), ("A2", "d", 0.606, 0.385, 4.0), ("A4", "", 0.226, 0.385, 6.0), ("A5", "", -0.226, 0.385, 6.0)] {
+                let m = if g == "A1" || g == "A2" { 0 } else { 1 };
+                st.nodes.push(ShellNode { name: format!("sh_{}_{tag}{s}", g.to_lowercase()), group: g, pos: DVec3::new(sg * 0.43, y, z), mass: kg, member: m });
+            }
+        }
+        st
+    }
+
+    #[test]
+    fn the_stations_get_their_corners_and_keep_their_mass() {
+        let st = lane();
+        let off = Physics { front_rules: FrontRules::default(), ..Default::default() };
+        assert_eq!(structure(&st, &off).nodes.len(), st.nodes.len(), "off: unchanged");
+        assert!(flat_chords(&st, &off).is_empty());
+        if !step("cells") {
+            return;
+        }
+        let on = Physics { front_rules: FrontRules { load_path: true, ..Default::default() }.resolved(), ..Default::default() };
+        let s = structure(&st, &on);
+        // a box end's two nodes become four, a rail station's one becomes four
+        assert_eq!(s.nodes.len(), st.nodes.len() + 2 * (2 + 2 + 3 + 3));
+        let mass = |s: &Structure| s.nodes.iter().map(|n| n.mass).sum::<f64>();
+        assert!((mass(&s) - mass(&st)).abs() < 1e-9);
+        let com_x = s.nodes.iter().map(|n| n.pos.x * n.mass).sum::<f64>() / mass(&s);
+        assert!(com_x.abs() < 1e-12);
+        for side in ["l", "r"] {
+            for stn in ["a1", "a2", "a4", "a5"] {
+                let tags = if stn == "a1" || stn == "a2" { STATIONS[0].1 } else { STATIONS[2].1 };
+                let p: Vec<DVec3> = tags.iter().map(|t| s.node(&corner(stn, t, side)).expect("corner").pos).collect();
+                // the section's corners: 70 mm across, 110 mm high
+                assert!(((p[0].x - p[2].x).abs() - 0.07).abs() < 1e-9 && ((p[0].y - p[1].y).abs() - 0.11).abs() < 1e-9, "{stn}{side}");
+            }
+        }
+        // four chords and four diagonals a bay, three bays a side
+        assert_eq!(flat_chords(&s, &on).iter().filter(|(a, _)| !a.starts_with("sh_a3") && !a.starts_with("sh_a8")).count(), 2 * 3 * 8);
+    }
+}

@@ -154,6 +154,65 @@ pub fn panel_buckling_force(strips: &[f64], (t, sigma_y, e, skins): (f64, f64, f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mechanical::{vals, BeamKind, Internal, Mount, PartNode};
+    use crate::physics::FrontRules;
+    use glam::DVec3;
+
+    #[test]
+    fn the_load_path_calls_and_supersedes_the_earlier_rules() {
+        // off: the rules as given (every file as before)
+        let r = FrontRules { hood_fold_row: true, ..Default::default() };
+        assert_eq!(r.resolved(), r);
+        assert_eq!(FrontRules::default().resolved(), FrontRules::default());
+        let lp = FrontRules { load_path: true, crash_box_cell: true, crash_box_stroke: true, ..Default::default() }.resolved();
+        if std::env::var("LOAD_PATH_STEPS").is_err() {
+            assert!(lp.subframe_mounts_off_crash_box && lp.yielding_stops && lp.hood_fold_row && lp.crush_from_section);
+        }
+        assert!(!lp.crash_box_cell && !lp.crash_box_stroke && !lp.crash_box_bay_alone && lp.load_path);
+        // `all` is still the seven earlier switches
+        assert!(!FrontRules::all().load_path);
+    }
+
+    fn beam_part() -> MechPart {
+        let mut nodes = Vec::new();
+        for (i, x) in [-0.62f64, -0.31, 0.0, 0.31, 0.62].iter().enumerate() {
+            for (t, y) in [("u", 0.505), ("d", 0.395)] {
+                nodes.push(PartNode { name: format!("impbf_{}{t}", i + 1), pos: DVec3::new(*x, y, 0.80 - 0.05 * x.abs()), mass: 0.8, collide: true });
+            }
+        }
+        let mounts = ["l", "r"].map(|s| Mount { group: format!("impact_beam_front_{s}"), from: vec![], to: vec![], beams: 8, kind: BeamKind::Normal, v: vals(1e6, 100.0, 20e3, 60e3), precomp: 1.0 }).to_vec();
+        MechPart {
+            name: "impact_beam_front".into(),
+            class: "bumper",
+            zone: crate::crash::Zone::FrontLower,
+            mesh: Default::default(),
+            nodes,
+            internal: vec![Internal { pairs: vec![(0, 1)], v: vals(0.0, 100.0, 8e3, f64::INFINITY), deform_group: None }],
+            mounts,
+            links: vec![],
+            binds: vec![],
+            meshes: vec![],
+        }
+    }
+
+    #[test]
+    fn the_bolted_plate_keeps_the_beams_mass_and_joins_all_four_corners() {
+        let mut parts = vec![beam_part()];
+        let side = |sg: f64, s: &str| ["u", "d", "ui", "di"].map(|t| (format!("sh_a1_{t}{s}"), DVec3::new(sg * if t.ends_with('i') { 0.395 } else { 0.465 }, if t.starts_with('u') { 0.495 } else { 0.385 }, 0.786)));
+        impact_beam_bolted_plate(&mut parts, [side(1.0, "l"), side(-1.0, "r")], 81.8e3);
+        let p = &parts[0];
+        assert!((p.mass() - 8.0).abs() < 1e-9, "mass {}", p.mass());
+        assert_eq!(p.nodes.len(), 18);
+        for (k, m) in p.mounts.iter().enumerate() {
+            assert_eq!(m.beams, 16);
+            assert_eq!(m.to.len(), 4);
+            assert!(m.to.iter().all(|t| t.ends_with(["l", "r"][k])));
+            assert_eq!(m.v.deform, 81.8e3);
+            assert_eq!(m.v.strength, BUMPER_PLATE_STRENGTH_N);
+        }
+        // the plate's nodes stand in front of the box's front plate, never behind it
+        assert!(p.nodes[10..].iter().all(|n| n.pos.z >= 0.786 - 1e-12));
+    }
 
     #[test]
     fn a_wide_thin_strip_keeps_its_effective_width() {
