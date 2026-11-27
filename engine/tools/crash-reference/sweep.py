@@ -4,7 +4,7 @@ jittered runs, on the CPU reference or on CUDA on Modal (engine/docs/crash-refer
 "Results").
 
     python3 tools/crash-reference/sweep.py --cpu  [--jobs 8] [--ids S01,S02] [--contacts edge]   (from engine/)
-    python3 tools/crash-reference/sweep.py --cuda [--gpu T4] [--ids S01,S02]
+    python3 tools/crash-reference/sweep.py --cuda [--gpu T4] [--ids S01,S02] [--contacts edge] [--run-from 4 --runs 2]
     python3 tools/crash-reference/sweep.py --summarize          (the tables again, no runs)
 
 Writes out/crash-reference/sweep/<backend>/<ID>-<contact>-<run>.json (each run's
@@ -55,19 +55,22 @@ def cpu(args) -> None:
     t0 = time.time()
 
     def one(job):
-        sid, c = job
-        log = d / "logs" / f"{sid}-{c}.log"
+        sid, c, k = job
+        log = d / "logs" / f"{sid}-{c}{'' if k is None else f'-{k}'}.log"
+        runs = ["--runs", str(RUNS)] if k is None else ["--run", str(k)]
         t = time.time()
         with open(log, "w") as f:
-            code = subprocess.run(["perl", "-e", "alarm 300; exec @ARGV", str(exe), sid, "--runs", str(RUNS), "--contact", c,
+            code = subprocess.run(["perl", "-e", "alarm 300; exec @ARGV", str(exe), sid, *runs, "--contact", c,
                                    "--out", str(d)], cwd=ENGINE, stdout=f, stderr=subprocess.STDOUT,
                                   stdin=subprocess.DEVNULL).returncode
-        return sid, c, code, time.time() - t
+        return sid, c, k, code, time.time() - t
 
-    jobs = [(s, c) for c in args.contacts for s in ids]
+    # --per-run: one process a run (scenarios whose 8 runs take longer than the bound); its
+    # exit code is then one run's verdict, and the summary's is the whole setting's.
+    jobs = [(s, c, k) for c in args.contacts for s in ids for k in (range(RUNS) if args.per_run else [None])]
     with cf.ThreadPoolExecutor(args.jobs) as ex:
-        for sid, c, code, secs in ex.map(one, jobs):
-            print(f"cpu {sid} {c}: exit {code}, {secs:.0f} s", flush=True)
+        for sid, c, k, code, secs in ex.map(one, jobs):
+            print(f"cpu {sid} {c}{'' if k is None else f' run {k}'}: exit {code}, {secs:.0f} s", flush=True)
     with open(d / "wall.txt", "a") as f:
         f.write(f"{','.join(args.contacts)}: {time.time() - t0:.0f} s wall, {len(jobs)} jobs, {args.jobs} at a time\n")
 
@@ -75,8 +78,8 @@ def cpu(args) -> None:
 def cuda(args) -> None:
     d = OUT / "cuda"
     d.mkdir(parents=True, exist_ok=True)
-    cmd = ["perl", "-e", "alarm 590; exec @ARGV", "tools/modal/gpu_run.sh", "--build", "modal", "--fanout-tests",
-           "--gpu", args.gpu, "--cpus", str(args.cpus), "--env", "CRASH_REPORT_LINES=1", "--env", f"CRASH_RUNS={RUNS}"]
+    cmd = ["perl", "-e", "alarm 590; exec @ARGV", "tools/modal/gpu_run.sh", "--build", args.build, "--fanout-tests",
+           "--gpu", args.gpu, "--cpus", str(args.cpus), "--env", "CRASH_REPORT_LINES=1", "--env", f"CRASH_RUNS={args.runs}", "--env", f"CRASH_RUN_FROM={args.run_from}"]
     for c in args.contacts:
         cmd += ["--variant", f"{c}:CRASH_CONTACT={c}"]
     cmd += ["--", "-p", "engine-cuda", "--test", "crash_reference"]
@@ -85,7 +88,8 @@ def cuda(args) -> None:
         cmd += ["--"] + [s.lower() for s in args.ids]
     t0 = time.time()
     tag = time.strftime("%H%M%S")
-    log = d / f"modal-{','.join(args.contacts)}-{tag}.log"
+    ids = ",".join(args.ids or ["all"])
+    log = d / f"modal-{','.join(args.contacts)}-{ids}-{args.run_from}-{tag}.log"
     with open(log, "w") as f:
         p = subprocess.Popen(cmd, cwd=ENGINE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              stdin=subprocess.DEVNULL)
@@ -109,10 +113,13 @@ def read_log(log: Path, d: Path) -> int:
     n = 0
     parts: dict = {}
     whole = []
-    for line in log.read_text(errors="replace").splitlines():
+    # (A fan-out's containers share one stream: a line can run on into another container's,
+    # which starts with its label.)
+    lines = [x for line in log.read_text(errors="replace").splitlines() for x in re.split(r"(?=\[crash_reference::)", line)]
+    for line in lines:
         i = line.find(PART)
         if i >= 0:
-            key, kn, text = (line[i + len(PART):].split(" ", 2) + ["", ""])[:3]
+            key, kn, text = (line[i + len(PART):].rstrip("\n").split(" ", 2) + ["", ""])[:3]
             k, _, total = kn.partition("/")
             parts.setdefault(key, {})[int(k)] = (int(total), text)
             continue
@@ -253,7 +260,32 @@ def compare() -> str:
     return "\n".join(lines) + "\n"
 
 
+def known_table(backend: str = "cpu") -> str:
+    """The recorded known failures (each result's known, known_occurs, known_note) beside what
+    the sweep measured: the doc's "Currently failing" table."""
+    data = load(backend)
+    if not data:
+        return ""
+    lines = [f"| Scenario | Criterion | Contact | Recorded as | Failed ({backend.upper()}) | Value over the runs | Band | New, for review |",
+             "|---|---|---|---|---|---|---|---|"]
+    for (sid, c), reps in sorted(data.items(), key=lambda kv: (kv[0][0], CONTACTS.index(kv[0][1]))):
+        for i, r0 in enumerate(reps[0]["results"]):
+            if not (r0["asserted"] and r0.get("known")):
+                continue
+            fails = sum(1 for r in reps if not r["results"][i]["pass"])
+            band = f"{fmt(r0['lo']) if r0['lo'] is not None else ''} .. {fmt(r0['hi']) if r0['hi'] is not None else ''}"
+            occurs = {"every_run": "every run", "some_runs": "some runs"}.get(r0.get("known_occurs"), "?")
+            vals = span([r["results"][i]["value"] for r in reps])
+            note = "**yes**" if "new in the" in (r0.get("known_note") or "") else ""
+            lines.append(f"| {sid} | {r0['name']} | {c} | {occurs} | {fails} of {len(reps)} | {vals} | {band} | {note} |")
+    return "\n".join(lines) + "\n"
+
+
 def write_tables() -> None:
+    t = known_table()
+    if t:
+        (OUT / "known-cpu.md").write_text(t)
+        print(f"wrote {OUT / 'known-cpu.md'}")
     for b in ("cpu", "cuda"):
         t = summary(b)
         if t:
@@ -274,8 +306,12 @@ def main() -> None:
     g.add_argument("--read-log", metavar="LOG", help="read a --cuda run's log back into reports")
     ap.add_argument("--ids", type=lambda s: [x.strip().upper() for x in s.split(",") if x.strip()])
     ap.add_argument("--contacts", type=lambda s: s.split(","), default=CONTACTS, help="the settings to run (default all three; --cuda: one variant each)")
+    ap.add_argument("--run-from", type=int, default=0, help="--cuda: the first run (CRASH_RUN_FROM)")
+    ap.add_argument("--runs", type=int, default=RUNS, help="--cuda: runs a container (CRASH_RUNS), from --run-from")
+    ap.add_argument("--per-run", action="store_true", help="--cpu: one process a run")
     ap.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 4))
     ap.add_argument("--gpu", default="T4")
+    ap.add_argument("--build", default="modal", choices=["modal", "local"], help="--cuda: where gpu_run.sh compiles")
     ap.add_argument("--cpus", default="2", help="--cuda: CPU cores a container (the templates rig on the CPU)")
     args = ap.parse_args()
     if args.cpu:

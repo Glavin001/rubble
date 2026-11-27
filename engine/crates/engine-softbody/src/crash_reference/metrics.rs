@@ -46,6 +46,7 @@
 //! | `all.plastic_work_j` | every body's `plastic_work_j` |
 //! | `pair.<a>_<b>.com_gap_min` | smallest distance between their COMs (m) |
 //! | `pair.<a>_<b>.reach_max`, `.skin_reach_max` | furthest any node of a (any node of a's collision triangles) gets past b's COM at that sample along a's first heading (m; negative: none reached it; no skin reach for a body without collision triangles). Both orders |
+//! | `pair.<a>_<b>.com_order_min` | least (b's COM − a's COM) · a's first heading over the run (m; negative: b's centre of mass got behind a's, through, under or over it). Both orders |
 //! | `pair.<a>_<b>.crossings_max` | most edges of one's collision surface through the other's live triangles at any sample (`ExplicitBeamsWorld::mesh_crossings`, both ways; the hard rule is 0) |
 //! | `pair.<a>_<b>.crush_peak_ratio`, `.plastic_work_ratio` | larger over smaller of the two `crush_peak` (each floored at 0, + 1 mm) and `plastic_work_j` (+ 1 J) |
 //! | `pair.<a>_<b>.yaw_peak_diff_deg` | \|a's `yaw_peak_deg` − b's\| |
@@ -204,6 +205,9 @@ struct PairRec {
     /// other's COM along its own first heading.
     reach: [f64; 2],
     skin_reach: [f64; 2],
+    /// [a then b, b then a]: least (the other's COM − its own COM) along its own first
+    /// heading over the run.
+    order: [f64; 2],
     /// The two vehicles as spawned, moved to each sample's state for the crossings test.
     mesh: ExplicitBeamsWorld,
     crossings: usize,
@@ -516,7 +520,7 @@ impl Recorder {
         for a in 0..bodies.len() {
             for b in a + 1..bodies.len() {
                 let mesh = ExplicitBeamsWorld::new(vec![built.fleet[a].clone(), built.fleet[b].clone()]);
-                pairs.insert((a, b), PairRec { gap: f64::INFINITY, reach: [f64::NEG_INFINITY; 2], skin_reach: [f64::NEG_INFINITY; 2], mesh, crossings: 0 });
+                pairs.insert((a, b), PairRec { gap: f64::INFINITY, reach: [f64::NEG_INFINITY; 2], skin_reach: [f64::NEG_INFINITY; 2], order: [f64::INFINITY; 2], mesh, crossings: 0 });
             }
         }
         Self {
@@ -588,6 +592,9 @@ impl Recorder {
             pr.reach[1] = pr.reach[1].max(past(pb, bb, ba, false));
             pr.skin_reach[0] = pr.skin_reach[0].max(past(pa, ba, bb, true));
             pr.skin_reach[1] = pr.skin_reach[1].max(past(pb, bb, ba, true));
+            let d = bb.com_now - ba.com_now;
+            pr.order[0] = pr.order[0].min(d.dot(ba.heading.as_dvec3()));
+            pr.order[1] = pr.order[1].min((-d).dot(bb.heading.as_dvec3()));
             // The collision meshes at this sample: positions, and beams broken (a torn
             // triangle is out of the surface).
             for (v, k) in pr.mesh.vehicles.iter_mut().zip([a, b]) {
@@ -678,6 +685,7 @@ impl Recorder {
             put(&format!("pair.{na}_{nb}.crossings_max"), pr.crossings as f64);
             for (i, (x, y)) in [(na, nb), (nb, na)].into_iter().enumerate() {
                 put(&format!("pair.{x}_{y}.reach_max"), pr.reach[i]);
+                put(&format!("pair.{x}_{y}.com_order_min"), pr.order[i]);
                 // (None for a body without collision triangles.)
                 if pr.skin_reach[i].is_finite() {
                     put(&format!("pair.{x}_{y}.skin_reach_max"), pr.skin_reach[i]);

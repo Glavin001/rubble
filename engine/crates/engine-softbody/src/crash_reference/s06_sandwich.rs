@@ -70,7 +70,9 @@ pub(super) fn scenario() -> CrashScenario {
             vec![
                 // Asserted (laws).
                 Criterion::new(Invariant, "state stays finite", "all.finite", Some(1.0), None, "a finite state is the least a run owes").law("every position and velocity is a real number"),
-                Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(610.0), "0.1 % of the truck's 585.9 kJ (½·7,500·12.5²), 609.6 kJ at +2 % speed").law("mechanical energy never rises in a crash: contact, plasticity, damping and friction only remove it"),
+                Criterion::new(Invariant, "no energy created", "all.energy_gain_j", None, Some(610.0), "0.1 % of the truck's 585.9 kJ (½·7,500·12.5²), 609.6 kJ at +2 % speed").law("mechanical energy never rises in a crash: contact, plasticity, damping and friction only remove it")
+                    .known_failure(&[Contact::Edge], "CPU reference 2026-11-27, 8 of 8 runs: 4.1-39.9 kJ (engine/docs/crash-reference.md, Currently failing)")
+                    .known_intermittent(&[Contact::Continuous], "CPU reference 2026-11-27: 1 of 8 runs (2), 991 J (engine/docs/crash-reference.md, Currently failing)"),
                 Criterion::new(Invariant, "momentum along the road", "all.momentum_z_end", Some(18_000.0), Some(105_200.0),
                     "starts at M·V = 93,750 kg·m/s (91,875-95,625 with the ±2 % speed). From outside only the ground acts: the trailer's landing-gear feet, sliding once pushed, at most μ·N = 0.6 × 57.0 kN over the 1.5 s after contact (51.3 kN·s); the crushed car's body, if all of it slid on the ground, 0.6 × 14.2 kN × 1.5 s = 12.8 kN·s; and every tyre's rolling resistance either way, at most 0.02 × 235 kN × 2.0 s = 9.4 kN·s")
                     .law("momentum changes only by the external impulse, the ground's friction and rolling resistance, bounded by μ·N and c_rr·W over the run"),

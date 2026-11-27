@@ -2,7 +2,8 @@
 //! `engine/docs/crash-reference.md`): every scenario, [`RUNS`] jittered runs, its tier 0 and
 //! tier 1 criteria. GPU tests run when `ENGINE_CUDA_DEVICE=1`; without it they skip.
 //!
-//! `CRASH_CONTACT=discrete|edge|continuous` (default edge), `CRASH_RUNS=N`,
+//! `CRASH_CONTACT=discrete|edge|continuous` (default edge), `CRASH_RUNS=N`, `CRASH_RUN_FROM=K`
+//! (runs K .. K + N, for a scenario whose runs take longer than one container),
 //! `CRASH_REPORTS=DIR` (each run's report as JSON), `CRASH_REPORT_LINES=1` (each run's
 //! report without its time histories on stdout, in numbered parts after `CRASH_REPORT_PART
 //! ID-contact-run k/n `: how a sweep on Modal reads them back from the log, `tools/crash-reference/sweep.py`).
@@ -36,7 +37,8 @@ fn scenario(id: &str) {
     let templates = engine_softbody_authoring::crash_templates::templates_for(&s).expect("templates");
     let runs = std::env::var("CRASH_RUNS").ok().and_then(|x| x.parse().ok()).unwrap_or(RUNS);
     let mut reports = Vec::new();
-    for run in 0..runs {
+    let from: usize = std::env::var("CRASH_RUN_FROM").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+    for run in from..from + runs {
         let built = s.build(&templates, Jitter::run(run), contact()).expect("build");
         let t = std::time::Instant::now();
         let mut g = CudaRunner::new(&built).expect("CUDA");

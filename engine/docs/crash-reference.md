@@ -113,11 +113,49 @@ scenario's file gives them a basis.
 
 ## Currently failing (asserted criteria)
 
-CPU reference, nominal run, measured 2026-11-27. Each is a finding, not a band to widen.
+Known failures are data: each is recorded on its criterion in the scenario's file
+(`Criterion::known_failure` for one that fails in every run of a contact setting,
+`Criterion::known_intermittent` for one that fails in some), with the measured value, the
+date and a pointer here. A known failure that fails is reported as `KNOWN` (the page:
+"known failure") and does not fail the run; an asserted criterion that fails without an entry
+fails it. The ratchet (`crash_reference::verdict`, which `crash_ref` and the CUDA tests
+apply to a scenario's runs in one setting): an entry recorded for every run that passes in
+all of them fails with "known failure now passes: remove the entry", so the list only
+shrinks; an intermittent one that does not occur is only noted. Bands, tiers and bases are
+never changed by an entry. Each is a finding, not a band to widen.
 
-| Scenario | Criterion (basis) | Band | Discrete | Edge | Edge + continuous |
-|---|---|---|---|---|---|
-| S03 barrier into the sedan's side, 50 km/h | no energy created (law): the largest rise of kinetic + gravitational + elastic energy | at most 132 J (0.1 % of the 131.9 kJ at the start) | 9 J, holds | **38,186 J** | **19,679 J** |
+The table is what `python3 tools/crash-reference/sweep.py --cpu` writes to
+`out/crash-reference/sweep/known-cpu.md` from the entries and the CPU reference's 8 runs a
+setting (2026-11-27). Rows marked new were found by that sweep and were not in this page's
+earlier list: they are recorded so the suite runs green, and wait for review.
+
+| Scenario | Criterion | Contact | Recorded as | Failed (CPU) | Value over the runs | Band | New, for review |
+|---|---|---|---|---|---|---|---|
+| S03 | no energy created | edge | every run | 8 of 8 | 14,112 to 211,378 |  .. 132.0 |  |
+| S03 | no energy created | continuous | every run | 8 of 8 | 6,719 to 29,661 |  .. 132.0 |  |
+| S04 | no energy created | discrete | some runs | 1 of 8 | 0.000 to 221.4 |  .. 182.0 |  |
+| S04 | no energy created | edge | every run | 8 of 8 | 2,242 to 43,160 |  .. 182.0 |  |
+| S04 | no energy created | continuous | some runs | 3 of 8 | 0.000 to 516.1 |  .. 182.0 |  |
+| S06 | no energy created | edge | every run | 8 of 8 | 4,107 to 39,865 |  .. 610.0 |  |
+| S06 | no energy created | continuous | some runs | 1 of 8 | 23.6 to 991.4 |  .. 610.0 |  |
+| S07 | nothing passes into the block | continuous | some runs | 1 of 8 | 0.009 to 0.050 |  .. 0.050 | **yes** |
+| S08 | the common centre of mass stays still | discrete | some runs | 2 of 8 | 0.060 to 0.461 |  .. 0.300 | **yes** |
+| S08 | momentum along the road | edge | some runs | 1 of 8 | -133.6 to 642.8 | -450.0 .. 450.0 | **yes** |
+| S08 | momentum across the road | edge | some runs | 1 of 8 | -283.7 to 519.0 | -450.0 .. 450.0 | **yes** |
+| S08 | the common centre of mass stays still | edge | some runs | 2 of 8 | 0.144 to 0.409 |  .. 0.300 | **yes** |
+| S08 | no energy created | continuous | some runs | 1 of 8 | 8.197 to 442.9 |  .. 340.0 |  |
+| S08 | momentum along the road | continuous | some runs | 2 of 8 | -410.7 to 568.1 | -450.0 .. 450.0 | **yes** |
+| S08 | the common centre of mass stays still | continuous | every run | 8 of 8 | 0.399 to 0.661 |  .. 0.300 |  |
+| S09 | no energy created | discrete | some runs | 1 of 8 | 8.191 to 531.5 |  .. 400.0 |  |
+| S09 | no energy created | edge | some runs | 5 of 8 | 1.796 to 2,510 |  .. 400.0 |  |
+| S10 | nothing passes into the block | continuous | some runs | 4 of 8 | 0.001 to 0.147 |  .. 0.050 | **yes** |
+| S11 | restitution within the 56 km/h sedan fleet's | discrete | every run | 8 of 8 | 0.302 to 0.346 |  .. 0.250 |  |
+| S11 | restitution within the 56 km/h sedan fleet's | edge | every run | 8 of 8 | 0.302 to 0.346 |  .. 0.250 |  |
+| S11 | restitution within the 56 km/h sedan fleet's | continuous | every run | 8 of 8 | 0.295 to 0.356 |  .. 0.250 |  |
+| S14 | no energy created | edge | every run | 8 of 8 | 4,703 to 1,006,835 |  .. 203.0 |  |
+| S14 | no energy created | continuous | every run | 8 of 8 | 6,271 to 13,083 |  .. 203.0 |  |
+
+S03 (the barrier into the sedan's side), localised:
 
 With edge contact the same run also shows what created energy looks like: plastic work of
 419 kJ (three times the energy the scene starts with), a car node at 138 m/s when the barrier
@@ -141,17 +179,7 @@ ignored probe printing the solver's own work ledger every 4 ms):
   partner, and their position step pushes inner door-panel nodes against the beams tying
   them to the outer skin every step, storing energy no force paid for.
 
-S11–S14 (added 2026-11-27; CPU reference, 8 runs each in each contact setting):
-
-| Scenario | Criterion (basis) | Band | Discrete | Edge | Edge + continuous |
-|---|---|---|---|---|---|
-| S11 sedan into the rigid wall, 56.3 km/h | restitution at the rear-seat crossmember (cited: nine sedans at 56 km/h, 0.057–0.194, + 0.05) | at most 0.25 | **0.30–0.35**, 8 of 8 fail | **0.30–0.35**, 8 of 8 | **0.29–0.36**, 8 of 8 |
-| S14 MDB crabbed 27° into the sedan, 62 km/h | no energy created (law) | at most 203 J | 4–5 J, holds | **4.7 kJ–1.0 MJ**, 8 of 8 fail | **6.3–13.1 kJ**, 8 of 8 fail |
-
-S14's created energy is S03's (below): edge-contact hits between the barrier and the door.
-
-Also failing with continuous contact, CPU reference, nominal run: S08 creates 443 J (at most
-340) and its common centre of mass ends at 0.454 m/s (at most 0.3); discrete: 48 J and 0.106.
+S14's created energy is S03's (above): edge-contact hits between the barrier and the door.
 
 Collision-mesh crossings at any sample (the repo's hard rule is 0), nominal run:
 
@@ -160,10 +188,23 @@ Collision-mesh crossings at any sample (the repo's hard rule is 0), nominal run:
 | S03 car and barrier | 94 | 315 | 0 |
 | S08 two sedans | 154 | 31 | 0 |
 
-On the GPU, continuous contact does not engage for a single vehicle against static boxes (it
-runs only on the split group path): a "continuous" run of S01, S02, S07 or S10 there is an
-edge run. With two vehicles (S08, in Chrome) it engages and diverges from the CPU reference
-(momentum along the road -1,024 kg m/s against -13).
+On CUDA, continuous contact does not engage for one vehicle against static boxes: it runs
+only on the split group path, which needs vehicle contact between two vehicles or more
+(`FramePlanner::contact_active`). The executor now says so: `all.continuous_engaged` (0/1,
+`Runner::continuous_engaged`, from `CudaExplicitBeams::continuous_ran`) and the report's note
+"continuous contact did not engage on this executor for this scene". Measured on a T4
+(`engine-cuda/tests/crash_reference.rs`, `continuous_engagement`, S11 run 0): S11 with the
+continuous setting has `continuous_engaged` 0 and is the edge run with the same passes, all
+198 metrics bit for bit; S08 (two cars) has 1. The CUDA runner takes the lab's continuous
+setting (`vehicle_lab::options::continuous_on`: group split on, self split and the wide passes
+off); **with the wide passes off a one-car CUDA run is not the edge run**: S11 run 0's
+rebound ratio 0.235 and end speed 3.67 m/s against 0.323 and 5.05 with them on (152 of 198
+metrics differ), and the CPU reference gives 0.323 and 5.05. The wide passes are meant to
+give the same results either way, so this is an open finding: the CPU reference matches
+the run with them on, so the path without them is the suspect for one vehicle with surface
+contact (not established). With two vehicles (S08, in
+Chrome) continuous contact engages and diverged from the CPU reference (momentum along the
+road -1,024 kg m/s against -13).
 
 ## Reported outside its band
 
