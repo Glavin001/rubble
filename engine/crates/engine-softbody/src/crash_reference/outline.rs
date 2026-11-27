@@ -28,7 +28,7 @@ const NEAR: f32 = 0.05;
 /// A look-at camera with its own up and field of view (degrees, vertical), in the
 /// scenario's world frame (the named scenario cameras are relative to the point of impact
 /// too: [`Camera`]).
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize, ts_rs::TS)]
 pub struct FreeCamera {
     pub name: String,
     pub eye: [f32; 3],
@@ -37,6 +37,28 @@ pub struct FreeCamera {
     pub up: [f32; 3],
     #[serde(default = "fov_default")]
     pub fov_y_deg: f32,
+}
+
+/// A reference image's own camera (the Reference Studio's `Frame.camera`), set by hand in
+/// the scenario's world frame: as [`FreeCamera`] without a name, with the region whose crop
+/// is its image.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize, ts_rs::TS)]
+pub struct FrameCamera {
+    pub eye: [f32; 3],
+    pub target: [f32; 3],
+    #[serde(default = "y_up")]
+    pub up: [f32; 3],
+    #[serde(default = "fov_default")]
+    pub fov_y_deg: f32,
+    /// The region it applies to (its crop's aspect), or null for the whole image.
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
+impl FrameCamera {
+    pub fn free(&self, name: &str) -> FreeCamera {
+        FreeCamera { name: name.into(), eye: self.eye, target: self.target, up: self.up, fov_y_deg: self.fov_y_deg }
+    }
 }
 
 fn y_up() -> [f32; 3] {

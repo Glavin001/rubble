@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 pub type P = [f64; 2];
 
 /// How well an element can be seen; a measure reports the worst of its inputs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum Vis {
     #[default]
@@ -157,27 +157,42 @@ impl Schema {
 }
 
 /// One element's traced value. Points are in the region's normalised coordinates.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
 pub struct ElementValue {
+    /// A keypoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub p: Option<P>,
+    /// A polyline, in order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub pts: Option<Vec<P>>,
+    /// A circle's centre and a point on its rim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub c: Option<P>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub rim: Option<P>,
     #[serde(default)]
     pub vis: Vis,
 }
 
-/// A traced instance of a structure in one region.
-#[derive(Clone, Debug, Default, Deserialize)]
+/// A traced instance of a structure in one region (points in the region's normalised
+/// coordinates), as the Reference Studio stores it in a frame.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
 pub struct Instance {
+    #[serde(default)]
+    pub id: String,
+    /// A structure schema id (`structures/<id>.json`).
+    #[serde(default)]
+    pub schema: String,
     /// "left" or "right": where the structure's front is in the image (default right).
     #[serde(default)]
+    #[ts(type = "'left' | 'right'")]
     pub front: Option<String>,
     #[serde(default)]
+    #[ts(type = "Record<string, ElementValue>")]
     pub elements: BTreeMap<String, ElementValue>,
 }
 

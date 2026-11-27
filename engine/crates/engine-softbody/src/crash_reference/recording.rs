@@ -23,6 +23,9 @@ pub struct RecBody {
 #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
 pub struct Header {
     pub scenario: String,
+    /// What it was made from (`ScenarioDesc::digest`, or `builtin-<id>-<contact>`).
+    #[serde(default)]
+    pub hash: String,
     /// What ran it: `webgpu` (the page's GPU solver, what production runs) or `cpu-fallback`
     /// (the wasm CPU reference: the automated smoke test only).
     pub executor: String,
@@ -43,6 +46,7 @@ pub struct Header {
 #[derive(Clone, Debug)]
 pub struct Recording {
     pub scenario: String,
+    pub hash: String,
     pub executor: String,
     pub contact: Contact,
     pub run: u32,
@@ -64,6 +68,7 @@ impl Recording {
         let beams = bodies.iter().map(|b| b.beams as usize).sum();
         Self {
             scenario: s.id.clone(),
+            hash: String::new(),
             executor: executor.into(),
             contact: built.contact,
             run: 0,
@@ -132,7 +137,7 @@ impl Recording {
     }
 
     pub fn header(&self) -> Header {
-        Header { scenario: self.scenario.clone(), executor: self.executor.clone(), contact: self.contact, run: self.run, impact_s: self.impact_s, sample_s: self.sample_s, samples: self.samples() as u32, bodies: self.bodies.clone(), report: self.report.clone() }
+        Header { scenario: self.scenario.clone(), hash: self.hash.clone(), executor: self.executor.clone(), contact: self.contact, run: self.run, impact_s: self.impact_s, sample_s: self.sample_s, samples: self.samples() as u32, bodies: self.bodies.clone(), report: self.report.clone() }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -177,7 +182,7 @@ impl Recording {
             at += 12 * nodes;
         }
         let broken_at = (0..beams).map(|i| u32::from_le_bytes(word(at + 4 * i))).collect();
-        Ok(Self { scenario: h.scenario, executor: h.executor, contact: h.contact, run: h.run, impact_s: h.impact_s, sample_s: h.sample_s, bodies: h.bodies, pos, broken_at, report: h.report })
+        Ok(Self { scenario: h.scenario, hash: h.hash, executor: h.executor, contact: h.contact, run: h.run, impact_s: h.impact_s, sample_s: h.sample_s, bodies: h.bodies, pos, broken_at, report: h.report })
     }
 }
 
@@ -187,7 +192,7 @@ mod tests {
 
     #[test]
     fn bytes_round_trip_and_interpolate() {
-        let mut r = Recording { scenario: "x".into(), executor: "cpu-fallback".into(), contact: Contact::Edge, run: 0, impact_s: 0.004, sample_s: 0.004, bodies: vec![RecBody { name: "car".into(), design: "d".into(), nodes: 2, beams: 1 }], pos: Vec::new(), broken_at: vec![u32::MAX], report: None };
+        let mut r = Recording { scenario: "x".into(), hash: String::new(), executor: "cpu-fallback".into(), contact: Contact::Edge, run: 0, impact_s: 0.004, sample_s: 0.004, bodies: vec![RecBody { name: "car".into(), design: "d".into(), nodes: 2, beams: 1 }], pos: Vec::new(), broken_at: vec![u32::MAX], report: None };
         let s = |y: f32, broken: bool| Sample { t: 0.0, pos: vec![vec![Vec3::new(0.0, y, 0.0), Vec3::new(1.0, y, 0.0)]], vel: vec![], beams: vec![vec![BeamState { rest: 1.0, broken }]], wheel_spin: vec![] };
         r.push(&s(0.0, false));
         r.push(&s(1.0, true));

@@ -121,6 +121,18 @@ impl ScenarioDesc {
         Ok(())
     }
 
+    /// What its recording is filed under: a 64-bit FNV-1a of its JSON and the contact
+    /// setting it is run in, as 16 hex digits.
+    pub fn digest(&self, contact: Contact) -> String {
+        let text = format!("{}|{}", serde_json::to_string(self).unwrap_or_default(), contact.name());
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in text.bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        format!("{h:016x}")
+    }
+
     /// The designs it needs, in first-use order.
     pub fn designs(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();

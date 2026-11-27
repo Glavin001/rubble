@@ -22,6 +22,8 @@ pub mod outline;
 pub mod recording;
 pub mod registry;
 pub mod shape;
+pub mod studio;
+pub mod types;
 mod s01_offset;
 mod s02_wall;
 mod s03_side_barrier;

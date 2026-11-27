@@ -45,5 +45,9 @@ engine/out/
 # Reference Studio (apps/reference-studio): the image library (third-party footage and
 # added screenshots, never committed), its install and build
 apps/reference-studio/library/
+apps/reference-studio/workspace/library/
+apps/reference-studio/workspace/recordings/
+apps/reference-studio/public/rubble/
+apps/reference-studio/public/designs/
 apps/reference-studio/node_modules/
 apps/reference-studio/dist/

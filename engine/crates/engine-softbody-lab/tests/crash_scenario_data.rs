@@ -61,3 +61,59 @@ fn workspace_scenarios_build_and_run() {
         assert!((s.criteria)().iter().all(|c| c.basis != cr::Basis::Estimate), "{}: law-based criteria only", d.id);
     }
 }
+
+/// The studio's scene (`crash_reference::studio`, what the page's wasm binds): S02 as data
+/// placed, run by the CPU path to its end, its recording through bytes and back, positions
+/// at a time, Rubble's outline through a hand-set camera and the comparison table, all from
+/// the recording.
+#[test]
+fn studio_records_and_outlines_from_the_recording() {
+    use engine_softbody::crash_reference::{outline::FrameCamera, shape::Schema, studio::*};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/reference-studio/workspace");
+    let desc: ScenarioDesc = serde_json::from_str(&std::fs::read_to_string(root.join("scenarios/s02-data.json")).unwrap()).unwrap();
+    let schema: Schema = serde_json::from_str(&std::fs::read_to_string(root.join("structures/vehicle-side.json")).unwrap()).unwrap();
+    let mut st = Studio::new();
+    let src = SceneSource { desc: Some(desc.clone()), id: None, contact: None };
+    for d in st.missing(&src).unwrap() {
+        st.templates.insert(d.clone(), engine_softbody_authoring::crash_templates::template(&d).unwrap());
+    }
+    let info = st.place_now(&src).unwrap();
+    println!("placed in {:.1} ms: {} bodies, {} samples, impact {} s", info.place_ms, info.bodies.len(), info.samples, info.impact_s);
+    assert_eq!(info.bodies[0].triangles.len() % 3, 0);
+    assert!(!info.bodies[0].triangles.is_empty());
+    assert_eq!(st.spawn_positions().unwrap().len(), 3 * info.bodies[0].nodes as usize);
+    // Live edit: the wall moved 1 m further; the first contact moves by 1 m at 13.9 m/s.
+    let mut moved = desc.clone();
+    moved.boxes[0].centre[2] += 1.0;
+    let t = std::time::Instant::now();
+    let info2 = st.place_now(&SceneSource { desc: Some(moved), id: None, contact: None }).unwrap();
+    println!("re-placed in {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    assert!((info2.impact_s - info.impact_s - 1.0 / (50.0 / 3.6)).abs() < 1e-3);
+    assert_ne!(info2.hash, info.hash);
+    st.place_now(&src).unwrap();
+    st.cpu_start().unwrap();
+    let t = std::time::Instant::now();
+    while !st.cpu_step(25).unwrap().done {}
+    println!("CPU run in {:.1} s", t.elapsed().as_secs_f32());
+    let status = st.recording_status().unwrap();
+    assert!(status.present && status.fresh && status.has_report);
+    assert_eq!(status.samples, info.samples);
+    assert_eq!(status.executor, "cpu-fallback");
+    let report = st.report().unwrap().unwrap();
+    assert!(report.failures().is_empty(), "{}", report.table());
+    let bytes = st.recording_bytes().unwrap();
+    println!("recording: {} KB", bytes.len() / 1024);
+    let at_70 = st.positions_at_ms(70.0).unwrap();
+    st.load_recording(&bytes, None).unwrap();
+    assert_eq!(st.positions_at_ms(70.0).unwrap(), at_70, "the recording survives its bytes");
+    let cam = FrameCamera { eye: [4.6, 1.1, -0.3], target: [0.0, 0.8, -0.3], up: [0.0, 1.0, 0.0], fov_y_deg: 60.0, region: None };
+    let spec = |ms: f32| RubbleSpec { at_ms: ms, camera: Some(cam.clone()), width: 1280.0, height: 720.0, body: 0 };
+    let inst = st.outline(&schema, &spec(70.0)).unwrap();
+    assert!(inst["elements"].as_object().is_some_and(|e| !e.is_empty()), "{inst}");
+    assert!(inst["loops"].as_object().is_some_and(|e| !e.is_empty()));
+    // Rubble against itself: before and peak, through the camera.
+    let src = |ms: f32| ShapeSpec { tracing: None, rubble: Some(spec(ms)) };
+    let table = st.compare(&schema, &[CompareSource { name: "rubble".into(), before: src(-10.0), now: src(70.0) }]).unwrap();
+    assert!(table["rows"].as_array().is_some_and(|r| !r.is_empty()), "{table}");
+    println!("{}", serde_json::to_string(&table["rows"]).unwrap());
+}
