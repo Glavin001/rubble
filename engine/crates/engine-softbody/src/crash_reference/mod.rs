@@ -335,6 +335,9 @@ pub struct Sample {
     pub pos: Vec<Vec<Vec3>>,
     pub vel: Vec<Vec<Vec3>>,
     pub beams: Vec<Vec<BeamState>>,
+    /// Per body, its raycast wheels' spin (rad/s, in `drive.config.wheels` order; empty
+    /// without raycast wheels or when the executor does not read them back).
+    pub wheel_spin: Vec<Vec<f32>>,
 }
 
 /// An executor running a built fleet: the only thing a backend provides.
@@ -371,6 +374,7 @@ impl Runner for CpuRunner {
             pos: v.iter().map(|s| s.positions()).collect(),
             vel: v.iter().map(|s| s.nodes.iter().map(|n| n.vel).collect()).collect(),
             beams: v.iter().map(|s| s.beams.iter().map(|b| BeamState { rest: b.rest, broken: b.broken }).collect()).collect(),
+            wheel_spin: v.iter().map(|s| s.drive.as_deref().map_or(Vec::new(), |d| d.wheels.iter().map(|w| w.omega).collect())).collect(),
         })
     }
     fn contact_removed(&mut self) -> Option<f64> {

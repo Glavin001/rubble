@@ -4,7 +4,7 @@
 
 use super::super::{BeamState, Body, Built, Contact, Layout, Sample, Section, Template, Templates, ZoneMap};
 use super::*;
-use crate::desc::{SoftBeam, SoftNode, SoftVehicleDesc};
+use crate::desc::{SoftBeam, SoftNode, SoftTriangle, SoftVehicleDesc};
 use crate::explicit_beams::{jbeam_force, Beam, ExplicitBeams, ExplicitKind, Node};
 use glam::{DMat3, Mat3};
 
@@ -49,6 +49,7 @@ fn sample(built: &Built, t: f32) -> Sample {
         pos: f.iter().map(|s| s.positions()).collect(),
         vel: f.iter().map(|s| s.nodes.iter().map(|n| n.vel).collect()).collect(),
         beams: f.iter().map(|s| s.beams.iter().map(|b| BeamState { rest: b.rest, broken: b.broken }).collect()).collect(),
+        wheel_spin: Vec::new(),
     }
 }
 
@@ -196,6 +197,8 @@ fn crash_metrics_momentum_and_kinetic_energy() {
     near(&m, "all.ke_lost_j", 0.0, 1e-9);
     near(&m, "car.speed_before", 10.0, 1e-6);
     near(&m, "pair.car_box.com_gap_min", 20.0 - 0.75, 1e-5);
+    // |Σ m v| / Σ m: (100, 0, 3800) N·s over 450 kg.
+    near(&m, "all.com_speed_end", (100.0f64.powi(2) + 3800.0f64.powi(2)).sqrt() / 450.0, 1e-6);
 }
 
 #[test]
@@ -318,4 +321,523 @@ fn crash_metrics_bounded_spring_energy() {
     }
     let plain = super::beams::stored(-0.4, [1.0, 2.0], |_| 5.0);
     assert!((plain - 0.5 * 5.0 * 0.16).abs() < 1e-12);
+}
+
+fn near_v(v: f64, want: f64, tol: f64) {
+    println!("{v:.6} (want {want:.6} ± {tol})");
+    assert!((v - want).abs() <= tol, "{v}, want {want} ± {tol}");
+}
+
+#[test]
+fn crash_metrics_robust_extent_of_known_lists() {
+    // 101 nodes 2 cm apart along +Z, in no order: end to end, 2 m.
+    let p: Vec<Vec3> = (0..=100).map(|i| Vec3::new(0.3, 0.0, 0.02 * ((i * 37) % 101) as f32)).collect();
+    near_v(robust_extent(&p, |_| true, Vec3::Z, EXTENT_GAP), 2.0, 1e-6);
+    // Along another axis: the projection.
+    near_v(robust_extent(&p, |_| true, Vec3::new(0.0, 0.6, 0.8), EXTENT_GAP), 1.6, 1e-6);
+    // Nodes flung off (one 1 km out, three together 0.3 m past the end) are left out; a
+    // node 0.2 m past the end (within the gap) is in.
+    let mut q = p.clone();
+    q.extend([Vec3::new(0.0, 0.0, 1000.0), Vec3::new(0.0, 0.0, -0.3), Vec3::new(0.0, 0.0, -0.31), Vec3::new(0.0, 0.0, -0.32)]);
+    near_v(robust_extent(&q, |_| true, Vec3::Z, EXTENT_GAP), 2.0, 1e-6);
+    q.push(Vec3::new(0.0, 0.0, 2.2));
+    near_v(robust_extent(&q, |_| true, Vec3::Z, EXTENT_GAP), 2.2, 1e-6);
+    // Only the nodes kept.
+    near_v(robust_extent(&p, |i| p[i].z <= 1.0 + 1e-4, Vec3::Z, EXTENT_GAP), 1.0, 1e-6);
+    assert_eq!(robust_extent(&p[..1], |_| true, Vec3::Z, EXTENT_GAP), 0.0);
+}
+
+/// A body of two ladders 1 m apart (left x = +0.5, right x = −0.5), each two rows (y 0.3,
+/// 1.0) of 101 nodes 4 cm apart along z ∈ [−2, 2], every row chained, each side's rows
+/// joined at every station, and rungs across at every station up to `rungs`. Masses: left
+/// `ml`, right `mr`. Node index: side s (0 left, 1 right), row r, station k:
+/// (s·2 + r)·101 + k. Beam order: per side, its two rows' 100 chain beams, then its 101
+/// row-to-row beams; then the rungs.
+fn ladders(ml: f32, mr: f32, rungs: usize) -> SoftVehicleDesc {
+    let mut n = Vec::new();
+    for s in 0..2 {
+        for r in 0..2 {
+            for k in 0..101 {
+                let x = if s == 0 { 0.5 } else { -0.5 };
+                n.push(node(&format!("n{s}{r}_{k}"), [x, [0.3, 1.0][r], -2.0 + 0.04 * k as f32], if s == 0 { ml } else { mr }));
+            }
+        }
+    }
+    let id = |s: usize, r: usize, k: usize| ((s * 2 + r) * 101 + k) as u32;
+    let mut b = Vec::new();
+    for s in 0..2 {
+        for r in 0..2 {
+            for k in 0..100 {
+                b.push((id(s, r, k), id(s, r, k + 1)));
+            }
+        }
+        for k in 0..101 {
+            b.push((id(s, 0, k), id(s, 1, k)));
+        }
+    }
+    for k in 0..=rungs {
+        for r in 0..2 {
+            b.push((id(0, r, k), id(1, r, k)));
+        }
+    }
+    desc(n, &b)
+}
+
+/// The rigid motion `r` about `c` then `t`, applied to the sample's body 0.
+fn moved(x: &Sample, r: Mat3, c: Vec3, t: Vec3, at: f32) -> Sample {
+    let mut y = x.clone();
+    y.t = at;
+    for p in &mut y.pos[0] {
+        *p = c + r * (*p - c) + t;
+    }
+    y
+}
+
+/// Body 0's frame at spawn as a world rotation (columns left, up, forward).
+fn frame(b: &Built) -> Mat3 {
+    let f = b.layout.bodies[0].heading();
+    Mat3::from_cols(Vec3::Y.cross(f), Vec3::Y, f)
+}
+
+#[test]
+fn crash_metrics_length_and_crush_in_the_fitted_frame() {
+    // Compressed along its own length to 0.75 at the deepest and 0.8 at the end, while
+    // turned 100°, pitched 15° and thrown 3 m: the world extent along the first heading
+    // would read the turn; the fitted frame reads only the crush.
+    let d = ladders(1.0, 1.0, 100);
+    let (t, b) = scene(&[("car", &d, ZoneMap::default(), Vec3::new(2.0, 0.0, -1.0), 0.6, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    let bm = frame(&b);
+    let o = b.layout.bodies[0].at;
+    let squash = |f: f32, at: f32| {
+        // In the body frame z ← −2 + f (z + 2), then the rigid motion.
+        let mut y = x0.clone();
+        for p in &mut y.pos[0] {
+            let mut l = bm.transpose() * (*p - o);
+            l.z = -2.0 + f * (l.z + 2.0);
+            *p = o + bm * l;
+        }
+        let r = bm * Mat3::from_rotation_y(100f32.to_radians()) * Mat3::from_rotation_x(15f32.to_radians()) * bm.transpose();
+        moved(&y, r, o, Vec3::new(0.0, 1.0, 3.0), at)
+    };
+    let m = run(&t, &b, &[x0.clone(), squash(0.75, 0.004), squash(0.8, 0.008)]);
+    let rest = 4.0;
+    near(&m, "car.length0", rest, 1e-4);
+    near(&m, "car.gauge.length.rest", rest, 1e-4);
+    near(&m, "car.crush_peak", 0.25 * rest, 1e-4);
+    near(&m, "car.crush_residual", 0.2 * rest, 1e-4);
+    near(&m, "car.gauge.length.shrink_frac", 0.2, 1e-4);
+    near(&m, "car.gauge.length_left.change_residual", -0.2 * rest, 1e-4);
+    near(&m, "car.gauge.length_right.change_residual", -0.2 * rest, 1e-4);
+    near(&m, "car.yaw_deg", 100.0, 1e-2);
+    // Height along the fitted up: the rows 0.7 m apart, unchanged.
+    near(&m, "car.gauge.height.rest", 0.7, 1e-5);
+    near(&m, "car.gauge.height.change_residual", 0.0, 1e-4);
+}
+
+#[test]
+fn crash_metrics_side_lengths_leave_out_detached_parts() {
+    // The left ladder (light, so the heavy right one sets the fit) crushed to 0.75 of its
+    // length; the right ladder's front ten stations (no rungs past station 90) torn off
+    // and flung 10 m ahead and 4 m up; the whole turned 30° about the body's up.
+    let d = ladders(1e-3, 1000.0, 90);
+    let (t, b) = scene(&[("car", &d, ZoneMap::default(), Vec3::ZERO, -0.4, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    let bm = frame(&b);
+    let o = b.layout.bodies[0].at;
+    let mut x1 = x0.clone();
+    x1.t = 0.004;
+    let flung = |i: usize| i >= 202 && (i - 202) % 101 > 90;
+    for (i, p) in x1.pos[0].iter_mut().enumerate() {
+        let mut l = bm.transpose() * (*p - o);
+        if i < 202 {
+            l.z = -2.0 + 0.75 * (l.z + 2.0);
+        }
+        if flung(i) {
+            l += Vec3::new(0.0, 4.0, 10.0);
+        }
+        *p = o + bm * l;
+    }
+    // Break the chain beams joining station 90 to 91 in both right rows.
+    for r in 0..2 {
+        x1.beams[0][301 + r * 100 + 90].broken = true;
+    }
+    let x1 = moved(&x1, bm * Mat3::from_rotation_y(30f32.to_radians()) * bm.transpose(), o, Vec3::new(1.0, 0.0, 0.0), 0.004);
+    let m = run(&t, &b, &[x0, x1]);
+    let rest = 4.0;
+    // The right half still attached: stations 0..=90 of both rows, z ∈ [−2, 1.6].
+    let want_right = 3.6;
+    near(&m, "car.gauge.length_left.rest", rest, 1e-4);
+    near(&m, "car.gauge.length_left.change_residual", -0.25 * rest, 1e-3);
+    near(&m, "car.gauge.length_left.shrink_frac", 0.25, 1e-3);
+    near(&m, "car.gauge.length_right.rest", rest, 1e-4);
+    near(&m, "car.gauge.length_right.change_residual", want_right - rest, 1e-3);
+    near(&m, "car.yaw_deg", 30.0, 1e-2);
+    near(&m, "car.detached_parts", 1.0, 0.0);
+}
+
+#[test]
+fn crash_metrics_yaw_unwraps_through_a_full_turn() {
+    let d = lattice();
+    let (t, b) = scene(&[("car", &d, ZoneMap::default(), Vec3::ZERO, 1.0, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    let bm = frame(&b);
+    let c = com(&x0.pos[0], &b.fleet[0].nodes.iter().map(|n| n.mass).collect::<Vec<_>>()).as_vec3();
+    let turn = |deg: f32, k: usize| moved(&x0, bm * Mat3::from_rotation_y(deg.to_radians()) * bm.transpose(), c, Vec3::ZERO, 0.004 * k as f32);
+    // Up to 400° in 10° steps, then back to 380°: the peak is the unwrapped 400°.
+    let mut xs: Vec<Sample> = (0..=40).map(|k| turn(10.0 * k as f32, k)).collect();
+    xs.push(turn(380.0, 41));
+    let m = run(&t, &b, &xs);
+    near(&m, "car.yaw_deg", 380.0, 1e-2);
+    near(&m, "car.yaw_peak_deg", 400.0, 1e-2);
+    near(&m, "car.yaw_abs_peak_deg", 400.0, 1e-2);
+    // The other way: to −50°, then +20°: the peak keeps its sign.
+    let mut xs: Vec<Sample> = (0..=5).map(|k| turn(-10.0 * k as f32, k)).collect();
+    xs.extend((0..=7).map(|k| turn(-50.0 + 10.0 * k as f32, 6 + k)));
+    let m = run(&t, &b, &xs);
+    near(&m, "car.yaw_deg", 20.0, 1e-2);
+    near(&m, "car.yaw_peak_deg", -50.0, 1e-2);
+    near(&m, "car.yaw_abs_peak_deg", 50.0, 1e-2);
+}
+
+#[test]
+fn crash_metrics_speed_peak_and_box_face() {
+    // A body speeding up to 12 m/s and back to 3: the peak is 12.
+    let d = desc(vec![node("a", [0.0, 0.5, 0.0], 1.0), node("b", [0.0, 0.5, 2.9], 3.0)], &[(0, 1)]);
+    // A box from z = 2.8 to 4: its near face is z = 2.8 seen from −Z, 4.0 from +Z.
+    let bx = (Vec3::new(0.0, 1.0, 3.4), Vec3::new(2.0, 2.0, 0.6));
+    for (yaw, face_z) in [(0.0f32, 2.8f64), (std::f32::consts::PI, 4.0)] {
+        let (t, b) = scene(&[("car", &d, ZoneMap::default(), Vec3::ZERO, yaw, Vec3::ZERO)], vec![bx]);
+        let x0 = sample(&b, 0.0);
+        let xs: Vec<Sample> = [0.0f32, 5.0, 12.0, 7.0, 3.0]
+            .iter()
+            .enumerate()
+            .map(|(k, &v)| {
+                let mut x = x0.clone();
+                x.t = 0.004 * k as f32;
+                x.vel[0] = vec![Vec3::new(0.6 * v, 0.0, 0.8 * v); 2];
+                x
+            })
+            .collect();
+        let m = run(&t, &b, &xs);
+        near(&m, "car.speed_peak", 12.0, 1e-5);
+        let z = f64::from(x0.pos[0][0].z) * 0.25 + f64::from(x0.pos[0][1].z) * 0.75;
+        let h = if yaw == 0.0 { 1.0 } else { -1.0 };
+        near(&m, "car.com_end_past_box0", (z - face_z) * h, 1e-5);
+    }
+    // Without a box: none.
+    let (t, b) = scene(&[("car", &d, ZoneMap::default(), Vec3::ZERO, 0.0, Vec3::ZERO)], vec![]);
+    assert!(!run(&t, &b, &[sample(&b, 0.0)]).contains_key("car.com_end_past_box0"));
+}
+
+#[test]
+fn crash_metrics_reach_past_the_other_com() {
+    // Car heading +Z: nodes at z = 0, 1, 2, 1 (masses 1, 1, 2, ~0), its collision
+    // triangle on nodes 0, 1, 3 (z ≤ 1). Barrier heading −Z: two nodes (masses 3, 1).
+    let mut car = desc(vec![node("a", [0.0, 0.5, 0.0], 1.0), node("b", [0.5, 0.5, 1.0], 1.0), node("c", [0.0, 1.0, 2.0], 2.0), node("d", [-0.5, 0.5, 1.0], 1.0e-6)], &[(0, 1), (1, 2), (1, 3)]);
+    car.triangles.push(SoftTriangle { nodes: [0, 1, 3], ..Default::default() });
+    let bar = desc(vec![node("a", [0.0, 0.5, 0.15], 3.0), node("b", [0.0, 0.5, -0.45], 1.0)], &[(0, 1)]);
+    let (t, b) = scene(&[("car", &car, ZoneMap::default(), Vec3::ZERO, 0.0, Vec3::ZERO), ("barrier", &bar, ZoneMap::default(), Vec3::new(0.0, 0.0, 1.45), std::f32::consts::PI, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    let m = run(&t, &b, &[x0.clone()]);
+    let car_com = (1.0 + 4.0 + 1.0e-6) / (4.0 + 1.0e-6);
+    let (z0, z1) = (f64::from(x0.pos[1][0].z), f64::from(x0.pos[1][1].z));
+    let bar_com = 0.75 * z0 + 0.25 * z1;
+    near(&m, "pair.car_barrier.reach_max", 2.0 - bar_com, 1e-5);
+    near(&m, "pair.car_barrier.skin_reach_max", 1.0 - bar_com, 1e-5);
+    // The barrier heads −Z: its node at the smallest z gets furthest past the car's COM.
+    near(&m, "pair.barrier_car.reach_max", car_com - z0.min(z1), 1e-5);
+    // Its skin: none (no triangles).
+    assert!(!m.contains_key("pair.barrier_car.skin_reach_max"));
+    // Later the car alone moves 0.3 m on and back: the reach is the largest over the samples.
+    let mut x1 = x0.clone();
+    x1.t = 0.004;
+    x1.pos[0].iter_mut().for_each(|p| p.z += 0.3);
+    let mut x2 = x0.clone();
+    x2.t = 0.008;
+    let m = run(&t, &b, &[x0, x1, x2]);
+    near(&m, "pair.car_barrier.reach_max", 2.3 - bar_com, 1e-5);
+}
+
+#[test]
+fn crash_metrics_pair_ratios() {
+    // Two one-beam bodies: a shortened 0.1 m, b 0.05 m, by yield (no hardening: threshold
+    // 1 kN × set) and in position.
+    let d = desc(vec![node("a", [0.0, 1.0, -0.5], 10.0), node("b", [0.0, 1.0, 0.5], 10.0)], &[(0, 1)]);
+    let (t, mut b) = scene(&[("car_a", &d, ZoneMap::default(), Vec3::ZERO, 0.0, Vec3::ZERO), ("car_b", &d, ZoneMap::default(), Vec3::new(3.0, 0.0, 0.0), 0.0, Vec3::ZERO)], vec![]);
+    for f in &mut b.fleet {
+        let beam = &mut f.beams[0];
+        (beam.kind, beam.k, beam.tc, beam.tt, beam.limit_k) = (ExplicitKind::JbeamPlain, 1.0e6, 1000.0, 1000.0, 1000.0);
+    }
+    // The recorder reads beam rates from the fleet as built.
+    let x0 = sample(&b, 0.0);
+    let mut x1 = x0.clone();
+    x1.t = 0.004;
+    for (k, dl) in [(0, 0.1f32), (1, 0.05)] {
+        x1.beams[k][0].rest = 1.0 - dl;
+        x1.pos[k][1].z -= dl;
+    }
+    let m = run(&t, &b, &[x0, x1]);
+    near(&m, "car_a.plastic_work_j", 100.0, 1e-3);
+    near(&m, "car_b.plastic_work_j", 50.0, 1e-3);
+    near(&m, "pair.car_a_car_b.plastic_work_ratio", 101.0 / 51.0, 1e-4);
+    near(&m, "car_a.crush_peak", 0.1, 1e-5);
+    near(&m, "pair.car_a_car_b.crush_peak_ratio", (0.1 + 0.001) / (0.05 + 0.001), 1e-3);
+    near(&m, "pair.car_a_car_b.yaw_peak_diff_deg", 0.0, 1e-6);
+}
+
+#[test]
+fn crash_metrics_yaw_peak_difference() {
+    let d = lattice();
+    let (t, b) = scene(&[("car_a", &d, ZoneMap::default(), Vec3::ZERO, 0.0, Vec3::ZERO), ("car_b", &d, ZoneMap::default(), Vec3::new(5.0, 0.0, 0.0), std::f32::consts::PI, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    let mut x1 = x0.clone();
+    x1.t = 0.004;
+    for (k, deg) in [(0usize, 20.0f32), (1, -10.0)] {
+        let c = com(&x0.pos[k], &b.fleet[k].nodes.iter().map(|n| n.mass).collect::<Vec<_>>()).as_vec3();
+        let r = Mat3::from_rotation_y(deg.to_radians());
+        x1.pos[k].iter_mut().for_each(|p| *p = c + r * (*p - c));
+    }
+    let m = run(&t, &b, &[x0, x1]);
+    near(&m, "car_a.yaw_peak_deg", 20.0, 1e-2);
+    near(&m, "car_b.yaw_peak_deg", -10.0, 1e-2);
+    near(&m, "pair.car_a_car_b.yaw_peak_diff_deg", 30.0, 1e-2);
+}
+
+#[test]
+fn crash_metrics_crossings_of_two_meshes() {
+    // a: one horizontal triangle at y = 1; b: one vertical triangle in x = 0 whose two
+    // edges from (0, 0.5, 0) pass through a's (at z = 0 and z = 0.25), its third above it.
+    let mut a = desc(vec![node("a", [-1.0, 1.0, -1.0], 1.0), node("b", [1.0, 1.0, -1.0], 1.0), node("c", [0.0, 1.0, 1.5], 1.0)], &[(0, 1), (1, 2), (2, 0)]);
+    a.triangles.push(SoftTriangle { nodes: [0, 1, 2], ..Default::default() });
+    let mut v = desc(vec![node("a", [0.0, 0.5, 0.0], 1.0), node("b", [0.0, 1.5, 0.0], 1.0), node("c", [0.0, 1.5, 0.5], 1.0)], &[(0, 1), (1, 2), (2, 0)]);
+    v.triangles.push(SoftTriangle { nodes: [0, 1, 2], ..Default::default() });
+    // b spawns 10 m away (no crossing), then is moved into a.
+    let (t, b) = scene(&[("a", &a, ZoneMap::default(), Vec3::ZERO, 0.0, Vec3::ZERO), ("b", &v, ZoneMap::default(), Vec3::new(0.0, 0.0, 10.0), 0.0, Vec3::ZERO)], vec![]);
+    let x0 = sample(&b, 0.0);
+    near(&run(&t, &b, &[x0.clone()]), "pair.a_b.crossings_max", 0.0, 0.0);
+    let mut x1 = x0.clone();
+    x1.t = 0.004;
+    x1.pos[1].iter_mut().for_each(|p| p.z -= 10.0);
+    let mut x2 = x0.clone();
+    x2.t = 0.008;
+    near(&run(&t, &b, &[x0.clone(), x1.clone(), x2]), "pair.a_b.crossings_max", 2.0, 0.0);
+    // b's triangle torn (a beam along its edge broken, as the JBeam spawn lists them): its
+    // edges are out of the surface.
+    let (t, mut b) = (t, b);
+    b.fleet[1].tri_breaks = vec![[0, 1, 2, crate::explicit_jbeam_ext::NO_BEAM]];
+    let mut x3 = x1;
+    x3.beams[1][1].broken = true;
+    near(&run(&t, &b, &[x0, x3]), "pair.a_b.crossings_max", 0.0, 0.0);
+}
+
+/// The FMVSS 214 barrier as the crash suite spawns it (`crash_rigs::mdb214_jbeam`, JBeam
+/// mode), and its nodes' names.
+fn barrier() -> (ExplicitBeams, Vec<String>) {
+    let text = crate::crash_rigs::mdb214_jbeam();
+    let d = crate::jbeam::load_jbeam(&[("mdb214.jbeam", text.as_str())], None).expect("barrier");
+    let (s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::ZERO, Vec3::ZERO, Default::default()).expect("spawn");
+    (s, d.nodes.iter().map(|n| n.name.clone()).collect())
+}
+
+/// The index of the barrier's beam of `kind` from node `a` to node `b` (either way).
+fn barrier_beam(s: &ExplicitBeams, names: &[String], kind: ExplicitKind, a: &str, b: &str) -> usize {
+    let id = |n: &str| names.iter().position(|x| x == n).expect("node") as u32;
+    let (a, b) = (id(a), id(b));
+    s.beams.iter().position(|x| x.kind == kind && ((x.a == a && x.b == b) || (x.a == b && x.b == a))).expect("beam")
+}
+
+/// The solver's force on beam `j` of `s` with its nodes at `pos` (at rest: no damping), as
+/// the beam pass computes it (`ExplicitBeams::step_rest`): the extension-record path for
+/// a beam that has one, else `jbeam_force`. Returns the force along id1–id2 (+ pushes
+/// apart) and, for an LBEAM, the arm terms on id1 and id2 (`lbeam_force`).
+fn solver_force(s: &mut ExplicitBeams, j: usize, pos: &[Vec3]) -> (f32, Vec3, Vec3, u32) {
+    let node = |p: Vec3| Node { pos: p, vel: Vec3::ZERO, force: Vec3::ZERO, mass: 1.0, friction: 0.0, flags: 0 };
+    let mut beam = s.beams[j];
+    let (na, nb) = (node(pos[beam.a as usize]), node(pos[beam.b as usize]));
+    let x = s.ext_of.get(j).copied().unwrap_or(0) as usize;
+    let out = if beam.kind == ExplicitKind::JbeamLbeam {
+        let c = s.beam_ext[x - 1].index(0);
+        let o = crate::explicit_jbeam_ext::lbeam_force(&mut beam, &na, &nb, &node(pos[c as usize]), None);
+        s.beams[j] = beam;
+        return (o.beam.force, o.fa, o.fb, c);
+    } else if x > 0 {
+        crate::explicit_jbeam_ext::jbeam_ext_force_with(&mut beam, &mut s.beam_ext[x - 1], &na, &nb, None, false)
+    } else {
+        jbeam_force(&mut beam, &na, &nb, false)
+    };
+    s.beams[j] = beam;
+    (out.force, Vec3::ZERO, Vec3::ZERO, u32::MAX)
+}
+
+/// Drives node `m` of beam `j` along `path` (positions, many small steps) quasi-statically
+/// and returns the external work done on it (J, trapezoid rule on the solver's force), and
+/// the metric's plastic work and stored energy at the end.
+fn drive(s: &mut ExplicitBeams, j: usize, pos: &mut [Vec3], m: usize, path: &[Vec3]) -> (f64, f64, f64) {
+    let spawn = s.clone();
+    let mut plastic = super::beams::can_yield(&s.beams[j]).then(|| super::beams::Plastic::new(&s.beams[j]));
+    let mut lplastic = super::beams::LbeamPlastic::new(&s.beams[j]);
+    // The force on node m (world): +f along (a − b) on a, −f on b; LBEAM arm terms.
+    let force_on = |s: &mut ExplicitBeams, pos: &[Vec3]| -> Vec3 {
+        let (f, fa, fb, _) = solver_force(s, j, pos);
+        let b = s.beams[j];
+        let d = (pos[b.a as usize] - pos[b.b as usize]).normalize();
+        if m == b.a as usize {
+            d * f + fa
+        } else if m == b.b as usize {
+            -d * f + fb
+        } else {
+            -(fa + fb)
+        }
+    };
+    let mut w = 0.0f64;
+    let mut f_prev = force_on(s, pos);
+    for &p in path {
+        let dx = p - pos[m];
+        pos[m] = p;
+        let f_now = force_on(s, pos);
+        // The driver holds the node against the beam: it does −F·dx.
+        w -= f64::from((0.5 * (f_prev + f_now)).dot(dx));
+        f_prev = f_now;
+        if let Some(pl) = plastic.as_mut() {
+            pl.advance(s.beams[j].rest);
+        }
+        if let Some(pl) = lplastic.as_mut() {
+            pl.advance(&spawn, j, s.beams[j].rest, pos);
+        }
+    }
+    let stored = super::beams::elastic(&spawn.beams, Some(&spawn), j, s.beams[j].rest, s.beams[j].broken, pos);
+    (w, plastic.map_or(0.0, |p| p.work) + lplastic.map_or(0.0, |p| p.work), stored)
+}
+
+/// `n` steps from `a` to `b`.
+fn line(a: Vec3, b: Vec3, n: usize) -> Vec<Vec3> {
+    (1..=n).map(|i| a + (b - a) * (i as f32 / n as f32)).collect()
+}
+
+#[test]
+fn crash_metrics_barrier_support_column_work_is_force_times_distance() {
+    use crate::crash_rigs::{MDB_CRUSH, MDB_FACE};
+    let (mut s, names) = barrier();
+    let mut pos: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    // A main-block column inside the face: its crush force is 310 kPa × its cell
+    // (1.676 m / 16 × 0.559 m / 6); it never hardens; it densifies at 80 % of its depth.
+    let j = barrier_beam(&s, &names, ExplicitKind::JbeamSupport, "f8_3", "p8_3");
+    let b0 = s.beams[j];
+    let cell = MDB_FACE[0] / 16.0 * (MDB_FACE[1] / 6.0);
+    let force = f64::from(MDB_CRUSH[0] * cell);
+    let (k, l0) = (f64::from(b0.k), f64::from(b0.rest));
+    println!("main column: tc {} N (want {force:.1}), cap {}, k {k:.0} N/m, rest {l0:.4} m, floor {}", b0.tc, b0.limit_k, b0.short_bound);
+    assert!((f64::from(b0.tc) - force).abs() < 1e-4 * force);
+    assert!((f64::from(b0.limit_k) - force).abs() < 1e-4 * force, "no hardening: deformLimitStress = the crush force");
+    let face = names.iter().position(|n| n == "f8_3").unwrap();
+    let back = pos[b0.b as usize + b0.a as usize - face];
+    let axis = (pos[face] - back).normalize();
+    // Crushed 0.15 m (the face node pushed toward the back plate), slowly.
+    let d = 0.15f32;
+    let start = pos[face];
+    let (w, plastic, stored) = drive(&mut s, j, &mut pos, face, &line(start, start - axis * d, 20_000));
+    let set = l0 - f64::from(s.beams[j].rest);
+    println!("crushed {d} m: external work {w:.3} J, plastic {plastic:.3} J (force × set {:.3}), stored {stored:.3} J, set {set:.5} m (want {:.5})", force * set, f64::from(d) - force / k);
+    assert!((set - (f64::from(d) - force / k)).abs() < 1e-4, "the set is the crush less the elastic part");
+    assert!((plastic - force * set).abs() < 1e-3 * force * set, "plastic work = crush force × set");
+    assert!((stored - 0.5 * force * force / k).abs() < 1e-3 * stored);
+    assert!((w - (plastic + stored)).abs() < 2e-3 * w, "the solver's work is the ledger's: {w} vs {}", plastic + stored);
+    // Released past its length: a support holds nothing in tension; what was stored comes back.
+    let path = line(pos[face], start + axis * 0.05, 20_000);
+    let (w2, plastic2, stored2) = drive(&mut s, j, &mut pos, face, &path);
+    println!("released: work {w2:.3} J, plastic {plastic2:.3}, stored {stored2:.3}");
+    assert!(stored2 == 0.0 && plastic2 == 0.0);
+    assert!((w2 + stored).abs() < 2e-3 * stored, "{w2} J back of {stored} J stored");
+    // Crushed past densification (80 % of the depth): the set stops at the floor and the
+    // column is elastic about it.
+    let deep = 0.9 * l0 as f32;
+    let rest_before = f64::from(s.beams[j].rest);
+    let path = line(pos[face], start - axis * deep, 40_000);
+    let (w3, plastic3, stored3) = drive(&mut s, j, &mut pos, face, &path);
+    let rest = f64::from(s.beams[j].rest);
+    println!("crushed {deep:.3} m: work {w3:.2} J, plastic {plastic3:.2} J (force × set {:.2}), stored {stored3:.2} J, rest {rest:.4} (floor {})", force * (rest_before - rest), s.beams[j].short_bound);
+    // The solver's floor is the deform limit or `MIN_REST` (0.1 m), the larger: 0.1 m here,
+    // so this column densifies at 74 % of its depth, not the rig's 80 % (0.0762 m).
+    let floor = f64::from(b0.short_bound.max(crate::explicit_beams::MIN_REST));
+    assert!((rest - floor).abs() < 1e-5, "at the floor {floor}");
+    assert!((plastic3 - force * (rest_before - rest)).abs() < 1e-3 * plastic3);
+    assert!((w3 - (plastic3 + stored3)).abs() < 2e-3 * w3, "{w3} vs {}", plastic3 + stored3);
+}
+
+#[test]
+fn crash_metrics_barrier_bumper_and_dense_block_work() {
+    use crate::crash_rigs::{MDB_CRUSH, MDB_FACE};
+    let (mut s, names) = barrier();
+    let mut pos: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    // A bumper column (bumper node to face node, row 1 inside the band): 1,689 kPa × its
+    // cell (1.676 m / 16 × one row, 0.559 m / 6).
+    let j = barrier_beam(&s, &names, ExplicitKind::JbeamSupport, "b8_1", "f8_1");
+    let b0 = s.beams[j];
+    let force = f64::from(MDB_CRUSH[1] * MDB_FACE[0] / 16.0 * (MDB_FACE[1] / 6.0));
+    let (k, l0) = (f64::from(b0.k), f64::from(b0.rest));
+    println!("bumper column: tc {} N (want {force:.1}), cap {}, k {k:.0}, rest {l0:.4}, floor {}", b0.tc, b0.limit_k, b0.short_bound);
+    assert!((f64::from(b0.tc) - force).abs() < 1e-4 * force);
+    let m = names.iter().position(|n| n == "b8_1").unwrap();
+    let other = (b0.a + b0.b) as usize - m;
+    let axis = (pos[m] - pos[other]).normalize();
+    let start = pos[m];
+    let (w, plastic, stored) = drive(&mut s, j, &mut pos, m, &line(start, start - axis * 0.05, 20_000));
+    let set = l0 - f64::from(s.beams[j].rest);
+    println!("crushed 0.05 m: work {w:.3} J, plastic {plastic:.3} J (force × set {:.3}), stored {stored:.3} J", force * set);
+    assert!((plastic - force * set).abs() < 1e-3 * force * set);
+    assert!((w - (plastic + stored)).abs() < 2e-3 * w);
+    // Its 0.102 m column can yield only to `MIN_REST` (0.1 m): 2 mm, then it is a spring
+    // (the rig's deform limit, 0.0204 m, is below that floor).
+    assert!((f64::from(s.beams[j].rest) - f64::from(crate::explicit_beams::MIN_REST)).abs() < 1e-6, "{}", s.beams[j].rest);
+    // The densified block (bumper node to back plate, rest 20 % of its length, never
+    // yields): elastic only, ½ k e² once pressed past its rest.
+    let (mut s, names) = barrier();
+    let mut pos: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    let j = barrier_beam(&s, &names, ExplicitKind::JbeamSupport, "b8_1", "p8_1");
+    // Its precompression ramps in over its first steps: run it out at spawn.
+    for _ in 0..10_000 {
+        solver_force(&mut s, j, &pos);
+    }
+    let b0 = s.beams[j];
+    println!("dense block: tc {} k {} rest {} (length {})", b0.tc, b0.k, b0.rest, pos[b0.a as usize].distance(pos[b0.b as usize]));
+    assert!(!b0.tc.is_finite() || b0.tc > 1e30);
+    let m = names.iter().position(|n| n == "b8_1").unwrap();
+    let other = (b0.a + b0.b) as usize - m;
+    let axis = (pos[m] - pos[other]).normalize();
+    let start = pos[m];
+    let len0 = pos[m].distance(pos[other]);
+    let target = start - axis * (len0 - b0.rest + 0.01);
+    let (w, plastic, stored) = drive(&mut s, j, &mut pos, m, &line(start, target, 20_000));
+    println!("pressed 1 cm past its rest: work {w:.4} J, plastic {plastic}, stored {stored:.4} J (½ k e² = {:.4})", 0.5 * f64::from(b0.k) * 1e-4);
+    assert_eq!(plastic, 0.0);
+    assert!((stored - 0.5 * f64::from(b0.k) * 1e-4).abs() < 2e-3 * stored);
+    assert!((w - stored).abs() < 2e-3 * w);
+}
+
+#[test]
+fn crash_metrics_barrier_shear_lbeam_work() {
+    // A shear LBEAM (face node f8_3, the neighbouring back-plate node p9_3, vertex p8_3):
+    // the face node pushed sideways 8 cm, past the plate shear yield (10 % of the 0.381 m
+    // depth), and back: the solver's work on it is the ledger's stored energy plus the
+    // LBEAM's plastic work, and back at the start it stores only what the set leaves.
+    let (mut s, names) = barrier();
+    let mut pos: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    let id = |n: &str| names.iter().position(|x| x == n).unwrap() as u32;
+    let j = s.beams.iter().position(|b| b.kind == ExplicitKind::JbeamLbeam && b.a == id("f8_3") && b.b == id("p9_3")).expect("lbeam");
+    let b0 = s.beams[j];
+    println!("lbeam: k {} tc {} cos {}", b0.k, b0.tc, b0.rest);
+    assert!(b0.tc.is_finite());
+    let m = b0.a as usize;
+    let side = (pos[id("p9_3") as usize] - pos[id("p8_3") as usize]).normalize();
+    let start = pos[m];
+    let (w, plastic, stored) = drive(&mut s, j, &mut pos, m, &line(start, start + side * 0.08, 40_000));
+    println!("sheared 8 cm: work {w:.3} J, plastic {plastic:.3} J, stored {stored:.3} J");
+    assert!(plastic > 0.0, "it yields");
+    assert!((w - (plastic + stored)).abs() < 5e-3 * w, "{w} vs {}", plastic + stored);
+    let path = line(pos[m], start, 40_000);
+    let (w2, plastic2, stored2) = drive(&mut s, j, &mut pos, m, &path);
+    println!("back: work {w2:.3} J, plastic {plastic2:.3} J, stored {stored2:.3} J");
+    let total = w + w2;
+    assert!((total - (plastic + plastic2 + stored2)).abs() < 5e-3 * (plastic + plastic2 + stored2), "{total} vs {}", plastic + plastic2 + stored2);
 }
