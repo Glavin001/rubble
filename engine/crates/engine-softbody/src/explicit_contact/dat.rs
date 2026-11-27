@@ -180,6 +180,8 @@ impl DatStats {
         self.ccd.overpush += o.ccd.overpush;
         self.ccd.spec_rows += o.ccd.spec_rows;
         self.ccd.zones_relist += o.ccd.zones_relist;
+        self.ccd.barrier_iters += o.ccd.barrier_iters;
+        self.ccd.barrier_unconverged += o.ccd.barrier_unconverged;
         (self.ccd.soft_rounds, self.ccd.soft_rows, self.ccd.soft_left, self.ccd.row_iters) = (self.ccd.soft_rounds + o.ccd.soft_rounds, self.ccd.soft_rows + o.ccd.soft_rows, self.ccd.soft_left + o.ccd.soft_left, self.ccd.row_iters + o.ccd.row_iters);
         self.ccd.ke += o.ccd.ke;
         self.ccd.dp = self.ccd.dp.max(o.ccd.dp);

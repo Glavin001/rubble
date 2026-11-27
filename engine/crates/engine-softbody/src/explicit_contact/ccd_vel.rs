@@ -28,6 +28,8 @@ use std::collections::HashMap;
 
 #[path = "ccd_exact.rs"]
 mod exact;
+#[path = "ccd_barrier.rs"]
+mod barrier;
 
 /// Warm starts (`Dat::warm`): each pair's impulse at the end of the last step, keyed by its four
 /// nodes, as the first iterate of the next step's solve (Box2D's and PhysX's accumulated
@@ -559,6 +561,11 @@ impl Ctx<'_> {
 pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
     let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(ROW_ITERS);
     let newton_e = if std::env::var("DAT_RESTITUTE").is_ok_and(|v| v == "newton") { e } else { 0.0 };
+    // Barrier contact in place of the rows (`ccd_barrier`, `DAT_BARRIER=1`, a measurement).
+    if std::env::var("DAT_BARRIER").is_ok_and(|v| v == "1") {
+        barrier::barrier(pairs, x0, x1, vel, im, h, st);
+        return collide(x1).is_empty();
+    }
     Ctx { pairs, x0, im, h, iters, newton_e }.rounds(x1, vel, rounds, st, collide, vpre, e, warm)
 }
 

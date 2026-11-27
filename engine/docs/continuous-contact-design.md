@@ -946,6 +946,20 @@ CCD-filtered line search (IPC: Li et al. 2020; GPU versions such as GIPC, 2024):
   so it removes no energy by design (rule 4: elastic, not a cushion that absorbs);
 - it is an implicit solve, while the vehicles step explicitly at 2 kHz.
 
+A first CPU prototype (`ccd_barrier.rs`, `DAT_BARRIER=1`, a measurement) minimises the incremental
+potential over the step's contact nodes with preconditioned gradient steps, each limited by CCD
+and backtracked. Head 100, 0.1 s: not yet a candidate.
+- 185 steps hit the 200-iteration cap, and the momentum is kept only at convergence: linear
+  momentum moved by 5.8 N·s in a step.
+- 3,931 zones: the final positions are clear of every gap, but the CCD then tests the straight
+  path from the start to them, which can cross. The barrier's own path is not that line.
+- 35 s of CPU for 0.1 s.
+
+What it needs: a Newton solve (the barrier's Hessian per pair) to converge in a few
+iterations; a CCD test that matches the straight path (end positions whose straight path from
+x₀ is clear, or the barrier's line search taken from x₀ along x − x₀ alone); and velocities
+taken only from a converged solve.
+
 Two ways in: an incremental potential per step on the contact set alone (the beams' forces held
 from the explicit step), or the barrier as a stiff conservative force integrated by the explicit
 step with a CCD step bound, which is closer to BeamNG's penalty contact but provably non-crossing.

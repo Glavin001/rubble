@@ -136,6 +136,9 @@ pub struct CcdStats {
     pub spec_rows: u64,
     /// Impact zones formed in the response's re-listed solves (velocity contact).
     pub zones_relist: u64,
+    /// Barrier contact (`DAT_BARRIER=1`): gradient steps, and steps that reached the cap.
+    pub barrier_iters: u64,
+    pub barrier_unconverged: u64,
 }
 
 /// The impact law's guard's tolerance (J a pass): the rows' work on the conserved energy above
