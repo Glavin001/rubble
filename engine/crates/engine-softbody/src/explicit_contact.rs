@@ -28,8 +28,10 @@ mod residual;
 mod wheels;
 mod ccd;
 mod dat;
+mod restitute;
 pub use ccd::CcdStats;
-pub use dat::{close_pairs_at, closest_on_triangle, own_clearance, closest_segments, Dat, DatStats, CONTACT_RESTITUTION, RESTITUTION_STRIPES};
+pub use dat::{close_pairs_at, closest_on_triangle, own_clearance, closest_segments, Dat, DatStats};
+pub use restitute::{CONTACT_RESTITUTION, RESTITUTION_STRIPES};
 use residual::*;
 pub(crate) use edge::self_edge_hits;
 

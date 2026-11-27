@@ -18,6 +18,8 @@
 
 #[path = "explicit_beams_self_pass.rs"]
 mod self_pass;
+#[path = "explicit_beams_torn.rs"]
+pub mod torn;
 pub(crate) use self_pass::SelfHit;
 pub use self_pass::self_edge_on;
 use crate::desc::{BeamKind, SoftVehicleDesc};
@@ -1107,6 +1109,8 @@ pub struct ExplicitBeams {
     /// in this one (state).
     pub groups_last: Vec<u32>,
     pub groups_now: Vec<u32>,
+    /// How the last beam pass's beams broke, for contact's torn triangles ([`torn::Torn`]).
+    pub torn: torn::Torn,
     /// The node grab applied each step ([`Grab`]); `None` (the default) for none.
     pub grab: Option<Grab>,
     /// JBeam Part II (`engine/docs/jbeam-semantics-spec.md` §16–§26;
@@ -1814,6 +1818,7 @@ impl ExplicitBeams {
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
             groups_now: Vec::new(),
+            torn: Default::default(),
             grab: None,
             beam_ext: Vec::new(),
             ext_of: Vec::new(),
@@ -4188,7 +4193,9 @@ impl ExplicitBeams {
             .contact_force
             .as_ref()
             .is_some_and(|l| l.pending.contains(&1));
+        self.torn.begin(&self.beams);
         for j in 0..self.beams.len() {
+            self.torn.at = j as u32;
             if fire && j == 1 {
                 self.fire_contact_breaks();
             }
@@ -4306,13 +4313,17 @@ impl ExplicitBeams {
         if fire && self.beams.len() == 1 {
             self.fire_contact_breaks();
         }
+        self.torn.end();
     }
 
     /// Set off break group `g` (> 0): every member is broken (spec §8, §17).
     pub(crate) fn cascade(&mut self, g: i32) {
         self.groups_now.push(g as u32);
-        for other in &mut self.beams {
+        for (k, other) in self.beams.iter_mut().enumerate() {
             if other.group.abs() == g {
+                if !other.broken {
+                    self.torn.cascaded(k);
+                }
                 other.broken = true;
             }
         }

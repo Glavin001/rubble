@@ -393,9 +393,12 @@ GPU == CPU bit for bit (stepping tests, 80 steps). The suite, 8 runs (energy tes
 
 0 crossings, momentum to rounding. The bounce squeezes the 5-12 cm paint shells harder in the
 two hardest hits: the generator's paint gaps (CONTACT_OFFSET_LOG) are the next fix.
-Found on the way, pre-existing: the CPU flags a torn triangle in the next beam pass, the kernel
-reads its beams' break marks (break groups); the listing differs by one pair the step a triangle
-tears (`continuous_pairs_list_like_the_cpu`, listed).
+Found on the way and fixed: the CPU flagged a torn triangle in the next beam pass, the kernel
+reads its beams' break marks, which a beam broken by its own load keeps pending until the next
+beam update and a break group's members get at their own update (after its master in beam
+order: this one; before: the next). The beam pass now records that (`explicit_beams_torn.rs`,
+`ExplicitBeams::tri_torn`) and the continuous pass's surface reads it: the listing is bit for bit
+at the step a triangle tears (`continuous_pairs_list_like_the_cpu`).
 
 ## The GPU port (design, 2026-11-26)
 

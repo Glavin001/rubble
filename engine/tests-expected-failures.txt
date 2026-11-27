@@ -57,10 +57,3 @@ continuous_contact::continuous_offset_100
 continuous_contact::continuous_energy_head_100
 continuous_contact::continuous_energy_ball_100
 continuous_contact::continuous_head_130
-
-# Continuous contact GPU listing (engine-webgpu tests/explicit_contact_gpu/continuous.rs,
-# 2026-11-26): with the impact law (e = 1) car B tears 6 collision triangles at step 54 and the
-# CPU and GPU list one pair apart there (the CPU's tri_dead flag is set in the next beam pass;
-# the kernel's triangleDead reads the beams' break marks, which the break groups set at their
-# own time). Positions stay bit for bit (continuous_head_on_steps_like_the_cpu, 80 steps).
-explicit_contact_gpu::continuous::continuous_pairs_list_like_the_cpu
