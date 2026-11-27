@@ -129,14 +129,15 @@ impl Member {
         self.grade.yield_pa() * self.steel_area()
     }
     /// Mean axial crush force of a thin-walled closed section folding
-    /// progressively, P = 13.06·σ₀·t^(5/3)·b^(1/3) with b the mean side (the
-    /// standard square-tube result; a hat on its panel folds as a box). N.
+    /// progressively, P = 13.06·σ₀·t^(5/3)·b^(1/3) with b the mean side
+    /// (Abramowicz–Jones, [`crate::thin_wall::crush::rect_tube_mean_crush`],
+    /// quasi-static, σ₀ the grade's flow stress; a hat on its panel folds as a
+    /// box). N.
     pub fn crush_n(&self) -> f64 {
-        let b = match self.section {
-            Section::Box { w, h } | Section::Hat { w, h } => 0.5 * (w + h),
-            Section::Panel => return 0.0,
-        };
-        13.06 * self.grade.flow_pa() * self.gauge.powf(5.0 / 3.0) * b.powf(1.0 / 3.0)
+        match self.section {
+            Section::Box { w, h } | Section::Hat { w, h } => crate::thin_wall::crush::rect_tube_mean_crush(self.grade.flow_pa(), self.gauge, w, h),
+            Section::Panel => 0.0,
+        }
     }
 }
 
