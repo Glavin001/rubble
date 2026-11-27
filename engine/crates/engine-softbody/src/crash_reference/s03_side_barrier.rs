@@ -126,7 +126,7 @@ pub(super) fn scenario() -> CrashScenario {
                 Criterion::new(Physics, "no rollover", "car.roll_peak_deg", None, Some(25.0), "the face's middle (0.56 m up) is near the car's centre of mass (0.51 m): the push shoves more than it tips; only the tyres' grip below tips it"),
                 Criterion::new(Physics, "barrier face stops short of the car's centreline", "pair.barrier_car.reach_max", None, Some(0.0),
                     "a side has 15–30 cm of structure and the cabin's width behind it: no barrier node gets past the car's centre of mass"),
-                Criterion::new(Shape, "little yaw (face centred between the axles)", "car.yaw_peak_deg", None, Some(10.0), "the face's middle 0.10 m ahead of the wheelbase's middle"),
+                Criterion::new(Shape, "little yaw (face centred between the axles)", "car.yaw_abs_peak_deg", None, Some(10.0), "the face's middle 0.10 m ahead of the wheelbase's middle"),
                 Criterion::new(Shape, "roof rail bowed a little", "car.gauge.roof_height.change_residual", Some(-0.10), Some(-0.002), "the frames show the struck roof rail bowed in; the roof itself stays up"),
             ]
         },

@@ -66,11 +66,40 @@ CPU reference, nominal run, measured 2026-11-27. Each is a finding, not a band t
 
 With edge contact the same run also shows what created energy looks like: plastic work of
 419 kJ (three times the energy the scene starts with), a car node at 138 m/s when the barrier
-arrives at 13.9 m/s, and, with continuous contact, 1,195 kJ counted as removed by the contact
-response. Discrete contact has none of this (38 kJ of plastic work, fastest node 23 m/s). Not
-yet diagnosed. Two things in the scene to look at first: the barrier's bumper element is held
-to its main block by push-only beams and folds under the car's sill in every run
-(`crash_rigs.rs`), and the barrier's honeycomb is made of push-only support beams.
+arrives at 13.9 m/s. Discrete contact has none of this (38 kJ of plastic work, fastest node
+16 m/s).
+
+Localised 2026-11-27 (`crates/engine-softbody-lab/tests/crash_metrics_s03_energy.rs`, an
+ignored probe printing the solver's own work ledger every 4 ms):
+
+- The ledger is right for the barrier's beam kinds: its columns, densified blocks and shear
+  beams driven through the solver's force functions give work = plastic + stored to 0.5 %.
+- The energy comes from the position step of edge-contact hits. With that step off for edge
+  hits (`EDGE_NO_SHIFT=1`, a measurement switch) the run creates 9 J, plastic work is
+  37.6 kJ and the fastest car node 16 m/s, as with discrete contact. With edge contact on
+  outer-skin edges only (`EDGE_OUTER_ONLY=1`): 9 J.
+- It starts at first contact, in car-to-barrier contact, and pumps about 10 kJ every 4 ms
+  while the barrier stays pressed; the fast nodes are the door's inner-panel nodes.
+- The barrier's bumper element is not the source (removed: still 8,575 J). It does go under
+  the sill: barrier nodes end 3.3-3.7 m past the car's centre of mass in every contact mode.
+- Hypothesis, not established: edge hits on inner-face edges take their side from the
+  partner, and their position step pushes inner door-panel nodes against the beams tying
+  them to the outer skin every step, storing energy no force paid for.
+
+Also failing with continuous contact, CPU reference, nominal run: S08 creates 443 J (at most
+340) and its common centre of mass ends at 0.454 m/s (at most 0.3); discrete: 48 J and 0.106.
+
+Collision-mesh crossings at any sample (the repo's hard rule is 0), nominal run:
+
+| Scenario | Discrete | Edge | Edge + continuous |
+|---|---|---|---|
+| S03 car and barrier | 94 | 315 | 0 |
+| S08 two sedans | 154 | 31 | 0 |
+
+On the GPU, continuous contact does not engage for a single vehicle against static boxes (it
+runs only on the split group path): a "continuous" run of S01, S02, S07 or S10 there is an
+edge run. With two vehicles (S08, in Chrome) it engages and diverges from the CPU reference
+(momentum along the road -1,024 kg m/s against -13).
 
 ## Reported outside its band
 
