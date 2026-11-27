@@ -93,3 +93,8 @@ fn s08() {
 fn s10() {
     scenario("S10");
 }
+
+#[test]
+fn s09() {
+    scenario("S09");
+}

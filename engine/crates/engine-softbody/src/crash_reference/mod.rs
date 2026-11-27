@@ -20,6 +20,7 @@ mod s02_wall;
 mod s03_side_barrier;
 mod s07_wall_190;
 mod s08_head_on;
+mod s09_car_vs_suv;
 mod s10_block_200;
 
 use crate::desc::SoftVehicleDesc;
@@ -255,6 +256,7 @@ pub fn all() -> Vec<CrashScenario> {
         s03_side_barrier::scenario(),
         s07_wall_190::scenario(),
         s08_head_on::scenario(),
+        s09_car_vs_suv::scenario(),
         s10_block_200::scenario(),
     ]
 }

@@ -1,4 +1,5 @@
-//! S2: full-width rigid wall at 50 km/h (Euro NCAP full width; video 2:10).
+//! S2: an SUV into a full-width rigid wall at 50 km/h (Euro NCAP full width; video 2:10): the
+//! generated 4x4 (`suv_4x4`, 2,000 kg kerb; `engine/docs/generated-vehicles-lessons.md` §21).
 //!
 //! First principles: 13.9 m/s stopped by a front built for 17–33 g gives 0.3–0.6 m of crush;
 //! the load is symmetric, so the car neither yaws nor drifts; the wall does not move.
@@ -10,17 +11,17 @@ const KMH: f32 = 50.0;
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
         id: "S02",
-        title: "Full-width rigid wall, 50 km/h",
+        title: "SUV into a full-width rigid wall, 50 km/h",
         reference: Reference { video: VIDEO, at_s: &[130], real_test: "Euro NCAP full-width rigid barrier, 50 km/h" },
-        designs: &["sedan"],
+        designs: &["suv_4x4"],
         layout: |extent, j| {
-            let e = extent("sedan");
+            let e = extent("suv_4x4");
             let v = KMH / 3.6 * j.speed;
             // A tenth of a second of travel before the wall.
             let gap = 0.1 * v;
             let face = e.hi.z + gap;
             Layout {
-                bodies: vec![Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
+                bodies: vec![Body::new("car", "suv_4x4", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
                 boxes: vec![(Vec3::new(0.0, 2.0, face + 0.5), Vec3::new(0.5 * e.width() + 1.0, 2.0, 0.5))],
                 impact_s: 0.1,
             }

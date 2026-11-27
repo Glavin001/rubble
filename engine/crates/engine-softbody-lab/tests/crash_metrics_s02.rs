@@ -1,6 +1,6 @@
 //! S02 on the CPU reference, as `crash_ref` runs it: every metric of the crash measuring
 //! kit (`engine_softbody::crash_reference::metrics`) is there and finite. Run with
-//! `--release` (rigging the generated sedan and 0.6 s of 2 kHz steps; `--nocapture`
+//! `--release` (rigging the generated 4x4 and 0.6 s of 2 kHz steps; `--nocapture`
 //! prints the values).
 
 use engine_softbody::crash_reference::{self as cr, metrics::Recorder, Contact, CpuRunner, Jitter, Runner, Sample};
@@ -41,7 +41,7 @@ fn crash_metrics_s02_emits_every_metric() {
     }
     want.push("car.zone.front_lr_ratio".into());
     want.push("car.zone.lr_ratio".into());
-    let gauges: Vec<String> = templates["sedan"].zones.gauges.iter().map(|g| g.name.clone()).chain(["length".into(), "length_left".into(), "length_right".into(), "height".into()]).collect();
+    let gauges: Vec<String> = templates[s.designs[0]].zones.gauges.iter().map(|g| g.name.clone()).chain(["length".into(), "length_left".into(), "length_right".into(), "height".into()]).collect();
     for g in &gauges {
         for q in ["rest", "change_peak", "change_residual", "shrink_frac"] {
             want.push(format!("car.gauge.{g}.{q}"));

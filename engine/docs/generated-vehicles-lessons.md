@@ -450,10 +450,56 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   Accord's closures and engine. The lint's `mass` rule now fails it at −26.5 %
   (1410 kg against 1920 kg ± 10 %), inside the already-listed
   `every_other_design_passes_every_rule`.
-- **Open (not retuned): where an SUV's extra 590 kg goes.** A ladder frame, heavier axles
-  and hubs, a larger engine and transfer case, bigger closures. This is a definition
-  change per part, and the strengths derived from the same sedan values would need to be
-  checked with it.
+- **(Fix, 2026-11-27) The 4x4's mass, built up part by part** (`designs/suv4x4/mass.rs`;
+  each figure says whether it is published or an engineering estimate, with its
+  uncertainty; none was fitted to the kerb, nothing is scaled by a factor). What a
+  body-on-frame mid-size 4x4 has that the unibody sedan lacks or has heavier, each on the
+  part that is it or the nodes where it is: the ladder frame's middle section (+100 kg: a
+  140 kg frame less the horns the unibody's own rails carry, half on each subframe's inner
+  nodes), a 4.0 L V6 (+40), a heavier automatic (+30) and a transfer case (+35) with its
+  skid plate (+6), a front differential and propshaft on the front crossmember (+40) and
+  its skid plate (+10), front CV shafts and brakes (+11 a hub), a solid rear axle's carrier
+  (+25) and tubes, shafts and half-leaves (+18 a hub), 265/75 R16 steel wheels (+10 each),
+  an 80 L tank full (+30) and its skid (+4), the V6's exhaust (+5): +423 kg of mechanical
+  parts. Rock sliders (+20) and the roof rack when fitted (+12) on the shell. Taller doors,
+  a steel hood, flared fenders, steel bumpers and a full-height tailgate (`Physics` closures,
+  +39.3), and the spare wheel on the tailgate when fitted (+32): +526 kg in all.
+  **Measured:** rigged 1,447.7 → 1,974.0 kg (nodes 1,410 → 1,897 kg: the lint's `mass`
+  passes at −1.2 % of 1,920 kg); topology unchanged (539 nodes, 3,509 beams), stability
+  ω·h 1.848 → 1.841. Parked 4 s (`tests/suv4x4_rest.rs`): 0 broken, 0 bent, ride height
+  still within 0.09 mm after 1.5 s, kinetic energy decaying (0.015 J → 0.003 J). The gate's
+  worst drift rose 2.7 → 4.9 mm (the bar is 5 mm): the 15.5 kg front bumper's lower row
+  (`bf_g2`) sags on its bolts; the same row hangs forward after S02 (below). Open. GLB, `.rskin`, `crash.json` and every other design's
+  output byte for byte as before (the look is unchanged: no visible part was added).
+- **(Measurement) The axle split is the sedan lattice's, not an SUV's.** Before 49.6 % front
+  / 50.4 % rear, after 48.7 / 51.3 (the spare, the tailgate and the tank sit behind the rear
+  axle). A front-engined body-on-frame 4x4 is nearer 52-55 % front (engineering estimate);
+  the sedan the 4x4's lattice comes from is itself 49.6 % front, where a front-drive mid-size
+  sedan is about 60 % (estimate). Not retuned: the masses are where the parts are; the
+  inherited layout (engine 0.09 m ahead of the front axle, a rear differential the
+  front-drive Accord does not have) is the open question.
+- **(Fact) The ladder frame is mass only.** The shared part builders have no frame (its
+  rails, crossmembers and rubber body mounts), so its stiffness and strength are not
+  modelled; the unibody lattice carries the load.
+- **(Fact) Strengths were checked, none changed.** The generator derives a member's
+  strength from its section, gauge and grade (`Member::crush_n`, the crash boxes' and
+  rails' deform), never from mass; the mechanical parts' mounts, the hardware and the
+  closures' hinges and latches are literals (the study's, FMVSS for the seats). Heavier
+  nodes only raise the springs the node budget gives (Σk/m). Open: whether the engine
+  mounts (90 kN, set for 170 kg) and the tailgate's hinges and latch (with 54 kg on them
+  now) hold a 2,000 kg car's loads.
+- **(Measurement) A re-massing rule that was not kept.** A shell member's sheet goes with
+  its sheet area at the same gauge, so its nodes could be re-massed by this car's area over
+  the sedan's. On the 4x4 that takes 12 kg off: the shared definition gives its rear pillar
+  (`c_pillar`, the rear header to 0.16 m above the back light's base) 0.014 m² against the
+  sedan's 0.154 m², a 0.14 m pillar where the 4x4's D-pillar stands 1.1 m tall, and its
+  upright A-pillar is shorter than the sedan's raked one. The definition does not describe
+  a two-box body's rear pillar; the shell keeps the sedan's group masses.
+- **(Measurement) S02 with the 4x4 at 2,000 kg** (CPU, 8 runs each of discrete, edge,
+  continuous): crush 0.25-0.27 m, rebound 0.25-0.31 (the 1,448 kg 4x4: 0.33), no energy
+  created; "the crush stays" reads −0.10 to −0.19 m because the car ends longer than it
+  started: the front bumper's lowest row (`bf_g0`-`bf_g4`) ends 0.08-0.18 m ahead of where
+  it began relative to the centre of mass. At the old mass the same measure was 0.000.
 - **(Fact) `crash.json`** (`gen2/crash_zones.rs`, written beside the JBeam by
   `vg_input::files_with` and `web_files`). This is the crash reference suite's zone map
   and gauges. Each node's zone comes from what it belongs to, by one rule. A shell node
@@ -467,6 +513,7 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
 
 ## Changelog
 
+- 2026-11-27: section 21, the 4x4's mass built up part by part (1,410 → 1,897 kg of nodes; the lint's `mass` passes), the axle split, strengths checked, S02 at the new mass.
 - 2026-11-27: section 21, the 4x4's kerb (2000 kg, the Xterra's) and why the rigged mass stays 1410 kg; `crash.json`.
 
 - 2026-11-27: section 20, glass binding: a pane interpolates its frame (the 4x4's windscreen spike).

@@ -86,14 +86,30 @@ pub struct Suv4x4Params {
 
 impl Default for Suv4x4Params {
     fn default() -> Self {
-        Suv4x4Params { rim_style: "steel".into(), roof_rack: true, spare_wheel: true, paint: [0.10, 0.16, 0.06], metallic: 0.15, roughness: 0.38, physics: Physics { kerb: SUV_KERB_KG, ..Physics::default() } }
+        Suv4x4Params { rim_style: "steel".into(), roof_rack: true, spare_wheel: true, paint: [0.10, 0.16, 0.06], metallic: 0.15, roughness: 0.38, physics: suv_physics() }
+    }
+}
+
+/// The sedan's physics block with the 4x4's kerb and closures ([`mass`]).
+fn suv_physics() -> Physics {
+    Physics {
+        kerb: SUV_KERB_KG,
+        door_f: mass::DOOR_F_KG,
+        door_r: mass::DOOR_R_KG,
+        hood: mass::HOOD_KG,
+        fender: mass::FENDER_KG,
+        decklid: mass::TAILGATE_KG,
+        bumper_f: mass::BUMPER_F_KG,
+        bumper_r: mass::BUMPER_R_KG,
+        ..Physics::default()
     }
 }
 
 /// Kerb mass (kg): a mid-size body-on-frame 4x4 on this 2.70 m wheelbase (the 2012
 /// Nissan Xterra Pro-4X 4WD, also 2.70 m: 4,417-4,425 lb published, 2,004-2,007 kg).
-/// `engine/docs/generated-vehicles-lessons.md` §21: the rigger does not yet read it for
-/// cars on the body definitions.
+/// The rigger takes the car's mass from its parts, not from this: [`mass`] builds the
+/// parts up to it (`engine/docs/generated-vehicles-lessons.md` §21), and the lint's
+/// `mass` rule holds the two together.
 pub const SUV_KERB_KG: f32 = 2000.0;
 
 #[cfg(test)]
@@ -103,6 +119,41 @@ mod kerb_tests {
         let p = super::Suv4x4Params::default();
         assert_eq!(p.physics.kerb, super::SUV_KERB_KG);
         assert!(p.physics.kerb > crate::physics::Physics::default().kerb + 400.0);
+    }
+
+    /// The 4x4's mass build-up lands where the table says, and nothing else moves: the
+    /// mechanical parts gain exactly the table's kg, the shell the sliders' and rack's, and
+    /// no node moves. `--nocapture` prints the table.
+    #[test]
+    fn the_4x4s_mass_is_built_up_part_by_part() {
+        use super::mass;
+        use crate::assemble::Design;
+        let car = super::Suv4x4::new(super::Suv4x4Params::default());
+        let (st0, st) = (car.unibody(), car.body_in_white());
+        let (m0, m) = (crate::mechanical::sedan_parts(&car.gear(), &st0), car.mechanical(&st));
+        let kg = |ps: &[crate::mechanical::MechPart]| ps.iter().map(|p| p.mass()).sum::<f64>();
+        let table: f64 = mass::MECH.iter().map(|a| a.kg).sum();
+        assert!((kg(&m) - kg(&m0) - table).abs() < 1e-9, "mechanical parts gained {} kg, the table {table}", kg(&m) - kg(&m0));
+        for (a, b) in m0.iter().zip(&m) {
+            assert!(a.nodes.iter().zip(&b.nodes).all(|(x, y)| x.pos == y.pos && x.name == y.name));
+        }
+        assert!(st0.nodes.iter().zip(&st.nodes).all(|(x, y)| x.pos == y.pos));
+        let shell: f64 = st.nodes.iter().map(|n| n.mass).sum::<f64>() - st0.nodes.iter().map(|n| n.mass).sum::<f64>();
+        let [sliders, rack] = mass::shell(&mut car.unibody(), true);
+        assert!((shell - sliders - rack).abs() < 1e-9);
+        println!("| part | kg added | basis |\n|---|---|---|");
+        for a in mass::MECH {
+            println!("| {} ({}) | {:+.1} | {} |", a.part, a.what, a.kg, a.basis);
+        }
+        println!("| rock sliders | {sliders:+.1} | engineering estimate: two 2 in. steel tubes with brackets, ±5 kg |");
+        println!("| roof rack | {rack:+.1} | engineering estimate: rails and bars, ±4 kg |");
+        let mut closures = 0.0;
+        for (n, k, k0, why) in mass::CLOSURES {
+            let each = if n.contains("each") { 2.0 } else { 1.0 };
+            closures += each * (k - k0) as f64;
+            println!("| {n} | {:+.1} ({k0:.1} → {k:.1}) | {why} |", k - k0);
+        }
+        println!("mechanical {table:+.1} kg, shell {shell:+.1} kg, closures {closures:+.1} kg: {:+.1} kg", table + shell + closures);
     }
 }
 
@@ -510,7 +561,8 @@ impl Design for Suv4x4 {
             arches: vec![ARCH_F, ARCH_R],
             front_z: Rc::new(front_z),
             rear_z: Rc::new(rear_z),
-            physics: self.p.physics.clone(),
+            // (the spare wheel rides the tailgate: its mass is the tailgate's when fitted)
+            physics: Physics { decklid: self.p.physics.decklid + if self.p.spare_wheel { mass::SPARE_KG } else { 0.0 }, ..self.p.physics.clone() },
             surfaces: Vec::new(),
             structure: None,
             mechanical: Rc::new(Vec::new()),
@@ -518,12 +570,25 @@ impl Design for Suv4x4 {
     }
 
     fn structure(&self) -> Option<Structure> {
-        Some(self.unibody())
+        Some(self.body_in_white())
     }
 
     fn mechanical(&self, st: &Structure) -> Vec<MechPart> {
-        mechanical::sedan_parts(&self.gear(), st)
+        let mut parts = mechanical::sedan_parts(&self.gear(), st);
+        mass::mechanical(&mut parts);
+        parts
     }
 }
 
+impl Suv4x4 {
+    /// The body-in-white with the 4x4's own masses ([`mass::shell`]); the lattice's
+    /// positions are [`Suv4x4::unibody`]'s.
+    pub fn body_in_white(&self) -> Structure {
+        let mut st = self.unibody();
+        mass::shell(&mut st, self.p.roof_rack);
+        st
+    }
+}
+
+pub mod mass;
 mod parts;
