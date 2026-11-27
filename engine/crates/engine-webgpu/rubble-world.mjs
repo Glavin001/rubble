@@ -14,7 +14,7 @@ import init, {
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer, DrawPacer, setStepsInFlight,
   showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
   sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene, presetList as wasmPresetList,
-  crashReferenceRegistry as wasmCrashReferenceRegistry,
+  crashReferenceRegistry as wasmCrashReferenceRegistry, crashReferenceScenario as wasmCrashReferenceScenario, crashLabCatalog as wasmCrashLabCatalog,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -36,6 +36,23 @@ export async function crashReferenceRegistry() {
   ready ??= init();
   await ready;
   return JSON.parse(wasmCrashReferenceRegistry());
+}
+
+/** One crash reference scenario as the registry lists it, for `{ id | family, params }`: a
+ * reference crash with family values changed (marked `modifiedFrom`, the law-based criteria
+ * only) or a scenario family opened directly (crash_ref.rs `crashReferenceScenario`). */
+export async function crashReferenceScenario(spec) {
+  ready ??= init();
+  await ready;
+  return JSON.parse(wasmCrashReferenceScenario(JSON.stringify(spec)));
+}
+
+/** The crash lab's own scenes (each with its parameters) and one-click presets
+ * (engine-world-wasm lab_scenes.rs), parsed. */
+export async function crashLabCatalog() {
+  ready ??= init();
+  await ready;
+  return JSON.parse(wasmCrashLabCatalog());
 }
 
 /**

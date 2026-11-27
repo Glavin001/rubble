@@ -27,17 +27,25 @@ export async function crashRefFolders(scenario) {
   try { const r = await fetch('/__mods/designs.json'); if (r.ok) listed = await r.json(); } catch { /* not listed: the default folder */ }
   const mods = [], designs = {};
   for (const d of scenario.folderDesigns) {
-    const row = listed.find((x) => x.name === d);
-    const folder = row?.folder ? `/__mods/${row.folder}` : `/__mods/${d}_new`;
-    const mod = await loadMod(folder, { pc: row?.pc ?? null });
-    const crash = mod.list.find((f) => f.endsWith('crash.json'));
-    const files = [...mod.files];
-    if (mod.pcName && mod.pc != null) files.push([mod.pcName, mod.pc]);
-    if (crash) { const r = await fetch(`${folder}/${crash}`); if (!r.ok) throw new Error(`${folder}/${crash}: ${r.status}`); files.push([crash, await r.text()]); }
+    // Each design's folder is fetched once a page (a changed design parameter loads only
+    // the new one).
+    if (!folderCache.has(d)) folderCache.set(d, loadFolder(d, listed));
+    const { folder, mod, files } = await folderCache.get(d);
     designs[d] = files;
     mods.push({ design: d, folder, pc: mod.pcName, mod });
   }
   return { mods, designs };
+}
+const folderCache = new Map();
+async function loadFolder(d, listed) {
+  const row = listed.find((x) => x.name === d);
+  const folder = row?.folder ? `/__mods/${row.folder}` : `/__mods/${d}_new`;
+  const mod = await loadMod(folder, { pc: row?.pc ?? null });
+  const crash = mod.list.find((f) => f.endsWith('crash.json'));
+  const files = [...mod.files];
+  if (mod.pcName && mod.pc != null) files.push([mod.pcName, mod.pc]);
+  if (crash) { const r = await fetch(`${folder}/${crash}`); if (!r.ok) throw new Error(`${folder}/${crash}: ${r.status}`); files.push([crash, await r.text()]); }
+  return { folder, mod, files };
 }
 
 /** The orbit camera (crash-lab.mjs `cams`: yaw, pitch, dist about a fixed target) that puts
@@ -101,7 +109,8 @@ const basisText = (b) => (b?.kind === 'law' ? `law: ${b.source}` : b?.kind === '
  * lab's (its camera group, ctx.cams).
  */
 export function createCrashRef(ctx) {
-  const { registry, scenario: s } = ctx;
+  const { registry } = ctx;
+  let s = ctx.scenario;
   const style = document.createElement('style');
   style.textContent = CSS;
   document.head.appendChild(style);
@@ -109,19 +118,25 @@ export function createCrashRef(ctx) {
   el.id = 'crashRef';
   if (!ctx.mount) el.className = 'alone';
   (ctx.mount?.results ?? document.body).appendChild(el);
-  const links = s.reference.links.map((u, i) => {
-    const t = s.reference.atS[i];
-    return `<a href="${esc(u)}" target="_blank" rel="noopener">${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}</a>`;
-  }).join(' · ');
+  // The heading: what the run is and where its criteria come from. A reference crash with
+  // its values changed, or a family opened directly, carries the law-based criteria only.
+  const head = () => {
+    const links = s.reference.links.map((u, i) => {
+      const t = s.reference.atS[i];
+      return `<a href="${esc(u)}" target="_blank" rel="noopener">${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}</a>`;
+    }).join(' · ');
+    const source = s.modifiedFrom ? `<div class="note">Modified from ${esc(s.modifiedFrom)}: its reference criteria (bands derived for its own speed, masses and geometry) are not applied; the law-based criteria below are, from this run's own numbers.</div>`
+      : !s.reference.realTest ? `<div class="note">A scenario family opened directly: the law-based criteria, from this run's own numbers.</div>`
+      : `<div class="muted">${esc(s.reference.realTest)}${links ? ` · reference video ${links}` : ''}</div>`;
+    return `<b>${esc(s.id)} · ${esc(s.title)}</b>${source}<div class="muted">moments: ${s.moments.map((m) => `${esc(m.name)} ${m.after_impact_ms} ms`).join(' · ')}</div>`;
+  };
   // The run's own settings: what is simulated (the Scene panel).
   const pick = document.createElement('div');
   pick.className = 'r';
   pick.innerHTML = `<label class="lbl" for="crContact">contact</label><select id="crContact" title="The contact setting this run uses (registry contacts)">${registry.contacts.map((c) => `<option${c === ctx.contact ? ' selected' : ''}>${c}</option>`).join('')}</select>
       <label for="crRun">run</label><select id="crRun" title="Run 0 is nominal; runs 1–${registry.runs - 1} jitter the speed, the path and the heading slightly (Jitter::run)">${Array.from({ length: registry.runs }, (_, k) => `<option value="${k}"${k === ctx.run ? ' selected' : ''}>${k}${k === 0 ? ' (nominal)' : ''}</option>`).join('')}</select>`;
   (ctx.mount?.scene ?? el).appendChild(pick);
-  el.insertAdjacentHTML('beforeend', `<div class="cr-head"><b>${esc(s.id)} · ${esc(s.title)}</b>
-      <div class="muted">${esc(s.reference.realTest)} · reference video ${links}</div>
-      <div class="muted">moments: ${s.moments.map((m) => `${esc(m.name)} ${m.after_impact_ms} ms`).join(' · ')}</div></div>
+  el.insertAdjacentHTML('beforeend', `<div class="cr-head" id="crHead">${head()}</div>
     <div class="st" id="crStatus"></div>
     <div id="crTable"></div>`);
   const $ = (id) => document.getElementById(id);
@@ -190,6 +205,10 @@ export function createCrashRef(ctx) {
     sampled,
     reset,
     sync,
+    /** The scenario placed again with other values (Rust's entry for it: its criteria,
+     * `modifiedFrom`): the heading and the table follow, then a new run starts (`reset`). */
+    setScenario(info) { s = info; $('crHead').innerHTML = head(); tableKey = null; },
+    scenario: () => s,
     info: () => info,
     report: () => report,
     progress: () => ({ pushed, samples: info?.samples ?? 0, error }),
