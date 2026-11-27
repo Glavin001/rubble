@@ -92,6 +92,35 @@ fn motion(s: &ExplicitBeams) -> (f64, f64) {
     (ke, s.nodes.iter().map(|n| n.mass as f64 * n.vel.x as f64).sum::<f64>() / m)
 }
 
+/// Kinetic + each beam's ½k(ℓ − L)² + gravity's potential, by hand.
+fn mechanical(w: &ExplicitBeamsWorld) -> f64 {
+    w.vehicles.iter().map(|s| {
+        let ke: f64 = s.nodes.iter().map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
+        let pe: f64 = s.beams.iter().map(|b| { let l = (s.nodes[b.a as usize].pos - s.nodes[b.b as usize].pos).length(); 0.5 * b.k as f64 * ((l - b.rest) as f64).powi(2) }).sum();
+        let g: f64 = s.nodes.iter().map(|n| n.mass as f64 * 9.81 * (s.origin.y + n.pos.y) as f64).sum();
+        ke + pe + g
+    }).sum()
+}
+
+/// The integrator's own conserved energy (symplectic Euler, kick then drift: the state is
+/// x_{n+1} with v_{n+1/2}): E = KE + V + (h/2)·Σ v·F(x), F the beams' and gravity's force at x.
+/// Exact for a quadratic potential; the raw KE + V swings by O(ωh) with the bars' ringing
+/// (ωh ≈ 1 here), so it is the measure an impact's energy is judged by.
+fn shadow(w: &ExplicitBeamsWorld) -> f64 {
+    mechanical(w) + w.vehicles.iter().map(|s| {
+        let mut f: Vec<glam::DVec3> = s.nodes.iter().map(|n| glam::DVec3::new(0.0, -9.81 * n.mass as f64, 0.0)).collect();
+        for b in &s.beams {
+            let d = (s.nodes[b.b as usize].pos - s.nodes[b.a as usize].pos).as_dvec3();
+            let l = d.length();
+            if l <= 0.0 { continue; }
+            let fb = d / l * (b.k as f64 * (l - b.rest as f64));
+            f[b.a as usize] += fb;
+            f[b.b as usize] -= fb;
+        }
+        0.5 * STEP as f64 * s.nodes.iter().zip(&f).map(|(n, f)| n.vel.as_dvec3().dot(*f)).sum::<f64>()
+    }).sum::<f64>()
+}
+
 /// Two bars head on at `v` m/s each, 1 cm apart, high above the ground: the run's
 /// (energy kept, rebound speed over arrival speed, contact time over 2L/c).
 fn bars_head_on(v: f32) -> (f64, f64, f64) {
@@ -111,20 +140,24 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
     if let (true, Some(d)) = (std::env::var("BARS_SELF").is_ok_and(|x| x == "0"), w.continuous.as_mut()) {
         d.self_contact = false;
     }
+    // (BARS_VC=0: no discrete vehicle contact pass, a diagnosis.)
+    if std::env::var("BARS_VC").is_ok_and(|x| x == "0") {
+        w.contact = false;
+    }
     w.enable_ledger();
     let e0 = w.ledger.as_ref().unwrap().start;
-    let own0: f64 = w.vehicles.iter().map(|s| {
-        let ke: f64 = s.nodes.iter().map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
-        let pe: f64 = s.beams.iter().map(|b| { let l = (s.nodes[b.a as usize].pos - s.nodes[b.b as usize].pos).length(); 0.5 * b.k as f64 * ((l - b.rest) as f64).powi(2) }).sum();
-        let g: f64 = s.nodes.iter().map(|n| n.mass as f64 * 9.81 * (s.origin.y + n.pos.y) as f64).sum();
-        ke + pe + g
-    }).sum();
+    let (own0, sh0) = (mechanical(&w), shadow(&w));
+    let ke0: f64 = w.vehicles.iter().map(|s| motion(s).0).sum();
     // c = DX·√(k_axial/m): four longitudinal and eight diagonal beams carry the axial load;
     // the measured contact time is compared with 2L/c of the bar's own long-wave speed.
     let (mut first, mut last) = (None, None);
     let steps = (0.2 / STEP) as usize;
     for s in 0..steps {
         w.step();
+        if std::env::var("BARS_TRACE").is_ok() && (s % 20 == 0 || (60..90).contains(&s)) {
+            let l = w.ledger.as_ref().unwrap();
+            println!("trace {s} shadow {:+.4} raw {:+.4} | air {:+.4} beams {:+.4} self {:+.4} slides {:+.4} cn {:+.4} cf {:+.4} gv {:+.4} gh {:+.4} cshift {:+.4} gshift {:+.4}", shadow(&w) - sh0, mechanical(&w) - own0, l.w_air, l.w_beams, l.w_self_contact, l.w_slides, l.w_contact_normal, l.w_contact_friction, l.w_ground_vertical, l.w_ground_horizontal, l.w_contact_shift, l.w_ground_shift);
+        }
         let (_, va) = motion(&w.vehicles[0]);
         if va < 0.9 * v as f64 && first.is_none() {
             first = Some(s);
@@ -135,18 +168,12 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
     }
     let l = w.ledger.as_ref().unwrap();
     let kept = l.mechanical() / e0;
-    // (The same by hand: kinetic + each beam's ½k(ℓ − L)², gravity's work apart.)
-    let own = |w: &ExplicitBeamsWorld| -> f64 {
-        w.vehicles.iter().map(|s| {
-            let ke: f64 = s.nodes.iter().map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
-            let pe: f64 = s.beams.iter().map(|b| { let l = (s.nodes[b.a as usize].pos - s.nodes[b.b as usize].pos).length(); 0.5 * b.k as f64 * ((l - b.rest) as f64).powi(2) }).sum();
-            let g: f64 = s.nodes.iter().map(|n| n.mass as f64 * 9.81 * (s.origin.y + n.pos.y) as f64).sum();
-            ke + pe + g
-        }).sum()
-    };
     let c = w.continuous.as_ref().map(|d| d.total).unwrap_or_default();
-    println!("| contact | CCD impacts {}, zones {}, unresolved {}, speculative KE {:.1} J, mechanical energy changed in the contact pass {:.1} J (DAT_ENERGY=1) |", c.ccd.hits, c.ccd.zones, c.ccd.unresolved, c.spec_ke, c.contact_de);
-    println!("| by hand | mechanical now {:.1} J, start {:.1} J (ledger {:.1} -> {:.1}) |", own(&w), own0, e0, l.mechanical());
+    println!("| contact | CCD impacts {}, rounds {}, row iterations {}, zones {}, unresolved {}, speculative KE {:.1} J, mechanical energy changed in the contact pass {:.1} J (DAT_ENERGY=1) |", c.ccd.hits, c.ccd.rounds, c.ccd.row_iters, c.ccd.zones, c.ccd.unresolved, c.spec_ke, c.contact_de);
+    println!("| by hand | mechanical now {:.1} J, start {:.1} J (ledger {:.1} -> {:.1}) |", mechanical(&w), own0, e0, l.mechanical());
+    // Energy kept, by the integrator's conserved energy, over the bars' kinetic energy at the start.
+    let kept_shadow = 1.0 + (shadow(&w) - sh0) / ke0;
+    println!("| shadow | conserved energy changed {:+.2} J of {:.1} J kinetic: kept {:.4} |", shadow(&w) - sh0, ke0, kept_shadow);
     let (_, va) = motion(&w.vehicles[0]);
     let (_, vb) = motion(&w.vehicles[1]);
     let rebound = 0.5 * (vb - va) / v as f64;
@@ -158,7 +185,8 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
     let t_contact = (last.unwrap_or(steps) as f64 - first.unwrap_or(0) as f64) * STEP as f64;
     let ratio = t_contact / (2.0 * len as f64 / c);
     println!("| bars {v} m/s | energy kept {:.4} | rebound {:.3} of arrival | contact {:.1} ms, {:.2} of 2L/c ({:.1} ms) |", kept, rebound, t_contact * 1e3, ratio, 2e3 * len as f64 / c);
-    (kept, rebound, ratio)
+    let _ = kept;
+    (kept_shadow, rebound, ratio)
 }
 
 /// The elastic bars' mechanical energy is conserved through their impact (elastic theory:

@@ -150,7 +150,7 @@ impl DatStats {
         self.ccd.zone_nodes += o.ccd.zone_nodes;
         self.ccd.unresolved += o.ccd.unresolved;
         self.ccd.zone_spin += o.ccd.zone_spin;
-        (self.ccd.soft_rounds, self.ccd.soft_rows, self.ccd.soft_left) = (self.ccd.soft_rounds + o.ccd.soft_rounds, self.ccd.soft_rows + o.ccd.soft_rows, self.ccd.soft_left + o.ccd.soft_left);
+        (self.ccd.soft_rounds, self.ccd.soft_rows, self.ccd.soft_left, self.ccd.row_iters) = (self.ccd.soft_rounds + o.ccd.soft_rounds, self.ccd.soft_rows + o.ccd.soft_rows, self.ccd.soft_left + o.ccd.soft_left, self.ccd.row_iters + o.ccd.row_iters);
         self.ccd.ke += o.ccd.ke;
         self.ccd.dp = self.ccd.dp.max(o.ccd.dp);
         self.ccd.dl = self.ccd.dl.max(o.ccd.dl);

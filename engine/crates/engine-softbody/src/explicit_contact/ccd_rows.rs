@@ -14,6 +14,10 @@
 use super::ccd::{closest, CcdPair, CcdStats, FixedSums};
 use glam::Vec3;
 
+/// The velocity rows' solve is settled when no row closes past its bound by more than this share
+/// of its pair's gap over the step: no pair can then cross.
+pub(super) const ROW_GAP_SHARE: f32 = 0.01;
+
 /// The most Jacobi iterations a round (`DAT_ROW_ITERS`; a fixed point ends it sooner).
 pub const ROW_ITERS: u32 = 32;
 
@@ -130,6 +134,7 @@ pub(super) fn rows_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
 #[allow(clippy::too_many_arguments)]
 pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], m: &[Vec<f32>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32) -> bool {
     struct VRow {
+        q: usize,
         k: [(usize, u32); 4],
         w: [f32; 4],
         n: Vec3,
@@ -144,6 +149,9 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
     let mut rows: Vec<VRow> = Vec::new();
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
     let mut done = false;
+    let mut listed = std::collections::HashSet::new();
+    // The last solve reached its fixed point (not the iteration cap).
+    let mut settled = false;
     for _ in 0..rounds {
         let hit = collide(x1);
         st.rounds += 1;
@@ -152,7 +160,14 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
             break;
         }
         st.hits += hit.len() as u64;
+        let mut fresh = 0usize;
         for &(q, t) in &hit {
+            // A pair already a row keeps it (its λ accumulates): a second row would count its
+            // nodes twice in the mass splitting.
+            if !listed.insert(q) {
+                continue;
+            }
+            fresh += 1;
             let pr = &pairs[q];
             let (a, b) = (pos(x0, &pr.k), pos(x1, &pr.k));
             let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
@@ -168,7 +183,16 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
             let cf = close(&|v, i| vb[v][i]);
             let cs = if vpre.is_empty() { 0.0 } else { close(&|v, i| vpre[v][i]) };
             let sigma = if cf > 0.0 { (cs / cf).clamp(0.0, 1.0) } else { 0.0 };
-            rows.push(VRow { k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / h, l: 0.0, sigma });
+            rows.push(VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / h, l: 0.0, sigma });
+        }
+        // Every pair still meeting its gap is a row the last solve settled: its row lets it close
+        // to the gap and no further, so the paths are resolved.
+        if fresh == 0 && settled {
+            done = true;
+            break;
+        }
+        if std::env::var("DAT_VDBG").is_ok() {
+            eprintln!("vdbg round hits {} fresh {} settled {} rows {}", hit.len(), fresh, settled, rows.len());
         }
         for c in count.iter_mut() {
             c.iter_mut().for_each(|c| *c = 0);
@@ -182,8 +206,14 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
         }
         let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j] * r.w[j] * mi(r.k[j]) * count[r.k[j].0][r.k[j].1 as usize] as f32).sum()).collect();
         let mut sums = FixedSums::new(x1);
-        for _ in 0..iters {
-            let mut changed = false;
+        settled = false;
+        let mut used = 0u32;
+        for _ in 0..=iters {
+            // Settled when no row closes past its bound by more than a hundredth of its gap over
+            // the step (`ROW_GAP_SHARE`): every pair then ends at least 99 % of its gap apart,
+            // so none can cross. (The Jacobi iterate reaches a floor near 5·10⁻⁵ m/s, 25 nm a
+            // step, on the bars, whatever the iterations: 2026-11-27.)
+            let mut ok = true;
             let next: Vec<f32> = rows
                 .iter()
                 .zip(&d)
@@ -192,11 +222,24 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
                         return r.l;
                     }
                     let cv: f32 = (0..4).map(|j| r.w[j] * r.n.dot(vel[r.k[j].0][r.k[j].1 as usize])).sum();
-                    (r.l - (cv + r.b) / dr).max(0.0)
+                    let g = cv + r.b;
+                    ok &= -g * h <= ROW_GAP_SHARE * pairs[r.q].xi;
+                    (r.l - g / dr).max(0.0)
                 })
                 .collect();
+            if std::env::var("DAT_VDBG").is_ok() && (ok || used == iters) {
+                let viol = rows.iter().zip(&d).map(|(r, &dr)| { if dr <= 0.0 { return 0.0f32; } let cv: f32 = (0..4).map(|j| r.w[j] * r.n.dot(vel[r.k[j].0][r.k[j].1 as usize])).sum(); -(cv + r.b) * h / pairs[r.q].xi }).fold(0.0f32, f32::max);
+                eprintln!("vdbg solve rows {} iters {} viol/gap {:.3e}", rows.len(), used, viol);
+            }
+            if ok {
+                settled = true;
+                break;
+            }
+            if used == iters {
+                break;
+            }
+            used += 1;
             for (r, l) in rows.iter_mut().zip(next) {
-                changed |= l != r.l;
                 r.l = l;
             }
             for (r, &dr) in rows.iter().zip(&d) {
@@ -212,10 +255,8 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
             }
             vel.clone_from_slice(&vb);
             sums.apply(vel, None);
-            if !changed {
-                break;
-            }
         }
+        st.row_iters += used as u64;
         // Positions follow the velocity change.
         for v in 0..x1.len() {
             for i in 0..x1[v].len() {
@@ -251,7 +292,10 @@ pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec
             }
         }
         let theta = if bq > 0.0 { let disc = (a * a - bq * (kp - 2.0 * k0)).max(0.0); ((-a + disc.sqrt()) / bq).clamp(0.0, 1.0) } else { 0.0 };
-        let _ = k0;
+        if std::env::var("DAT_VDBG").is_ok() {
+            let sig: Vec<String> = rows.iter().filter(|r| r.l > 0.0).map(|r| format!("{:.2}", r.sigma)).collect();
+            eprintln!("vdbg back rows {} theta {:.3} ke_before {:.3} ke_after_solve {:.3} sigma [{}]", rows.len(), theta, k0, 0.5 * kp, sig.join(" "));
+        }
         for v in 0..vel.len() {
             for i in 0..vel[v].len() {
                 let dv = back[v][i] * theta as f32;

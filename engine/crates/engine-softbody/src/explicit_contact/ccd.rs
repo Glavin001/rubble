@@ -92,6 +92,8 @@ pub struct CcdStats {
     pub soft_rounds: u64,
     pub soft_rows: u64,
     pub soft_left: u64,
+    /// Velocity rows (`DAT_RESPONSE=vel`): Jacobi iterations run, summed over rounds.
+    pub row_iters: u64,
 }
 
 /// The closest points of a pair at positions `p` (four points): their weights (signed by
