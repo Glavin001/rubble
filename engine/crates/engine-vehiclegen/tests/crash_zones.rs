@@ -21,8 +21,12 @@ fn every_member_and_part_of_every_design_has_a_zone() {
         // A car's load paths; the tractor unit's own (a cab-over on a ladder frame has no
         // hood-and-fender upper path and no rear body: its underrun bumper, cab, axles and
         // wheels, and the frame and what it carries, `Other`).
+        // The semi-trailer's: its rear impact guard (`Rear`, the trailer's rear), axles and
+        // wheels, and the frame, box, rear frame, landing gear and kingpin plate (`Other`).
         let need: &[Zone] = if n == "truck_cab" {
             &[Zone::FrontLower, Zone::Cabin, Zone::Wheel, Zone::Other]
+        } else if n == "box_trailer" {
+            &[Zone::Rear, Zone::Wheel, Zone::Other]
         } else {
             &[Zone::FrontLower, Zone::FrontUpper, Zone::Cabin, Zone::Rear, Zone::Wheel]
         };

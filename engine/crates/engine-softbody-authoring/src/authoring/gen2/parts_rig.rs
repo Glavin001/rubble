@@ -52,6 +52,13 @@ pub const MOUNT_MIN_LEN: f32 = 0.12;
 /// direction for a fit (as `body2::THICK`).
 const THICK: f32 = 0.04;
 
+/// Whether `p` lies on the segment a–b (within `tol`), strictly between its ends.
+fn on_segment(p: DVec3, a: DVec3, b: DVec3, tol: f64) -> bool {
+    let ab = b - a;
+    let t = (p - a).dot(ab) / ab.length_squared().max(1e-18);
+    t > 1e-9 && t < 1.0 - 1e-9 && (a + ab * t).distance(p) <= tol
+}
+
 /// A design rigged by this path: an empty body-in-white and defined parts.
 pub fn applies(inp: &VgInput) -> bool {
     inp.structure
@@ -211,6 +218,13 @@ pub fn hull(pts: &[DVec3]) -> Vec<[usize; 3]> {
                     (pts[cc] - pts[a]).length(),
                 ];
                 let q = area / (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+                // An ear whose new edge a–c runs over another point of the ring would
+                // leave that point on a triangle's edge (a T-junction) and the last
+                // three points collinear, a triangle short: points along a long face's
+                // edges (the trailer's box, 17 stations) did, by the greedy order.
+                if ring.iter().any(|&o| o != a && o != cc && on_segment(pts[o], pts[a], pts[cc], tol)) {
+                    continue;
+                }
                 if best.is_none_or(|x| q > x.0) {
                     best = Some((q, e));
                 }
@@ -692,5 +706,94 @@ pub fn gauges(inp: &VgInput, r: &Rig) -> Vec<engine_softbody::crash_reference::G
     ]
     .into_iter()
     .flatten()
+    .chain(trailer_gauges(&of_class, &nearest, &bounds, wheel(1.0, false)))
     .collect()
+}
+
+type ClassNodes = Vec<(Vec3, String)>;
+
+/// A semi-trailer's gauges (none on a vehicle without its parts): the kingpin plate's
+/// left rear lower node to the rear axle's left inner node (`kingpin_to_axle`: the
+/// kingpin-to-rear-axle distance less the plate's half length), the cargo box's floor
+/// width and its height on the left at mid length (`box_width`, `box_height`), and the
+/// rear sill's lowest left rear node down to the guard bar's (`guard_drop`: how far the
+/// guard hangs under the sill; its change in a crash is the guard pushed against the
+/// trailer).
+fn trailer_gauges(
+    of_class: &dyn Fn(&str) -> ClassNodes,
+    nearest: &dyn Fn(&[(Vec3, String)], Vec3) -> Option<String>,
+    bounds: &dyn Fn(&[(Vec3, String)]) -> (Vec3, Vec3),
+    rear_axle_left: Option<String>,
+) -> Vec<engine_softbody::crash_reference::Gauge> {
+    use engine_softbody::crash_reference::Gauge;
+    let pair = |name: &str, a: Option<String>, b: Option<String>| -> Option<Gauge> {
+        Some(Gauge {
+            name: name.into(),
+            a: a?,
+            b: b?,
+        })
+    };
+    let low_left_rear = |of: &[(Vec3, String)]| {
+        let (lo, hi) = bounds(of);
+        nearest(of, Vec3::new(hi.x, lo.y, lo.z))
+    };
+    let king = of_class("kingpin");
+    let bx = of_class("cargo_box");
+    let (blo, bhi) = bounds(&bx);
+    let mid = 0.5 * (blo.z + bhi.z);
+    [
+        pair("kingpin_to_axle", low_left_rear(&king), rear_axle_left),
+        pair(
+            "box_width",
+            nearest(&bx, Vec3::new(bhi.x, blo.y, mid)),
+            nearest(&bx, Vec3::new(blo.x, blo.y, mid)),
+        ),
+        pair(
+            "box_height",
+            nearest(&bx, Vec3::new(bhi.x, blo.y, mid)),
+            nearest(&bx, Vec3::new(bhi.x, bhi.y, mid)),
+        ),
+        pair(
+            "guard_drop",
+            low_left_rear(&of_class("rear_frame")),
+            low_left_rear(&of_class("guard")),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hull;
+    use glam::{DVec3, Vec3};
+
+    /// A long box with nodes along its edges (a trailer's cargo box: 17 stations over
+    /// 16 m, positions through f32 as the rig holds them): its hull is closed, every node a
+    /// vertex, 2V − 4 triangles.
+    #[test]
+    fn a_long_box_with_collinear_edge_nodes_has_a_closed_hull() {
+        let b = engine_vehiclegen::designs::box_trailer::BoxTrailer::new(Default::default()).cargo();
+        let mut pts = Vec::new();
+        for z in b.stations() {
+            for (x, y) in [(1.2914, 1.155), (1.2914, 4.1148), (-1.2914, 1.155), (-1.2914, 4.1148)] {
+                // (through the JBeam frame and back, as `Rig::g` gives them)
+                let af = engine_vehiclegen::designs::box_trailer::Z_FA as f32;
+                let jy = af - z as f32;
+                pts.push(Vec3::new(x as f32, y as f32, af - jy).as_dvec3());
+            }
+        }
+        let t = hull(&pts);
+        let mut used = vec![false; pts.len()];
+        for tri in &t {
+            for &i in tri {
+                used[i] = true;
+            }
+        }
+        let missing: Vec<usize> = (0..pts.len()).filter(|&i| !used[i]).collect();
+        assert!(missing.is_empty(), "points in no triangle: {missing:?}");
+        assert_eq!(t.len(), 2 * pts.len() - 4);
+        let _ = DVec3::ZERO;
+    }
 }

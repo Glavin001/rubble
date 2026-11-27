@@ -4,6 +4,7 @@
 //! (police, wagon) wraps another design and overrides only what differs;
 //! nothing else (CLI, wasm designer, web build, tests, lab) names a design.
 
+pub mod box_trailer;
 pub mod mach1;
 pub mod mach1_gasser;
 pub mod police;
@@ -122,6 +123,7 @@ pub static REGISTRY: &[Entry] = &[
         rim_styles: suv4x4::RIM_STYLES,
     },
     Entry { name: "truck_cab", title: "4x2 cab-over tractor unit (ladder frame, 7.5 t)", defaults: || serde_json::to_string_pretty(&truck_cab::TruckCabParams::default()).unwrap(), build: |j| { let p: truck_cab::TruckCabParams = serde_json::from_str(j).map_err(|e| format!("parameters: {e}"))?; p.validate()?; Ok(Box::new(truck_cab::TruckCab::new(p))) }, ranges: truck_cab::RANGES, rim_styles: truck_cab::RIM_STYLES },
+    Entry { name: "box_trailer", title: "53 ft tandem dry-van semi-trailer, parked, laden to 15 t", defaults: || serde_json::to_string_pretty(&box_trailer::BoxTrailerParams::default()).unwrap(), build: |j| { let p: box_trailer::BoxTrailerParams = serde_json::from_str(j).map_err(|e| format!("parameters: {e}"))?; p.validate()?; Ok(Box::new(box_trailer::BoxTrailer::new(p))) }, ranges: box_trailer::RANGES, rim_styles: box_trailer::RIM_STYLES },
 ];
 
 pub fn find(name: &str) -> Result<&'static Entry, String> {

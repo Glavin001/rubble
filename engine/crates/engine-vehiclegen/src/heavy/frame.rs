@@ -36,6 +36,10 @@ impl LadderFrame {
             .map(|k| self.z_front + (self.z_rear - self.z_front) * k as f64 / self.bays as f64)
             .collect()
     }
+    /// The stations' spacing (m).
+    pub fn spacing(&self) -> f64 {
+        (self.z_front - self.z_rear) / self.bays as f64
+    }
     /// One rail's steel section (m²): web plus two flanges.
     pub fn rail_area(&self) -> f64 {
         (self.web_h + 2.0 * (self.flange_w - self.gauge)) * self.gauge

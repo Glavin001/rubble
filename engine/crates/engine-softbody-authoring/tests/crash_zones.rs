@@ -41,8 +41,11 @@ fn every_designs_zones_cover_its_nodes_and_every_load_path() {
         assert!(share >= 0.95, "{design}: {:.1} % matched; unmatched {:?}", 100.0 * share, &unmatched[..unmatched.len().min(20)]);
         // A car's load paths; the tractor unit's own (a cab-over on a ladder frame: no hood
         // and fender path, no rear body; the frame and what it carries are `Other`).
+        // The semi-trailer's: its rear impact guard (`Rear`), axles and wheels, the rest `Other`.
         let need: &[Section] = if *design == "truck_cab" {
             &[Section::FrontLower, Section::Cabin, Section::Wheel, Section::Other]
+        } else if *design == "box_trailer" {
+            &[Section::Rear, Section::Wheel, Section::Other]
         } else {
             &[Section::FrontLower, Section::FrontUpper, Section::Cabin, Section::Rear, Section::Wheel]
         };
@@ -77,13 +80,45 @@ fn every_designs_gauges_are_node_pairs_of_a_plausible_length() {
         ("frame_length", 5.3, 6.1),
         ("front_overhang", 1.0, 1.7),
     ];
+    // (m) the 53 ft tandem dry van's (`box_trailer`: a 49 in tandem spread, the kingpin
+    // 40 ft ahead of the rear axle less the plate's 0.45 m half length, a 2.58 m floor
+    // between the walls' nodes, 2.96 m from the floor's underside to the roof, the rails
+    // 14.3 m, the guard 0.47 m under the rear sill): the tandem's spread (named as a
+    // wheelbase: the gauge picks the foremost and rearmost wheels), the kingpin plate to the
+    // rear axle, the box's width and height at mid length, the rail's length, the sill to
+    // the guard's lower edge
+    let trailer: &[(&str, f32, f32)] = &[
+        ("wheelbase_left", 1.1, 1.4),
+        ("wheelbase_right", 1.1, 1.4),
+        ("kingpin_to_axle", 11.3, 12.3),
+        ("box_width", 2.4, 2.6),
+        ("box_height", 2.7, 3.1),
+        ("frame_length", 13.5, 15.5),
+        ("guard_drop", 0.35, 0.65),
+    ];
+    let pos_y = |t: &Template, i: u32| t.desc.nodes[i as usize].position[1];
     for (design, t) in templates() {
         let pos = |n: &str| -> Vec3 {
             let i = t.desc.nodes.iter().position(|x| x.name == n).unwrap_or_else(|| panic!("{design}: gauge node {n} is not in the JBeam"));
             Vec3::from(t.desc.nodes[i].position)
         };
         let mut line = Vec::new();
-        for &(name, lo, hi) in if *design == "truck_cab" { truck } else { car } {
+        if *design == "box_trailer" {
+            // FMVSS 224 S5.1.2: the guard's lower edge at most 560 mm over the ground (the
+            // template's ground: its wheels' lowest point), across its whole width
+            let low = t.desc.wheels.iter().map(|w| 0.5 * (pos_y(t, w.node1) + pos_y(t, w.node2)) - w.radius).fold(f32::MAX, f32::min);
+            let guard = t.desc.nodes.iter().filter(|n| n.name.starts_with("gb")).map(|n| n.position[1]).fold(f32::MAX, f32::min);
+            line.push(format!("guard's lower edge {:.3} m over the ground", guard - low));
+            assert!(guard - low <= 0.56, "{design}: the guard's lower edge stands {:.3} m over the ground (FMVSS 224: at most 0.56)", guard - low);
+        }
+        let bands = if *design == "truck_cab" {
+            truck
+        } else if *design == "box_trailer" {
+            trailer
+        } else {
+            car
+        };
+        for &(name, lo, hi) in bands {
             let g = t.zones.gauges.iter().find(|g| g.name == name).unwrap_or_else(|| panic!("{design}: no gauge {name}"));
             let (a, b) = (pos(&g.a), pos(&g.b));
             let l = a.distance(b);
