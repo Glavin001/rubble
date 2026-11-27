@@ -117,6 +117,7 @@ kernels/vehicle_coupling_query.slang 1
 kernels/explicit_beams_cc_math.slang 4
 kernels/explicit_beams_split_cc.slang 4
 kernels/explicit_beams_split_cc_respond.slang 4
+kernels/explicit_beams_split_cc_vel.slang 4
 kernels/explicit_beams_split_edges.slang 4
 kernels/explicit_beams_vv_edges.slang 4
 kernels/explicit_beams_vv_edges_grid.slang 4
