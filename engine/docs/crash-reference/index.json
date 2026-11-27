@@ -263,6 +263,42 @@
    "camera": "side",
    "moment": "peak crush",
    "look_at": "SUV rides over the car's hood; car's front crushed to the screen and its rear thrown up; SUV's front damaged far less."
+  },
+  {
+   "scenario": "S10",
+   "file": null,
+   "video_s": 393,
+   "shows": "real+beamng",
+   "camera": "side close",
+   "moment": "first contact",
+   "look_at": "About 200 km/h into a narrow block, partial overlap."
+  },
+  {
+   "scenario": "S10",
+   "file": null,
+   "video_s": 394,
+   "shows": "real+beamng",
+   "camera": "side close",
+   "moment": "mid crush",
+   "look_at": "Struck side destroyed back through the front door; rear rising."
+  },
+  {
+   "scenario": "S10",
+   "file": null,
+   "video_s": 395,
+   "shows": "real+beamng",
+   "camera": "side",
+   "moment": "peak pitch",
+   "look_at": "Rear at 40-60 degrees; car swinging round the block."
+  },
+  {
+   "scenario": "S10",
+   "file": null,
+   "video_s": 399,
+   "shows": "real+beamng",
+   "camera": "three-quarter",
+   "moment": "aftermath",
+   "look_at": "Everything ahead of the B-pillar is wreckage; rear half keeps its shape; a wheel and a panel on the ground."
   }
  ]
 }
