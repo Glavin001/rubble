@@ -792,6 +792,7 @@ pub fn files_with(b: &Built, lite: Option<&(Vec<u8>, Skin)>) -> Vec<(String, Vec
         out.push((format!("{name}/{}", lite_skin_file(&name)), skin.encode()));
     }
     add_contact_offsets(b, &mut out);
+    out.extend(super::crash_zones::file(&b.input, &b.rig));
     let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
     let index = serde_json::to_string(&list).unwrap();
     out.push(("files.json".into(), index.into_bytes()));
@@ -823,6 +824,7 @@ pub fn web_files(design: &str, params: &str, h: f64) -> Result<Vec<(String, Vec<
     });
     out.push((format!("{name}/{}", lite_glb_file(&name)), lite.0));
     out.push((format!("{name}/{}", lite_skin_file(&name)), lite.1.encode()));
+    out.extend(super::crash_zones::file(&input, &rig));
     let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
     let index = serde_json::to_string(&list).unwrap();
     out.push(("files.json".into(), index.into_bytes()));

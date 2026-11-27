@@ -11,6 +11,7 @@
 
 pub mod body2;
 pub mod build;
+pub mod crash_zones;
 pub mod export;
 pub mod gen3;
 pub mod mesh;

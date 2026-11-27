@@ -431,7 +431,43 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
   rigid headlamps 4.6–9.1, rigid pieces' centroid weights); none was seen to spike, but a
   rigid piece's frame extrapolated that far turns with the nodes' bending.
 
+## 21. The 4x4's kerb mass, and crash zones from the definitions (2026-11-27)
+
+- **(Fact) Source of the 4x4's kerb.** `suv_4x4` had the sedan's `Physics::default()`
+  (kerb 1450 kg). Its wheelbase is 2.70 m (wheel axle node to axle node). The closest
+  published match is the 2012 Nissan Xterra Pro-4X 4WD, a mid-size body-on-frame 4x4 on the
+  same 2.70 m (106.3 in) wheelbase. Its curb weight is 4,417-4,425 lb (AP fact sheet;
+  cars.com and Guide Auto list 4,417-4,418 lb for the manual 4WD), which is 2,004-2,007 kg.
+  The 4x2 is 4,143 lb (1,879 kg). The design now says `kerb` 2000 kg
+  (`designs/suv4x4.rs` `SUV_KERB_KG`).
+- **(Measurement) The rigged mass did not change: 1410 kg, every JBeam byte as before.**
+  Cars built on the body definitions (all six designs) take their masses from those
+  definitions: the shell groups (`structure::GROUPS`), each `MechPart`'s nodes and the
+  closures' `Physics` masses (`body2::masses`). Only the earlier census rigger
+  (`rig.rs`, "the rigger's own masses") reads `kerb`, putting the remainder in a
+  front-end module. So the 4x4 is the sedan's masses on a taller body: the sedan's shell
+  groups, the sedan's running gear and powertrain (`mechanical::sedan_parts`), the
+  Accord's closures and engine. The lint's `mass` rule now fails it at −26.5 %
+  (1410 kg against 1920 kg ± 10 %), inside the already-listed
+  `every_other_design_passes_every_rule`.
+- **Open (not retuned): where an SUV's extra 590 kg goes.** A ladder frame, heavier axles
+  and hubs, a larger engine and transfer case, bigger closures. This is a definition
+  change per part, and the strengths derived from the same sedan values would need to be
+  checked with it.
+- **(Fact) `crash.json`** (`gen2/crash_zones.rs`, written beside the JBeam by
+  `vg_input::files_with` and `web_files`). This is the crash reference suite's zone map
+  and gauges. Each node's zone comes from what it belongs to, by one rule. A shell node
+  takes its member type's zone (`engine_vehiclegen::crash::member_zone`, checked for
+  every design's members by `engine-vehiclegen/tests/crash_zones.rs`). A mechanical part
+  takes its own `MechPart::zone`, which every part states when it is made. A panel takes
+  `crash_zones::part_zone` (an exhaustive match). Any other body node (shut-line edge
+  nodes, strikers) takes the zone of the nearest shell node. The names are written as the
+  fewest prefixes that give every node its zone (100 % of nodes on all six designs).
+  The gauges are picked from geometry. `tests/crash_zones.rs` (authoring) holds both.
+
 ## Changelog
+
+- 2026-11-27: section 21, the 4x4's kerb (2000 kg, the Xterra's) and why the rigged mass stays 1410 kg; `crash.json`.
 
 - 2026-11-27: section 20, glass binding: a pane interpolates its frame (the 4x4's windscreen spike).
 - 2026-11-27: section 19, two coplanar overlaps fixed in the rigger (a hull face's inside point, a quad's second diagonal).

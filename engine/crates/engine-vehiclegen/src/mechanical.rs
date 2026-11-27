@@ -16,6 +16,7 @@
 
 use glam::DVec3;
 
+use crate::crash::Zone;
 use crate::frame::Frame;
 use crate::mesh::{box_, closed_lathe, rbox, rot_x, Mat, Mesh};
 use crate::structure::{box_along, box_stations, cyl_along, Structure};
@@ -97,6 +98,9 @@ pub struct MechPart {
     /// the study's class: bumper, suspension, wheel, engine, driveline,
     /// exhaust, fuel, cooling, interior
     pub class: &'static str,
+    /// the region of the car it is, for crash measurement ([`crate::crash`]):
+    /// every part states it where it is made
+    pub zone: Zone,
     pub mesh: Mesh,
     pub nodes: Vec<PartNode>,
     pub internal: Vec<Internal>,
@@ -113,8 +117,8 @@ impl MechPart {
     pub fn mass(&self) -> f64 {
         self.nodes.iter().map(|n| n.mass).sum()
     }
-    fn new(name: &str, class: &'static str) -> MechPart {
-        MechPart { name: name.into(), class, mesh: Mesh::new(), nodes: Vec::new(), internal: Vec::new(), mounts: Vec::new(), links: Vec::new(), binds: Vec::new(), meshes: Vec::new() }
+    fn new(name: &str, class: &'static str, zone: Zone) -> MechPart {
+        MechPart { name: name.into(), class, zone, mesh: Mesh::new(), nodes: Vec::new(), internal: Vec::new(), mounts: Vec::new(), links: Vec::new(), binds: Vec::new(), meshes: Vec::new() }
     }
     fn node(&mut self, tag: &str, pos: DVec3, mass: f64) -> String {
         let name = format!("{}_{tag}", self.prefix());
@@ -205,7 +209,7 @@ fn fuel_tank_and_radiator(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
     let r = |x: f64, y: f64, z: f64| f.p(x, y, z);
     // ---- fuel tank: a soft box of 8 under the boot floor, on straps
     {
-        let mut p = MechPart::new("fuel_tank", "fuel");
+        let mut p = MechPart::new("fuel_tank", "fuel", Zone::Other);
         let zr = g.axle_r;
         let (x0, x1, y0, y1, z0, z1) = (-0.40, 0.16, 0.335, 0.440, zr - 0.62, zr - 0.25);
         for (i, (x, y, z)) in [(x0, y0, z0), (x1, y0, z0), (x0, y1, z0), (x1, y1, z0), (x0, y0, z1), (x1, y0, z1), (x0, y1, z1), (x1, y1, z1)].into_iter().enumerate() {
@@ -218,7 +222,7 @@ fn fuel_tank_and_radiator(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
     }
     // ---- radiator on the radiator support
     {
-        let mut p = MechPart::new("radiator", "cooling");
+        let mut p = MechPart::new("radiator", "cooling", Zone::Other);
         let a3 = sh(st, "sh_a3_uc");
         let z = a3.z + 0.062;
         let (hx, y0, y1) = (f.x(0.36), sh(st, "sh_a3_dc").y + 0.035, a3.y - 0.045);
@@ -241,7 +245,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
 
     // ---- bumper beams: 5 across × 2 heights
     for (front, name, kg, yb, h, dz, dep, strength) in [(true, "impact_beam_front", 8.0, 0.45, 0.110, -0.105, 20e3, 60e3), (false, "impact_beam_rear", 6.0, 0.414, 0.090, 0.105, 15e3, 40e3)] {
-        let mut p = MechPart::new(name, "bumper");
+        let mut p = MechPart::new(name, "bumper", if front { Zone::FrontLower } else { Zone::Rear });
         let face = if front { &g.z_nose } else { &g.z_tail };
         let zc = |x: f64| face(f.x(x.abs()), f.y(yb)) + dz;
         let xs = [-0.62, -0.31, 0.0, 0.31, 0.62];
@@ -277,7 +281,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     let (zs_f, zs_r, z_rack) = (g.axle_f + 0.225, g.axle_f - 0.225, g.axle_f + 0.135);
     let tube = |a: DVec3, b: DVec3| bar(a, b, 0.050, 0.050);
     {
-        let mut p = MechPart::new("subframe_front", "suspension");
+        let mut p = MechPart::new("subframe_front", "suspension", Zone::FrontLower);
         for (tg, x, z) in [("fl", sx, zs_f), ("fr", -sx, zs_f), ("rl", sx, zs_r), ("rr", -sx, zs_r)] {
             p.node(tg, r(x, sy, z), 7.0);
         }
@@ -302,7 +306,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     // ---- rear subframe: 4 corners, 2 centre nodes
     let (qy, zq_f, zq_r) = (0.20, g.axle_r + 0.215, g.axle_r - 0.205);
     {
-        let mut p = MechPart::new("subframe_rear", "suspension");
+        let mut p = MechPart::new("subframe_rear", "suspension", Zone::Rear);
         for (tg, x, z) in [("fl", sx, zq_f), ("fr", -sx, zq_f), ("rl", sx, zq_r), ("rr", -sx, zq_r), ("cf", 0.0, zq_f), ("cr", 0.0, zq_r)] {
             p.node(tg, r(x, qy, z), 7.0);
         }
@@ -326,7 +330,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     // ---- steering rack on the front subframe
     let y_rack = sy + 0.055;
     {
-        let mut p = MechPart::new("steering_rack", "suspension");
+        let mut p = MechPart::new("steering_rack", "suspension", Zone::Wheel);
         p.node("l", r(0.28, y_rack, z_rack), 5.0);
         p.node("r", r(-0.28, y_rack, z_rack), 5.0);
         p.mesh = cyl(r(-0.30, y_rack, z_rack), r(0.30, y_rack, z_rack), 0.024);
@@ -347,7 +351,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let wy = ax.wheel_y;
         let at = |dx: f64, dy: f64, dz: f64| DVec3::new(sg * (t + dx), wy + dy, z0 + dz);
         let (lo, up, toe, n4) = (at(-0.16, -0.14, 0.0), at(-0.17, 0.14, 0.0), at(-0.15, -0.035, fwd * 0.135), at(-0.14, 0.02, -fwd * 0.12));
-        let mut hub = MechPart::new(&format!("hub_{cn}"), "suspension");
+        let mut hub = MechPart::new(&format!("hub_{cn}"), "suspension", Zone::Wheel);
         let kg = if front { 17.0 } else { 24.0 };
         let (nlo, nup, ntoe, nn4) = (hub.node("lo", lo, kg / 4.0), hub.node("up", up, kg / 4.0), hub.node("toe", toe, kg / 4.0), hub.node("n4", n4, kg / 4.0));
         hub.internal.push(Internal { pairs: hub.complete(), v: vals(6e6, 100.0, 129e3, INF), deform_group: None });
@@ -359,7 +363,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         // lower arm: two legs from the subframe's corners to the lower joint
         let sub = if front { "subf" } else { "subr" };
         let arm_v = vals(1.2e7, 2000.0, 155e3, 300e3);
-        let mut arm = MechPart::new(&format!("arm_lower_{cn}"), "suspension");
+        let mut arm = MechPart::new(&format!("arm_lower_{cn}"), "suspension", Zone::Wheel);
         let pos_of = |n: &str| out.iter().flat_map(|p| p.nodes.iter()).find(|x| x.name == n).unwrap_or_else(|| panic!("no node {n}")).pos;
         for e in ["f", "r"] {
             let a = format!("{sub}_{e}{s}");
@@ -375,7 +379,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         // arm from the rail
         let tower = if front { format!("sh_a6_{s}") } else { format!("sh_e2_{s}") };
         let pt = sh(st, &tower);
-        let mut strut = MechPart::new(&format!("strut_{cn}"), "suspension");
+        let mut strut = MechPart::new(&format!("strut_{cn}"), "suspension", Zone::Wheel);
         let foot = up;
         // (the tube stops under the wheel-well liner; the tower is above it)
         let dir = (pt - foot).normalize();
@@ -383,7 +387,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         strut.mesh = cyl(foot + dir * 0.03, foot + dir * len, 0.032);
         strut.links.push(Link { name: format!("strut_{c}"), a: nlo.clone(), b: tower.clone(), v: vals(0.0, 200.0, 17e3, 180e3), group: Some(format!("strut_{c}")) });
         strut.binds.extend([tower.clone(), nlo.clone(), nup.clone(), nn4.clone()]);
-        let mut upper = MechPart::new(&format!("arm_upper_{cn}"), "suspension");
+        let mut upper = MechPart::new(&format!("arm_upper_{cn}"), "suspension", Zone::Wheel);
         if front {
             // (a MacPherson strut is clamped to the knuckle at two points)
             for (e, n) in [("a", &nup), ("b", &nn4)] {
@@ -405,13 +409,13 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         // toe link: the rack's end (front) or the subframe's centre (rear)
         let inner = if front { format!("ster_{s}") } else { format!("subr_r{s}") };
         let pi = pos_of(&inner);
-        let mut tie = MechPart::new(&format!("toe_link_{cn}"), "suspension");
+        let mut tie = MechPart::new(&format!("toe_link_{cn}"), "suspension", Zone::Wheel);
         let a0 = if front { pi + DVec3::X * sg * 0.03 } else { pi + (toe - pi).normalize() * 0.075 + DVec3::Y * 0.03 };
         tie.mesh = cyl(a0, toe - (toe - a0).normalize() * 0.03, 0.012);
         tie.links.push(Link { name: format!("toe_link_{c}"), a: inner.clone(), b: ntoe.clone(), v: vals(1.7e7, 100.0, 85e3, 250e3), group: Some(format!("toe_link_{c}")) });
         tie.binds.extend([inner, ntoe.clone(), nlo.clone(), nup.clone()]);
         // wheel: two axle nodes on the spin axis and three frame nodes
-        let mut wh = MechPart::new(&format!("wheel_{cn}"), "wheel");
+        let mut wh = MechPart::new(&format!("wheel_{cn}"), "wheel", Zone::Wheel);
         wh.node("ai", at(-0.125, 0.0, 0.0), 5.0);
         wh.node("ao", at(0.125, 0.0, 0.0), 5.0);
         let rr = 0.42 * ax.rim_d;
@@ -429,7 +433,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         wh.mounts.push(Mount { group: format!("wheel_{c}"), from: vec![wh.nodes[2].name.clone()], to: hub.names(), beams: 2, kind: BeamKind::Normal, v: vals(1e6, 100.0, 168e3, 168e3), precomp: 1.0 });
         wh.meshes.extend([format!("rim_{cn}"), format!("tyre_{cn}")]);
         // hub cap: a pressed disc clipped into the rim's centre
-        let mut cap = MechPart::new(&format!("hub_cap_{cn}"), "wheel");
+        let mut cap = MechPart::new(&format!("hub_cap_{cn}"), "wheel", Zone::Wheel);
         let xc = 0.5 * ax.rim_w - 0.012;
         for k in 0..3 {
             let a = std::f64::consts::TAU * (k as f64 / 3.0 + 0.25);
@@ -465,7 +469,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     // ---- engine: 8 block corners and 2 mount ears, on the front subframe
     let (ex, ey0, ey1, ez0, ez1) = (0.20, 0.335, 0.735, g.axle_f - 0.215, g.axle_f + 0.385);
     {
-        let mut p = MechPart::new("engine", "engine");
+        let mut p = MechPart::new("engine", "engine", Zone::Other);
         for (i, (x, y, z)) in [(ex, ey0, ez1), (-ex, ey0, ez1), (ex, ey1, ez1), (-ex, ey1, ez1), (ex, ey0, ez0), (-ex, ey0, ez0), (ex, ey1, ez0), (-ex, ey1, ez0)].into_iter().enumerate() {
             p.node(&format!("{}", i + 1), r(x, y, z), 19.0);
         }
@@ -496,7 +500,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     // ---- transmission behind it, into the tunnel's mouth
     let (z_tt, y_tt) = (g.axle_f - 0.93, 0.305);
     {
-        let mut p = MechPart::new("transmission", "driveline");
+        let mut p = MechPart::new("transmission", "driveline", Zone::Other);
         p.node("t", r(0.0, y_tt, z_tt), 20.0);
         p.node("b", r(0.0, 0.40, ez0 - 0.10), 25.0);
         p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(4.8e6, 150.0, 27e3, INF), deform_group: None });
@@ -511,7 +515,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     // ---- driveshaft, differential, half-shafts
     let (z_dn, y_d) = (g.axle_r + 0.17, 0.31);
     {
-        let mut p = MechPart::new("driveshaft", "driveline");
+        let mut p = MechPart::new("driveshaft", "driveline", Zone::Other);
         let (a, b) = (r(0.0, y_tt, z_tt - 0.07), r(0.0, y_d - 0.012, z_dn + 0.018));
         p.node("f", a, 0.5);
         p.node("r", b, 0.5);
@@ -525,7 +529,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         out.push(p);
     }
     {
-        let mut p = MechPart::new("differential", "driveline");
+        let mut p = MechPart::new("differential", "driveline", Zone::Other);
         p.node("n", r(0.0, y_d, z_dn), 14.0);
         p.node("l", r(0.11, y_d, g.axle_r - 0.02), 14.0);
         p.node("r", r(-0.11, y_d, g.axle_r - 0.02), 14.0);
@@ -536,7 +540,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         for (cn, sg) in [("RL", 1.0), ("RR", -1.0)] {
             let c = cn.to_lowercase();
             let s = if sg > 0.0 { "l" } else { "r" };
-            let mut hs = MechPart::new(&format!("halfshaft_{cn}"), "driveline");
+            let mut hs = MechPart::new(&format!("halfshaft_{cn}"), "driveline", Zone::Other);
             let (a, b) = (r(sg * 0.112, y_d, g.axle_r), DVec3::new(sg * (t - 0.215), g.axle(false).wheel_y, g.zr));
             hs.mesh = cyl(a, b, 0.018);
             hs.links.push(Link { name: format!("halfshaft_{c}"), a: format!("dif_{s}"), b: format!("whe{c}_ai"), v: vals(0.0, 20.0, 3600.0, 9500.0), group: Some(format!("halfshaft_{c}")) });
@@ -548,7 +552,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
 
     // ---- exhaust: a chain of 13 from the manifold to the tail pipe
     {
-        let mut p = MechPart::new("exhaust", "exhaust");
+        let mut p = MechPart::new("exhaust", "exhaust", Zone::Other);
         let zr = g.axle_r;
         let pts = [
             (0.26, 0.47, g.axle_f + 0.05),
@@ -611,7 +615,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     let y_xm = f.y(y_pan) + 0.060 + 0.006;
     for (cn, sg) in [("FL", 1.0), ("FR", -1.0)] {
         let s = if sg > 0.0 { "l" } else { "r" };
-        let mut p = MechPart::new(&format!("seat_{cn}"), "interior");
+        let mut p = MechPart::new(&format!("seat_{cn}"), "interior", Zone::Other);
         let (x, zc) = (sg * f.x(0.38), 0.5 * (rows.0 + rows.1));
         let h = y_xm + 0.020;
         p.mesh = crate::parts::bucket_seat(x, zc, h, Mat::InteriorFabric, true);
@@ -641,7 +645,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         out.push(p);
     }
     {
-        let mut p = MechPart::new("seat_rear", "interior");
+        let mut p = MechPart::new("seat_rear", "interior", Zone::Other);
         let e3 = sh(st, "sh_e3_1");
         let (hx, yc, zc) = (f.x(0.47), e3.y + 0.042 + 0.07, e3.z + 0.185);
         p.mesh.add(&rbox(DVec3::new(0.0, yc, zc), DVec3::new(hx, 0.07, 0.20), 0.05, 3, Mat::InteriorFabric));
@@ -658,7 +662,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         out.push(p);
     }
     {
-        let mut p = MechPart::new("dash", "interior");
+        let mut p = MechPart::new("dash", "interior", Zone::Cabin);
         // the cross-car beam under the cowl, behind the leaning firewall (b1-b2) by its radius + 1 cm
         let (b1, b2) = (sh(st, "sh_b1_ol"), sh(st, "sh_b2_ol"));
         let (hx, yb) = (b2.x + 0.012, b2.y - 0.135);
@@ -685,7 +689,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         out.push(p);
     }
     {
-        let mut p = MechPart::new("console", "interior");
+        let mut p = MechPart::new("console", "interior", Zone::Other);
         let (c2, c4) = (sh(st, "sh_c3_2"), sh(st, "sh_c3_4"));
         let (z0, z1, y0) = (c2.z - 0.10, c4.z + 0.05, c2.y + 0.008);
         p.mesh = rbox(DVec3::new(0.0, y0 + 0.075, 0.5 * (z0 + z1)), DVec3::new(0.085, 0.075, 0.5 * (z0 - z1)), 0.03, 2, Mat::InteriorPlastic);
@@ -706,10 +710,10 @@ mod tests {
     #[test]
     fn node_prefixes_are_short_and_distinct() {
         let names = ["impact_beam_front", "impact_beam_rear", "subframe_front", "subframe_rear", "steering_rack", "hub_FL", "hub_RR", "wheel_FL", "hub_cap_FL", "engine", "transmission", "driveshaft", "differential", "exhaust", "fuel_tank", "radiator", "seat_FL", "seat_rear", "dash", "console"];
-        let mut p: Vec<String> = names.iter().map(|n| MechPart::new(n, "x").prefix()).collect();
-        assert_eq!(MechPart::new("subframe_front", "x").prefix(), "subf");
-        assert_eq!(MechPart::new("wheel_RL", "x").prefix(), "wherl");
-        assert_eq!(MechPart::new("hub_FL", "x").prefix(), "hubfl");
+        let mut p: Vec<String> = names.iter().map(|n| MechPart::new(n, "x", Zone::Other).prefix()).collect();
+        assert_eq!(MechPart::new("subframe_front", "x", Zone::Other).prefix(), "subf");
+        assert_eq!(MechPart::new("wheel_RL", "x", Zone::Other).prefix(), "wherl");
+        assert_eq!(MechPart::new("hub_FL", "x", Zone::Other).prefix(), "hubfl");
         p.sort();
         p.dedup();
         assert_eq!(p.len(), names.len());
