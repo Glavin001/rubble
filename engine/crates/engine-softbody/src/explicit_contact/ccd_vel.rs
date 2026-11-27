@@ -32,6 +32,12 @@ fn push_tol() -> f32 {
     std::env::var("DAT_PUSH_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(PUSH_TOL)
 }
 
+/// A pair already a row is linearised again only when it ends closer than this share of what it
+/// may close to (`DAT_RELIN`).
+fn relin_share() -> f32 {
+    std::env::var("DAT_RELIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0 - ROW_GAP_SHARE)
+}
+
 /// APGD's momentum restarts every this many iterations.
 pub(super) const APGD_RESTART: u32 = 16;
 
@@ -154,6 +160,7 @@ impl Ctx<'_> {
             }
             st.hits += hit.len() as u64;
             let mut fresh = 0usize;
+            let mut relin = 0usize;
             for &(q, t) in &hit {
                 let pr = &self.pairs[q];
                 let (a, b) = (pos(self.x0, &pr.k), pos(x1, &pr.k));
@@ -161,9 +168,15 @@ impl Ctx<'_> {
                 // close to (its gap, or its start distance when it began inside the gap) keeps
                 // its row; one closer is linearised again at its impact now (its normal turns
                 // with its features), keeping its λ.
+                // The end separation is signed, along the row's own normal: a pair that passed
+                // through within the step is as far apart unsigned as one that stopped short.
                 let old = listed.get(&q).copied();
-                if old.is_some() && closest(pr.nn, b).1.length() >= (1.0 - ROW_GAP_SHARE) * closest(pr.nn, a).1.length().min(pr.xi) {
-                    continue;
+                if let Some(i) = old {
+                    let r = &rows[i];
+                    let s_end: f32 = (0..4).map(|j| r.w[j] * r.n.dot(b[j])).sum();
+                    if s_end >= relin_share() * closest(pr.nn, a).1.length().min(pr.xi) {
+                        continue;
+                    }
                 }
                 let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
                 let (w, gv) = closest(pr.nn, at);
@@ -179,6 +192,7 @@ impl Ctx<'_> {
                 }
                 match old {
                     Some(i) => {
+                        relin += 1;
                         r.l = rows[i].l;
                         rows[i] = r;
                     }
@@ -191,6 +205,9 @@ impl Ctx<'_> {
             // Every pair still meeting its gap is a row the last solve settled: resolved.
             if fresh == 0 && settled {
                 return true;
+            }
+            if std::env::var("DAT_VDBG").is_ok() {
+                eprintln!("vdbg round {} hits {} fresh {} relin {} settled {} rows {}", st.rounds, hit.len(), fresh, relin, settled, rows.len());
             }
             settled = self.solve(&mut rows, &vb, vel, st);
             for v in 0..x1.len() {

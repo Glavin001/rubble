@@ -120,6 +120,8 @@ pub struct DatStats {
     /// Surface nodes the speculative pass moved past twice their vehicle's listing reach (the
     /// listing's bound broken: an error).
     pub reach_over: u64,
+    /// Velocity contact: steps whose response ran again over pairs its motion newly reached.
+    pub relisted: u64,
     /// The smallest fraction taken, the kinetic energy (J) and momentum (N·s, summed
     /// magnitudes) the cuts removed.
     pub min_t: f32,
@@ -169,6 +171,7 @@ impl DatStats {
         self.min_gap = self.min_gap.min(o.min_gap);
         self.over_step += o.over_step;
         self.reach_over += o.reach_over;
+        self.relisted += o.relisted;
         self.min_t = self.min_t.min(o.min_t);
         self.ke_removed += o.ke_removed;
         self.p_removed += o.p_removed;
@@ -530,11 +533,7 @@ impl ExplicitBeamsWorld {
         if dat.ccd_rounds > 0 {
             // The physical guarantee: CCD with inelastic impulses, then impact zones.
             let q = reach(&x1, &zero);
-            let pairs: Vec<super::ccd::CcdPair> = recs
-                .iter()
-                .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, &q, true) + side(r, &q, false)))
-                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: if dat.penalty > 0.0 { dat.min_gap } else { (xi_share() * r.d).max(dat.min_gap) } })
-                .collect();
+            let pairs = ccd_pairs(&recs, &q, dat.min_gap, dat.penalty);
             st.pairs_ccd = pairs.len() as u64;
             let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
             let mut vs: Vec<Vec<Vec3>> = (0..x1.len())
@@ -542,6 +541,9 @@ impl ExplicitBeamsWorld {
                 .collect();
             let vpre: Vec<Vec<Vec3>> = if pre.is_empty() { Vec::new() } else { pre.iter().map(|p| p.iter().map(|q| q.1).collect()).collect() };
             super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpre, dat.restitution, dat.velocity);
+            if dat.velocity {
+                relist_velocity(dat, &mut recs, &mut own_reach, &surf, &off, &x0, &mut x1, &mut vs, &m, &im, &vpre, &reach_v, pairs.len(), &mut st);
+            }
             vfinal = Some(vs);
         }
         let q = reach(&x1, &zero);
@@ -772,6 +774,59 @@ fn close_pairs(x: &[Vec3], s: &Surface, eps: f32) -> Vec<([u32; 4], f32)> {
         }
     }
     out
+}
+
+/// The CCD's pairs among the records: within twice the two sides' reach `q` this step.
+fn ccd_pairs(recs: &[Rec], q: &[Vec<f32>], min_gap: f32, penalty: f32) -> Vec<super::ccd::CcdPair> {
+    let side = |r: &Rec, neg: bool| {
+        let js = if neg { 0..r.nn } else { r.nn..r.len };
+        js.map(|j| q[r.k[j].0][r.k[j].1 as usize]).fold(0.0f32, f32::max)
+    };
+    recs.iter()
+        .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, true) + side(r, false)))
+        .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: if penalty > 0.0 { min_gap } else { (xi_share() * r.d).max(min_gap) } })
+        .collect()
+}
+
+/// Velocity contact moves nodes by impulses, which can carry a node farther than the reach its
+/// pairs and records were listed for (a bounce, a push from its neighbours' rows; and the records
+/// are listed relative to each vehicle's first node, which the response may move too): it could
+/// then meet a pair not listed. Each vehicle's reach the response grew lists the records again,
+/// the pairs the final reach adds are listed, and the response runs again from here, until the
+/// listing covers the motion (at most four times).
+#[allow(clippy::too_many_arguments)]
+fn relist_velocity(dat: &mut Dat, recs: &mut Vec<Rec>, own_reach: &mut [f32], surf: &[Surface], off: &[Vec<Vec3>], x0: &[Vec<Vec3>], x1: &mut Vec<Vec<Vec3>>, vs: &mut Vec<Vec<Vec3>>, m: &[Vec<f32>], im: &[Vec<f32>], vpre: &[Vec<Vec3>], reach_v: &[f32], listed: usize, st: &mut DatStats) {
+    let mut reach_l = reach_v.to_vec();
+    let mut n = listed;
+    for _ in 0..4 {
+        let fin: Vec<f32> = surf.iter().enumerate().map(|(v, s)| {
+            let r0 = x1[v][0] - x0[v][0];
+            s.nodes.iter().map(|&i| ((x1[v][i as usize] - x0[v][i as usize]) - r0).length()).fold(0.0f32, f32::max)
+        }).collect();
+        let mut grew = false;
+        for (l, f) in reach_l.iter_mut().zip(&fin) {
+            if *f > *l {
+                *l = *f;
+                grew = true;
+            }
+        }
+        if grew {
+            let refs_l: Vec<(Vec3, Vec3)> = (0..x0.len()).map(|v| (x1[v][0] - x0[v][0], vs[v][0])).collect();
+            let mut own_l = vec![0.0f32; x0.len()];
+            *recs = list_pairs(dat, x0, surf, off, &reach_l, &refs_l, &mut own_l, st);
+            for (o, l) in own_reach.iter_mut().zip(own_l) {
+                *o = o.max(l);
+            }
+        }
+        let q: Vec<Vec<f32>> = x1.iter().zip(x0).map(|(a, b)| a.iter().zip(b).map(|(p, o)| (*p - *o).length()).collect()).collect();
+        let more = ccd_pairs(recs, &q, dat.min_gap, dat.penalty);
+        if !grew && more.len() <= n {
+            break;
+        }
+        n = more.len();
+        st.relisted += 1;
+        super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.restitution, dat.velocity);
+    }
 }
 
 /// Every listed pair at the step's start `x0` (point-triangle, edge-edge; between vehicles
