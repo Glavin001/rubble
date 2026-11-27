@@ -62,6 +62,8 @@ pub fn lattice(st: &Structure, ph: &Physics) -> Lattice {
         _ => 1.0,
     };
     super::crash_box_cell::lattice(st, &mut l, ph, rate("crash_box"), rate("front_rail"));
+    // The front load path (its cells, braces and upper rail; off: nothing).
+    super::load_path::lattice(st, &mut l, ph);
     // Rule 2: the beams that cross the crash box's bay without being the box (one end on the
     // box's front nodes, the other behind its rear nodes) carry, together and in their axial
     // direction, a share of the box's own chords.
@@ -115,6 +117,7 @@ pub fn apply(r: &mut Rig, inp: &dyn RigInput) {
     if rules.is_off() {
         return;
     }
+    super::load_path::apply(r, inp);
     let (car, member) = (&mut r.car, &r.member);
     let name = |car: &super::build::Car, i: usize| car.nodes[i].name.clone();
     // Rule 3: the crash box's chords crush flat to their stroke.

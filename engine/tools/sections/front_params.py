@@ -14,17 +14,19 @@ import subprocess
 import sys
 
 RULES = ["subframe_mounts_off_crash_box", "crash_box_bay_alone", "crash_box_stroke", "yielding_stops", "hood_fold_row", "crush_from_section", "crash_box_cell"]
+# the front load path (front-load-path.md): its own switch, not part of `all` (the seven above)
+EXTRA = ["load_path"]
 
 
 def main():
     design, out, *args = sys.argv[1:]
     p = json.loads(subprocess.run(["target/release/examples/vehicle_gen_rig", design, "--defaults"], check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120).stdout)
-    rules = {r: False for r in RULES}
+    rules = {r: False for r in RULES + EXTRA}
     for a in args:
         if a.startswith("crash="):
             p["physics"]["crash"] = a.split("=", 1)[1]
         elif a == "all":
-            rules = {r: True for r in RULES}
+            rules.update({r: True for r in RULES})
         elif a in rules:
             rules[a] = True
         else:

@@ -16,6 +16,7 @@ pub mod crash_zones;
 pub mod export;
 pub mod front_rules;
 pub mod gen3;
+pub mod load_path;
 pub mod mesh;
 pub mod model;
 pub mod parts_rig;

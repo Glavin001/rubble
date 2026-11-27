@@ -159,6 +159,16 @@ pub struct FrontRules {
     /// force. Off: the planar four-node cell (it swings about its rear nodes, §25.2).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub crash_box_cell: bool,
+    /// The front load path designed from the 2012 Camry's (`engine/docs/front-load-path.md`):
+    /// the crash boxes and rails closed four-corner cells back to the firewall, each bay at its
+    /// section's mean crush force with a flat stroke; the bumper beam on a bolted plate on the
+    /// boxes' front corners; the subframe mounted under the rail stations above its corners;
+    /// the upper rails their own member to the hinge pillar; nothing else across the bays at
+    /// more than [`CRASH_BOX_BAY_BRACE_SHARE`] of a bay; the engine's stops engaging where the
+    /// block meets the structure. It calls rules 1, 4 and 5 and supersedes 2, 3 and the box
+    /// cell ([`FrontRules::resolved`]). Off: every design's files as before.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub load_path: bool,
 }
 
 /// [`FrontRules::crash_box_bay_alone`]: the braces across a crash box's bay together carry
@@ -199,6 +209,7 @@ impl FrontRules {
                 "hood_fold_row" => r.hood_fold_row = true,
                 "crush_from_section" => r.crush_from_section = true,
                 "crash_box_cell" => r.crash_box_cell = true,
+                "load_path" => r.load_path = true,
                 _ => panic!("RUBBLE_FRONT_RULES: no rule {n}"),
             }
         }
@@ -214,7 +225,38 @@ impl FrontRules {
             hood_fold_row: true,
             crush_from_section: true,
             crash_box_cell: true,
+            load_path: false,
         }
+    }
+    /// The rules the rigger applies: with [`FrontRules::load_path`] on, the earlier rules it
+    /// calls (1 the subframe's mounts, 4 the yielding stops, 5 the hood row and panels, 6 the
+    /// crash rate) are on and those it supersedes (2 the bay's braces, 3 the box's stroke, the
+    /// box cell: each bay's cell, braces and stroke are its own) are off. Without it, the rules
+    /// as given.
+    pub fn resolved(&self) -> Self {
+        if !self.load_path {
+            return self.clone();
+        }
+        Self {
+            subframe_mounts_off_crash_box: load_path_step("mounts"),
+            crash_box_bay_alone: false,
+            crash_box_stroke: false,
+            yielding_stops: load_path_step("panels"),
+            hood_fold_row: load_path_step("panels"),
+            crush_from_section: true,
+            crash_box_cell: false,
+            load_path: true,
+        }
+    }
+}
+
+/// Whether a step of [`FrontRules::load_path`] is on: all of them, unless `LOAD_PATH_STEPS` (a
+/// measurement switch, comma separated: `cells`, `plate`, `mounts`, `upper`, `panels`, `engine`,
+/// or `all`) lists the ones to build, so each step's effect can be measured alone.
+pub fn load_path_step(name: &str) -> bool {
+    match std::env::var("LOAD_PATH_STEPS") {
+        Ok(v) => v.split(',').any(|s| s.trim() == name || s.trim() == "all"),
+        Err(_) => true,
     }
 }
 
