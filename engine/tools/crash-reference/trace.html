@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crash reference tracings</title>
+<style>
+  :root { --bg: #0f131a; --panel: #18202c; --line: #2b3648; --text: #e3e8f0; --muted: #93a0b5; --real: #ff4d4d; --beamng: #3d8bff; --hood: #ffb000; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; display: flex; height: 100vh; }
+  #side { width: 290px; padding: 12px; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; }
+  #side h1 { font-size: 15px; margin: 0 0 8px; }
+  #side label { display: block; color: var(--muted); margin: 10px 0 3px; }
+  select, button, input[type=text] { width: 100%; background: #0f1520; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; font: inherit; }
+  button { cursor: pointer; margin-top: 6px; }
+  button.primary { background: #23497f; border-color: #3d6fb5; }
+  .row { display: flex; gap: 6px; } .row > * { flex: 1; }
+  #help { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  #help b { color: var(--text); }
+  #status { margin-top: 10px; min-height: 1.4em; }
+  #wrap { flex: 1; position: relative; overflow: hidden; cursor: crosshair; }
+  canvas { position: absolute; left: 0; top: 0; }
+  kbd { border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; }
+</style>
+</head>
+<body>
+<div id="side">
+  <h1>Reference tracings</h1>
+  <label for="file">Frame</label>
+  <select id="file"></select>
+  <label for="half">Half</label>
+  <select id="half"></select>
+  <label for="line">Active line (new points go here)</label>
+  <select id="line"></select>
+  <div class="row"><input type="text" id="newName" placeholder="new line name"><button id="addLine" style="flex:0 0 70px;margin:0">Add</button></div>
+  <label><input type="checkbox" id="approx"> approximate (uncheck once you have checked every point)</label>
+  <label for="by">Traced by</label>
+  <input type="text" id="by">
+  <button class="primary" id="save">Save to the repository (POST)</button>
+  <button id="download">Download JSON</button>
+  <div id="status"></div>
+  <div id="help">
+    <b>Drag</b> a point to move it (any line of the chosen half).<br>
+    <b>Shift-click</b>: add a point to the active line (inserted at the nearest segment; <kbd>A</kbd> held: appended at its end).<br>
+    <b>Alt-click</b> a point: delete it.<br>
+    <b>Wheel</b>: zoom about the cursor; <b>right-drag</b> or <b>space-drag</b>: pan; <kbd>0</kbd>: fit.<br>
+    Wheels: drag the centre, and the rim point to set the radius. Crop: the half's outline (dashed).<br>
+    Points are stored as fractions of the image width and height.
+  </div>
+</div>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const cv = $('c'), cx = cv.getContext('2d');
+let doc = null, name = null, img = new Image();
+let view = { s: 1, x: 0, y: 0 };
+let drag = null, pan = null, keys = new Set();
+const COL = { real: '#ff4d4d', beamng: '#3d8bff' };
+
+function status(t, bad) { $('status').textContent = t; $('status').style.color = bad ? '#ff7070' : '#8fd18f'; }
+function W() { return doc.image.width; } function H() { return doc.image.height; }
+const toScr = (p) => [view.x + p[0] * W() * view.s, view.y + p[1] * H() * view.s];
+const toImg = (sx, sy) => [(sx - view.x) / view.s / W(), (sy - view.y) / view.s / H()];
+
+function resize() { const r = $('wrap').getBoundingClientRect(); cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio; cv.style.width = r.width + 'px'; cv.style.height = r.height + 'px'; draw(); }
+function fit() { if (!doc) return; const r = $('wrap').getBoundingClientRect(); view.s = Math.min(r.width / W(), r.height / H()); view.x = (r.width - W() * view.s) / 2; view.y = (r.height - H() * view.s) / 2; draw(); }
+
+/** Every editable point of a half: [array, index, kind, name]. */
+function handles(half) {
+  const h = doc.halves[half], out = [];
+  for (const [n, l] of Object.entries(h.lines)) l.forEach((_, i) => out.push([l, i, 'line', n]));
+  for (const [n, w] of Object.entries(h.wheels || {})) { out.push([w, 'c', 'wheel', n]); out.push([w, 'rim', 'wheel', n]); }
+  (h.crop || []).forEach((_, i) => out.push([h.crop, i, 'crop', 'crop']));
+  return out;
+}
+const pt = (hd) => hd[0][hd[1]];
+
+function draw() {
+  cx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  cx.fillStyle = '#0f131a'; cx.fillRect(0, 0, cv.width, cv.height);
+  if (!doc) return;
+  if (img.complete && img.naturalWidth) cx.drawImage(img, view.x, view.y, W() * view.s, H() * view.s);
+  const active = $('half').value, act = $('line').value;
+  for (const [half, h] of Object.entries(doc.halves)) {
+    const dim = half !== active;
+    cx.globalAlpha = dim ? 0.45 : 1;
+    cx.setLineDash([8, 6]); cx.strokeStyle = COL[half]; cx.lineWidth = 1.5;
+    if (h.crop?.length) { cx.beginPath(); h.crop.forEach((p, i) => { const s = toScr(p); i ? cx.lineTo(...s) : cx.moveTo(...s); }); cx.closePath(); cx.stroke(); }
+    cx.setLineDash([]);
+    for (const [n, l] of Object.entries(h.lines)) {
+      cx.strokeStyle = n === 'hood' ? '#ffb000' : COL[half];
+      cx.lineWidth = (!dim && n === act) ? 4 : 2;
+      cx.beginPath(); l.forEach((p, i) => { const s = toScr(p); i ? cx.lineTo(...s) : cx.moveTo(...s); }); cx.stroke();
+      if (l.length) { const s = toScr(l[0]); cx.font = 'bold 13px system-ui'; cx.lineWidth = 3; cx.strokeStyle = '#000'; cx.strokeText(n, s[0] + 6, s[1] - 6); cx.fillStyle = cx.strokeStyle = n === 'hood' ? '#ffb000' : COL[half]; cx.fillText(n, s[0] + 6, s[1] - 6); }
+    }
+    for (const [n, w] of Object.entries(h.wheels || {})) {
+      const c = toScr(w.c), r = toScr(w.rim);
+      cx.strokeStyle = COL[half]; cx.lineWidth = 2; cx.beginPath(); cx.arc(c[0], c[1], Math.hypot(r[0] - c[0], r[1] - c[1]), 0, 7); cx.stroke();
+      cx.fillStyle = COL[half]; cx.fillText(`${n} wheel`, c[0] + 6, c[1] - 6);
+    }
+    if (!dim) for (const hd of handles(half)) {
+      const s = toScr(pt(hd));
+      cx.fillStyle = hd[2] === 'crop' ? '#fff' : (hd[3] === act ? '#fff36b' : COL[half]);
+      cx.strokeStyle = '#000'; cx.lineWidth = 1.5;
+      cx.beginPath(); cx.arc(s[0], s[1], hd[2] === 'wheel' && hd[1] === 'rim' ? 4 : 5, 0, 7); cx.fill(); cx.stroke();
+    }
+  }
+  cx.globalAlpha = 1;
+}
+
+function nearest(sx, sy, maxd = 10) {
+  let best = null, bd = maxd;
+  for (const hd of handles($('half').value)) { const s = toScr(pt(hd)); const d = Math.hypot(s[0] - sx, s[1] - sy); if (d < bd) { bd = d; best = hd; } }
+  return best;
+}
+
+function addPoint(sx, sy) {
+  const l = doc.halves[$('half').value].lines[$('line').value];
+  if (!l) return status('choose or add a line first', true);
+  const p = toImg(sx, sy).map((v) => +v.toFixed(4));
+  if (keys.has('KeyA') || l.length < 2) { l.push(p); return; }
+  // Insert where it lengthens the line least.
+  let bi = l.length, bc = Infinity;
+  const d = (a, b) => Math.hypot((a[0] - b[0]) * W(), (a[1] - b[1]) * H());
+  for (let i = 0; i <= l.length; i++) {
+    const c = i === 0 ? d(p, l[0]) : i === l.length ? d(l[i - 1], p) : d(l[i - 1], p) + d(p, l[i]) - d(l[i - 1], l[i]);
+    if (c < bc) { bc = c; bi = i; }
+  }
+  l.splice(bi, 0, p);
+}
+
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+cv.addEventListener('pointerdown', (e) => {
+  if (!doc) return;
+  const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  cv.setPointerCapture(e.pointerId);
+  if (e.button === 2 || keys.has('Space')) { pan = { sx, sy, x: view.x, y: view.y }; return; }
+  if (e.shiftKey) { addPoint(sx, sy); draw(); return; }
+  const hd = nearest(sx, sy);
+  if (hd && e.altKey) {
+    if (hd[2] === 'line') { hd[0].splice(hd[1], 1); draw(); } else status('wheels and crops keep their points', true);
+    return;
+  }
+  if (hd) { drag = hd; if (hd[2] === 'line') $('line').value = hd[3]; }
+});
+cv.addEventListener('pointermove', (e) => {
+  const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  if (pan) { view.x = pan.x + sx - pan.sx; view.y = pan.y + sy - pan.sy; draw(); return; }
+  if (drag) { const p = toImg(sx, sy).map((v) => +Math.min(1, Math.max(0, v)).toFixed(4)); drag[0][drag[1]] = p; draw(); }
+});
+cv.addEventListener('pointerup', () => { drag = null; pan = null; });
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  const k = Math.exp(-e.deltaY * 0.0015);
+  view.x = sx - (sx - view.x) * k; view.y = sy - (sy - view.y) * k; view.s *= k; draw();
+}, { passive: false });
+addEventListener('keydown', (e) => { if (e.target.tagName === 'INPUT') return; keys.add(e.code); if (e.code === 'Digit0') fit(); if (e.code === 'Space') e.preventDefault(); });
+addEventListener('keyup', (e) => keys.delete(e.code));
+addEventListener('resize', resize);
+
+function fillLines() {
+  const h = doc.halves[$('half').value], keep = $('line').value;
+  $('line').innerHTML = Object.keys(h.lines).map((n) => `<option>${n}</option>`).join('');
+  if (h.lines[keep]) $('line').value = keep;
+  draw();
+}
+$('half').onchange = fillLines;
+$('line').onchange = draw;
+$('addLine').onclick = () => { const n = $('newName').value.trim().replace(/\W+/g, '_'); if (!n) return; doc.halves[$('half').value].lines[n] ??= []; $('newName').value = ''; fillLines(); $('line').value = n; draw(); };
+
+async function load(n) {
+  name = n;
+  doc = await (await fetch(`/api/tracing/${n}`)).json();
+  $('half').innerHTML = Object.keys(doc.halves).map((h) => `<option>${h}</option>`).join('');
+  $('approx').checked = !!doc.approximate;
+  $('by').value = doc.traced_by || '';
+  fillLines();
+  img = new Image();
+  img.onload = () => { fit(); status(`${doc.frame}: ${doc.moment} (${doc.camera})`); };
+  img.onerror = () => { fit(); status(`no frame image at /frames/${doc.frame} (see --frames)`, true); };
+  img.src = `/frames/${doc.frame}`;
+}
+function current() { doc.approximate = $('approx').checked; doc.traced_by = $('by').value; return JSON.stringify(doc, null, 1) + '\n'; }
+$('save').onclick = async () => {
+  const r = await fetch(`/api/tracing/${name}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: current() });
+  status(r.ok ? `saved ${name}` : `save failed: ${await r.text()}`, !r.ok);
+};
+$('download').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([current()], { type: 'application/json' })); a.download = name; a.click(); };
+$('file').onchange = () => load($('file').value);
+
+(async () => {
+  resize();
+  const list = await (await fetch('/api/list')).json();
+  $('file').innerHTML = list.map((n) => `<option>${n}</option>`).join('');
+  if (list.length) load(list[0]);
+})();
+</script>
+</body>
+</html>

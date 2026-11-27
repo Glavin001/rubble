@@ -1,0 +1,238 @@
+{
+ "frame": "S01/S01_2m08s_top_09.webp",
+ "scenario": "S01",
+ "camera": "top",
+ "moment": "rotation",
+ "video_s": 128,
+ "image": {
+  "width": 2000,
+  "height": 1220
+ },
+ "coords": "normalised image coordinates: x / width, y / height, from the top-left corner",
+ "front": "right",
+ "approximate": true,
+ "note": "First pass, placed by eye on a 50/100 px grid over the frame: approximate (typically +-10-20 px on a 2000 px frame; worse where the part is torn, hidden by the barrier or motion-blurred). Correct with engine/tools/crash-reference/trace.html.",
+ "traced_by": "first pass (Claude, by eye)",
+ "halves": {
+  "real": {
+   "crop": [
+    [
+     0.0,
+     0.1148
+    ],
+    [
+     0.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     1.0
+    ],
+    [
+     0.98,
+     1.0
+    ]
+   ],
+   "lines": {
+    "body_outline": [
+     [
+      0.26,
+      0.3443
+     ],
+     [
+      0.45,
+      0.2828
+     ],
+     [
+      0.625,
+      0.2377
+     ],
+     [
+      0.76,
+      0.2459
+     ],
+     [
+      0.825,
+      0.4098
+     ],
+     [
+      0.85,
+      0.5738
+     ],
+     [
+      0.71,
+      0.7623
+     ]
+    ],
+    "hood_outline": [
+     [
+      0.635,
+      0.2623
+     ],
+     [
+      0.76,
+      0.2459
+     ],
+     [
+      0.825,
+      0.4098
+     ],
+     [
+      0.85,
+      0.5738
+     ],
+     [
+      0.71,
+      0.7623
+     ],
+     [
+      0.72,
+      0.6557
+     ],
+     [
+      0.7,
+      0.4508
+     ],
+     [
+      0.635,
+      0.2623
+     ]
+    ],
+    "windscreen_base": [
+     [
+      0.65,
+      0.2705
+     ],
+     [
+      0.7,
+      0.4508
+     ],
+     [
+      0.725,
+      0.6557
+     ],
+     [
+      0.7,
+      0.7295
+     ]
+    ],
+    "roof_front_edge": [
+     [
+      0.5,
+      0.3525
+     ],
+     [
+      0.55,
+      0.5738
+     ],
+     [
+      0.55,
+      0.6967
+     ]
+    ],
+    "side_line": [
+     [
+      0.3,
+      0.3279
+     ],
+     [
+      0.45,
+      0.2828
+     ],
+     [
+      0.6,
+      0.2459
+     ]
+    ]
+   },
+   "wheels": {},
+   "blur": "medium"
+  },
+  "beamng": {
+   "crop": [
+    [
+     0.0,
+     0.1148
+    ],
+    [
+     0.98,
+     1.0
+    ],
+    [
+     0.0,
+     1.0
+    ]
+   ],
+   "lines": {
+    "body_outline": [
+     [
+      0.1,
+      0.4262
+     ],
+     [
+      0.035,
+      0.5082
+     ],
+     [
+      0.06,
+      0.7377
+     ],
+     [
+      0.115,
+      0.9426
+     ],
+     [
+      0.175,
+      0.9672
+     ],
+     [
+      0.4,
+      0.8852
+     ],
+     [
+      0.625,
+      0.7705
+     ]
+    ],
+    "roof_outline": [
+     [
+      0.09,
+      0.541
+     ],
+     [
+      0.2,
+      0.8934
+     ],
+     [
+      0.55,
+      0.7377
+     ],
+     [
+      0.525,
+      0.6311
+     ]
+    ],
+    "side_line": [
+     [
+      0.21,
+      0.8811
+     ],
+     [
+      0.4,
+      0.8361
+     ],
+     [
+      0.625,
+      0.7705
+     ]
+    ]
+   },
+   "wheels": {},
+   "blur": "none"
+  }
+ }
+}

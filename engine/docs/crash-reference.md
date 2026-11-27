@@ -52,6 +52,47 @@ The cameras are framed for a 60° vertical field of view at 16:9 (the page's): s
 views put the car at impact across about two thirds of the width, wide enough for where the
 wreck ends (S07 tumbles back off the block, S10 slides on past it).
 
+## Outlines: shape differences per part (prototype, S01 and S02)
+
+Side-by-side stills hide shape differences (a hood that folds into a tent against one that
+stays a plate). Outlines make them visible, per part, in four steps:
+
+1. **Rubble's outlines, from Rust.** `cargo run --release -p engine-softbody-lab --example
+   crash_outlines -- S02` runs the scenario on the CPU reference to each moment's exact step
+   and writes `out/crash-reference/outlines/S02-edge/outlines.json`
+   (`crash_reference::outline`): per part group (hood, fenders, bumpers, the four doors,
+   trunk, greenhouse, roof, sills, wheels as centre and radius) the boundary of its
+   collision triangles as each scenario camera sees it (the page's projection: look-at,
+   60° vertical field of view, 1280 × 720), the same for the ghost (the rest shape carried
+   rigidly with the cabin and rear, `metrics::robust_fit` over cabin and rear nodes), the
+   hood's centreline (its nodes nearest the centre plane, front to rear), and all of it in
+   the car's own side frame (x along the car, y up, origin the rear axle on the ground). It
+   also renders each moment's still of the collision surface from each camera, so the
+   outlines line up exactly; on the recorder's WebGPU stills they line up too, to within the
+   GPU run's own difference. `--census DESIGN` lists a design's groups.
+2. **Overlays.** `python3 tools/crash-reference/outlines.py all S01 S02` writes SVGs (outlines
+   on the recorded and the CPU stills, the ghost dashed, onion skins of before and each
+   moment), annotated reference frames, common-frame and change figures and
+   `shape-numbers.md`; `python3 scripts/with-gpu-lock.py --limit 300 -- python3
+   tools/crash-reference/outlines.py rasterise out/crash-reference/outlines/S01 ...` turns
+   them into PNGs (headless Chrome over http, without the GPU).
+3. **Tracings.** `docs/crash-reference/tracings/*.json`: per reference frame, the real and
+   BeamNG halves' crop and polylines in normalised image coordinates (hood, fender top,
+   wheel arch, bumper, windscreen, roofline, front door's front edge, sill, wheels; for the
+   top view the visible outline, hood, windscreen base, side line). The committed ones are
+   a first pass placed by eye: approximate. Correct them with `python3
+   tools/crash-reference/trace_server.py` and `http://127.0.0.1:8770/` (drag, shift-click to
+   add, alt-click to delete, save writes the JSON back).
+4. **One frame, shape numbers.** S01's frames show the whole car: origin the rear wheel,
+   unit the wheelbase in each source's own before frame. S02's show only the front half:
+   origin the front door's front edge at the sill (Rubble: that corner carried with the
+   cabin), unit the front wheel's radius. Hood fold height, chord shortening, creases (turns
+   over 20°), front wheel setback, windscreen angle and ride height are computed by the same
+   code for the three sources; they are reported comparisons, not criteria.
+
+The generated designs' hoods have 4 rows of nodes front to rear, so a Rubble hood can bend at
+two lines at most.
+
 ## What may be asserted
 
 A criterion can fail a run only when its band has a basis, recorded with it
