@@ -1033,6 +1033,11 @@ steps were cut into frames, and it differed from the CPU at a frame that ends ri
 cascade. Now the frame end's marks of those beams are pending (`groupDropsAtFrameEnd`), as a beam
 broken under its own load. The contact, jbeam, bitwise, Metal and World suites pass bit for bit.
 
+**The shared kernel changes on the scenario matrix** (CUDA on Modal, T4, strict floats; base
+3d4980afe, the commit before the port, against 37dcd0745): all 12 rows bit for bit, none slower
+past the 5 % threshold. Deltas: −0.3 to +0.2 %, and head-on +1.7 % (13.09 against 12.88 ms). The
+shared changes are the frame-end tearing fix, the loop caps and the edge pass's trim.
+
 **Cost, measured** (Metal, M3 Max, one 34-step frame, the head-on above, `continuous_cost`):
 
 | | ms a frame |
