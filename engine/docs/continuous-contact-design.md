@@ -1091,7 +1091,17 @@ Head 100 for 0.1 s, `DAT_BARRIER_TOL=5e-7`:
   step test can pass. It is not diverging.
 - **What that costs:** the gradient left unsolved is the momentum drift (1.7–2.7 N·s).
 - **What the prototype needs** before it can be judged: the minimisation in f64 (positions and
-  closest points), and a stop test on the gradient against the inertia.
+  closest points), and a stop test on the gradient against the inertia. Both are now in
+  (2026-11-27, later): positions in f64, each pair's closest points in f32 relative to its first
+  node, and a stop when the gradient over m/h² is below 1e-9 m.
+  - **Measured, head 100, 0.1 s:** paint 143.9 mm during, jitter 8.42 m/s, 782 capped solves.
+  - **Small clusters** settle to rounding of the stop test.
+  - **Large ones** (about 360 nodes, 2,950 pairs) still stall, at a residual of about 7 µm: the
+    Gauss–Newton direction (truncated CG, the normal's change left out of the Hessian) converges
+    linearly, not quadratically.
+  - **Over 0.03 s against velocity contact:** paint 41 mm against 0, momentum 0.12 against
+    4e-4 N·s, the response's kinetic energy change −515 kJ against −804 kJ. That last is the raw
+    change, not the work measure of rule 8.
 - **What it shows meanwhile**, apart from convergence: 148 mm of paint during the crush and 8 m/s
   of jitter. It does not yet meet the paint guard.
 

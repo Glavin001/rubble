@@ -90,10 +90,12 @@ pub(in super::super) fn barrier(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [V
     }
 }
 
-/// [`barrier`] over one set of pairs: one Newton loop, one line search.
+/// [`barrier`] over one set of pairs: one Newton loop, one line search. Positions in f64; each
+/// pair's closest points and CCD in f32 relative to its first node (translation free, and fine
+/// at the pair's millimetres: in world coordinates the iterate stalled at f32's 1.2e-7 m).
 fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, st: &mut CcdStats) {
+    use glam::DVec3;
     let (dh, iters) = (env("DAT_DHAT", DHAT) as f64, env("DAT_BARRIER_ITERS", ITERS as f32) as u32);
-    // The contact set: every movable node of a pair, in a fixed order.
     let mut idx: BTreeMap<(usize, u32), usize> = BTreeMap::new();
     for p in pairs {
         for k in p.k {
@@ -111,16 +113,18 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
         idx.insert(*k, i);
     }
     let m: Vec<f64> = keys.iter().map(|k| 1.0 / im[k.0][k.1 as usize] as f64).collect();
-    let xh: Vec<Vec3> = keys.iter().map(|k| x1[k.0][k.1 as usize]).collect();
-    let mut x: Vec<Vec3> = keys.iter().map(|k| x0[k.0][k.1 as usize]).collect();
+    let xh: Vec<DVec3> = keys.iter().map(|k| x1[k.0][k.1 as usize].as_dvec3()).collect();
+    let mut x: Vec<DVec3> = keys.iter().map(|k| x0[k.0][k.1 as usize].as_dvec3()).collect();
     let kappa = env("DAT_KAPPA", 1.0) as f64 * (m.iter().sum::<f64>() / m.len() as f64) / (h as f64 * h as f64);
     let h2 = (h as f64) * (h as f64);
-    // Each pair's gap, held under START_SHARE of its start distance (a pair that began inside its
-    // gap; at 0.5 a pressed pair's gap halved every step and the paint sank 120-197 mm).
-    let at = |x: &[Vec3], p: &CcdPair| p.k.map(|k| idx.get(&k).map_or(x0[k.0][k.1 as usize], |&i| x[i]));
+    // A pair's four positions relative to its first node, f32.
+    let at = |x: &[DVec3], p: &CcdPair| -> [Vec3; 4] {
+        let w = p.k.map(|k| idx.get(&k).map_or(x0[k.0][k.1 as usize].as_dvec3(), |&i| x[i]));
+        w.map(|q| (q - w[0]).as_vec3())
+    };
     let xi: Vec<f32> = pairs.iter().map(|p| p.xi.min(START_SHARE * closest(p.nn, at(&x, p)).1.length())).collect();
-    let energy = |x: &[Vec3]| -> f64 {
-        let mut e: f64 = (0..x.len()).map(|i| 0.5 * m[i] * (x[i] - xh[i]).length_squared() as f64 / h2).sum();
+    let energy = |x: &[DVec3]| -> f64 {
+        let mut e: f64 = (0..x.len()).map(|i| 0.5 * m[i] * (x[i] - xh[i]).length_squared() / h2).sum();
         for (p, &g) in pairs.iter().zip(&xi) {
             let d = closest(p.nn, at(x, p)).1.length() as f64 - g as f64;
             if d <= 0.0 {
@@ -134,16 +138,17 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
     let mut used = 0u32;
     for _ in 0..iters {
         used += 1;
-        let mut g: Vec<glam::DVec3> = (0..x.len()).map(|i| (x[i] - xh[i]).as_dvec3() * (m[i] / h2)).collect();
+        let mut g: Vec<DVec3> = (0..x.len()).map(|i| (x[i] - xh[i]) * (m[i] / h2)).collect();
         let mut diag: Vec<f64> = m.iter().map(|&m| m / h2).collect();
-        for (p, &gap) in pairs.iter().zip(&xi) {
+        let mut act: Vec<(usize, [f32; 4], DVec3, f64)> = Vec::new();
+        for (q, (p, &gap)) in pairs.iter().zip(&xi).enumerate() {
             let (w, gv) = closest(p.nn, at(&x, p));
             let dist = gv.length() as f64;
             let d = dist - gap as f64;
             if d >= dh || dist <= 0.0 {
                 continue;
             }
-            let n = (gv.as_dvec3()) / dist;
+            let n = gv.as_dvec3() / dist;
             let (d1, d2) = (kappa * db(d, dh), (kappa * ddb(d, dh)).max(0.0));
             for j in 0..4 {
                 if let Some(&i) = idx.get(&p.k[j]) {
@@ -151,17 +156,17 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
                     diag[i] += d2 * (w[j] as f64) * (w[j] as f64);
                 }
             }
+            act.push((q, w, n, d2));
         }
-        // Gauss–Newton: H·dx = −g, H = M/h² + Σₚ κ·max(b″, 0)·JₚᵀJₚ (Jₚ = the pair's weights
-        // along its normal), by conjugate gradients, matrix-free, preconditioned by H's diagonal.
-        let act: Vec<(usize, [f32; 4], glam::DVec3, f64)> = pairs.iter().zip(&xi).enumerate().filter_map(|(q, (p, &gap))| {
-            let (w, gv) = closest(p.nn, at(&x, p));
-            let dist = gv.length() as f64;
-            let d = dist - gap as f64;
-            (d < dh && dist > 0.0).then(|| (q, w, gv.as_dvec3() / dist, (kappa * ddb(d, dh)).max(0.0)))
-        }).collect();
-        let hv = |v: &[glam::DVec3]| -> Vec<glam::DVec3> {
-            let mut o: Vec<glam::DVec3> = (0..v.len()).map(|i| v[i] * (m[i] / h2)).collect();
+        // Stop when the gradient is rounding against the inertia's scale (a force of 1e-9 of
+        // a node's m/h² times a metre: the pass's residual momentum then a nanonewton-second).
+        let gmax = (0..x.len()).map(|i| g[i].length() / (m[i] / h2)).fold(0.0f64, f64::max);
+        if gmax < env("DAT_BARRIER_TOL", 1e-9) as f64 {
+            used -= 1;
+            break;
+        }
+        let hv = |v: &[DVec3]| -> Vec<DVec3> {
+            let mut o: Vec<DVec3> = (0..v.len()).map(|i| v[i] * (m[i] / h2)).collect();
             for &(q, w, n, k) in &act {
                 let kk = pairs[q].k;
                 let s: f64 = (0..4).filter_map(|j| idx.get(&kk[j]).map(|&i| w[j] as f64 * n.dot(v[i]))).sum();
@@ -173,10 +178,10 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
             }
             o
         };
-        let dot = |a: &[glam::DVec3], b: &[glam::DVec3]| -> f64 { a.iter().zip(b).map(|(a, b)| a.dot(*b)).sum() };
-        let mut dx = vec![glam::DVec3::ZERO; x.len()];
-        let mut r: Vec<glam::DVec3> = g.iter().map(|g| -*g).collect();
-        let mut z: Vec<glam::DVec3> = r.iter().zip(&diag).map(|(r, &d)| *r / d).collect();
+        let dot = |a: &[DVec3], b: &[DVec3]| -> f64 { a.iter().zip(b).map(|(a, b)| a.dot(*b)).sum() };
+        let mut dx = vec![DVec3::ZERO; x.len()];
+        let mut r: Vec<DVec3> = g.iter().map(|g| -*g).collect();
+        let mut z: Vec<DVec3> = r.iter().zip(&diag).map(|(r, &d)| *r / d).collect();
         let mut pp = z.clone();
         let mut rz = dot(&r, &z);
         let r0 = rz.abs().max(1e-300);
@@ -189,7 +194,7 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
             }
             z = r.iter().zip(&diag).map(|(r, &d)| *r / d).collect();
             let rz1 = dot(&r, &z);
-            if rz1.abs() < 1e-12 * r0 {
+            if rz1.abs() < 1e-16 * r0 {
                 break;
             }
             let beta = rz1 / rz;
@@ -198,30 +203,24 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
                 pp[i] = z[i] + pp[i] * beta;
             }
         }
-        let dir: Vec<Vec3> = dx.iter().map(|d| d.as_vec3()).collect();
-        let big = dir.iter().fold(0.0f32, |a, d| a.max(d.length()));
-        if big < env("DAT_BARRIER_TOL", 1e-8) {
-            break;
-        }
-        // The longest step along `dir` before any pair reaches its gap, with room.
-        let mut a = 1.0f32;
+        // The longest step along dx before any pair reaches its gap, with room (CCD in each
+        // pair's own frame).
+        let mut a = 1.0f64;
         for (p, &gap) in pairs.iter().zip(&xi) {
-            let dp = p.k.map(|k| idx.get(&k).map_or(Vec3::ZERO, |&i| dir[i]));
+            let dp = p.k.map(|k| idx.get(&k).map_or(Vec3::ZERO, |&i| dx[i].as_vec3()));
             if let Some(t) = accd(p.nn, at(&x, p), dp, gap) {
-                a = a.min(0.8 * t);
+                a = a.min(0.8 * t as f64);
             }
         }
-        let slope: f64 = g.iter().zip(&dir).map(|(g, d)| g.dot(d.as_dvec3())).sum();
+        let slope: f64 = g.iter().zip(&dx).map(|(g, d)| g.dot(*d)).sum();
         if std::env::var("DAT_BDBG").is_ok() && used + 3 > iters {
-            let gn = g.iter().map(|g| g.length()).fold(0.0f64, f64::max);
-            let dmin = pairs.iter().zip(&xi).map(|(p, &gap)| closest(p.nn, at(&x, p)).1.length() - gap).fold(f32::MAX, f32::min);
-            eprintln!("BDBG it {used} pairs {} nodes {} | max |dir| {big:.2e} m, ccd alpha {a:.2e}, max |grad| {gn:.2e}, slope {slope:.2e}, E {e:.6e}, min d {dmin:.2e}, active {}", pairs.len(), x.len(), act.len());
+            eprintln!("BDBG it {used} pairs {} nodes {} | max |dx| {:.2e} m, ccd alpha {a:.2e}, grad/inertia {gmax:.2e} m, slope {slope:.2e}, E {e:.9e}, active {}", pairs.len(), x.len(), dx.iter().fold(0.0f64, |q, d| q.max(d.length())), act.len());
         }
         let mut moved = false;
-        for _ in 0..30 {
-            let xn: Vec<Vec3> = x.iter().zip(&dir).map(|(x, d)| *x + *d * a).collect();
+        for _ in 0..40 {
+            let xn: Vec<DVec3> = x.iter().zip(&dx).map(|(x, d)| *x + *d * a).collect();
             let en = energy(&xn);
-            if en <= e + 1e-4 * a as f64 * slope {
+            if en <= e + 1e-4 * a * slope {
                 x = xn;
                 e = en;
                 moved = true;
@@ -238,7 +237,7 @@ fn barrier_set(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &
     }
     st.barrier_iters += used as u64;
     for (i, k) in keys.iter().enumerate() {
-        x1[k.0][k.1 as usize] = x[i];
-        vel[k.0][k.1 as usize] = (x[i] - x0[k.0][k.1 as usize]) / h;
+        x1[k.0][k.1 as usize] = x[i].as_vec3();
+        vel[k.0][k.1 as usize] = ((x[i] - x0[k.0][k.1 as usize].as_dvec3()) / h as f64).as_vec3();
     }
 }
