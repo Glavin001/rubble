@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_C006_f248",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_C006_f248.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "545880480df141244e9fa5c3e4a44fc97759ab6ad046652d65c6bd916df5ca97"
+ },
+ "moment": {
+  "label": "200 ms",
+  "after_impact_ms": 200.3
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 14; RMDB turned about 25 deg (by eye); car yaw -8.7 deg (sensor, nose left) (v08790C006.mp4, film frame 248)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

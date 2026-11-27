@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_C004_f090",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_C004_f090.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "90a1d9bbdba24e5be62a5929b67287bbe76063e486e9d0e4228c33e9af2b5f2d"
+ },
+ "moment": {
+  "label": "40 ms",
+  "after_impact_ms": 39.9
+ },
+ "time": null,
+ "view": "side-left-high",
+ "notes": "camera 12; face at the front wheel, hood folded up, airbags out (v09124C004.mp4, film frame 90)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

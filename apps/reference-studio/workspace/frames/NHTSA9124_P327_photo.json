@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_P327_photo",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_P327_photo.webp",
+  "width": 2000,
+  "height": 1336,
+  "sha256": "d4a3b6dee323e7eede99234bc82618898234a6f75ef8b4f93646e7ed4a52f172"
+ },
+ "moment": {
+  "label": "post-test",
+  "after_impact_ms": null
+ },
+ "time": null,
+ "view": "photo-left-front-34",
+ "notes": "report photo No.008: post-test left front 3/4 (final shape) (v09124P327.jpg)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

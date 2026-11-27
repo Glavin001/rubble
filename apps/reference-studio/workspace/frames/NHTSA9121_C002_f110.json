@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9121_C002_f110",
+ "shot": "NHTSA9121",
+ "image": {
+  "file": "NHTSA9121/NHTSA9121_C002_f110.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "570bbde8b202dfcc4a751e019f402c3f4883541227daadf6017431d6513e593c"
+ },
+ "moment": {
+  "label": "60 ms",
+  "after_impact_ms": 59.9
+ },
+ "time": null,
+ "view": "side-right",
+ "notes": "camera 11; right front heavily crushed, hood folded up (v09121C002.mp4, film frame 110)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

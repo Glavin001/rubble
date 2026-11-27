@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA8790_P076_photo",
+ "shot": "NHTSA8790",
+ "image": {
+  "file": "NHTSA8790/NHTSA8790_P076_photo.webp",
+  "width": 2000,
+  "height": 1334,
+  "sha256": "8e2b3f7cd85c56c01f03697e1c1b9d7f985f129b75ff37b19179d6fc0bfe9a51"
+ },
+ "moment": {
+  "label": "post-test",
+  "after_impact_ms": null
+ },
+ "time": null,
+ "view": "photo-left-front-34",
+ "notes": "post-test left front 3/4 (from the contact sheets; final shape) (v08790P076.jpg)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9124_C007_f050",
+ "shot": "NHTSA9124",
+ "image": {
+  "file": "NHTSA9124/NHTSA9124_C007_f050.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "945aaef2105eb57ca4b92da8b30d713c638a77fdfdefd300c2bcc7b6cbb83eba"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": 0.2
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 15 overhead; the face's edge at the left front corner (v09124C007.mp4, film frame 50)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

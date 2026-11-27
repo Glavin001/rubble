@@ -1,0 +1,24 @@
+{
+ "id": "NHTSA9121_C006_f050",
+ "shot": "NHTSA9121",
+ "image": {
+  "file": "NHTSA9121/NHTSA9121_C006_f050.webp",
+  "width": 1536,
+  "height": 1024,
+  "sha256": "0fa4ca5a2a2227cfc68ff5e4459f5dd2edf2cc17d4a355123584e8ef5f10d046"
+ },
+ "moment": {
+  "label": "first contact",
+  "after_impact_ms": 0.5
+ },
+ "time": null,
+ "view": "top",
+ "notes": "camera 15 overhead (v09121C006.mp4, film frame 50)",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T16:00:00Z"
+}

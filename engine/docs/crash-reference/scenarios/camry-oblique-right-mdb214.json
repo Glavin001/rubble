@@ -1,0 +1,34 @@
+{
+ "id": "camry-oblique-right-mdb214",
+ "title": "NHTSA oblique (right) stand-in: mdb214 at 90.46 km/h, 15 deg, 35 % overlap into a standing sedan",
+ "notes": "Closest setup runnable without new Rust for NHTSA tests 9121 (engine/docs/crash-reference/camry-oblique-comparison.md). Real: NHTSA research MDB 2010B (2,491 kg, honeycomb face 2,205 mm wide, 605 mm deep) at 89.7-90.5 km/h into a 1,734-1,759 kg Camry turned 15 deg to its path, 35 % overlap on the car's right. Here: mdb214 into the generated sedan (1,448 kg). Geometry: the barrier heads 165 deg (15 deg off straight on); the inboard edge of a 1.676 m face centred on its origin, carried along its travel, passes 35 % of the sedan's width (1.8889 m) in from its right side at the sedan's extent front (z = 0.9644 m); origin 2.5 m back along the travel; first contact computed.",
+ "bodies": [
+  {
+   "name": "car",
+   "design": "sedan",
+   "at": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "yaw_deg": 0.0,
+   "speed_kmh": 0.0,
+   "carrier": false
+  },
+  {
+   "name": "barrier",
+   "design": "mdb214",
+   "at": [
+    -1.73983,
+    0.0,
+    3.16232
+   ],
+   "yaw_deg": 165.0,
+   "speed_kmh": 90.46,
+   "carrier": false
+  }
+ ],
+ "boxes": [],
+ "secs_after_impact": 0.3,
+ "contact": "discrete"
+}
