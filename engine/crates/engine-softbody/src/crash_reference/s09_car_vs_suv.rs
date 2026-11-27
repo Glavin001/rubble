@@ -25,10 +25,6 @@
 
 use super::*;
 
-const KMH: f32 = 55.0;
-/// The share of the car's width that meets the SUV's.
-const OVERLAP: f32 = 0.5;
-
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
         id: "S09".into(),
@@ -36,25 +32,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[375], real_test: "car-to-SUV frontal offset, 50 % overlap, each at 55 km/h" },
         designs: names(&["wagon", "suv_4x4"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let (ec, es) = (extent("wagon"), extent("suv_4x4"));
-            let v = KMH / 3.6 * j.speed;
-            // A tenth of a second of closing (both move) before the fronts meet.
-            let gap = 0.1 * 2.0 * v;
-            // The SUV faces the car (yaw π: its left is world −X). Its world x span is
-            // [xs − es.hi.x, xs − es.lo.x]; its left edge stands OVERLAP of the car's width in
-            // from the car's left (+X) edge, so their left sides overlap.
-            let xs = ec.hi.x - OVERLAP * ec.width() + es.hi.x;
-            let zs = ec.hi.z + es.hi.z + gap;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![
-                    Body::new("car", "wagon", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v),
-                    Body::new("suv", "suv_4x4", Vec3::new(xs, 0.0, zs), std::f32::consts::PI, v),
-                ],
-                boxes: vec![],
-                impact_s: 0.1,
-            }
-        }),
+        modified_from: None,
+        // A tenth of a second of closing (both move) before the fronts meet; the SUV faces the
+        // car, its left edge half the car's width in from the car's left (+X) edge.
+        layout: family::preset_named(&families::HEAD_ON, &["car", "suv"], &[("car_a", "wagon".into()), ("car_b", "suv_4x4".into()), ("speed", 55.0.into()), ("speed_b", 55.0.into()), ("overlap", 0.5.into()), ("angle", 0.0.into()), ("lead", 0.1.into())]),
         secs_after_impact: 1.0,
         // The fronts meet at z ≈ 2.2 (the wagon's front is 0.96 m ahead of its origin), x ≈ 0.5.
         cameras: vec![

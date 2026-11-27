@@ -40,6 +40,7 @@ mod frame_pacer;
 mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
 mod lab;
+mod lab_scenes;
 mod motion;
 mod presets;
 mod read;

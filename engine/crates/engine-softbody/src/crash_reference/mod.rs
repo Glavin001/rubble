@@ -11,12 +11,16 @@
 //! a second time anywhere else.
 //!
 //! Adding a scenario: one file with a `pub(super) fn scenario() -> CrashScenario`, and one
-//! line in [`all`].
+//! line in [`all`]. Its layout is a preset of a scenario family ([`family`], [`families`]:
+//! the family's id and values; every scenario is one today), or its own code
+//! ([`LayoutSource::Code`]) for a crash no family stages.
 
 pub mod criteria;
 #[cfg(test)]
 mod known_tests;
 pub mod desc;
+pub mod families;
+pub mod family;
 pub mod metrics;
 pub mod outline;
 pub mod recording;
@@ -281,6 +285,9 @@ pub type CodeLayout = fn(&dyn Fn(&str) -> Extent, Jitter) -> Layout;
 pub enum LayoutSource {
     Code(CodeLayout),
     Data(Box<ScenarioDesc>),
+    /// A preset of a scenario family ([`family`]): the family's one layout from these values
+    /// (every parameter's, checked), its bodies renamed to `names` in order where given.
+    Family { family: &'static family::Family, values: family::Values, names: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -300,11 +307,9 @@ pub struct CrashScenario {
     /// Recreated from data ([`ScenarioDesc::scenario`]), not defined in Rust: it carries the
     /// law-based criteria only ([`desc::law_criteria`]).
     pub recreated: bool,
-}
-
-/// A Rust scenario's layout (a closure's argument types given by the function's).
-pub(crate) fn code(f: CodeLayout) -> LayoutSource {
-    LayoutSource::Code(f)
+    /// Laid out from values other than its preset's ([`CrashScenario::with_values`]): the id
+    /// of the scenario it was modified from; it carries the law-based criteria only.
+    pub modified_from: Option<String>,
 }
 
 /// `&["a", "b"]` as owned names (the Rust scenarios' design lists).
@@ -364,6 +369,13 @@ impl CrashScenario {
         Ok(match &self.layout {
             LayoutSource::Code(f) => f(&extent, jitter),
             LayoutSource::Data(d) => d.resolve(&extent, jitter),
+            LayoutSource::Family { family, values, names } => {
+                let mut l = (family.layout)(values, &extent, jitter);
+                for (b, n) in l.bodies.iter_mut().zip(names) {
+                    b.name = n.clone();
+                }
+                l
+            }
         })
     }
 

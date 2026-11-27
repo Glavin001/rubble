@@ -157,6 +157,7 @@ impl ScenarioDesc {
             moments: self.moments.clone(),
             criteria: law_criteria(!self.boxes.is_empty()),
             recreated: true,
+            modified_from: None,
         }
     }
 

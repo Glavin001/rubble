@@ -15,7 +15,7 @@ import { MemoryWorkspace, checkPath } from '../shared/workspace.ts';
 import { DiskWorkspace, WORKSPACE } from '../scripts/node-workspace.ts';
 
 const stub: EngineApi = {
-  registry: (data) => ({ scenarios: data.map((d) => ({ id: d.id, title: d.title, reference: { video: '', atS: [], links: [], realTest: '' }, designs: [], folderDesigns: [], secsAfterImpact: d.secs_after_impact, cameras: d.cameras, moments: d.moments, criteria: [], recreated: true, contact: d.contact })), contacts: ['discrete', 'edge', 'continuous'], runs: 8, sampleSteps: 8, dt: 0.0005 }),
+  registry: (data) => ({ scenarios: data.map((d) => ({ id: d.id, title: d.title, reference: { video: '', atS: [], links: [], realTest: '' }, designs: [], folderDesigns: [], secsAfterImpact: d.secs_after_impact, cameras: d.cameras, moments: d.moments, criteria: [], recreated: true, contact: d.contact })), families: [], contacts: ['discrete', 'edge', 'continuous'], runs: 8, sampleSteps: 8, dt: 0.0005 }),
   pick: (m) => ({ moment: m[0]?.name ?? null, camera: null }),
   validId: (id) => {
     if (/^S\d\d$/i.test(id)) throw new Error(`scenario id ${id}: a built-in scenario has it`);

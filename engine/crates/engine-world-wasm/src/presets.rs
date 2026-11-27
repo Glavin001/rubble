@@ -101,6 +101,17 @@ impl WebWorld {
         Ok(js(res(placed.to_json())?))
     }
 
+    /// The explicit sim's static shapes (`ExplicitSim::layout().boxes` rows) as world bodies
+    /// for rendering, as `placeScene` places them for an explicit scene
+    /// (`play::explicit_boxes::place`): the crash lab's scene placed again with other values.
+    /// Returns their handles (`destroyBody` removes them).
+    #[wasm_bindgen(js_name = placeExplicitBoxes)]
+    pub fn place_explicit_boxes(&mut self, rows: JsValue) -> Result<Vec<f64>, JsValue> {
+        let rows: Vec<Vec<f64>> = serde_wasm_bindgen::from_value(rows).map_err(|e| crate::err(e.to_string()))?;
+        let ids = res(rubble::play::explicit_boxes::place(&mut self.world, &rows))?;
+        Ok(ids.iter().map(|b| handle(b.to_bits())).collect())
+    }
+
     /// Do a player action on the placed scene before the next step (`play::Action`, e.g.
     /// `{action: 'fire', aim: {eye, dir}}`, `{action: 'reset'}`).
     pub fn act(

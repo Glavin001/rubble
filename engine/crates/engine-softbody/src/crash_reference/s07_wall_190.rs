@@ -21,19 +21,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[332], real_test: "rigid concrete block, full width, 190 km/h (no standard test)" },
         designs: names(&["wagon"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let e = extent("wagon");
-            let v = KMH / 3.6 * j.speed;
-            // A tenth of a second of travel before the block.
-            let gap = 0.1 * v;
-            let face = e.hi.z + gap;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![Body::new("car", "wagon", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
-                // A concrete block 2 m tall (above the roof), 2 m deep, a metre past each side.
-                boxes: vec![(Vec3::new(0.0, 1.0, face + 1.0), Vec3::new(0.5 * e.width() + 1.0, 1.0, 1.0))],
-                impact_s: 0.1,
-            }
-        }),
+        modified_from: None,
+        // A concrete block 2 m tall (above the roof), 2 m deep, a metre past each side, a tenth
+        // of a second ahead.
+        layout: family::preset(&families::BLOCK, &[("car", "wagon".into()), ("speed", f64::from(KMH).into()), ("overlap", 1.0.into()), ("height", 2.0.into()), ("depth", 2.0.into()), ("lead", 0.1.into())]),
         // Pitched up to its peak by 0.6 s, back on its wheels by 1.25 s, at rest (under 1 kJ)
         // by 1.8 s.
         secs_after_impact: 2.0,

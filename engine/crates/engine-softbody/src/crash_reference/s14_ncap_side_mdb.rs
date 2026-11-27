@@ -23,12 +23,14 @@
 //! takes the work.
 
 use super::*;
-use crate::crash_rigs::{MDB_CRAB_DEG, MDB_FACE};
+use crate::crash_rigs::MDB_CRAB_DEG;
 
 /// NCAP side MDB: 38.5 mph.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const SPEED: f32 = 38.5 * 0.447_04;
-/// The barrier's run-up before contact (s), as S03's.
-const RUN_UP_S: f32 = 0.4;
+/// [`SPEED`] in km/h as the family takes it: the f32 whose `/ 3.6` is [`SPEED`] exactly
+/// (`tests::speed_kmh_is_speed`).
+pub const SPEED_KMH: f64 = 61.959_747_314_453_125;
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -37,21 +39,12 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[], real_test: "NHTSA NCAP side MDB, 62 km/h crabbed 27° (tests 7517, 8560: 2012-14 Toyota Camry)" },
         designs: names(&["sedan", "mdb214"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let (e, b) = (extent("sedan"), extent("mdb214"));
-            let v = SPEED * j.speed;
-            let (front, rear) = e.axles.unwrap_or((e.lo.z + 0.2 * e.length(), e.lo.z + 0.8 * e.length()));
-            let irl = if front - rear <= 2.896 { 0.5 * (front + rear) + 0.94 } else { front - 0.508 };
-            let face_z = irl - 0.5 * MDB_FACE[0] + j.lateral;
-            let crab = MDB_CRAB_DEG.to_radians();
-            let dir = Vec3::new(-crab.cos(), 0.0, -crab.sin());
-            // Its origin when its face reaches the side's outermost plane, and a run-up back
-            // along its travel.
-            let contact = Vec3::new(e.hi.x + b.hi.z, 0.0, face_z);
-            let mut barrier = Body::new("barrier", "mdb214", contact - dir * (v * RUN_UP_S), -0.5 * std::f32::consts::PI + j.yaw, v);
-            barrier.vel = Some(dir * v);
-            Layout { box_yaw: Vec::new(), bodies: vec![Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0), barrier], boxes: Vec::new(), impact_s: RUN_UP_S }
-        }),
+        modified_from: None,
+        // The barrier facing −X, crabbed 27° (moving across the car and toward its rear), its
+        // face's forward edge on the impact reference line when it reaches the side, after a
+        // run-up of 0.4 s. The speed is 38.5 mph stated in km/h: 61.959747314453125 is the
+        // f32 whose km/h-to-m/s (÷ 3.6) is 38.5 × 0.44704 m/s exactly.
+        layout: family::preset(&families::SIDE_BARRIER, &[("car", "sedan".into()), ("barrier", "mdb214".into()), ("speed", SPEED_KMH.into()), ("crab", f64::from(MDB_CRAB_DEG).into()), ("aim", 0.0.into()), ("run_up", 0.4.into())]),
         secs_after_impact: 0.5,
         cameras: vec![
             // As S03's: ahead of the car and out on the struck side; above; on its axis ahead.
@@ -108,5 +101,12 @@ mod tests {
         near(2.0 * bm * v / (bm + m) * 1.02, 17.05, 5e-3);
         near(0.5 * bm * v * v * 1e-3, 202.6, 0.1);
         near(bm * v * 27f64.to_radians().cos() / (bm + m), 7.45, 5e-3);
+    }
+
+    /// The family's km/h gives the stated m/s bit for bit.
+    #[test]
+    fn speed_kmh_is_speed() {
+        assert_eq!((super::SPEED_KMH as f32 / 3.6).to_bits(), super::SPEED.to_bits());
+        assert_eq!(super::SPEED_KMH as f32 as f64, super::SPEED_KMH);
     }
 }

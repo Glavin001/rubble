@@ -6,8 +6,6 @@
 
 use super::*;
 
-const KMH: f32 = 50.0;
-
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
         id: "S02".into(),
@@ -15,18 +13,9 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[130], real_test: "Euro NCAP full-width rigid barrier, 50 km/h" },
         designs: names(&["suv_4x4"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let e = extent("suv_4x4");
-            let v = KMH / 3.6 * j.speed;
-            // A tenth of a second of travel before the wall.
-            let gap = 0.1 * v;
-            let face = e.hi.z + gap;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![Body::new("car", "suv_4x4", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v)],
-                boxes: vec![(Vec3::new(0.0, 2.0, face + 0.5), Vec3::new(0.5 * e.width() + 1.0, 2.0, 0.5))],
-                impact_s: 0.1,
-            }
-        }),
+        modified_from: None,
+        // A wall 4 m tall and 1 m deep, a metre past each side, a tenth of a second ahead.
+        layout: family::preset(&families::BLOCK, &[("car", "suv_4x4".into()), ("speed", 50.0.into()), ("overlap", 1.0.into()), ("height", 4.0.into()), ("depth", 1.0.into()), ("lead", 0.1.into())]),
         secs_after_impact: 0.5,
         cameras: vec![
             // Framed as the reference footage (60° vertical field of view, 16:9): the SUV (z −2.3 to

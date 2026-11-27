@@ -21,10 +21,8 @@
 
 use super::*;
 
-const KMH: f32 = 56.0;
-/// The car's run-up (s): the trailer settles on its landing gear and tandem from the
-/// spawn's 2 cm drop, and the car on its wheels, before the hit.
-const RUN_UP_S: f32 = 0.5;
+// The car's run-up (0.5 s): the trailer settles on its landing gear and tandem from the
+// spawn's 2 cm drop, and the car on its wheels, before the hit.
 pub const AFTER_IMPACT_S: f32 = 0.8;
 
 pub(super) fn scenario() -> CrashScenario {
@@ -34,21 +32,9 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[179, 181], real_test: "IIHS rear underride guard test, full width, a mid-size sedan at 56 km/h into a parked trailer" },
         designs: names(&["sedan", "box_trailer"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let (c, t) = (extent("sedan"), extent("box_trailer"));
-            let v = KMH / 3.6 * j.speed;
-            // The trailer heads +Z, its rear (`t.lo.z` behind its origin) a run-up ahead of
-            // the car's front.
-            let z = c.hi.z + RUN_UP_S * v - t.lo.z;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![
-                    Body::new("car", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v),
-                    Body::new("trailer", "box_trailer", Vec3::new(0.0, 0.0, z), 0.0, 0.0),
-                ],
-                boxes: vec![],
-                impact_s: RUN_UP_S,
-            }
-        }),
+        modified_from: None,
+        // The trailer heads +Z, its rear a run-up ahead of the car's front, full overlap.
+        layout: family::preset(&families::UNDERRIDE, &[("car", "sedan".into()), ("trailer", "box_trailer".into()), ("speed", 56.0.into()), ("overlap", 1.0.into()), ("run_up", 0.5.into())]),
         secs_after_impact: AFTER_IMPACT_S,
         // The car's front reaches the trailer's rear at z ≈ 1.0 + 7.8 = 8.8 (the sedan's
         // front is 0.96 m ahead of its origin).

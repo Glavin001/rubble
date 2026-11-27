@@ -82,12 +82,41 @@ pub struct ScenarioInfo {
     #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desc: Option<ScenarioDesc>,
+    /// The scenario family it is a preset of ([`family`]; `Registry::families` has its
+    /// parameters), and its values: the controls a page shows start from these.
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<family::Values>,
+    /// Laid out from values other than its preset's: the scenario it was modified from (its
+    /// criteria are then the law-based ones only).
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_from: Option<String>,
+}
+
+/// A scenario family as a page lists it: its parameters (each a control) and their defaults.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FamilyInfo {
+    pub id: String,
+    pub title: String,
+    pub about: String,
+    pub params: Vec<family::Param>,
+    pub defaults: family::Values,
+    /// Whether it places static boxes.
+    pub boxes: bool,
+    /// The reference scenarios that are its presets, in order.
+    pub presets: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Registry {
     pub scenarios: Vec<ScenarioInfo>,
+    pub families: Vec<FamilyInfo>,
     pub contacts: Vec<Contact>,
     pub runs: u32,
     pub sample_steps: u32,
@@ -110,12 +139,30 @@ pub fn info(s: &CrashScenario, desc: Option<&ScenarioDesc>, from_code: &dyn Fn(&
         recreated: s.recreated,
         contact: desc.map_or(Contact::Edge, |d| d.contact),
         desc: desc.cloned(),
+        family: s.family().map(|(f, _)| f.id.to_string()),
+        values: s.family().map(|(_, v)| v.clone()),
+        modified_from: s.modified_from.clone(),
     }
 }
 
-/// Every built-in scenario, then `data`'s.
+/// A family's entry, with the reference scenarios that are its presets.
+pub fn family_info(f: &family::Family, scenarios: &[CrashScenario]) -> FamilyInfo {
+    FamilyInfo {
+        id: f.id.into(),
+        title: f.title.into(),
+        about: f.about.into(),
+        params: (f.params)(),
+        defaults: f.values(&family::Values::default()).unwrap_or_default(),
+        boxes: f.boxes,
+        presets: scenarios.iter().filter(|s| s.family().is_some_and(|(g, _)| g.id == f.id)).map(|s| s.id.clone()).collect(),
+    }
+}
+
+/// Every built-in scenario, then `data`'s; every family.
 pub fn registry(data: &[ScenarioDesc], from_code: &dyn Fn(&str) -> bool) -> Registry {
-    let mut scenarios: Vec<ScenarioInfo> = all().iter().map(|s| info(s, None, from_code)).collect();
+    let builtin = all();
+    let mut scenarios: Vec<ScenarioInfo> = builtin.iter().map(|s| info(s, None, from_code)).collect();
     scenarios.extend(data.iter().map(|d| info(&d.scenario(), Some(d), from_code)));
-    Registry { scenarios, contacts: Contact::ALL.to_vec(), runs: RUNS as u32, sample_steps: SAMPLE_STEPS, dt: DT }
+    let families = families::all().into_iter().map(|f| family_info(f, &builtin)).collect();
+    Registry { scenarios, families, contacts: Contact::ALL.to_vec(), runs: RUNS as u32, sample_steps: SAMPLE_STEPS, dt: DT }
 }

@@ -20,11 +20,9 @@
 
 use super::*;
 
-const KMH: f32 = 45.0;
-/// The car's nose to the trailer's rear (m): a queue's gap (estimate).
+/// The car's nose to the trailer's rear (m): a queue's gap (estimate). The truck's run-up
+/// (0.5 s): the car and the trailer settle on their wheels first.
 pub const GAP: f32 = 1.0;
-/// The truck's run-up (s): the car and the trailer settle on their wheels first.
-const RUN_UP_S: f32 = 0.5;
 pub const AFTER_IMPACT_S: f32 = 1.4;
 
 pub(super) fn scenario() -> CrashScenario {
@@ -34,23 +32,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[246, 248, 255], real_test: "DEKRA: a truck into a queue, a car between it and a parked truck" },
         designs: names(&["truck_cab", "sedan", "box_trailer"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let (c, t, tr) = (extent("sedan"), extent("truck_cab"), extent("box_trailer"));
-            let v = KMH / 3.6 * j.speed;
-            // the trailer's rear GAP ahead of the car's nose
-            let z_trailer = c.hi.z + GAP - tr.lo.z;
-            // the truck's front a run-up behind the car's tail
-            let z_truck = c.lo.z - RUN_UP_S * v - t.hi.z;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![
-                    Body::new("truck", "truck_cab", Vec3::new(j.lateral, 0.0, z_truck), j.yaw, v),
-                    Body::new("car", "sedan", Vec3::ZERO, 0.0, 0.0),
-                    Body::new("trailer", "box_trailer", Vec3::new(0.0, 0.0, z_trailer), 0.0, 0.0),
-                ],
-                boxes: vec![],
-                impact_s: RUN_UP_S,
-            }
-        }),
+        modified_from: None,
+        // The trailer's rear GAP ahead of the car's nose, the truck's front a run-up behind the
+        // car's tail.
+        layout: family::preset_named(&families::SANDWICH, &["truck", "car", "trailer"], &[("striker", "truck_cab".into()), ("car", "sedan".into()), ("trailer", "box_trailer".into()), ("speed", 45.0.into()), ("gap", f64::from(GAP).into()), ("run_up", 0.5.into())]),
         secs_after_impact: AFTER_IMPACT_S,
         // The car spans z −3.9 to 1.0; the trailer's rear at z ≈ 2.0.
         cameras: vec![

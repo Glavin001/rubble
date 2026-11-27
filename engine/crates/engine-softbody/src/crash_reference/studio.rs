@@ -252,7 +252,7 @@ impl Studio {
         let l = &built.layout;
         let names: Vec<String> = match &s.layout {
             LayoutSource::Data(d) => d.boxes.iter().map(|x| x.name.clone()).collect(),
-            LayoutSource::Code(_) => Vec::new(),
+            LayoutSource::Code(_) | LayoutSource::Family { .. } => Vec::new(),
         };
         let boxes = l.boxes.iter().enumerate().map(|(i, (c, h))| SceneBox { name: names.get(i).cloned().unwrap_or(format!("box{i}")), centre: c.to_array(), half: h.to_array(), yaw_deg: l.yaw_of(i).to_degrees() }).collect();
         let samples = s.samples(l) as u32 + 1;

@@ -10,10 +10,6 @@
 
 use super::*;
 
-const KMH: f32 = 55.0;
-/// The share of each car's width that meets the other's.
-const OVERLAP: f32 = 0.5;
-
 /// The same bands for each car (metric names are static, so they are built by `concat!`).
 macro_rules! per_car {
     ($car:literal) => {{
@@ -43,24 +39,10 @@ pub(super) fn scenario() -> CrashScenario {
         reference: Reference { video: VIDEO, at_s: &[357], real_test: "car-to-car frontal offset, 50 % overlap, equal cars at 55 km/h each" },
         designs: names(&["sedan"]),
         recreated: false,
-        layout: code(|extent, j| {
-            let e = extent("sedan");
-            let v = KMH / 3.6 * j.speed;
-            // A tenth of a second of closing (both cars move) before the fronts meet.
-            let gap = 0.1 * 2.0 * v;
-            // car_b faces car_a (yaw π: its left is world −X). Its world x span is
-            // [xb − hi.x, xb − lo.x]; overlapping car_a's left (+X) side by OVERLAP of the width.
-            let xb = 2.0 * e.hi.x - OVERLAP * e.width();
-            let zb = 2.0 * e.hi.z + gap;
-            Layout { box_yaw: Vec::new(),
-                bodies: vec![
-                    Body::new("car_a", "sedan", Vec3::new(j.lateral, 0.0, 0.0), j.yaw, v),
-                    Body::new("car_b", "sedan", Vec3::new(xb, 0.0, zb), std::f32::consts::PI, v),
-                ],
-                boxes: vec![],
-                impact_s: 0.1,
-            }
-        }),
+        modified_from: None,
+        // A tenth of a second of closing (both cars move) before the fronts meet; car_b faces
+        // car_a, overlapping its left (+X) side by half the width.
+        layout: family::preset(&families::HEAD_ON, &[("car_a", "sedan".into()), ("car_b", "sedan".into()), ("speed", 55.0.into()), ("speed_b", 55.0.into()), ("overlap", 0.5.into()), ("angle", 0.0.into()), ("lead", 0.1.into())]),
         secs_after_impact: 1.0,
         // The fronts meet at z ≈ 2.5 (the sedan's front is 0.96 m ahead of its origin), x ≈ 0.5.
         cameras: vec![

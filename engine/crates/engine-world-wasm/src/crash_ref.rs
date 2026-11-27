@@ -133,9 +133,38 @@ pub(crate) fn scenario_of(c: &serde_json::Value) -> Result<(cr::CrashScenario, C
         d.check()?;
         return Ok((d.scenario(), d.contact));
     }
-    let id = c.get("id").and_then(|x| x.as_str()).ok_or("crashRef.id (a scenario id) or crashRef.desc (a scenario description)")?;
-    let s = cr::get(id).ok_or_else(|| format!("no crash reference scenario {id}: {}", cr::all().iter().map(|s| s.id.clone()).collect::<Vec<_>>().join(", ")))?;
-    Ok((s, Contact::Edge))
+    let id = c.get("id").and_then(|x| x.as_str());
+    let family = c.get("family").and_then(|x| x.as_str());
+    if id.is_none() && family.is_none() {
+        return Err("crashRef.id (a scenario id), crashRef.family (a scenario family) or crashRef.desc (a scenario description)".into());
+    }
+    let values = params_of(c)?;
+    Ok((cr::family::resolve(id, family, &values)?, Contact::Edge))
+}
+
+/// `crashRef.params`: family parameter values by key (numbers, flags, names; a number or a
+/// flag may be given as text, as a URL holds it).
+fn params_of(c: &serde_json::Value) -> Result<cr::family::Values, String> {
+    match c.get("params").filter(|p| !p.is_null()) {
+        Some(p) => serde_json::from_value(p.clone()).map_err(|e| format!("crashRef.params: {e}")),
+        None => Ok(cr::family::Values::default()),
+    }
+}
+
+/// The scenario `spec` names (`{ id | family, params }`, as `spec.crashRef`) as the page
+/// lists it (`crash_reference::registry::ScenarioInfo`: its designs, criteria, family and
+/// values): what a page shows for a reference crash with changed values, or a family opened
+/// directly, before it spawns it.
+#[wasm_bindgen(js_name = crashReferenceScenario)]
+pub fn crash_reference_scenario(spec: String) -> Result<String, JsValue> {
+    scenario_info(&spec).map_err(err)
+}
+
+fn scenario_info(spec: &str) -> Result<String, String> {
+    let c: serde_json::Value = serde_json::from_str(spec).map_err(|e| format!("crashReferenceScenario: {e}"))?;
+    let (s, _) = scenario_of(&c)?;
+    let info = cr::registry::info(&s, None, &engine_softbody_authoring::crash_templates::from_code);
+    Ok(serde_json::to_string(&info).unwrap_or_default())
 }
 
 /// `spec.crashRef`: `{ id | desc, run (default 0), contact ('discrete' | 'edge' |
@@ -208,8 +237,10 @@ impl ExplicitSim {
         let Some(c) = &self.crash else { return JsValue::NULL };
         let c = c.borrow();
         let l = &c.built.layout;
+        let (family, values) = c.scenario.family().map_or((None, None), |(f, v)| (Some(f.id), Some(v.clone())));
         super::js(serde_json::json!({
             "id": c.id, "run": c.run, "contact": c.built.contact.name(),
+            "family": family, "values": values, "modifiedFrom": c.scenario.modified_from,
             "impactS": l.impact_s, "impactStep": (l.impact_s / DT).round(),
             "sampleSteps": SAMPLE_STEPS, "samples": c.samples,
             "totalSteps": (c.samples - 1) as u32 * SAMPLE_STEPS,
@@ -339,6 +370,27 @@ mod tests {
             assert_eq!(g["moments"].as_array().unwrap().len(), s.moments.len());
             assert_eq!(g["reference"]["links"].as_array().unwrap().len(), s.reference.at_s.len());
         }
+        // Every scenario is a family preset: its family listed with its parameters, its values
+        // every parameter's.
+        let fams = r["families"].as_array().unwrap();
+        assert_eq!(fams.len(), cr::families::all().len());
+        for (g, s) in got.iter().zip(&all) {
+            let f = fams.iter().find(|f| f["id"] == g["family"]).unwrap_or_else(|| panic!("{}: family {}", s.id, g["family"]));
+            let keys: Vec<&str> = f["params"].as_array().unwrap().iter().map(|p| p["key"].as_str().unwrap()).collect();
+            assert_eq!(g["values"].as_object().unwrap().keys().map(|k| k.as_str()).collect::<std::collections::BTreeSet<_>>(), keys.iter().copied().collect(), "{}", s.id);
+            assert!(f["presets"].as_array().unwrap().iter().any(|p| p == &g["id"]), "{}", s.id);
+        }
+        // A reference crash with a value changed: the law-based criteria, marked modified; a
+        // family opened directly.
+        let m: serde_json::Value = serde_json::from_str(&scenario_info(r#"{"id":"S11","params":{"speed":"64","car":"wagon"}}"#).unwrap()).unwrap();
+        assert_eq!(m["modifiedFrom"], "S11");
+        assert_eq!(m["designs"], serde_json::json!(["wagon"]));
+        assert!(m["criteria"].as_array().unwrap().iter().all(|c| c["basis"]["kind"] == "law"));
+        let same: serde_json::Value = serde_json::from_str(&scenario_info(r#"{"id":"S11","params":{"speed":56.3}}"#).unwrap()).unwrap();
+        assert!(same.get("modifiedFrom").is_none(), "the preset's own value");
+        let f: serde_json::Value = serde_json::from_str(&scenario_info(r#"{"family":"pole","params":{"offset":0.4}}"#).unwrap()).unwrap();
+        assert_eq!(f["family"], "pole");
+        assert!(scenario_info(r#"{"id":"S11","params":{"speed":-3}}"#).is_err());
         assert_eq!(r["contacts"].as_array().unwrap().len(), Contact::ALL.len());
         assert!(got.iter().all(|g| g["folderDesigns"].as_array().is_some()));
         // The text the page parses is the same value.
