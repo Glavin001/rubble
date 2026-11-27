@@ -449,8 +449,23 @@ a round, e = 1, zones unchanged. The speculative pass still runs before it, apar
   and ends in a zone; removing the path's closing (as today's rounds) keeps zones rare but the
   guard binds in two thirds of the steps: the velocity change is still not one projection,
   because the speculative pass's inelastic changes are in it.
-- Next: the speculative constraints as rows in the same solve (design C step 1), so the
-  velocity change is one projection and e = 1 returns it whole.
+- The speculative pass as rows too (`speculative_rows`, accumulated λ to a fixed point): 4.2-4.8 %.
+  Its rows carry a bias b > 0 (closing allowed down to the thickness), and against them giving
+  the change back once returns KE(v⁻) − 4·λᵀb, not KE(v⁻): exact projections do not make e = 1
+  energy-neutral for speculative constraints.
+- Energy removed, head 100 (ball 100), 2 runs each, by what runs (e = 1, cap 1):
+
+  | | head 100 | ball 100 |
+  |---|---|---|
+  | today (speculative, CCD rounds, rigid zones) | 2.8-2.9 % | 1.3-1.5 % |
+  | today without speculative (`DAT_ITERS=0`) | 1.8 % | |
+  | rows without speculative | 2.6-2.7 % | |
+  | without speculative, 8 non-rigid zone rounds | 1.8-1.9 % | 2.7 % |
+  | speculative, 8 non-rigid zone rounds | 2.6 % | 1.3-1.5 % |
+
+  No exact-projection variant reaches 1 %: the loss is spread over the speculative pass (about
+  a third), the rigid zones and the projections' remaining inexactness. The energy-exact θ per
+  group (the cap above 1, measured above) is what removes it.
 
 ## The GPU port (design, 2026-11-26)
 

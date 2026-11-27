@@ -167,7 +167,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: 8, paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: 16, restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -297,6 +297,9 @@ impl Rec {
 /// passes to the struck side. It removes approach and never adds separation. Each change
 /// of velocity moves the node by h times it (as the node update would have).
 fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
+    if std::env::var("DAT_RESPONSE").is_ok_and(|x| x == "rows") {
+        return speculative_rows(recs, v, im);
+    }
     let h = STEP;
     // Mass splitting (Tonge et al. 2012): a node's inverse mass is shared by its active pairs
     // in each pair's effective mass, and each pair's impulse is applied in full, equal and
@@ -340,6 +343,56 @@ fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) 
         sums.apply(v, None);
         for c in count.iter_mut() {
             c.iter_mut().for_each(|c| *c = 0);
+        }
+    }
+}
+
+/// [`speculative`] as rows with accumulated impulses (`DAT_RESPONSE=rows`; design C): each
+/// pair's λ ≥ 0 moves to where its constraint (closing speed no more than brings its gap to its
+/// thickness by the step's end) would hold with its nodes shared among all the pairs, projected
+/// Jacobi to a fixed point (at most `ccd_rows::ROW_ITERS`), so the velocities end on the
+/// mass-weighted projection, not on whatever the rounds reached.
+fn speculative_rows(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>]) {
+    let h = STEP;
+    let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|x| x.parse().ok()).unwrap_or(super::ccd_rows::ROW_ITERS);
+    let mut count: Vec<Vec<u32>> = v.iter().map(|x| vec![0; x.len()]).collect();
+    for r in recs {
+        for j in 0..r.len {
+            let (q, i) = r.k[j];
+            if r.w[j] > 0.0 && im[q][i as usize] > 0.0 {
+                count[q][i as usize] += 1;
+            }
+        }
+    }
+    let d: Vec<f32> = recs.iter().map(|r| (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize] * count[r.k[j].0][r.k[j].1 as usize] as f32).sum()).collect();
+    let mut lam = vec![0.0f32; recs.len()];
+    let mut sums = super::ccd::FixedSums::new(v);
+    for _ in 0..iters {
+        let mut changed = false;
+        for (q, r) in recs.iter().enumerate() {
+            if d[q] <= 0.0 {
+                continue;
+            }
+            let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
+            let c = rel + (r.g - r.d).max(0.0) / h;
+            let l = (lam[q] - c / d[q]).max(0.0);
+            let dl = l - lam[q];
+            if dl == 0.0 {
+                continue;
+            }
+            changed = true;
+            lam[q] = l;
+            for j in 0..r.len {
+                let (k, i) = r.k[j];
+                let m = im[k][i as usize];
+                if m > 0.0 && r.w[j] > 0.0 {
+                    sums.add_v(k, i, r.n * (r.sign(j) * r.w[j] * m * dl));
+                }
+            }
+        }
+        sums.apply(v, None);
+        if !changed {
+            break;
         }
     }
 }
