@@ -419,6 +419,7 @@ impl Ctx<'_> {
         let mut rows: Vec<VRow> = Vec::new();
         let mut listed: std::collections::HashMap<usize, usize> = Default::default();
         let mut settled = false;
+        let keep_rows = std::env::var("DAT_KEEPROWS").is_ok_and(|v| v == "1");
         // Speculative rows (`DAT_SPEC=1`, a measurement; Catto's speculative contact): every pair
         // whose start distance is within its gap and the two sides' paths this step is a row from
         // the first round, linearised at the start, bounded by its own gap (b ≥ 0: inactive until
@@ -512,6 +513,14 @@ impl Ctx<'_> {
                 }
                 warm.touched_next.insert(pr.k);
                 match old {
+                    // Monotone rounds (`DAT_KEEPROWS=1`, a measurement): the pair's earlier row is
+                    // kept beside its new one, so the constraint set only grows and a pair cannot
+                    // cycle between its forms.
+                    Some(_) if keep_rows => {
+                        relin += 1;
+                        listed.insert(q, rows.len());
+                        rows.push(r);
+                    }
                     Some(i) => {
                         relin += 1;
                         r.l = rows[i].l;

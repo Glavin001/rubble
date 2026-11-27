@@ -927,6 +927,12 @@ first solve, none in the response's re-listed solves.
   The rounds are not monotone: a re-linearised row replaces its last form, so a pair can cycle,
   and finitely many pairs don't guarantee an end. Replacing the zones needs a response whose
   iterations provably end, not more of them.
+- Monotone rounds (`DAT_KEEPROWS=1`, a measurement): a re-linearised pair keeps its earlier row
+  beside the new one, so the constraint set only grows.
+  - Default otherwise: 4,914 zones.
+  - With the exact solve and torque-free rows: 1,131 zones at 8 rounds (half of 2,361). At 32
+    rounds 1,243, with the exact solve unsettled 1,425 times as its clusters grow.
+  - 0 crossings, paint 11–14 mm, angular momentum per step under 1 N·m·s.
 - Speculative rows (`DAT_SPEC=1`, a measurement): every pair within its gap plus both sides' paths
   is a row from the first round, linearised at the start with b = (s0 − ξ)/h ≥ 0. No help:
   4,475 zones alone, 6,812 with the exact solve and torque-free rows.
