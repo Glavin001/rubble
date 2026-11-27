@@ -319,6 +319,7 @@
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer, DrawPacer, setStepsInFlight } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
+    import { createNodeBlend } from './node-blend.mjs';
     import { loadMod, modFromFiles, modModelSizesOf, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
     import { createDesignPanel } from './vehicle-design-ui.mjs';
     import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
@@ -677,7 +678,7 @@
         progress(`compiling the ${car.name}'s kernels and building the lab…`);
         const old = W; W = null;
         // The previous World and renderers go first: a phone cannot hold two.
-        try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
+        try { old?.cars.destroy(); old?.blend?.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const { world, lab, materials } = await createVehicleLab(spec, loading.progress);
         loading.stage('Building the renderers');
         const device = world.device();
@@ -688,10 +689,15 @@
         const gen = ++buildGen;
         device.addEventListener('uncapturederror', (e) => { if (gen !== buildGen) return; fail(gpuErrorText(e.error, device)); if (e.error?.constructor?.name === 'GPUOutOfMemoryError') outOfMemoryRetry(car); });
         // The ground slab (the World's first collider) is left to the renderer's ground.
+        // The nodes as drawn between World steps: interpolated between the last two
+        // stepped states (node-blend.mjs: carried forward by their velocities, a crash's
+        // ringing metal was drawn up to 25 cm from where it was, into the wall).
+        const labRec = world.explicitLabRecords();
+        const blend = labRec ? createNodeBlend(device, { nodes: world.explicitNodesBuffer(), misc: world.explicitMiscBuffer(), nodeVehicles: labRec.nodeVehicles }) : null;
         const { env, cars, texBase, dataBase } = await gpuPhase(device, `building the ${car.name}'s renderers`, async () => {
           const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
           const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'], skinBatch: get('skinBatch') });
-          cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
+          cars.setSolver(blend?.out ?? world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
           // The types' texture layers, one array each for the colour and the data maps (a
           // type's car draws from its own layers: addCar's texBase and dataBase).
           const colour = [], data = [], texBase = [], dataBase = [];
@@ -709,7 +715,7 @@
         }).catch((e) => { try { world.free(); lab.free(); } catch {} throw e; });
         const spans = world.explicitSpans();
         const [nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize] = lab.readPlan();
-        const w = { world, lab, device, env, cars, car, entries, typeOf, texBase, dataBase, paintOf: w_paints, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
+        const w = { world, lab, device, env, cars, blend, car, entries, typeOf, texBase, dataBase, paintOf: w_paints, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
           plan: { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize, fOff, fSize }, depthTex: null, msaaTex: null,
           pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize + fSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })),
           // The camera's own readback of the car it follows, every drawn frame (its nodes
@@ -730,7 +736,7 @@
         const dp = lab.derbyPlan(world);
         w.derbyPlan = dp.length === 4 ? dp : null;
         w.derbyPool = w.derbyPlan ? Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: dp[1] + dp[3], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) : [];
-        w.wire = structureView(device, world);
+        w.wire = structureView(device, world, blend);
         await gpuPhase(device, `uploading ${n === 1 ? 'the car' : `${n} cars`} to the GPU (${car.detail === 'lite' ? 'the lighter' : 'the full'} mesh)`, () => { for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i)); })
           .catch((e) => { try { w.cars.destroy(); w.env?.destroy?.(); world.free(); lab.free(); } catch {} throw e; });
         // (Cars with one level of detail each: their skin does not follow the eye.)
@@ -802,7 +808,7 @@
     }
     // The beams and nodes views: the crash lab's renderer (crash-lab-render.mjs) on the
     // World's explicit buffers and the wasm's render records (explicitLabRecords).
-    function structureView(device, world) {
+    function structureView(device, world, blend) {
       const rec = world.explicitLabRecords();
       if (!rec) return null;
       const up = (words) => {
@@ -817,7 +823,7 @@
       const bufs = { recs: up(rec.recs), labBeams: up(rec.labBeams), tris: up(rec.tris) };
       r.setSim({
         labNodeVehicles: () => rec.nodeVehicles, beamRecordsBuffer: () => bufs.recs, labBeamsBuffer: () => bufs.labBeams, trisBuffer: () => bufs.tris,
-        nodesBuffer: () => world.explicitNodesBuffer(), miscBuffer: () => world.explicitMiscBuffer(), beamsBuffer: () => world.explicitBeamsBuffer(),
+        nodesBuffer: () => blend?.out ?? world.explicitNodesBuffer(), miscBuffer: () => world.explicitMiscBuffer(), beamsBuffer: () => world.explicitBeamsBuffer(),
       }, { nodes: rec.nodes, beams: rec.beams, triangles: rec.triangles });
       return { r, frameBuf };
     }
@@ -863,6 +869,7 @@
         ...(mode === 'derby' ? { derby: derbySpec() } : {}) };
       try {
         W.lab.restart(W.world, spec);
+        W.blend?.invalidate();
         if (script) W.lab.setScript(script);
       } catch (e) { warn(errorText(e)); return; }
       watch();
@@ -1198,20 +1205,28 @@
     function draw(lead, simDt, wallDt, read) {
       const w = W;
       if (!w) return Promise.resolve();
-      const { device, env, cars, world } = w;
+      const { device, env, cars, world, blend } = w;
+      // What the frame shows (node-blend.mjs): `alpha` of the way from the state the last
+      // World step started from to the one it left, so `shown` seconds from the last step
+      // (at most one step back; paused: the last step itself). The cars' nodes are
+      // interpolated; the rigid bodies, the camera and the shadow are carried by `shown`
+      // along their velocities (for a body whose last step moved it by its velocity, the
+      // same place). Without the blend (no explicit vehicles): carried forward by `lead`.
+      const alpha = !blend || !blend.valid || paused ? 1 : Math.min(1, Math.max(0, lead * w.RATE));
+      const shown = blend ? (alpha - 1) / w.RATE : lead;
       if (!w.depthTex || w.depthTex.width !== canvas.width || w.depthTex.height !== canvas.height) {
         w.depthTex?.destroy(); w.msaaTex?.destroy();
         w.depthTex = device.createTexture({ size: [canvas.width, canvas.height], format: DEPTH, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
         w.msaaTex = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
       readPose();
-      updateCamera(lead, wallDt);
+      updateCamera(shown, wallDt);
       const M = scene() === 'mountain';
       const vp = viewProj(cam.eye, cam.at, canvas.width / canvas.height, 0.1, 2500);
       lastInv = invert(vp);
       // The mountain has no ground plane: the renderer's lies far below, in the haze.
       env.setCut(mode === 'compactor' && get('ghost') ? { centre: cam.target, radius: 0.01, towardEye: 0, opacity: 0.1 } : null);
-      env.frame({ viewProj: vp, invViewProj: lastInv, eye: cam.eye, focus: [cam.target[0], M ? cam.target[1] - 1 : 0, cam.target[2]], ground: M ? cam.target[1] - 400 : 0, lead, time: performance.now() / 1000,
+      env.frame({ viewProj: vp, invViewProj: lastInv, eye: cam.eye, focus: [cam.target[0], M ? cam.target[1] - 1 : 0, cam.target[2]], ground: M ? cam.target[1] - 400 : 0, lead: shown, time: performance.now() / 1000,
         road: [0, 0, 0], fogDist: M ? 70 : 220 });
       const enc = device.createCommandEncoder();
       // The drawing's GPU time (when GPU timing is on: the device has timestamp queries):
@@ -1224,24 +1239,27 @@
       // since the last, another lead, a restart or a car added (skinGen), or (the shadow)
       // another light focus. A level-of-detail pick follows the eye: cars with more than
       // one level are skinned every drawn frame. The same picture, without the work.
-      const skinKey = `${world.stepCount()}|${lead}|${w.skinGen}`, focusKey = `${cam.target[0]}|${M ? cam.target[1] : 0}|${cam.target[2]}`;
+      const skinKey = `${world.stepCount()}|${shown}|${w.skinGen}`, focusKey = `${cam.target[0]}|${M ? cam.target[1] : 0}|${cam.target[2]}`;
       const skinSame = skinKey === w.skinKey && w.singleLevel && !forceSkin;
       const shadowSame = skinSame && focusKey === w.focusKey;
       w.skinKey = skinKey; w.focusKey = focusKey;
+      // (The blend first: the skin and the structure view draw from its nodes; unchanged
+      // with the skin.)
+      if (blend && !skinSame) blend.update(enc, alpha);
       if (skinSame) { if (dq) enc.beginComputePass(stamp(0)).end(); }
       else {
         // (The debris effects' time step: the simulated time since the cars were last
         // skinned, which spans the steps of frames not drawn.)
         const at = world.stepCount(), since = simDt > 0 && w.skinAt != null && at > w.skinAt ? (at - w.skinAt) / w.RATE : simDt;
         w.skinAt = at;
-        cars.update(enc, { dt: since, floorY: M ? -1e5 : 0, lead, ...stamp(0) });
+        cars.update(enc, { dt: since, floorY: M ? -1e5 : 0, lead: blend ? 0 : lead, ...stamp(0) });
       }
       const wire = (get('beams') || get('nodes')) ? w.wire : null;
       if (wire) {
         const f = new Float32Array(60);
         f.set(vp, 0); f.set([...cam.eye, 1], 16); f.set([...env.sun, 0], 20); f.set(lastInv, 44);
         device.queue.writeBuffer(wire.frameBuf, 0, f);
-        wire.r.gather(enc, lead);
+        wire.r.gather(enc, blend ? 0 : lead);
       }
       if (shadowSame) { if (dq) enc.beginComputePass(stamp(1)).end(); }
       else env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }), { ...stamp(1), perfSkip: drawSkip });
@@ -1664,6 +1682,7 @@
           acc += w.RATE * scale / fpsV;
           const k = Math.floor(acc + 1e-6); acc -= k;
           for (let i = 0; i < k; i++) {
+            w.blend?.keep(w.device.queue);
             await stepFrames(w.world, 1, onFrame, before);
             simSteps++;
             const enc = w.device.createCommandEncoder();
@@ -1707,6 +1726,7 @@
             if (!w.world.canStep()) pollFrame(w.world, onFrame);
             if (!w.world.canStep()) { refused = owed - k; break; }
             before();
+            w.blend?.keep(w.device.queue);
             w.world.step();
             taken++;
           }
