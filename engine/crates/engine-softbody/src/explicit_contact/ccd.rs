@@ -83,8 +83,8 @@ impl FixedSums {
     }
 }
 
-
 /// A pair for the response: its four nodes (vehicle, node), the first `nn` one side.
+#[derive(Clone)]
 pub(super) struct CcdPair {
     pub k: [(usize, u32); 4],
     pub nn: usize,

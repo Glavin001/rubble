@@ -1735,15 +1735,14 @@ impl ExplicitBeamsWorld {
             (Some(s), true) if !s.2.is_empty() => Some((s.2.iter().map(|p| p.iter().map(|q| q.1).collect()).collect(), self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect())),
             _ => None,
         };
+        let balls = |w: &ExplicitBeamsWorld| -> Vec<(f64, Vec3)> { w.vehicles.iter().filter_map(|v| v.rigid.as_ref()).flat_map(|r| r.bodies.iter().map(|b| (if b.inv_mass > 0.0 { 1.0 / b.inv_mass as f64 } else { 0.0 }, b.vel))).collect() }; let b0 = if on { balls(self) } else { Vec::new() };
         self.dat_truncate(x0);
         if on {
-            let de = mech(self) - e0;
-            let work = before.map_or(0.0, |(vpre, vb)| self.vehicles.iter().zip(vpre.iter().zip(&vb)).map(|(v, (vp, vb))| {
-                v.nodes.iter().zip(vp.iter().zip(vb)).map(|(n, (vp, vb))| n.mass as f64 * (n.vel - *vb).as_dvec3().dot((*vp + n.vel).as_dvec3() * 0.5)).sum::<f64>()
-            }).sum());
+            let (de, ball_work) = (mech(self) - e0, b0.iter().zip(balls(self)).map(|((m, v0), (_, v1))| m * (v1 - *v0).as_dvec3().dot((*v0 + v1).as_dvec3() * 0.5)).sum::<f64>());
+            let work = before.map_or(0.0, |(vpre, vb)| self.vehicles.iter().zip(vpre.iter().zip(&vb)).map(|(v, (vp, vb))| v.nodes.iter().zip(vp.iter().zip(vb)).map(|(n, (vp, vb))| n.mass as f64 * (n.vel - *vb).as_dvec3().dot((*vp + n.vel).as_dvec3() * 0.5)).sum::<f64>()).sum());
             if let Some(d) = self.continuous.as_mut() {
                 d.total.contact_de += de;
-                d.total.contact_work += work;
+                d.total.contact_work += work + ball_work;
             }
         }
     }

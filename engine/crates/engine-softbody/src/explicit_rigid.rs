@@ -385,9 +385,27 @@ impl ProxySet {
     /// and shapes' surface (`ContactSurface::BOX`, exact and dissipative on the BeamNG
     /// profile: jbeam-semantics-spec.md §37.1).
     pub fn node_contact_with(&mut self, x: Vec3, n: &Node, fast_side: bool, stat: &ContactSurface) -> Vec3 {
+        self.node_contact_rows(x, n, fast_side, stat, false)
+    }
+
+    /// The spheres velocity contact solves as bodies of its own (`explicit_contact::ccd_vel`):
+    /// (shape, body, radius) of each sphere centred on a moving body.
+    pub fn row_spheres(&self) -> Vec<(usize, usize, f32)> {
+        self.shapes.iter().enumerate().filter_map(|(k, s)| match s.geom {
+            ProxyGeom::Sphere { radius } if s.local_pos == Vec3::ZERO && !self.bodies[s.body as usize].is_static() => Some((k, s.body as usize, radius)),
+            _ => None,
+        }).collect()
+    }
+
+    /// [`Self::node_contact_with`]; `rows`: [`Self::row_spheres`] left to velocity contact.
+    pub fn node_contact_rows(&mut self, x: Vec3, n: &Node, fast_side: bool, stat: &ContactSurface, rows: bool) -> Vec3 {
         let mut total = Vec3::ZERO;
         let h = STEP;
+        let skip: Vec<usize> = if rows { self.row_spheres().into_iter().map(|s| s.0).collect() } else { Vec::new() };
         for k in 0..self.shapes.len() {
+            if skip.contains(&k) {
+                continue;
+            }
             let Some(mut normal) = Self::face(&self.shapes[k], x) else {
                 continue;
             };
@@ -474,12 +492,19 @@ impl ProxySet {
     /// ([`crate::explicit_surface`]): each shape in shape order with its cull box. The
     /// poses are the shared module's strict ones (`fq::shape_pose`), as the GPU's.
     pub fn surface_shapes(&mut self) -> Vec<(SurfaceShape, Vec3, Vec3)> {
+        self.surface_shapes_rows(false)
+    }
+
+    /// [`Self::surface_shapes`]; `rows`: [`Self::row_spheres`] left to velocity contact (an
+    /// empty cull box, so no triangle meets them here; their slots stay in order).
+    pub fn surface_shapes_rows(&mut self, rows: bool) -> Vec<(SurfaceShape, Vec3, Vec3)> {
+        let skip: Vec<usize> = if rows { self.row_spheres().into_iter().map(|s| s.0).collect() } else { Vec::new() };
         let mut out = Vec::with_capacity(self.shapes.len());
         for k in 0..self.shapes.len() {
             let b = &self.bodies[self.shapes[k].body as usize];
             let (bp, bq) = (b.pos, b.rot);
             let shape = surface_shape(bp, bq, &mut self.shapes[k]);
-            let (lo, hi) = fq::bounds(&shape);
+            let (lo, hi) = if skip.contains(&k) { (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)) } else { fq::bounds(&shape) };
             out.push((shape, lo, hi));
         }
         out

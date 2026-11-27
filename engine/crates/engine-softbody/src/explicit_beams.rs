@@ -3819,13 +3819,12 @@ impl ExplicitBeams {
                     }
                 }
                 if let Some(r) = rigid.as_mut() {
-                    let c = r.node_contact_with(
-                        x,
-                        &n,
-                        fast_side,
+                    let c = r.node_contact_rows(
+                        x, &n, fast_side,
                         &ContactSurface::BOX
                             .exact_if(exact)
                             .dissipative_if(dissipative),
+                        self.no_position_steps,
                     );
                     if let Some(l) = cf.as_mut() {
                         l.add(i, c);
@@ -4567,6 +4566,7 @@ impl ExplicitBeams {
 
     /// Adds position step `d` (m) to node `i`'s ([`Self::contact_shift`]).
     pub fn add_shift(&mut self, i: usize, d: Vec3) {
+        if std::env::var("DAT_NOSHIFT").is_ok() { return; }
         if self.contact_shift.len() != self.nodes.len() {
             self.contact_shift = vec![[0; 3]; self.nodes.len()];
         }
