@@ -6,6 +6,13 @@ reference, with where Rubble differs over time and the most likely reason for ea
 2026-11-27 at `crash-ref/camry-side-footage` (cut from `claude/crash-reference-suite`
 a81e0dfc7). Nothing was tuned: this is measurement only.
 
+**Revised 2026-11-27 (S13's setup).** The first measurement found S13's pole 0.9 m behind where
+the tests put it. S13 was moved (`s13_side_pole.rs`, "Where the pole strikes") and every S13
+number, sheet and curve below is from the moved scenario; the earlier figures are kept in §2
+for the record. The first version's second setup finding, that S14's barrier lands 0.6 m ahead
+of the doors, was wrong (it read a door outline that starts at the window opening): S14 was
+right and is unchanged.
+
 - Real tests: 7517 (2012 Camry, side MDB), 8560 (2014.5 Camry, side MDB), 7523 (2012, pole),
   8558 (2014.5, pole). Media index with every film's timing and moments, every photo's group,
   and the report page sources: `nhtsa/media/<test>.json` (hand notes kept in
@@ -56,28 +63,35 @@ have no caption: their first contact was not established.
 | car, as tested | 1,566 kg | 1,579 kg | 1,448 kg |
 | speed, angle | 32.1 km/h, 75° | 31.95 km/h, 75° | 32 km/h, 75° |
 | pole | rigid round, 254 mm | same | square post, 254 mm (stated choice) |
-| **pole centre behind the front axle** | **1,101 mm** (on the driver's head CG; front door) | **1,125 mm** | **2,146 mm** (the generated sedan's driver seat; its rear door) |
-| as a share of the wheelbase | 0.40 | 0.41 | 0.76 |
+| **impact line on the side, behind the front axle** | **1,101 mm** (front door) | **1,125 mm** | **1,355 mm** (front door); was 1,996 mm (rear door) |
+| the line ahead of the car's centre of mass | about 0.06–0.09 m | same | 0.075 m; was 0.57 m behind it |
+| the line ahead of the B-pillar | about 0.37 m | same | 0.28 m |
 
-Setup findings (the scenarios were not changed):
+Setup findings:
 
-1. **S13's pole strikes 1.0 m further back than the tests', relative to the front axle**
-   (measured: the scenario's `aim_behind_axle` 2.146 m and the export's pole at z = −1.96 m with
-   the front axle at z = 0, against the reports' "actual impact point" 1,101 and 1,125 mm). On
-   the generated sedan this is the rear door, behind the car's centre of mass; on the Camrys it
-   is the front door, 90 mm ahead of the CG. The scenario follows the procedure (aim at the
-   driver's head) on a car whose driver seat, as the generator places it, sits 2.15 m behind its
-   front axle; a Camry's head is 1.10 m behind. Either the generated sedan's cabin is about a
-   metre further back than a Camry's (its outline groups support this: front door 1.08–1.60 m
-   behind the front axle, rear door 1.67–2.61 m; the Camry's doors run from 0.41 m to 2.47 m),
-   or the seat nodes the aim was read from are not the driver's. Not resolved here; it drives
-   difference S13-1 below.
-2. **S14's barrier lands partly ahead of the generated sedan's doors.** The impact line is the
-   same rule (940 mm ahead of mid-wheelbase), so the face covers 0.475–2.15 m behind the front
-   axle on both cars; on a Camry that is all door (doors 0.41–2.47 m), on the generated sedan its
-   first 0.6 m (0.475–1.08 m) is ahead of the front door's outline group, in the fender / hinge
-   pillar region (outline group extents from `crash_outlines`, rest shape; supported by the
-   overhead stills).
+1. **S13's pole was 0.9 m too far back; fixed.** The scenario had aimed at the generated
+   sedan's driver seat, and the generator stands that seat behind the B-pillar, beside the rear
+   door (seat 1.64–2.25 m behind the front axle, B-pillar 1.635 m, front door 0.57–1.60 m: node
+   positions in `out/gen/sedan_new`). A real front seat is ahead of the B-pillar; this is a
+   fault of the generated sedan (reported on PR 163), not of the procedure. The tests' line by
+   the axle (1.113 m) does not transfer either: the sedan is rear-wheel drive with its centre of
+   mass 1.43 m behind the front axle (0.51 of the wheelbase; the Camrys 1.16–1.19 m, 0.42), so
+   that line is 0.31 m ahead of its centre of mass and the car swings the other way. Measured,
+   edge contact, run 0:
+
+   | impact line behind the front axle | relative to the centre of mass | yaw at 300 ms | pole force |
+   |---|---|---|---|
+   | 1.996 m (the old aim, rear door) | 0.57 m behind | 38.7° nose-left | 307 kN |
+   | 1.113 m (the tests' line by the axle) | 0.31 m ahead | 19.9° nose-right | 342 kN |
+   | **1.355 m (S13 now)** | 0.075 m ahead, as the tests | 3.6–4.1° nose-right | 275 kN |
+   | tests | 0.06–0.09 m ahead | 8–10° nose-left (±30 %) | 191–197 kN |
+
+   S13 now keeps the tests' lever arm about the centre of mass and strikes the front door.
+2. **S14's setup is right.** The face's forward edge is on FMVSS 214's line by the same rule as
+   the tests (0.475 m behind the front axle; the tests 0.455–0.463 m). The generated sedan's
+   front door begins 0.57 m behind the front axle (a Camry's 0.41 m), so the face's first 0.10 m
+   is on the fender's rear edge instead of 0.05 m inside the door: a small difference of the
+   car, not a setup fault.
 3. Mass: the generated sedan is 12 % lighter than the MDB Camrys and 8 % lighter than the pole
    Camrys (§6 computes what this alone changes). The barrier mass and speeds match within 0.5 %.
 4. The tests' cars carry ES-2re / SID-IIs dummies and ballast; the scenario has none. Their mass
@@ -167,21 +181,23 @@ a proxy for the reports' grid, mm, + behind the impact line):
 | 1,500 | 238 | 225 | 113 | 90 | 275 |
 | 1,800 | 227 | 206 | −11 | −13 | 59 |
 
-**S13, edge contact:** the CG starts at once (0.79 m/s at 10 ms against 0.05–0.12), reaches half
-its change by 43 ms (60–62) and finishes by about 100 ms (150); its change is 9.78 m/s (10.3–10.9)
-and the car moving back off the post at 0.46 m/s along the travel at the end. Pole force **307 kN at 44 ms** (191–197 kN at
-44–46). Crush peak 321 mm, residual 236 mm (379–394). The car **turns nose-left 9° by 100 ms, 17°
-by 150 ms, 38.7° by 300 ms** (real 2.2–2.6°, 4.4–4.6°, 8–10°) and slides off the pole; in the
-overhead stills the post sits beside the rear door, behind the roof's middle, and the car pivots
-round it. Plan-view crush at 300 ms: 130–240 mm from 300 mm ahead of the pole to 600 mm behind it
-(8558: 340–379 mm at the pole, ≥ 200 mm from −225 to +225, about 0 at ±1 m).
-- continuous: 259 kN at 48 ms, change 10.1 m/s, crush 331 / 245 mm; its cabin-width gauge moves
-  265 mm at the peak and 230 mm at the end (edge: 43 / 20 mm): unexplained (a B-pillar gauge
-  node near the post, inferred).
-- ETK, edge: 332 kN at 32 ms, change only 8.2 m/s (it rotates 60° and slides past the post,
-  still moving toward it at 1.15 m/s), residual crush 142 mm, one part detaches. Continuous
-  contact refuses to start on the ETK (skin pairs closer than 2 mm at spawn: the import's
-  authoring).
+**S13, edge contact (the moved pole):** the CG starts at once (0.87 m/s at 10 ms against
+0.05–0.12; 2.5 at 20, 7.6 at 50), has half its change by 43 ms (60–62) and **stops along the
+travel at 58 ms after 0.27 m** (97–112 ms, 0.46–0.51 m); it is then **thrown back at 4.0 m/s**
+(1.7–2.2), a lateral change of 12.7 m/s (10.3–10.9). Pole force **275 kN at 24 ms** (191–197 kN
+at 44–46). Crush peak 341 mm, residual 110 mm (379–394 static). Yaw: nose-right 2° from 40 to
+150 ms, 4° at 300 ms (real nose-left 4.5° at 150 ms, 8–10° at 300): small on both sides now. In
+the overhead stills the post meets the front door just ahead of the B-pillar, the side dents
+round it to 60–100 ms, and by 200 ms the car has left the post with most of the dent gone; the
+real cars stay wrapped round the pole. Plan-view crush: 330 mm at 60 ms and 123 mm at 300 ms,
+0.3 m behind the line (8558: 340–379 mm at the pole, ≥ 200 mm from −225 to +225, about 0 at ±1 m).
+All of S13's asserted rules hold on 8 jittered runs with edge and with continuous contact.
+- continuous: 271 kN at 20 ms, thrown back at 3.7 m/s, crush 355 / 296 mm; its cabin-width
+  gauge moves 291 mm at the peak and 257 mm at the end (edge: 100 / 48 mm): unexplained (a
+  B-pillar gauge node near the post, inferred).
+- ETK, edge, struck 1.355 m behind its own front axle: 427 kN at 28 ms, thrown back at 2.2 m/s,
+  crush 342 / 144 mm, yaw 25°. Continuous contact refuses to start on the ETK (skin pairs
+  closer than 2 mm at spawn: the import's authoring).
 
 ## 5. Sensor detail (the real tests)
 
@@ -227,9 +243,8 @@ The generated sedan is 1,448 kg against 1,641–1,649 kg (MDB) and 1,566–1,579
 - **S13.** Against a rigid pole the velocity change does not depend on mass. For the same side
   stiffness a lighter car's peak force scales with √m (a linear spring: F = v√(k m)): the
   Camrys' 191–197 kN become **184–189 kN** at 1,448 kg, and their pulse 4 % shorter. Rubble's
-  307 kN is 1.6–1.7 times that; in the same spring model its side is 2.6–2.8 times stiffer
-  ((F/v)²/m: about 820 kN/m against 290–310 kN/m; hypothesis-level, the model is crude).
-  Residual crush for the same energy per mass would be unchanged by mass.
+  275 kN is 1.5 times that, and it comes 20 ms earlier. Residual crush for the same energy per
+  mass would be unchanged by mass.
 
 ## 7. Differences, ranked, with causes
 
@@ -256,9 +271,8 @@ stills), **hypothesis** (a likely cause, not isolated by an experiment here).
    ms: the load crosses the car through the floor at once). Rubble's load enters through door
    skin and reaches the floor late. Likely causes: (a) the barrier's lower element or the
    sedan's sill not meeting at the same height and stiffness (authoring of `mdb214` and the
-   sill: the sill's top is 295–302 mm in the tests; not measured on the sedan here); (b) the
-   barrier hitting 0.6 m of fender / hinge-pillar region ahead of the doors (setup finding 2)
-   instead of the B-pillar foot. Hypothesis.
+   sill: the sill's top is 295–302 mm in the tests; not measured on the sedan here); (b) not the
+   impact line, which is right (setup finding 2). Hypothesis.
 3. **Too little yaw early, then yaw keeps growing** (4° vs 8° at 100 ms, 8° vs 14–15° at 150 ms,
    18° vs 30–33° at 300 ms). Measured (both from different methods: Rubble from the rigid fit
    of cabin and rear, the tests from two accelerometers, ±30 %). In the tests the rear is
@@ -268,8 +282,7 @@ stills), **hypothesis** (a likely cause, not isolated by an experiment here).
 4. **Where the crush is**: Rubble's dent is shallow and broken into patches (95–145 mm at 80
    ms; edge contact puts it at 1.2–1.5 m behind the line); the tests' is a continuous trough
    200–275 mm deep from 150 to 1,950 mm behind the line, deepest at the front door's rear and
-   the B-pillar foot. Film and measured (proxy). Causes: 1, and the door openings' placement
-   (setup finding 2).
+   the B-pillar foot. Film and measured (proxy). Cause: 1.
 5. **What breaks and detaches**: the tests break the front door glass (25–40 ms) and jam both
    left doors; nothing detaches from the generated sedan (glass is visual-only by design). Film;
    by design, not a defect.
@@ -277,21 +290,19 @@ stills), **hypothesis** (a likely cause, not isolated by an experiment here).
    crushes 3–7 times more. The doc's known fault; any agreement in crush depth under edge
    contact is an artefact. Measured.
 
-### S13 (side pole), edge contact
+### S13 (side pole), edge contact, the moved pole
 
-1. **The pole hits the rear door and the car pivots round it** (yaw 38.7° vs 8–10° at 300 ms;
-   17° vs 4.5° at 150 ms; the overhead sheet shows it from 60 ms). Measured and film. Cause:
-   setup finding 1, the aim 2.146 m behind the front axle (behind the CM) vs 1.10–1.13 m on the
-   Camrys (90 mm ahead of their CG). Confident (the direction and size follow from the lever
-   arm); a run with the pole at 1.10 m would confirm it (not run: no scenario changes).
-2. **Too stiff and too fast**: 307 vs 184–189 kN mass-scaled; half the change by 43 vs 60–62 ms;
-   pulse over by about 100 vs 150 ms; CG moves 0.32 m into the pole vs 0.46–0.51; residual crush
-   236 vs 379–394 mm. Measured. Causes: the post meets the rear door / C-pillar region of the
-   sedan, which may be stiffer than a front door (cause 1); the generated sedan's side
-   structure yielding too little (as S14-1); the square post spreading the load (a stated
-   choice; small). Hypothesis on the split; the ETK, struck at its own seat, is stiffer still
-   (332 kN at 32 ms), which points at the side structure, not only at where it is struck.
-3. **The start**: Rubble's CG moves at once (0.8 vs 0.05–0.12 m/s at 10 ms): the door skin and
+1. **The side springs back: the car is thrown off the pole at 4.0 m/s** (real 1.7–2.2), and its
+   dent recovers from 341 mm to 110 mm (real 379–394 mm left in the car). Measured and film.
+   45 % of the approach speed comes back, 20 % of the energy. Cause: the door, sill and
+   B-pillar yield too little and store the load; the same fault as S14-1, now seen without a
+   barrier in the way. Authoring of the side structure first; the solver's limit on members
+   folding (beam-yield-law.md §9) may share it. Hypothesis on the split.
+2. **Too stiff and too early**: 275 kN at 24 ms vs 184–189 kN (mass-scaled) at 44–46 ms; stopped
+   at 58 ms after 0.27 m vs 97–112 ms after 0.46–0.51 m. Measured. Causes: as 1; the square
+   post spreading the load (a stated choice; small). The ETK is stiffer still (427 kN), so this
+   is not one generator's choice.
+3. **The start**: Rubble's CG moves at once (0.87 vs 0.05–0.12 m/s at 10 ms): the door skin and
    the structure behind it engage together in Rubble; on the Camrys the door skin crushes alone
    for 10–15 ms before the sill / B-post sill reach the pole (13–15 ms on 8558, 30 ms on 7523).
    Measured. Cause: little stand-off and little skin softness between the outer surface and
@@ -299,21 +310,19 @@ stills), **hypothesis** (a likely cause, not isolated by an experiment here).
 4. **Wrap**: the tests' side folds into a V around the round pole (wheelbase and left side
    106–135 mm shorter, roof rail bent, windshield cracked); Rubble's dent is a shallow trough
    130–240 mm deep spread from 0.3 m ahead to 0.6 m behind the post, with little length lost
-   by its gauges (`wheelbase_left` changes 23 mm at the end, `length_left` 9 mm). Film and measured. Causes: 1 and
+   by its gauges (`wheelbase_left` changes 35 mm at the end). Film and measured. Causes: 1 and
    2; the square post (cannot wrap as a cylinder does).
-5. Rebound: Rubble's rebound ratio 0.28–0.30 against the Camrys' 0.19–0.25: close. Measured.
+5. Yaw: 4° nose-right against 8–10° nose-left (±30 %). Both small; the remaining difference is
+   within what the pole's friction along the side and the wrap would turn (not isolated).
 
 ## 8. What would have to change to reproduce each real result
 
 Ranked by how much each would close the gaps above. Nothing here was tried.
 
 **Scenario setup**
-1. S13: put the pole where the tests put it relative to the car's axles and CG, or establish
-   that the generated sedan's driver seat really is 2.15 m behind its front axle (then S13 is
-   right for its car and cannot match a Camry's yaw). Closes S13-1, much of S13-2 and S13-4.
-2. S14: decide whether the impact line should be placed by the rule on the sedan's wheelbase
-   (as now) or by the Camry's door geometry (the face 0.04–0.08 m behind the front door's
-   leading edge). Affects S14-2 and S14-4.
+1. S13: done (§2). What remains is the car: the generated sedan's front seats belong ahead of
+   the B-pillar, and its centre of mass is 0.27 m further back than a Camry's.
+2. S14: nothing to change (§2).
 3. Report both at the Camry mass (ballast to 1,641 / 1,566 kg) when a like-for-like number is
    wanted; §6 shows mass explains 6–7 % of the S14 exit speed and none of the shape.
 
@@ -322,8 +331,8 @@ Ranked by how much each would close the gaps above. Nothing here was tried.
    250–400 mm and stays crushed instead of springing back (S14-1, S13-2, S13-4; the residual
    B-pillar width loss of 110–350 mm is a target). The ETK shows the same stiffness, so this is
    not specific to one generator choice (hypothesis).
-5. The door openings' placement along the car (front door starting about 0.4 m behind the front
-   axle on a Camry, 1.08 m on the generated sedan) and the driver seat's position (S13 setup).
+5. The front seats' position (behind the B-pillar; they belong ahead of it) and the front door's
+   start (0.57 m behind the front axle; a Camry's 0.41 m).
 6. The sill height and the barrier bumper's height match, so that the first spike appears
    (S14-2): measure the sedan's sill top against 295–302 mm.
 7. ETK: its collision skin has pairs closer than 2 mm at spawn, so continuous contact refuses it.

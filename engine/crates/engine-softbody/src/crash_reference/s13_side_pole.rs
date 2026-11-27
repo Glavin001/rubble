@@ -13,12 +13,30 @@
 //! a square post 254 mm wide (the lab's is 200 mm; the test's is a 254 mm cylinder): a face
 //! parallel to the car's side meets it along a 254 mm vertical strip, as the cylinder's
 //! tangent does at first contact; the cylinder's wrapping as the side crushes round it is not
-//! modelled. The driver's head centre of gravity, which the pole is aligned with, is taken at
-//! the generated sedan's driver seat: 0.38 m left of the centre line (the seat's centre node
-//! `seafl_c`) and 0.10 m ahead of the seat back's top (`seafl_bo`, `seafl_bi`), 2.146 m behind
-//! the front axle (the test places the 50th-percentile dummy's head there; ours is the seat's
-//! geometry, measured 2026-11-27). The pole's centre lies on the line through that point along
-//! the travel, touching the side's outermost plane at first contact.
+//! modelled.
+//!
+//! **Where the pole strikes.** The procedure aligns the pole with the seated dummy's head
+//! centre of gravity along the travel; both reports give where that put it on the car: the
+//! vertical impact reference line on the struck side 1,101 mm (7523) and 1,125 mm (8558; 1,128
+//! intended) behind the front axle. On a Camry that is the front door, about 0.37 m ahead of the
+//! B-pillar and 0.06-0.09 m ahead of the car's centre of gravity. The generated sedan is laid
+//! out differently (rear-wheel drive: its centre of mass is 1.43 m behind its front axle, 0.51
+//! of its wheelbase, against the Camrys' 1.16-1.19 m, 0.42; its B-pillar 1.635 m, its front
+//! door 0.57-1.60 m), so one line cannot match on the axle, the door and the centre of mass at
+//! once. The scenario keeps what decides the crash: **the impact line 0.075 m ahead of the
+//! centre of mass** (the pole's lever arm, so the car's yaw) **and on the front door**, 0.28 m
+//! ahead of the B-pillar: 1.355 m behind the front axle. The aim, on the travel line through
+//! that line, is 0.38 m left of the centre line and 1.506 m behind the front axle
+//! (1.355 + (0.943 - 0.38) / tan 75 deg; the side's outermost plane is 0.943 m out). A change
+//! of the sedan's mass distribution moves this number.
+//!
+//! Measured 2026-11-27 (CPU reference, run 0, edge contact), the impact line at three places:
+//! 1.996 m behind the front axle (the aim until then, read from the generated sedan's driver
+//! seat, which the generator stands behind the B-pillar, beside the rear door: seat 1.64-2.25
+//! m): the pole behind the centre of mass, the car pivots 38.7 deg nose-left by 300 ms, 307 kN.
+//! 1.113 m (the tests' line by the axle): 0.31 m ahead of the centre of mass, 19.9 deg
+//! nose-right, 342 kN. 1.355 m (this scenario): 3.6 deg nose-right, 275 kN. The tests: 8-10 deg
+//! nose-left (two accelerometers, good to 30 %), 191-197 kN.
 //!
 //! First principles: 8.89 m/s, 57 kJ; the pole only pushes (the car leaves along the travel
 //! no faster than it came, and the carrier only slows it); the struck (left) side takes the
@@ -29,8 +47,8 @@ use super::*;
 pub const KMH: f32 = 32.0;
 /// The travel's angle from the car's forward axis (deg).
 pub const ANGLE_DEG: f32 = 75.0;
-// The pole: 254 mm wide. The driver's head CG in the design's frame (the aim): 0.38 m left of
-// the centre line, 2.146 m behind the front axle (see the module notes).
+// The pole: 254 mm wide. The aim: 0.38 m left of the centre line, 1.506 m behind the front
+// axle, which puts the impact line on the side 1.355 m behind it (see the module notes).
 
 pub(super) fn scenario() -> CrashScenario {
     CrashScenario {
@@ -42,13 +60,13 @@ pub(super) fn scenario() -> CrashScenario {
         modified_from: None,
         // Travel 75° from the forward axis toward the car's left, the pole's centre on the
         // travel line through the driver's head, a tenth of a second ahead.
-        layout: family::preset(&families::SIDE_POLE, &[("car", "sedan".into()), ("speed", f64::from(KMH).into()), ("angle", f64::from(ANGLE_DEG).into()), ("pole_width", 0.254.into()), ("aim_left", 0.38.into()), ("aim_behind_axle", 2.146.into()), ("lead", 0.1.into())]),
+        layout: family::preset(&families::SIDE_POLE, &[("car", "sedan".into()), ("speed", f64::from(KMH).into()), ("angle", f64::from(ANGLE_DEG).into()), ("pole_width", 0.254.into()), ("aim_left", 0.38.into()), ("aim_behind_axle", 1.506.into()), ("lead", 0.1.into())]),
         secs_after_impact: 0.3,
-        // World coordinates at contact: the car's origin at 0, the pole at about (1.07, −1.96).
+        // World coordinates at contact: the car's origin at 0, the pole at about (1.07, −1.32).
         cameras: vec![
-            Camera { name: "front three-quarter".into(), eye: [4.5, 1.6, 2.0], target: [0.9, 0.7, -1.9] },
-            Camera { name: "top".into(), eye: [0.01, 12.0, -1.7], target: [0.0, 0.0, -1.7] },
-            Camera { name: "behind the pole".into(), eye: [5.5, 1.2, -1.96], target: [0.9, 0.8, -1.96] },
+            Camera { name: "front three-quarter".into(), eye: [4.5, 1.6, 2.6], target: [0.9, 0.7, -1.3] },
+            Camera { name: "top".into(), eye: [0.01, 12.0, -1.4], target: [0.0, 0.0, -1.4] },
+            Camera { name: "behind the pole".into(), eye: [5.5, 1.2, -1.32], target: [0.9, 0.8, -1.32] },
         ],
         moments: vec![
             Moment { name: "before".into(), after_impact_ms: -10.0 },

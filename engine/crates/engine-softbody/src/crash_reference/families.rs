@@ -139,7 +139,7 @@ pub static SIDE_POLE: Family = Family {
             num("angle", "travel angle", "°", 75.0, 15.0, 165.0, 1.0).help("the travel's angle from the car's forward axis, toward its left (90: square to the side)"),
             num("pole_width", "pole width", "m", 0.254, 0.05, 1.0, 0.001),
             num("aim_left", "aim: left of centre", "m", 0.38, -1.0, 1.0, 0.01).help("the aimed point's distance left of the centre line"),
-            num("aim_behind_axle", "aim: behind front axle", "m", 2.146, -1.5, 4.0, 0.01).help("the aimed point's distance behind the front axle"),
+            num("aim_behind_axle", "aim: behind front axle", "m", 1.506, -1.5, 4.0, 0.001).help("the aimed point's distance behind the front axle (the default puts the impact line on the generated sedan's side 0.075 m ahead of its centre of mass, as in NHTSA tests 7523 and 8558: S13's notes)"),
             lead(0.1),
         ]
     },

@@ -786,9 +786,16 @@ In words (what the overlays show):
   barrier loses 11.2 m/s (Camry 8.2–8.6), and the door band springs back to 0.05 m of
   residual crush (Camry 0.26–0.28): an elastic side. The CG's lateral pulse lacks the Camrys'
   first 30–35 g spike at 6–7 ms (their door and sill meeting the barrier's bumper element).
-- The side tests' films, photos and curves beside S13 and S14 over time, with the setup
-  mismatches (S13's pole 1.0 m further back than the tests' relative to the front axle) and
-  each difference's likely cause: `crash-reference/camry-side-comparison.md`.
+- The side tests' films, photos and curves beside S13 and S14 over time and each
+  difference's likely cause: `crash-reference/camry-side-comparison.md`.
+- **S13 moved, 2026-11-27.** Its pole was 0.9 m behind where the tests put it (the aim had been
+  read from the generated sedan's driver seat, which stands beside the rear door). The impact
+  line is now 1.355 m behind the front axle: on the front door, 0.075 m ahead of the centre of
+  mass as in the tests. Every S13 figure in this document dated before that (the tables and
+  notes above and the 8-run rows below) is from the old position. At the new one, edge contact,
+  run 0: 275 kN at 24 ms (tests 191-197 kN at 44-46), residual crush 110 mm (379-394), thrown
+  back at 4.0 m/s (1.7-2.2), yaw 4 deg (8-10); all asserted rules hold on 8 runs, edge and
+  continuous. The comparison document has the detail.
 
 ## Results (2026-11-27)
 

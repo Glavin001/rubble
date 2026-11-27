@@ -55,9 +55,9 @@ render() {
   # (x the struck side, z from the export's barrier position less 0.4 s of travel), S13 the
   # pole's centre (the export's box).
   python3 $SC rubble-cams S14 $OUT/S14.export.json --out $OUT/rubble/S14-film.json --at 0.9 -1.313
-  python3 $SC rubble-cams S13 $OUT/S13.export.json --out $OUT/rubble/S13-film.json --at 1.07 -1.96
+  python3 $SC rubble-cams S13 $OUT/S13.export.json --out $OUT/rubble/S13-film.json --at 1.07 -1.32
   python3 $SC rubble-cams S14 $OUT/S14-etk.export.json --out $OUT/rubble/S14-etk-film.json --at 0.9 0.077
-  python3 $SC rubble-cams S13 $OUT/S13-etk.export.json --out $OUT/rubble/S13-etk-film.json --at 1.057 -0.795
+  python3 $SC rubble-cams S13 $OUT/S13-etk.export.json --out $OUT/rubble/S13-etk-film.json --at 1.057 -0.155
   for j in "S13-film edge" "S14-film discrete" "S14-film edge" "S13-etk-film edge" "S14-etk-film discrete"; do
     set -- $j
     "${T[@]}" target/release/examples/crash_outlines --scenario $OUT/rubble/$1.json --cameras $OUT/rubble/$1.cameras.json --contact $2 --size 960x640 --out $OUT/rubble/$1-$2 > $OUT/rubble/$1-$2.log 2>&1 </dev/null
@@ -105,10 +105,10 @@ curves() {
 
 profile() {
   # Impact lines in metres ahead of the generated sedan's rear axle: S14 FMVSS 214's line
-  # (0.475 m behind its front axle, wheelbase 2.83 m), S13 the pole's centre (1.96 m behind).
+  # (0.475 m behind its front axle, wheelbase 2.83 m), S13 the pole's impact line (1.355 m behind).
   python3 $SC profile $OUT/rubble/S14-film-discrete/outlines.json --impact 2.355 --moments t40,t80,t300
   python3 $SC profile $OUT/rubble/S14-film-edge/outlines.json --impact 2.355 --moments t40,t80,t300
-  python3 $SC profile $OUT/rubble/S13-film-edge/outlines.json --impact 0.87 --moments t60,t100,t300
+  python3 $SC profile $OUT/rubble/S13-film-edge/outlines.json --impact 1.475 --moments t60,t100,t300
 }
 
 studio() {
