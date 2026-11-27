@@ -1,0 +1,149 @@
+{
+ "id": "vehicle-three-quarter",
+ "title": "Vehicle, three-quarter view",
+ "kind": "vehicle",
+ "view": "three-quarter",
+ "description": "A vehicle seen from a front or rear corner: the near side's wheels, the front face and the glasshouse. Lengths are foreshortened; compare ratios along one line.",
+ "orientation": {
+  "front": [
+   "left",
+   "right"
+  ],
+  "default": "left",
+  "note": "which side of the image the near side's front is on"
+ },
+ "rubble_view": "camera",
+ "elements": [
+  {
+   "name": "front_wheel",
+   "type": "circle",
+   "label": "Near front wheel",
+   "colour": "#f2f2f2",
+   "hint": "Hub centre, then the tyre's edge (the ellipse's half height).",
+   "rubble": {
+    "wheel": "wheel_fl"
+   }
+  },
+  {
+   "name": "rear_wheel",
+   "type": "circle",
+   "label": "Near rear wheel",
+   "colour": "#cfcfcf",
+   "hint": "Hub centre, then the tyre's edge.",
+   "rubble": {
+    "wheel": "wheel_rl"
+   }
+  },
+  {
+   "name": "hood",
+   "type": "polyline",
+   "label": "Hood line (near edge)",
+   "colour": "#ffb000",
+   "hint": "Front to rear along the hood's near edge."
+  },
+  {
+   "name": "front_face",
+   "type": "polyline",
+   "label": "Front face outline",
+   "colour": "#e04be0",
+   "hint": "Around the front face: bumper, grille, lamps."
+  },
+  {
+   "name": "bumper_line",
+   "type": "polyline",
+   "label": "Bumper line",
+   "colour": "#ff7ae0",
+   "hint": "Across the bumper's top edge, corner to corner."
+  },
+  {
+   "name": "front_corner_top",
+   "type": "point",
+   "label": "Front corner, top",
+   "colour": "#ffd27a",
+   "hint": "The near front corner at the hood's height."
+  },
+  {
+   "name": "front_corner_bottom",
+   "type": "point",
+   "label": "Front corner, bottom",
+   "colour": "#ffd27a",
+   "hint": "The near front corner at the bumper's bottom."
+  },
+  {
+   "name": "windscreen_base",
+   "type": "polyline",
+   "label": "Windscreen base",
+   "colour": "#8f8fd8",
+   "hint": "Across the windscreen's bottom edge."
+  },
+  {
+   "name": "a_pillar",
+   "type": "polyline",
+   "label": "Near A-pillar",
+   "colour": "#a0a0ff",
+   "hint": "From the windscreen's base corner up to the roof."
+  },
+  {
+   "name": "roofline",
+   "type": "polyline",
+   "label": "Roofline",
+   "colour": "#b8b8ff",
+   "hint": "Front to rear along the roof's near edge."
+  },
+  {
+   "name": "sill",
+   "type": "polyline",
+   "label": "Sill",
+   "colour": "#ff5050",
+   "hint": "Front to rear along the near side's lowest edge."
+  },
+  {
+   "name": "door_front_edge",
+   "type": "polyline",
+   "label": "Front door, front edge",
+   "colour": "#58e070",
+   "hint": "Top to bottom along the near front door's front shut line."
+  }
+ ],
+ "frames": [
+  {
+   "id": "wheelbase",
+   "label": "origin: rear wheel centre; unit: wheel centre distance in the image",
+   "origin": {
+    "centre": "rear_wheel"
+   },
+   "unit": {
+    "distance": [
+     "front_wheel",
+     "rear_wheel"
+    ]
+   }
+  }
+ ],
+ "measures": [
+  {
+   "id": "hood_fold",
+   "label": "hood fold height (/ chord before)",
+   "kind": "fold_height",
+   "line": "hood"
+  },
+  {
+   "id": "hood_chord",
+   "label": "hood chord after / before",
+   "kind": "chord_ratio",
+   "line": "hood"
+  },
+  {
+   "id": "pillar_change",
+   "label": "A-pillar angle change (deg)",
+   "kind": "angle_change",
+   "line": "a_pillar"
+  },
+  {
+   "id": "sill_chord",
+   "label": "sill chord after / before",
+   "kind": "chord_ratio",
+   "line": "sill"
+  }
+ ]
+}

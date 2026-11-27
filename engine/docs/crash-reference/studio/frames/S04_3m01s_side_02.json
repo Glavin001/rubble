@@ -1,0 +1,27 @@
+{
+ "id": "S04_3m01s_side_02",
+ "shot": "S04",
+ "image": {
+  "file": "S04/S04_3m01s_side_02.webp",
+  "width": 2000,
+  "height": 1122,
+  "sha256": "e7b2f4ae2968b861039af38712d1f6c157672d7bdbf55404a8e0acb9814530c3"
+ },
+ "moment": {
+  "label": "peak crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 181,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Front crushed back to the screen base; front wheel pushed back; cabin stays out from under the box; trailer barely moves. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.626Z"
+}

@@ -1,0 +1,27 @@
+{
+ "id": "S03_2m31s_front-three-quarter_01",
+ "shot": "S03",
+ "image": {
+  "file": "S03/S03_2m31s_front-three-quarter_01.webp",
+  "width": 2000,
+  "height": 936,
+  "sha256": "f8be2a5927a02715a39d3edfa40baa14d71de5c23d16240747d34cdeaebb6fc1"
+ },
+ "moment": {
+  "label": "peak intrusion",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 151,
+  "approximate": true
+ },
+ "view": "front three-quarter",
+ "notes": "Sled face in both doors between the axles; B-pillar pushed in; roof rail bowed; nose and tail untouched. Shows: beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.625Z"
+}

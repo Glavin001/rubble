@@ -40,13 +40,19 @@ same code.
 
 ## Reference frames
 
-Third-party footage is not committed. `docs/crash-reference/index.json` lists each frame
-(scenario, video time, camera, moment, what to look at); the frames themselves are in
-`~/Development/rubble-artifacts/crash-reference/`. `tools/crash-reference/sheet.py [ID ...]`
-lays each frame beside Rubble's still from the matching camera at the nearest moment (the
-recorder's `--all-cams` stills), one PNG per scenario and contact setting in
-`out/crash-reference/sheets/` (`--copy-to DIR`); it says "no reference frames" where the
-frames are absent (S10), and nothing else reads that folder.
+Third-party footage is not committed. The reference frames live in the **Reference Studio**
+(`apps/reference-studio/`, its README): a local app with a gitignored image library
+(`apps/reference-studio/library/`) where each frame belongs to a *shot* (one crash run in
+the video) and is annotated, linked to a scenario moment and camera, and compared. Its
+points-only data is committed in `docs/crash-reference/studio/` (`shots/`, `frames/`:
+scenario, video time, view, moment, what to look at, regions and tracings; `structures/`:
+the structure schemas). The originals stay in `~/Development/rubble-artifacts/crash-reference/`;
+`npm run import-prototype` (in the studio) copied them into the library and migrated the old
+`index.json` and tracings (removed; at commit 4773e6f1b). `tools/crash-reference/sheet.py
+[ID ...]` lays each linked frame beside Rubble's still from its camera at its moment (the
+frame's own choice, else the rule in `crash_reference::shape::link`; the recorder's
+`--all-cams` stills), one PNG per scenario and contact setting in `out/crash-reference/sheets/`
+(`--copy-to DIR`); frames without an image (S10's) are skipped.
 
 The cameras are framed for a 60° vertical field of view at 16:9 (the page's): side and top
 views put the car at impact across about two thirds of the width, wide enough for where the
@@ -76,19 +82,24 @@ stays a plate). Outlines make them visible, per part, in four steps:
    `shape-numbers.md`; `python3 scripts/with-gpu-lock.py --limit 300 -- python3
    tools/crash-reference/outlines.py rasterise out/crash-reference/outlines/S01 ...` turns
    them into PNGs (headless Chrome over http, without the GPU).
-3. **Tracings.** `docs/crash-reference/tracings/*.json`: per reference frame, the real and
-   BeamNG halves' crop and polylines in normalised image coordinates (hood, fender top,
-   wheel arch, bumper, windscreen, roofline, front door's front edge, sill, wheels; for the
-   top view the visible outline, hood, windscreen base, side line). The committed ones are
-   a first pass placed by eye: approximate. Correct them with `python3
-   tools/crash-reference/trace_server.py` and `http://127.0.0.1:8770/` (drag, shift-click to
-   add, alt-click to delete, save writes the JSON back).
-4. **One frame, shape numbers.** S01's frames show the whole car: origin the rear wheel,
-   unit the wheelbase in each source's own before frame. S02's show only the front half:
-   origin the front door's front edge at the sill (Rubble: that corner carried with the
-   cabin), unit the front wheel's radius. Hood fold height, chord shortening, creases (turns
-   over 20°), front wheel setback, windscreen angle and ride height are computed by the same
-   code for the three sources; they are reported comparisons, not criteria.
+3. **Tracings.** In the Reference Studio (`cd apps/reference-studio && npm run dev`,
+   `http://127.0.0.1:8770/`): per frame, regions (the real and BeamNG halves' crops) each
+   traced as an instance of a structure schema (`docs/crash-reference/studio/structures/`:
+   `vehicle-side` has the wheels as circles, hood, fender top, wheel arch, front face,
+   windscreen, roofline, front door edge and its corner at the sill, sill and rear face;
+   `vehicle-top` the outline, corners, centreline, hood, windscreen base, roof and side line),
+   points in the region's normalised coordinates with a visibility flag (clear, blurred,
+   hidden). The migrated S01/S02 tracings are a first pass placed by eye: approximate.
+4. **One frame, shape numbers.** The schema names its frames: S01's frames show the whole
+   car: origin the rear wheel, unit the wheelbase in each source's own before frame. S02's
+   show only the front half: origin the front door's corner at the sill (Rubble: that
+   corner carried with the cabin), unit the front wheel's radius. Hood fold height, chord
+   shortening, creases (turns over 20°), front wheel setback, windscreen angle and ride
+   height are computed by one Rust implementation for every source
+   (`crash_reference::shape`, the example `reference_shape`), which the studio's Compare view
+   and `outlines.py` both call; Rubble's elements are read off its outlines by rules in the
+   schema. They are reported comparisons, not criteria. `crash_outlines -- ID --cameras FILE`
+   also projects through explicit cameras (a frame's own camera, set by hand in the studio).
 
 The generated designs' hoods have 4 rows of nodes front to rear, so a Rubble hood can bend at
 two lines at most.

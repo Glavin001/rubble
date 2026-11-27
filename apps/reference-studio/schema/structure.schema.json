@@ -1,0 +1,202 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "reference-studio/structure.schema.json",
+ "title": "StructureSchema",
+ "description": "A structure kind as data: its elements, how a shape is normalised, which measures apply, and how each element is read off Rubble's outlines. engine/docs/crash-reference/studio/structures/<id>.json; read by the studio and by Rust (crash_reference::shape::Schema).",
+ "type": "object",
+ "required": [
+  "id",
+  "title",
+  "kind",
+  "view",
+  "description",
+  "orientation",
+  "rubble_view",
+  "elements",
+  "frames",
+  "measures"
+ ],
+ "properties": {
+  "id": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+  },
+  "title": {
+   "type": "string"
+  },
+  "kind": {
+   "type": "string"
+  },
+  "view": {
+   "type": "string"
+  },
+  "description": {
+   "type": "string"
+  },
+  "orientation": {
+   "type": "object",
+   "required": [
+    "front",
+    "default"
+   ],
+   "properties": {
+    "front": {
+     "type": "array",
+     "items": {
+      "enum": [
+       "left",
+       "right"
+      ]
+     }
+    },
+    "default": {
+     "enum": [
+      "left",
+      "right"
+     ]
+    },
+    "note": {
+     "type": "string"
+    }
+   }
+  },
+  "rubble_view": {
+   "enum": [
+    "car_frame",
+    "camera"
+   ],
+   "description": "compare Rubble in its own side frame (orthographic) or through the frame's camera"
+  },
+  "elements": {
+   "type": "array",
+   "maxItems": 16,
+   "items": {
+    "type": "object",
+    "required": [
+     "name",
+     "type",
+     "label",
+     "colour",
+     "hint"
+    ],
+    "properties": {
+     "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+     },
+     "type": {
+      "enum": [
+       "point",
+       "polyline",
+       "circle"
+      ]
+     },
+     "label": {
+      "type": "string"
+     },
+     "colour": {
+      "type": "string"
+     },
+     "hint": {
+      "type": "string"
+     },
+     "rubble": {
+      "description": "one rule: {\"wheel\": name} | {\"centreline\": true} | {\"envelope\": {groups, along: x|y, take: max|min, bins, front_half?}} | {\"ghost_corner\": group} | {\"hull\": [groups]}",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1
+     }
+    }
+   }
+  },
+  "frames": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "id",
+     "origin",
+     "unit"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "label": {
+      "type": "string"
+     },
+     "origin": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "description": "centre | point | lowest | rearmost | frontmost | centroid: an element name"
+     },
+     "unit": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "description": "distance: [a, b] | radius: circle | chord: polyline"
+     }
+    }
+   }
+  },
+  "measures": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "id",
+     "label",
+     "kind"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "label": {
+      "type": "string"
+     },
+     "kind": {
+      "enum": [
+       "fold_height",
+       "chord_ratio",
+       "creases",
+       "crease_sign_changes",
+       "point_count",
+       "shift_x",
+       "shift_y",
+       "angle",
+       "angle_change",
+       "tilt_change",
+       "heading_change",
+       "fit_change"
+      ]
+     },
+     "line": {
+      "type": "string",
+      "description": "an element name"
+     },
+     "of": {
+      "type": "object"
+     },
+     "sign": {
+      "type": "number"
+     },
+     "deg": {
+      "type": "number"
+     },
+     "key": {
+      "type": "string"
+     },
+     "frames": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "only in these common frames"
+     }
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,27 @@
+{
+ "id": "S07_5m42s_three-quarter-rear_06",
+ "shot": "S07",
+ "image": {
+  "file": "S07/S07_5m42s_three-quarter-rear_06.webp",
+  "width": 2000,
+  "height": 825,
+  "sha256": "28cd1b66f20880b7b9a4dd0c24fd2039071d7ac2436b4ab72a4119beaada7c82"
+ },
+ "moment": {
+  "label": "aftermath",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 342,
+  "approximate": true
+ },
+ "view": "three-quarter rear",
+ "notes": "Roof folded; doors and a wheel on the ground. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.631Z"
+}

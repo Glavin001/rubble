@@ -1,0 +1,27 @@
+{
+ "id": "S09_6m15s_side_01",
+ "shot": "S09",
+ "image": {
+  "file": "S09/S09_6m15s_side_01.webp",
+  "width": 1726,
+  "height": 1342,
+  "sha256": "52642e9ed9dd4ce5d698df26f911f347e9392d217befdda5fb1063e0497e3205"
+ },
+ "moment": {
+  "label": "peak crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 375,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "SUV rides over the car's hood; car's front crushed to the screen and its rear thrown up; SUV's front damaged far less. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.633Z"
+}

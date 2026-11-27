@@ -1,0 +1,492 @@
+{
+ "id": "S01_1m53s_side_03",
+ "shot": "S01",
+ "image": {
+  "file": "S01/S01_1m53s_side_03.webp",
+  "width": 1908,
+  "height": 1644,
+  "sha256": "37c25807622286c2345af0064e24ba9922fcae1df0645bd6e37faa08b612bec9"
+ },
+ "moment": {
+  "label": "early crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 113,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Bumper and headlamp gone; hood starts to buckle; front wheel still in its arch. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [
+  {
+   "id": "real",
+   "label": "real test",
+   "source": "real",
+   "crop": [
+    0,
+    0,
+    1,
+    0.4897
+   ],
+   "tracing": {
+    "instances": [
+     {
+      "id": "car",
+      "schema": "vehicle-side",
+      "front": "left",
+      "elements": {
+       "hood": {
+        "pts": [
+         [
+          0.0996,
+          0.471922
+         ],
+         [
+          0.1572,
+          0.409843
+         ],
+         [
+          0.2201,
+          0.372677
+         ],
+         [
+          0.2909,
+          0.330406
+         ]
+        ],
+        "vis": "clear"
+       },
+       "fender_top": {
+        "pts": [
+         [
+          0.1048,
+          0.496835
+         ],
+         [
+          0.1834,
+          0.434756
+         ],
+         [
+          0.2621,
+          0.416173
+         ],
+         [
+          0.3145,
+          0.409843
+         ]
+        ],
+        "vis": "clear"
+       },
+       "wheel_arch": {
+        "pts": [
+         [
+          0.1101,
+          0.794977
+         ],
+         [
+          0.1258,
+          0.695528
+         ],
+         [
+          0.1677,
+          0.627323
+         ],
+         [
+          0.2149,
+          0.614866
+         ],
+         [
+          0.2621,
+          0.633449
+         ],
+         [
+          0.2935,
+          0.695528
+         ],
+         [
+          0.304,
+          0.794977
+         ]
+        ],
+        "vis": "clear"
+       },
+       "bumper_front": {
+        "pts": [
+         [
+          0.0996,
+          0.471922
+         ],
+         [
+          0.0839,
+          0.558914
+         ],
+         [
+          0.0891,
+          0.695528
+         ],
+         [
+          0.1048,
+          0.857055
+         ]
+        ],
+        "vis": "clear"
+       },
+       "windscreen": {
+        "pts": [
+         [
+          0.2909,
+          0.329181
+         ],
+         [
+          0.3669,
+          0.217276
+         ],
+         [
+          0.4455,
+          0.124158
+         ],
+         [
+          0.4717,
+          0.105575
+         ]
+        ],
+        "vis": "clear"
+       },
+       "roofline": {
+        "pts": [
+         [
+          0.4717,
+          0.105575
+         ],
+         [
+          0.6027,
+          0.076986
+         ],
+         [
+          0.76,
+          0.086992
+         ],
+         [
+          0.8595,
+          0.118031
+         ],
+         [
+          0.9172,
+          0.149071
+         ]
+        ],
+        "vis": "clear"
+       },
+       "door_front_edge": {
+        "pts": [
+         [
+          0.3145,
+          0.416173
+         ],
+         [
+          0.3118,
+          0.645906
+         ],
+         [
+          0.3276,
+          0.844599
+         ]
+        ],
+        "vis": "clear"
+       },
+       "sill": {
+        "pts": [
+         [
+          0.3302,
+          0.857055
+         ],
+         [
+          0.5241,
+          0.857055
+         ],
+         [
+          0.6813,
+          0.857055
+         ],
+         [
+          0.7809,
+          0.850929
+         ]
+        ],
+        "vis": "clear"
+       },
+       "front_wheel": {
+        "c": [
+         0.207,
+         0.834797
+        ],
+        "rim": [
+         0.2856,
+         0.834797
+        ],
+        "vis": "clear"
+       },
+       "rear_wheel": {
+        "c": [
+         0.8726,
+         0.834797
+        ],
+        "rim": [
+         0.9539,
+         0.834797
+        ],
+        "vis": "clear"
+       },
+       "door_sill_corner": {
+        "p": [
+         0.3276,
+         0.844599
+        ],
+        "vis": "clear"
+       }
+      }
+     }
+    ],
+    "traced_by": "first pass (Claude, by eye)",
+    "approximate": true,
+    "note": "First pass, placed by eye on a 50/100 px grid over the frame: approximate (typically +-10-20 px on a 2000 px frame; worse where the part is torn, hidden by the barrier or motion-blurred). Correct with engine/tools/crash-reference/trace.html. blur: low door_sill_corner: the lowest point of door_front_edge (migrated from the prototype)."
+   }
+  },
+  {
+   "id": "beamng",
+   "label": "BeamNG",
+   "source": "beamng",
+   "crop": [
+    0,
+    0.4897,
+    1,
+    1
+   ],
+   "tracing": {
+    "instances": [
+     {
+      "id": "car",
+      "schema": "vehicle-side",
+      "front": "left",
+      "elements": {
+       "hood": {
+        "pts": [
+         [
+          0.0917,
+          0.470704
+         ],
+         [
+          0.131,
+          0.423084
+         ],
+         [
+          0.1834,
+          0.399177
+         ],
+         [
+          0.2358,
+          0.375465
+         ],
+         [
+          0.2935,
+          0.351558
+         ]
+        ],
+        "vis": "clear"
+       },
+       "fender_top": {
+        "pts": [
+         [
+          0.0943,
+          0.506565
+         ],
+         [
+          0.1677,
+          0.446992
+         ],
+         [
+          0.2358,
+          0.411131
+         ],
+         [
+          0.304,
+          0.399177
+         ]
+        ],
+        "vis": "clear"
+       },
+       "wheel_arch": {
+        "pts": [
+         [
+          0.131,
+          0.768763
+         ],
+         [
+          0.1415,
+          0.673329
+         ],
+         [
+          0.1782,
+          0.613757
+         ],
+         [
+          0.2201,
+          0.595924
+         ],
+         [
+          0.2621,
+          0.613757
+         ],
+         [
+          0.2987,
+          0.685283
+         ],
+         [
+          0.3092,
+          0.780717
+         ]
+        ],
+        "vis": "clear"
+       },
+       "bumper_front": {
+        "pts": [
+         [
+          0.0839,
+          0.494611
+         ],
+         [
+          0.0681,
+          0.590045
+         ],
+         [
+          0.0655,
+          0.709191
+         ],
+         [
+          0.0734,
+          0.828336
+         ]
+        ],
+        "vis": "clear"
+       },
+       "windscreen": {
+        "pts": [
+         [
+          0.2935,
+          0.351558
+         ],
+         [
+          0.3931,
+          0.220459
+         ],
+         [
+          0.5031,
+          0.077405
+         ]
+        ],
+        "vis": "clear"
+       },
+       "roofline": {
+        "pts": [
+         [
+          0.5031,
+          0.075054
+         ],
+         [
+          0.6656,
+          0.059573
+         ],
+         [
+          0.8124,
+          0.071527
+         ],
+         [
+          0.9434,
+          0.101313
+         ]
+        ],
+        "vis": "clear"
+       },
+       "door_front_edge": {
+        "pts": [
+         [
+          0.3197,
+          0.423084
+         ],
+         [
+          0.3171,
+          0.613757
+         ],
+         [
+          0.3354,
+          0.75681
+         ]
+        ],
+        "vis": "clear"
+       },
+       "sill": {
+        "pts": [
+         [
+          0.3407,
+          0.828336
+         ],
+         [
+          0.5241,
+          0.834411
+         ],
+         [
+          0.6813,
+          0.828336
+         ],
+         [
+          0.7809,
+          0.816383
+         ]
+        ],
+        "vis": "clear"
+       },
+       "front_wheel": {
+        "c": [
+         0.2096,
+         0.804429
+        ],
+        "rim": [
+         0.2909,
+         0.804429
+        ],
+        "vis": "clear"
+       },
+       "rear_wheel": {
+        "c": [
+         0.8884,
+         0.810504
+        ],
+        "rim": [
+         0.9722,
+         0.810504
+        ],
+        "vis": "clear"
+       },
+       "door_sill_corner": {
+        "p": [
+         0.3354,
+         0.75681
+        ],
+        "vis": "clear"
+       }
+      }
+     }
+    ],
+    "traced_by": "first pass (Claude, by eye)",
+    "approximate": true,
+    "note": "First pass, placed by eye on a 50/100 px grid over the frame: approximate (typically +-10-20 px on a 2000 px frame; worse where the part is torn, hidden by the barrier or motion-blurred). Correct with engine/tools/crash-reference/trace.html. door_sill_corner: the lowest point of door_front_edge (migrated from the prototype)."
+   }
+  }
+ ],
+ "updated": "2026-11-27T11:51:37.618Z"
+}

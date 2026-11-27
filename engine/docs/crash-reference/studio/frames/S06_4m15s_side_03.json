@@ -1,0 +1,27 @@
+{
+ "id": "S06_4m15s_side_03",
+ "shot": "S06",
+ "image": {
+  "file": "S06/S06_4m15s_side_03.webp",
+  "width": 2000,
+  "height": 574,
+  "sha256": "8427373c5e093cb53952c1f31a65d5b39cbc9b865ea70f2145a342e3de5b6d3e"
+ },
+ "moment": {
+  "label": "aftermath",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 255,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Car about half length; roof flattened to the beltline; everything folded. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.629Z"
+}

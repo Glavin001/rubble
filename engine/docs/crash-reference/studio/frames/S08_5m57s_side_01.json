@@ -1,0 +1,27 @@
+{
+ "id": "S08_5m57s_side_01",
+ "shot": "S08",
+ "image": {
+  "file": "S08/S08_5m57s_side_01.webp",
+  "width": 2000,
+  "height": 1124,
+  "sha256": "48bd617bf44d0a143912adebd20845cc41cd2c8215a0d0656c892aca3f6686e6"
+ },
+ "moment": {
+  "label": "peak crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 357,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Both fronts crushed to the wheel; hoods folded; both rears lifted; cabins intact. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.632Z"
+}

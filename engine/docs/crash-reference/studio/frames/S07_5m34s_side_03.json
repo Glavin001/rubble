@@ -1,0 +1,27 @@
+{
+ "id": "S07_5m34s_side_03",
+ "shot": "S07",
+ "image": {
+  "file": "S07/S07_5m34s_side_03.webp",
+  "width": 2000,
+  "height": 1011,
+  "sha256": "99629d6ef1d101fac2e9f105d03bd905e1b8e3260f89279666d2263621bb8bad"
+ },
+ "moment": {
+  "label": "mid crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 334,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Crush through the cabin; roof buckled; rear high. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.630Z"
+}

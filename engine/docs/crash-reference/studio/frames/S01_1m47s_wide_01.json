@@ -1,0 +1,27 @@
+{
+ "id": "S01_1m47s_wide_01",
+ "shot": "S01",
+ "image": {
+  "file": "S01/S01_1m47s_wide_01.webp",
+  "width": 2000,
+  "height": 1156,
+  "sha256": "cc9618de5d76daca5add434efab818298d448ab169ed9a66a6aef5939e63c84f"
+ },
+ "moment": {
+  "label": "setup",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 107,
+  "approximate": true
+ },
+ "view": "wide",
+ "notes": "The test hall: rigid offset block, fixed cameras. Shows: beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.616Z"
+}

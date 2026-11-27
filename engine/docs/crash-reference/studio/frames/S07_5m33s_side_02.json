@@ -1,0 +1,27 @@
+{
+ "id": "S07_5m33s_side_02",
+ "shot": "S07",
+ "image": {
+  "file": "S07/S07_5m33s_side_02.webp",
+  "width": 2000,
+  "height": 885,
+  "sha256": "b5deb58b5b929c55310c17527a91606cd6280852791531cae5a01e325f55306a"
+ },
+ "moment": {
+  "label": "early crush",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 333,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Front gone to the front axle; crush entering the cabin; rear starts to rise. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.630Z"
+}

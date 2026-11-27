@@ -1,0 +1,22 @@
+{
+ "id": "S10_399s_three-quarter",
+ "shot": "S10",
+ "image": null,
+ "moment": {
+  "label": "aftermath",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 399,
+  "approximate": true
+ },
+ "view": "three-quarter",
+ "notes": "Everything ahead of the B-pillar is wreckage; rear half keeps its shape; a wheel and a panel on the ground. (no image captured yet: add one) Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.634Z"
+}

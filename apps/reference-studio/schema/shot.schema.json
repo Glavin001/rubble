@@ -1,0 +1,110 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "reference-studio/shot.schema.json",
+ "title": "Shot",
+ "description": "One crash run seen in footage (a video) or in a set of screenshots. engine/docs/crash-reference/studio/shots/<id>.json",
+ "type": "object",
+ "required": [
+  "id",
+  "title",
+  "source",
+  "rubble",
+  "before_frame",
+  "notes"
+ ],
+ "properties": {
+  "id": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+  },
+  "title": {
+   "type": "string"
+  },
+  "source": {
+   "oneOf": [
+    {
+     "type": "object",
+     "required": [
+      "kind",
+      "url"
+     ],
+     "properties": {
+      "kind": {
+       "const": "video"
+      },
+      "url": {
+       "type": "string"
+      },
+      "note": {
+       "type": "string"
+      }
+     }
+    },
+    {
+     "type": "object",
+     "required": [
+      "kind"
+     ],
+     "properties": {
+      "kind": {
+       "const": "screenshots"
+      },
+      "note": {
+       "type": "string"
+      }
+     }
+    }
+   ]
+  },
+  "rubble": {
+   "description": "the Rubble scenario setup that recreates the run",
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "object",
+     "required": [
+      "scenario",
+      "contact",
+      "run"
+     ],
+     "properties": {
+      "scenario": {
+       "type": "string"
+      },
+      "contact": {
+       "enum": [
+        "discrete",
+        "edge",
+        "continuous"
+       ]
+      },
+      "run": {
+       "type": "integer",
+       "minimum": 0
+      }
+     }
+    }
+   ]
+  },
+  "before_frame": {
+   "oneOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    }
+   ],
+   "description": "frame each source is compared against; null: the earliest traced frame of the same view"
+  },
+  "notes": {
+   "type": "string"
+  },
+  "updated": {
+   "type": "string"
+  }
+ }
+}

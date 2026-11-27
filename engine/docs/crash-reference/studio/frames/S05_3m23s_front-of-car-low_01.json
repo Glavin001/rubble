@@ -1,0 +1,27 @@
+{
+ "id": "S05_3m23s_front-of-car-low_01",
+ "shot": "S05",
+ "image": {
+  "file": "S05/S05_3m23s_front-of-car-low_01.webp",
+  "width": 2000,
+  "height": 574,
+  "sha256": "554341ca68aab083ccf284272036bfd470ddf439b7f7c6cc7b917a47dc3de737"
+ },
+ "moment": {
+  "label": "carried",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 203,
+  "approximate": true
+ },
+ "view": "front of car, low",
+ "notes": "Car wrapped around the truck's nose; struck side caved past the middle; car tilted and carried. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.626Z"
+}

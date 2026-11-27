@@ -1,0 +1,169 @@
+{
+ "id": "vehicle-top",
+ "title": "Vehicle, top view",
+ "kind": "vehicle",
+ "view": "top",
+ "description": "A vehicle seen from above: its outline, the four corners, the centreline and the side that is struck.",
+ "orientation": {
+  "front": [
+   "left",
+   "right"
+  ],
+  "default": "right",
+  "note": "which side of the image the vehicle's front is on"
+ },
+ "rubble_view": "camera",
+ "elements": [
+  {
+   "name": "outline",
+   "type": "polyline",
+   "label": "Body outline",
+   "colour": "#ff9a1f",
+   "hint": "Around the whole body, closing back at the start.",
+   "rubble": {
+    "hull": [
+     "bumper_f",
+     "hood",
+     "fender_l",
+     "fender_r",
+     "door_fl",
+     "door_fr",
+     "door_rl",
+     "door_rr",
+     "roof",
+     "greenhouse",
+     "trunk",
+     "bumper_r"
+    ]
+   }
+  },
+  {
+   "name": "front_left",
+   "type": "point",
+   "label": "Front-left corner",
+   "colour": "#f2f2f2",
+   "hint": "The body's front corner on the vehicle's left."
+  },
+  {
+   "name": "front_right",
+   "type": "point",
+   "label": "Front-right corner",
+   "colour": "#f2f2f2",
+   "hint": "The body's front corner on the vehicle's right."
+  },
+  {
+   "name": "rear_left",
+   "type": "point",
+   "label": "Rear-left corner",
+   "colour": "#cfcfcf",
+   "hint": "The body's rear corner on the vehicle's left."
+  },
+  {
+   "name": "rear_right",
+   "type": "point",
+   "label": "Rear-right corner",
+   "colour": "#cfcfcf",
+   "hint": "The body's rear corner on the vehicle's right."
+  },
+  {
+   "name": "centreline",
+   "type": "polyline",
+   "label": "Centreline",
+   "colour": "#ffffff",
+   "hint": "Rear to front along the middle of the roof and hood."
+  },
+  {
+   "name": "hood_outline",
+   "type": "polyline",
+   "label": "Hood outline",
+   "colour": "#ffb000",
+   "hint": "Around the hood panel.",
+   "rubble": {
+    "hull": [
+     "hood"
+    ]
+   }
+  },
+  {
+   "name": "windscreen_base",
+   "type": "polyline",
+   "label": "Windscreen base",
+   "colour": "#8f8fd8",
+   "hint": "Across the bottom edge of the windscreen."
+  },
+  {
+   "name": "roof_front_edge",
+   "type": "polyline",
+   "label": "Roof front edge",
+   "colour": "#b8b8ff",
+   "hint": "Across the roof's front edge."
+  },
+  {
+   "name": "roof_outline",
+   "type": "polyline",
+   "label": "Roof outline",
+   "colour": "#b8b8ff",
+   "hint": "Around the roof panel.",
+   "rubble": {
+    "hull": [
+     "roof"
+    ]
+   }
+  },
+  {
+   "name": "side_line",
+   "type": "polyline",
+   "label": "Side line (struck side)",
+   "colour": "#58e070",
+   "hint": "Rear to front along the struck side's outer edge: its angle gives the yaw."
+  }
+ ],
+ "frames": [
+  {
+   "id": "centreline",
+   "label": "origin: centreline's middle; unit: centreline length",
+   "origin": {
+    "centroid": "centreline"
+   },
+   "unit": {
+    "chord": "centreline"
+   }
+  },
+  {
+   "id": "outline",
+   "label": "origin: outline's mean point; unit: side line length",
+   "origin": {
+    "centroid": "outline"
+   },
+   "unit": {
+    "chord": "side_line"
+   }
+  }
+ ],
+ "measures": [
+  {
+   "id": "yaw",
+   "label": "yaw from the side line (deg, + counter-clockwise in the image)",
+   "kind": "heading_change",
+   "line": "side_line"
+  },
+  {
+   "id": "centreline_yaw",
+   "label": "yaw from the centreline (deg)",
+   "kind": "heading_change",
+   "line": "centreline"
+  },
+  {
+   "id": "side_chord",
+   "label": "side line length after / before",
+   "kind": "chord_ratio",
+   "line": "side_line"
+  },
+  {
+   "id": "fit_yaw",
+   "label": "check: cabin and rear yaw from the fit (deg; Rubble only)",
+   "kind": "fit_change",
+   "key": "yaw"
+  }
+ ]
+}

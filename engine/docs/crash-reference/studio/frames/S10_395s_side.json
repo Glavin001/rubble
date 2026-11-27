@@ -1,0 +1,22 @@
+{
+ "id": "S10_395s_side",
+ "shot": "S10",
+ "image": null,
+ "moment": {
+  "label": "peak pitch",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 395,
+  "approximate": true
+ },
+ "view": "side",
+ "notes": "Rear at 40-60 degrees; car swinging round the block. (no image captured yet: add one) Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [],
+ "updated": "2026-11-27T11:51:37.633Z"
+}

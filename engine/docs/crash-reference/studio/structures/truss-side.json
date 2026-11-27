@@ -1,0 +1,104 @@
+{
+ "id": "truss-side",
+ "title": "Truss or bridge, side view",
+ "kind": "structure",
+ "view": "side",
+ "description": "A generic node-beam structure (a truss, a bridge span, a barrier) seen from the side: two supports, the chords and the load point. A new structure kind is a new JSON file like this one.",
+ "orientation": {
+  "front": [
+   "right"
+  ],
+  "default": "right",
+  "note": "x runs from the left support to the right one"
+ },
+ "rubble_view": "camera",
+ "elements": [
+  {
+   "name": "left_support",
+   "type": "point",
+   "label": "Left support",
+   "colour": "#f2f2f2",
+   "hint": "Where the structure rests on its left support."
+  },
+  {
+   "name": "right_support",
+   "type": "point",
+   "label": "Right support",
+   "colour": "#f2f2f2",
+   "hint": "Where it rests on its right support."
+  },
+  {
+   "name": "top_chord",
+   "type": "polyline",
+   "label": "Top chord",
+   "colour": "#38b6ff",
+   "hint": "Left to right along the top member; one point per panel node."
+  },
+  {
+   "name": "bottom_chord",
+   "type": "polyline",
+   "label": "Bottom chord",
+   "colour": "#ff9a1f",
+   "hint": "Left to right along the bottom member."
+  },
+  {
+   "name": "midspan_bottom",
+   "type": "point",
+   "label": "Midspan, bottom",
+   "colour": "#ff5050",
+   "hint": "The bottom chord's node at midspan."
+  },
+  {
+   "name": "load_point",
+   "type": "point",
+   "label": "Load point",
+   "colour": "#e04be0",
+   "hint": "Where the load is applied."
+  }
+ ],
+ "frames": [
+  {
+   "id": "span",
+   "label": "origin: left support; unit: span (each source's own before frame)",
+   "origin": {
+    "point": "left_support"
+   },
+   "unit": {
+    "distance": [
+     "left_support",
+     "right_support"
+    ]
+   }
+  }
+ ],
+ "measures": [
+  {
+   "id": "midspan_deflection",
+   "label": "midspan deflection (/ span, + down)",
+   "kind": "shift_y",
+   "of": {
+    "point": "midspan_bottom"
+   },
+   "sign": -1
+  },
+  {
+   "id": "bottom_sag",
+   "label": "bottom chord sag (/ chord before)",
+   "kind": "fold_height",
+   "line": "bottom_chord"
+  },
+  {
+   "id": "top_chord_ratio",
+   "label": "top chord length after / before",
+   "kind": "chord_ratio",
+   "line": "top_chord"
+  },
+  {
+   "id": "top_kinks",
+   "label": "top chord kinks (turn > 10 deg)",
+   "kind": "creases",
+   "line": "top_chord",
+   "deg": 10
+  }
+ ]
+}

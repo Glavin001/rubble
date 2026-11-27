@@ -1,0 +1,274 @@
+{
+ "id": "S01_2m08s_top_09",
+ "shot": "S01",
+ "image": {
+  "file": "S01/S01_2m08s_top_09.webp",
+  "width": 2000,
+  "height": 1220,
+  "sha256": "0e325221d3bf7b9a162902baaf69051286e9aecd0350ecb66ef2e2c85cd852e1"
+ },
+ "moment": {
+  "label": "rotation",
+  "after_impact_ms": null
+ },
+ "time": {
+  "video_s": 128,
+  "approximate": true
+ },
+ "view": "top",
+ "notes": "Car yawed about 20-30 degrees around the struck corner; rear swings out. Shows: real+beamng.",
+ "rubble": {
+  "moment": null,
+  "camera": null
+ },
+ "camera": null,
+ "regions": [
+  {
+   "id": "real",
+   "label": "real test",
+   "source": "real",
+   "crop": [
+    0,
+    0,
+    1,
+    1
+   ],
+   "tracing": {
+    "instances": [
+     {
+      "id": "car",
+      "schema": "vehicle-top",
+      "front": "right",
+      "elements": {
+       "outline": {
+        "pts": [
+         [
+          0.26,
+          0.3443
+         ],
+         [
+          0.45,
+          0.2828
+         ],
+         [
+          0.625,
+          0.2377
+         ],
+         [
+          0.76,
+          0.2459
+         ],
+         [
+          0.825,
+          0.4098
+         ],
+         [
+          0.85,
+          0.5738
+         ],
+         [
+          0.71,
+          0.7623
+         ]
+        ],
+        "vis": "clear"
+       },
+       "hood_outline": {
+        "pts": [
+         [
+          0.635,
+          0.2623
+         ],
+         [
+          0.76,
+          0.2459
+         ],
+         [
+          0.825,
+          0.4098
+         ],
+         [
+          0.85,
+          0.5738
+         ],
+         [
+          0.71,
+          0.7623
+         ],
+         [
+          0.72,
+          0.6557
+         ],
+         [
+          0.7,
+          0.4508
+         ],
+         [
+          0.635,
+          0.2623
+         ]
+        ],
+        "vis": "clear"
+       },
+       "windscreen_base": {
+        "pts": [
+         [
+          0.65,
+          0.2705
+         ],
+         [
+          0.7,
+          0.4508
+         ],
+         [
+          0.725,
+          0.6557
+         ],
+         [
+          0.7,
+          0.7295
+         ]
+        ],
+        "vis": "clear"
+       },
+       "roof_front_edge": {
+        "pts": [
+         [
+          0.5,
+          0.3525
+         ],
+         [
+          0.55,
+          0.5738
+         ],
+         [
+          0.55,
+          0.6967
+         ]
+        ],
+        "vis": "clear"
+       },
+       "side_line": {
+        "pts": [
+         [
+          0.3,
+          0.3279
+         ],
+         [
+          0.45,
+          0.2828
+         ],
+         [
+          0.6,
+          0.2459
+         ]
+        ],
+        "vis": "clear"
+       }
+      }
+     }
+    ],
+    "traced_by": "first pass (Claude, by eye)",
+    "approximate": true,
+    "note": "First pass, placed by eye on a 50/100 px grid over the frame: approximate (typically +-10-20 px on a 2000 px frame; worse where the part is torn, hidden by the barrier or motion-blurred). Correct with engine/tools/crash-reference/trace.html. blur: medium"
+   }
+  },
+  {
+   "id": "beamng",
+   "label": "BeamNG",
+   "source": "beamng",
+   "crop": [
+    0,
+    0.1148,
+    0.98,
+    1
+   ],
+   "tracing": {
+    "instances": [
+     {
+      "id": "car",
+      "schema": "vehicle-top",
+      "front": "right",
+      "elements": {
+       "outline": {
+        "pts": [
+         [
+          0.102041,
+          0.351785
+         ],
+         [
+          0.035714,
+          0.444419
+         ],
+         [
+          0.061224,
+          0.703683
+         ],
+         [
+          0.117347,
+          0.935156
+         ],
+         [
+          0.178571,
+          0.962946
+         ],
+         [
+          0.408163,
+          0.870312
+         ],
+         [
+          0.637755,
+          0.740737
+         ]
+        ],
+        "vis": "clear"
+       },
+       "roof_outline": {
+        "pts": [
+         [
+          0.091837,
+          0.481473
+         ],
+         [
+          0.204082,
+          0.879575
+         ],
+         [
+          0.561224,
+          0.703683
+         ],
+         [
+          0.535714,
+          0.583258
+         ]
+        ],
+        "vis": "clear"
+       },
+       "side_line": {
+        "pts": [
+         [
+          0.214286,
+          0.86568
+         ],
+         [
+          0.408163,
+          0.814844
+         ],
+         [
+          0.637755,
+          0.740737
+         ]
+        ],
+        "vis": "clear"
+       }
+      }
+     }
+    ],
+    "traced_by": "first pass (Claude, by eye)",
+    "approximate": true,
+    "note": "First pass, placed by eye on a 50/100 px grid over the frame: approximate (typically +-10-20 px on a 2000 px frame; worse where the part is torn, hidden by the barrier or motion-blurred). Correct with engine/tools/crash-reference/trace.html."
+   }
+  }
+ ],
+ "updated": "2026-11-27T11:51:37.622Z"
+}
