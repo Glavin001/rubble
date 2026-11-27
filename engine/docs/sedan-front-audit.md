@@ -560,3 +560,298 @@ byte for byte the same with every rule; the skins (`.rskin`) change with rule 5 
 **Defaults: every rule stays off** (lessons §25.8: each breaks a hard rule or a gate that held
 before). Rules 4 and 5 together come nearest (S11 restitution 0.271, run 0); rule 5 is the
 single largest improvement against the real tests.
+
+## 9. The crash box as a closed cell, and the six rules again (2026-11-27, `crash-ref/crash-box-cell`)
+
+The owner's decision on §8: rebuild the crash box's lattice cell as a box (a node at each corner
+of its section at both ends, every face braced), then re-measure. The rule, its derivation and
+the stroke options: [generated-vehicles-lessons.md](generated-vehicles-lessons.md) §26. Switch
+`crash_box_cell`; off, every design's files are byte for byte those of `33b57f525` (the kept
+`gen-before-33b57f525`). With it on: every design's `.glb` and `crash.json` byte for byte the same,
+`truck_cab` and `box_trailer` untouched; on the six car designs the body, closures', engine's,
+impact beam's (and on the Mach 1s and the 4x4 the subframe's and windscreen's) JBeam and the
+`.rskin`/`.lite.rskin` change (`out/gen-rules/changed_cell.txt`). Tags as §8 with `c` for the
+cell: `cell` the cell alone, `cr1`…`cr5` the cell with one rule, `cc12`… cumulative, `call` all
+seven; `cellshear` the cell with its long faces' diagonals at the walls' shear yield
+(`CELL_DIAG_SHEAR=1`, a measurement).
+
+### 9.1 Does the box fold? The slow push: the box's span along the car / its two outboard chords (m)
+
+| variant | 0.1 m: span / chords (m) | 0.2 m: span / chords (m) | 0.3 m: span / chords (m) | 0.4 m: span / chords (m) | 0.5 m: span / chords (m) | 0.6 m: span / chords (m) | 0.7 m: span / chords (m) |
+|---|---|---|---|---|---|---|---|
+| off | 0.179 / 0.177, 0.179 | 0.173 / 0.173, 0.173 | 0.123 / 0.138, 0.125 | 0.078 / 0.129, 0.113 | 0.010 / 0.142, 0.147 | -0.000 / 0.143, 0.151 | -0.000 / 0.144, 0.151 |
+| cell | 0.178 / 0.178, 0.178 | 0.169 / 0.173, 0.169 | 0.119 / 0.145, 0.126 | 0.055 / 0.129, 0.119 | 0.000 / 0.135, 0.125 | -0.000 / 0.137, 0.125 | -0.000 / 0.146, 0.141 |
+| cellshear | 0.176 / 0.179, 0.176 | 0.167 / 0.169, 0.167 | 0.133 / 0.147, 0.137 | 0.095 / 0.125, 0.109 | 0.006 / 0.088, 0.093 | 0.001 / 0.092, 0.099 | 0.003 / 0.090, 0.100 |
+| cr1 | 0.178 / 0.178, 0.179 | 0.172 / 0.174, 0.172 | 0.136 / 0.151, 0.138 | 0.096 / 0.137, 0.119 | 0.001 / 0.148, 0.133 | 0.000 / 0.165, 0.127 | 0.000 / 0.167, 0.127 |
+| cr2 | 0.178 / 0.178, 0.178 | 0.130 / 0.180, 0.176 | -0.091 / 0.184, 0.189 | -0.093 / 0.190, 0.185 | -0.101 / 0.189, 0.184 | -0.100 / 0.185, 0.192 | -0.095 / 0.184, 0.194 |
+| cr3 | 0.178 / 0.178, 0.178 | 0.169 / 0.173, 0.169 | 0.117 / 0.143, 0.124 | 0.051 / 0.116, 0.107 | -0.002 / 0.120, 0.110 | -0.002 / 0.122, 0.110 | -0.002 / 0.122, 0.111 |
+| cr4 | 0.178 / 0.178, 0.178 | 0.165 / 0.169, 0.166 | 0.100 / 0.136, 0.124 | 0.060 / 0.137, 0.132 | -0.000 / 0.143, 0.133 | -0.000 / 0.144, 0.133 | -0.000 / 0.147, 0.139 |
+| cr5 | 0.178 / 0.178, 0.178 | 0.168 / 0.169, 0.168 | 0.098 / 0.135, 0.124 | 0.000 / 0.134, 0.127 | 0.000 / 0.134, 0.127 | -0.000 / 0.136, 0.127 | -0.000 / 0.139, 0.141 |
+| cc12 | 0.178 / 0.178, 0.178 | 0.132 / 0.179, 0.176 | -0.089 / 0.181, 0.188 | -0.099 / 0.188, 0.183 | -0.112 / 0.189, 0.182 | -0.115 / 0.187, 0.184 | -0.135 / 0.185, 0.187 |
+| cc123 | 0.178 / 0.178, 0.178 | 0.134 / 0.179, 0.176 | -0.085 / 0.183, 0.190 | -0.098 / 0.189, 0.186 | -0.103 / 0.187, 0.185 | -0.103 / 0.188, 0.185 | -0.109 / 0.188, 0.185 |
+| cc1234 | 0.178 / 0.178, 0.178 | 0.140 / 0.180, 0.176 | -0.078 / 0.183, 0.189 | -0.098 / 0.185, 0.187 | -0.103 / 0.184, 0.186 | -0.099 / 0.183, 0.185 | -0.099 / 0.182, 0.183 |
+| cc12345 | 0.178 / 0.178, 0.178 | 0.148 / 0.180, 0.176 | -0.078 / 0.185, 0.183 | -0.093 / 0.185, 0.183 | -0.096 / 0.184, 0.182 | -0.096 / 0.184, 0.182 | -0.095 / 0.183, 0.182 |
+| call | 0.178 / 0.178, 0.178 | 0.148 / 0.180, 0.176 | -0.078 / 0.185, 0.183 | -0.093 / 0.185, 0.183 | -0.096 / 0.184, 0.182 | -0.096 / 0.184, 0.182 | -0.095 / 0.183, 0.182 |
+| rc_cell | 0.179 / 0.178, 0.179 | 0.160 / 0.166, 0.160 | 0.084 / 0.115, 0.103 | 0.037 / 0.107, 0.103 | -0.000 / 0.113, 0.120 | -0.000 / 0.121, 0.122 | -0.007 / 0.129, 0.147 |
+| rc_cr6 | 0.178 / 0.178, 0.178 | 0.163 / 0.171, 0.164 | 0.098 / 0.150, 0.131 | -0.011 / 0.163, 0.146 | -0.028 / 0.168, 0.158 | -0.029 / 0.172, 0.167 | -0.027 / 0.173, 0.169 |
+| rc_call | 0.178 / 0.179, 0.178 | 0.127 / 0.180, 0.177 | -0.069 / 0.181, 0.181 | -0.091 / 0.183, 0.181 | -0.093 / 0.183, 0.180 | -0.087 / 0.183, 0.180 | -0.085 / 0.183, 0.179 |
+
+It does not: in every variant the box ends with its front and rear plates both on the wall
+(span 0) and its chords at 0.12–0.15 m. The cell keeps its section and turns down and outboard
+as a whole (front corners 0.11 m below and 0.06 m outboard of its rear corners at 0.5 m of push):
+a bending collapse of box and rail end (lessons §26.2), driven by the impact beam sliding off the
+boxes' ends (beam to box front +28 mm → −80 mm). With shear-matched diagonals it turns up.
+
+### 9.2 The cell with each rule
+
+| | off | cell | cr1 | cr2 | cr3 | cr4 | cr5 |
+|---|---|---|---|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 1010 / 1606 | 1068 / 1507 | 1068 / 1507 | 781 / 1507 | 1068 / 1507 | 1136 / 130 | 798 / 1501 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 194 / 224 / 401 | 164 / 298 / 415 | 164 / 298 / 415 | 164 / 12 / 415 | 164 / 298 / 415 | 164 / 298 / 483 | 164 / 298 / 146 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 2236 / 1334 | 2297 / 1235 | 1964 / 1235 | 2171 / 1235 | 2297 / 1235 | 2352 / 30 | 2091 / 936 |
+|   of which rail chords and braces / subframe–crash box (kN) | 348 / 553 | 312 / 544 | 312 / 0 | 250 / 544 | 312 / 544 | 312 / 544 | 312 / 544 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 162 / 394 / 538 / 509 | 180 / 428 / 489 / 444 | 178 / 413 / 524 / 503 | 155 / 252 / 199 / 380 | 178 / 428 / 481 / 472 | 143 / 376 / 511 / 485 | 178 / 410 / 508 / 366 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.128 / 0.371, 0.434 | 0.129 / 0.379, 0.443 | 0.138 / 0.375, 0.419 | 0.189 / 0.371, 0.448 | 0.117 / 0.379, 0.444 | 0.136 / 0.375, 0.441 | 0.132 / 0.383, 0.446 |
+| push at 0.39 m: elastic / plastic (kJ) | 40.5 / 78.0 | 44.0 / 78.6 | 45.5 / 79.7 | 30.9 / 38.4 | 42.8 / 78.8 | 40.8 / 75.5 | 39.5 / 75.2 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 255 / 538 / 644 / – | 282 / 573 / 687 / – | 281 / 563 / 672 / – | 267 / 477 / 499 / 470 | 281 / 569 / 694 / – | 247 / 536 / 714 / – | 273 / 539 / 640 / – |
+| S11 t_m (ms) | 44.4 | 44.6 | 44.1 | 52.1 | 43.1 | 47.5 | 47.1 |
+| S11 dynamic crush (m) | 0.394 | 0.378 | 0.382 | 0.465 | 0.376 | 0.400 | 0.397 |
+| S11 rebound (m/s) / restitution | 5.34 / 0.342 | 5.41 / 0.346 | 5.65 / 0.362 | 4.81 / 0.308 | 5.56 / 0.356 | 5.52 / 0.353 | 5.59 / 0.358 |
+| S11 residual crush (m) | 0.199 | 0.181 | 0.184 | 0.295 | 0.167 | 0.204 | 0.192 |
+| S11 peak wall force (kN) at (ms) | 661 at 20.0 | 704 at 20.0 | 692 at 20.0 | 543 at 20.0 | 702 at 20.0 | 729 at 20.0 | 653 at 20.0 |
+| S11 4 ms / CFC 60 peak (g) | 50.0 / 59.1 | 50.7 / 61.3 | 50.9 / 58.1 | 49.8 / 54.5 | 51.0 / 61.2 | 52.0 / 60.4 | 47.0 / 60.5 |
+| S11 cabin: door opening change peak / residual (mm) | 151 / -24 | 166 / -33 | 171 / -33 | 214 / -77 | 172 / -39 | 172 / -41 | 136 / -13 |
+| S11 plastic work: cabin share | 0.061 | 0.096 | 0.101 | 0.159 | 0.099 | 0.093 | 0.046 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 47.3 / 9.7 | 51.2 / 9.1 | 51.7 / 8.8 | 45.9 / 8.6 | 50.5 / 8.1 | 45.7 / 7.6 | 48.1 / 8.8 |
+| S11 released by zone (kJ) | cabin 16.6, front lower 8.2, front lower+upper 5.8, front upper 4.9, other 2.1 | cabin 17.7, front lower+upper 11.1, front lower 5.2, front upper 4.9, other 3.2 | cabin 18.7, front lower+upper 10.1, front lower 5.6, front upper 4.9, other 3.8 | cabin 20.9, front lower+upper 5.6, front lower 5.2, front upper 3.0, other 2.8 | cabin 18.0, front lower+upper 9.7, front lower 7.0, front upper 4.4, other 3.3 | cabin 18.7, front lower+upper 7.3, front lower 6.3, front upper 4.6, other 1.2 | cabin 15.4, front lower+upper 12.1, front lower 5.2, front upper 3.5, other 3.1 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.227 at 166; None | 0.226 at 66; None | 0.224 at 65; None | 0.231 at 71; None | 0.224 at 69; None | 0.226 at 175; None | 0.222 at 157; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 39.5 / 0.275 / 0.484 / 0.099 | 38.6 / 0.263 / 0.493 / 0.095 | 39.3 / 0.266 / 0.496 / 0.101 | 60.1 / 0.335 / 0.306 / 0.217 | 39.0 / 0.264 / 0.484 / 0.098 | 40.7 / 0.279 / 0.472 / 0.111 | 39.7 / 0.269 / 0.484 / 0.104 |
+| S12 peak wall force (kN) at (ms) | 576 at 32.0 | 606 at 28.0 | 596 at 28.0 | 459 at 24.0 | 596 at 28.0 | 601 at 28.0 | 578 at 32.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.4; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 |
+
+![cell, each rule](../out/sections/fixes/front_ab_off_cell_cr1_cr2_cr3_cr4_cr5.png)
+
+### 9.3 Cumulative with the cell
+
+| | off | cell | cr1 | cc12 | cc123 | cc1234 | cc12345 | call |
+|---|---|---|---|---|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 1010 / 1606 | 1068 / 1507 | 1068 / 1507 | 781 / 1507 | 781 / 1507 | 849 / 130 | 515 / 130 | 515 / 130 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 194 / 224 / 401 | 164 / 298 / 415 | 164 / 298 / 415 | 164 / 12 / 415 | 164 / 12 / 415 | 164 / 12 / 483 | 164 / 12 / 149 | 164 / 12 / 149 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 2236 / 1334 | 2297 / 1235 | 1964 / 1235 | 1837 / 1235 | 1837 / 1235 | 1893 / 30 | 1583 / 30 | 1583 / 30 |
+|   of which rail chords and braces / subframe–crash box (kN) | 348 / 553 | 312 / 544 | 312 / 0 | 250 / 0 | 250 / 0 | 250 / 0 | 250 / 0 | 250 / 0 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 162 / 394 / 538 / 509 | 180 / 428 / 489 / 444 | 178 / 413 / 524 / 503 | 153 / 255 / 220 / 375 | 151 / 259 / 217 / 315 | 138 / 226 / 174 / 352 | 134 / 198 / 115 / 365 | 134 / 198 / 115 / 365 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.128 / 0.371, 0.434 | 0.129 / 0.379, 0.443 | 0.138 / 0.375, 0.419 | 0.187 / 0.371, 0.449 | 0.188 / 0.364, 0.448 | 0.185 / 0.364, 0.448 | 0.186 / 0.360, 0.445 | 0.186 / 0.360, 0.445 |
+| push at 0.39 m: elastic / plastic (kJ) | 40.5 / 78.0 | 44.0 / 78.6 | 45.5 / 79.7 | 30.5 / 35.1 | 21.8 / 49.2 | 24.1 / 44.0 | 16.7 / 30.8 | 16.7 / 30.8 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 255 / 538 / 644 / – | 282 / 573 / 687 / – | 281 / 563 / 672 / – | 266 / 474 / 515 / 425 | 266 / 470 / 515 / 445 | 238 / 448 / 524 / 417 | 225 / 410 / 412 / 414 | 225 / 410 / 412 / 414 |
+| S11 t_m (ms) | 44.4 | 44.6 | 44.1 | 53.8 | 53.4 | 53.0 | 54.5 | 54.5 |
+| S11 dynamic crush (m) | 0.394 | 0.378 | 0.382 | 0.471 | 0.467 | 0.479 | 0.507 | 0.507 |
+| S11 rebound (m/s) / restitution | 5.34 / 0.342 | 5.41 / 0.346 | 5.65 / 0.362 | 4.88 / 0.312 | 4.78 / 0.306 | 5.13 / 0.328 | 4.91 / 0.315 | 4.91 / 0.315 |
+| S11 residual crush (m) | 0.199 | 0.181 | 0.184 | 0.299 | 0.296 | 0.280 | 0.307 | 0.307 |
+| S11 peak wall force (kN) at (ms) | 661 at 20.0 | 704 at 20.0 | 692 at 20.0 | 555 at 20.0 | 550 at 20.0 | 559 at 20.0 | 535 at 40.0 | 535 at 40.0 |
+| S11 4 ms / CFC 60 peak (g) | 50.0 / 59.1 | 50.7 / 61.3 | 50.9 / 58.1 | 40.3 / 46.5 | 39.6 / 46.4 | 45.1 / 51.0 | 45.8 / 51.6 | 45.8 / 51.6 |
+| S11 cabin: door opening change peak / residual (mm) | 151 / -24 | 166 / -33 | 171 / -33 | 212 / -67 | 211 / -66 | 186 / -46 | 116 / -9 | 116 / -9 |
+| S11 plastic work: cabin share | 0.061 | 0.096 | 0.101 | 0.150 | 0.147 | 0.127 | 0.030 | 0.030 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 47.3 / 9.7 | 51.2 / 9.1 | 51.7 / 8.8 | 44.9 / 8.3 | 44.8 / 8.5 | 42.1 / 5.6 | 34.6 / 5.9 | 34.6 / 5.9 |
+| S11 released by zone (kJ) | cabin 16.6, front lower 8.2, front lower+upper 5.8, front upper 4.9, other 2.1 | cabin 17.7, front lower+upper 11.1, front lower 5.2, front upper 4.9, other 3.2 | cabin 18.7, front lower+upper 10.1, front lower 5.6, front upper 4.9, other 3.8 | cabin 21.2, front lower+upper 5.4, front lower 3.7, front upper 3.5, other 3.0 | cabin 21.2, front lower+upper 5.0, front upper 3.5, front lower 3.4, other 3.2 | cabin 20.6, front lower 5.5, front upper 4.8, front lower+upper 3.6, other 2.1 | cabin 12.2, front lower 7.3, front lower+upper 4.2, other 3.0, front upper 2.1 | cabin 12.2, front lower 7.3, front lower+upper 4.2, other 3.0, front upper 2.1 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.227 at 166; None | 0.226 at 66; None | 0.224 at 65; None | 0.224 at 68; None | 0.224 at 69; None | 0.229 at 175; None | 0.227 at 77; None | 0.227 at 77; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 39.5 / 0.275 / 0.484 / 0.099 | 38.6 / 0.263 / 0.493 / 0.095 | 39.3 / 0.266 / 0.496 / 0.101 | 60.4 / 0.337 / 0.275 / 0.228 | 59.2 / 0.332 / 0.302 / 0.209 | 57.6 / 0.336 / 0.346 / 0.175 | 66.1 / 0.370 / 0.301 / 0.192 | 66.1 / 0.370 / 0.301 / 0.192 |
+| S12 peak wall force (kN) at (ms) | 576 at 32.0 | 606 at 28.0 | 596 at 28.0 | 462 at 24.0 | 455 at 24.0 | 459 at 24.0 | 400 at 24.0 | 400 at 24.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.4; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 4859.5; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 |
+
+![cell, cumulative](../out/sections/fixes/front_ab_off_cell_cr1_cc12_cc123_cc1234_cc12345_call.png)
+
+### 9.4 `real_crash`
+
+| | rc_off | rc_cell | rc_cr6 | rc_call |
+|---|---|---|---|---|
+| cut z 0.70 (crash-box bay, both sides; stated 2 × 45 static, 2 × 70 crash rate): yielding / never yielding (kN) | 627 / 1606 | 659 / 1507 | 708 / 1507 | 427 / 130 |
+|   of which crash boxes / box–other braces / hood + fenders (kN) | 108 / 125 / 204 | 91 / 166 / 211 | 140 / 166 / 211 | 140 / 12 / 84 |
+| cut z 0.47 (rails' bay; stated 2 × 62 static, 2 × 95 crash rate): yielding / never yielding (kN) | 1756 / 1334 | 1805 / 1235 | 1871 / 1235 | 1349 / 30 |
+|   of which rail chords and braces / subframe–crash box (kN) | 193 / 553 | 174 / 544 | 240 / 544 | 207 / 0 |
+| push force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 157 / 299 / 330 / 301 | 152 / 329 / 385 / 340 | 160 / 346 / 333 / 303 | 125 / 146 / 90 / 259 |
+| push at 0.39 m: crash-box chord / rail chords (m) | 0.160 / 0.377, 0.435 | 0.108 / 0.379, 0.444 | 0.161 / 0.382, 0.439 | 0.183 / 0.357, 0.446 |
+| push at 0.39 m: elastic / plastic (kJ) | 25.8 / 60.3 | 27.9 / 67.2 | 25.8 / 66.5 | 11.9 / 27.3 |
+| S11 force at 0.1 / 0.2 / 0.3 / 0.4 m (kN) | 245 / 436 / 477 / 501 | 264 / 464 / 526 / 429 | 267 / 485 / 541 / 410 | 210 / 362 / 354 / 349 |
+| S11 t_m (ms) | 57.3 | 53.4 | 54.3 | 61.9 |
+| S11 dynamic crush (m) | 0.480 | 0.457 | 0.455 | 0.565 |
+| S11 rebound (m/s) / restitution | 3.67 / 0.235 | 3.95 / 0.253 | 3.90 / 0.250 | 3.77 / 0.241 |
+| S11 residual crush (m) | 0.333 | 0.293 | 0.320 | 0.373 |
+| S11 peak wall force (kN) at (ms) | 508 at 32.0 | 527 at 20.0 | 549 at 20.0 | 446 at 36.0 |
+| S11 4 ms / CFC 60 peak (g) | 39.4 / 41.4 | 39.3 / 42.6 | 39.2 / 45.0 | 40.0 / 44.9 |
+| S11 cabin: door opening change peak / residual (mm) | 131 / -23 | 154 / -41 | 149 / -38 | 82 / -12 |
+| S11 plastic work: cabin share | 0.031 | 0.052 | 0.049 | 0.018 |
+| S11 elastic at the stop / 0.3 s later (kJ) | 28.0 / 7.3 | 33.3 / 10.0 | 31.5 / 9.6 | 25.4 / 4.6 |
+| S11 released by zone (kJ) | cabin 11.0, front lower+upper 3.8, front upper 3.4, front lower 1.7, other 1.0 | cabin 12.7, front lower+upper 4.4, front lower 3.1, front upper 2.5, other 0.7 | cabin 12.4, front lower+upper 3.5, front lower 2.6, front upper 2.5, other 1.0 | cabin 6.7, other 4.8, front lower 4.3, front lower+upper 3.1, front upper 1.9 |
+| S11 engine rear to firewall: least (m) at (ms); within 3 cm | 0.234 at 77; None | 0.246 at 184; None | 0.239 at 186; None | 0.222 at 55; None |
+| S12 t_m (ms) / crush (m) / restitution / residual (m) | 50.3 / 0.317 / 0.366 / 0.156 | 48.0 / 0.304 / 0.395 / 0.152 | 47.3 / 0.297 / 0.383 / 0.146 | 69.6 / 0.427 / 0.309 / 0.252 |
+| S12 peak wall force (kN) at (ms) | 427 at 24.0 | 462 at 28.0 | 483 at 28.0 | 340 at 24.0 |
+| hard: energy gain S11 / S12 (J); into the wall (m) | 0.0 / 1.3; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 | 0.0 / 0.0; 0.000 |
+
+### 9.5 Bay by bay at 0.39 m of push (z shortening, m)
+
+| variant | crash box a1–a2: z shortening (m) | chords' length upper / lower (m, from 0.180) | rail a2–a4 (z) | rail a4–a5 (z) | a5 to firewall (z) | firewall to cabin rear | crash box front's rise (m) |
+|---|---|---|---|---|---|---|---|
+| off | 0.100 | 0.128 / 0.111 | 0.029 | 0.023 | -0.023 | 0.109 | -0.017 |
+| cell | 0.111 | 0.129 / 0.119 | 0.021 | 0.015 | -0.028 | 0.118 | 0.001 |
+| cr1 | 0.076 | 0.138 / 0.119 | 0.021 | 0.041 | -0.027 | 0.126 | -0.006 |
+| cr2 | 0.276 | 0.190 / 0.186 | 0.019 | 0.009 | -0.020 | 0.050 | 0.028 |
+| cr3 | 0.122 | 0.117 / 0.107 | 0.016 | 0.014 | -0.027 | 0.112 | 0.001 |
+| cr4 | 0.112 | 0.136 / 0.130 | 0.021 | 0.017 | -0.028 | 0.115 | 0.006 |
+| cr5 | 0.168 | 0.132 / 0.125 | 0.011 | 0.010 | -0.020 | 0.067 | -0.001 |
+| cc12 | 0.277 | 0.187 / 0.184 | 0.021 | 0.009 | -0.023 | 0.050 | 0.055 |
+| cc123 | 0.276 | 0.188 / 0.186 | 0.027 | 0.008 | -0.017 | 0.040 | 0.024 |
+| cc1234 | 0.273 | 0.185 / 0.187 | 0.024 | 0.008 | -0.021 | 0.047 | 0.013 |
+| cc12345 | 0.272 | 0.186 / 0.183 | 0.024 | 0.009 | -0.010 | 0.035 | -0.038 |
+| call | 0.272 | 0.186 / 0.183 | 0.024 | 0.009 | -0.010 | 0.035 | -0.038 |
+| rc_cell | 0.132 | 0.107 / 0.102 | 0.014 | 0.014 | -0.025 | 0.104 | 0.006 |
+| rc_cr6 | 0.184 | 0.162 / 0.143 | 0.022 | 0.017 | -0.027 | 0.073 | 0.025 |
+| rc_call | 0.270 | 0.183 / 0.181 | 0.032 | 0.008 | -0.008 | 0.026 | -0.026 |
+
+### 9.6 Hard rules, 8 runs × 3 contact settings, judged by `crash_reference::verdict`
+
+`crash_verdict` (`engine-softbody-lab/examples/crash_verdict.rs`) judges each file's 8 reports
+again by the scenarios' current criteria and known failures, so a known failure (listed in the
+scenario, e.g. S11's restitution, S08's centre of mass) does not fail it and a new one does.
+Before the rules (`off`), every scenario and setting is ok with its known failures.
+
+Hard rules on 8 runs × discrete/edge/continuous × S11, S12, S01, S02 (the 4x4), S08, judged by
+`crash_reference::verdict` (`crash_verdict`; known failures listed in the scenarios do not fail,
+new ones do; `off` is ok everywhere). Variants with one file are S08 edge only, the setting where
+the edge contact's energy fault shows:
+
+| variant | settings judged | new failures (scenario, setting: criterion, runs) | known failures that now pass in every run |
+|---|---|---|---|
+| off | 15 | none | – |
+| r1 | 15 | S08 continuous: turns the same sense as the other 2/8 | – |
+| r2 | 1 | S08 edge: no energy created 5/8 | – |
+| r3 | 1 | S08 edge: no energy created 1/8 | – |
+| r4 | 15 | none | S08 continuous: the common centre of mass stays still |
+| r5 | 15 | S08 continuous: turns the same sense as the other 1/8 | S08 continuous: the common centre of mass stays still |
+| all | 15 | S08 edge: no energy created 1/8 | S08 continuous: the common centre of mass stays still |
+| c12 | 1 | S08 edge: no energy created 5/8 | – |
+| c123 | 1 | S08 edge: no energy created 8/8 | – |
+| c1234 | 1 | S08 edge: no energy created 3/8 | – |
+| c12345 | 1 | S08 edge: no energy created 1/8 | – |
+| rc_off | 15 | S08 continuous: momentum across the road 2/8, S08 continuous: turns the same sense as the other 5/8, S08 discrete: momentum along the road 1/8, S08 discrete: no energy created 2/8, S11 discrete: no energy created 1/8, S11 edge: no energy created 1/8, S12 continuous: no energy created 1/8 | S11 discrete: restitution within the 56 km/h sedan fleet's; S11 edge: restitution within the 56 km/h sedan fleet's |
+| rc_r6 | 15 | S08 continuous: momentum across the road 1/8, S08 continuous: turns the same sense as the other 5/8, S08 edge: turns the same sense as the other 3/8 | – |
+| cell | 15 | S08 continuous: momentum across the road 2/8, S08 continuous: turns the same sense as the other 2/8, S08 edge: turns the same sense as the other 1/8 | – |
+| cr1 | 1 | none | – |
+| cr2 | 1 | S08 edge: turns the same sense as the other 2/8 | – |
+| cr3 | 1 | none | – |
+| cr4 | 1 | S08 edge: no energy created 2/8 | – |
+| cr5 | 15 | none | S08 continuous: the common centre of mass stays still |
+| call | 15 | none | S08 continuous: the common centre of mass stays still |
+
+With the cell, rules 2 and 3 no longer create energy in S08 edge (worst 296 and 69 J against 2.8
+kJ and 674 J without it); rule 4 still does (2 of 8). The cell alone fails S08's own laws in 2 of
+8 continuous runs (momentum across the road, 540 N·s against the 450 bar) and its "turns the same
+sense" in 3 runs; with rule 5 or with every rule on, S08 holds every criterion in every setting.
+S08's laws are chaotic in our runs (the same variant's run-by-run spread decides them), so the
+one-rule-at-a-time standard reads them run by run.
+
+| variant | scenario | contact | runs | energy created, max (J) | its band | into the wall, max (m) | finite | crossings, max | asserted failures | restitution | dyn. crush (m) | residual (m) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| cell | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.341–0.357 | 0.367–0.384 | 0.161–0.192 |
+| cell | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.341–0.357 | 0.367–0.384 | 0.161–0.192 |
+| cell | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.000 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.348–0.379 | 0.359–0.379 | 0.174–0.196 |
+| cell | S12 | discrete | 8 | 3.4 | ≤ 89.0 | 0.000 | 1 | – | none | 0.480–0.505 | 0.259–0.268 | 0.092–0.098 |
+| cell | S12 | edge | 8 | 3.4 | ≤ 89.0 | 0.000 | 1 | – | none | 0.480–0.505 | 0.259–0.268 | 0.092–0.098 |
+| cell | S12 | continuous | 8 | 3.4 | ≤ 89.0 | 0.000 | 1 | – | none | 0.497–0.516 | 0.258–0.267 | 0.091–0.101 |
+| cell | S01 | discrete | 8 | 1.4 | ≤ 230.0 | 0.000 | 1 | – | none | 0.250–0.275 | 0.548–0.573 | 0.055–0.064 |
+| cell | S01 | edge | 8 | 1.4 | ≤ 230.0 | 0.000 | 1 | – | none | 0.250–0.275 | 0.548–0.573 | 0.055–0.064 |
+| cell | S01 | continuous | 8 | 63.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.265–0.310 | 0.540–0.566 | -0.002–0.063 |
+| cell | S02 | discrete | 8 | 0.0 |  | 0.000 | 1 | – | none | 0.303–0.330 | 0.295–0.306 | -0.264–-0.078 |
+| cell | S02 | edge | 8 | 0.0 |  | 0.000 | 1 | – | none | 0.303–0.330 | 0.295–0.306 | -0.264–-0.078 |
+| cell | S02 | continuous | 8 | 0.0 |  | 0.009 | 1 | – | none | 0.316–0.337 | 0.291–0.303 | -0.097–0.060 |
+| cell | S08 | discrete | 8 | 206.1 | ≤ 340.0 | 0.000 | 1 | 204.0 | the common centre of mass stays still 1/8 | 0.089–0.211 | 0.710–0.795 | -0.017–0.051 |
+| cell | S08 | edge | 8 | 153.4 | ≤ 340.0 | 0.000 | 1 | 16.0 | momentum across the road 3/8, momentum along the road 2/8, the common centre of mass stays still 6/8, turns the same sense as the other 1/8 | 0.163–0.225 | 0.682–0.736 | -0.048–0.050 |
+| cell | S08 | continuous | 8 | 177.3 | ≤ 340.0 | 0.000 | 1 | 0.0 | momentum across the road 2/8, momentum along the road 1/8, the common centre of mass stays still 6/8, turns the same sense as the other 2/8 | 0.134–0.174 | 0.654–0.727 | -0.011–0.038 |
+| cr5 | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.013 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.344–0.376 | 0.387–0.420 | 0.173–0.220 |
+| cr5 | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.013 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.344–0.376 | 0.387–0.420 | 0.173–0.220 |
+| cr5 | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.013 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.349–0.379 | 0.384–0.419 | 0.187–0.223 |
+| cr5 | S12 | discrete | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.438–0.486 | 0.265–0.276 | 0.095–0.111 |
+| cr5 | S12 | edge | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.438–0.486 | 0.265–0.276 | 0.095–0.111 |
+| cr5 | S12 | continuous | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.444–0.491 | 0.264–0.276 | 0.096–0.112 |
+| cr5 | S01 | discrete | 8 | 122.6 | ≤ 230.0 | 0.000 | 1 | – | none | 0.184–0.243 | 0.570–0.600 | 0.017–0.033 |
+| cr5 | S01 | edge | 8 | 122.6 | ≤ 230.0 | 0.000 | 1 | – | none | 0.184–0.243 | 0.570–0.600 | 0.017–0.033 |
+| cr5 | S01 | continuous | 8 | 0.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.212–0.256 | 0.572–0.601 | 0.025–0.059 |
+| cr5 | S02 | discrete | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.240–0.311 | 0.328–0.350 | 0.062–0.157 |
+| cr5 | S02 | edge | 8 | 0.0 |  | 0.002 | 1 | – | none | 0.240–0.311 | 0.328–0.350 | 0.062–0.157 |
+| cr5 | S02 | continuous | 8 | 0.0 |  | 0.003 | 1 | – | none | 0.268–0.306 | 0.327–0.348 | -0.011–0.073 |
+| cr5 | S08 | discrete | 8 | 104.2 | ≤ 340.0 | 0.000 | 1 | 107.0 | none | 0.117–0.206 | 0.753–0.781 | -0.050–0.012 |
+| cr5 | S08 | edge | 8 | 58.0 | ≤ 340.0 | 0.000 | 1 | 26.0 | momentum across the road 3/8 | 0.159–0.225 | 0.704–0.760 | -0.050–0.022 |
+| cr5 | S08 | continuous | 8 | 42.3 | ≤ 340.0 | 0.000 | 1 | 0.0 | none | 0.128–0.182 | 0.729–0.790 | -0.024–0.017 |
+| call | S11 | discrete | 8 | 0.0 | ≤ 177.0 | 0.005 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.300–0.318 | 0.499–0.514 | 0.296–0.310 |
+| call | S11 | edge | 8 | 0.0 | ≤ 177.0 | 0.005 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.300–0.318 | 0.499–0.514 | 0.296–0.310 |
+| call | S11 | continuous | 8 | 0.0 | ≤ 177.0 | 0.001 | 1 | – | restitution within the 56 km/h sedan fleet's 8/8 | 0.302–0.321 | 0.501–0.513 | 0.299–0.310 |
+| call | S12 | discrete | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.263–0.337 | 0.361–0.386 | 0.185–0.223 |
+| call | S12 | edge | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.263–0.337 | 0.361–0.386 | 0.185–0.223 |
+| call | S12 | continuous | 8 | 0.0 | ≤ 89.0 | 0.000 | 1 | – | none | 0.259–0.335 | 0.360–0.386 | 0.184–0.222 |
+| call | S01 | discrete | 8 | 18.6 | ≤ 230.0 | 0.000 | 1 | – | none | 0.137–0.153 | 0.640–0.664 | 0.050–0.065 |
+| call | S01 | edge | 8 | 18.6 | ≤ 230.0 | 0.000 | 1 | – | none | 0.137–0.153 | 0.640–0.664 | 0.050–0.065 |
+| call | S01 | continuous | 8 | 10.0 | ≤ 230.0 | 0.000 | 1 | – | none | 0.146–0.175 | 0.640–0.660 | 0.057–0.080 |
+| call | S02 | discrete | 8 | 0.0 |  | 0.001 | 1 | – | none | 0.261–0.273 | 0.408–0.416 | 0.099–0.213 |
+| call | S02 | edge | 8 | 0.0 |  | 0.001 | 1 | – | none | 0.261–0.273 | 0.408–0.416 | 0.099–0.213 |
+| call | S02 | continuous | 8 | 0.0 |  | 0.001 | 1 | – | none | 0.272–0.280 | 0.408–0.416 | 0.122–0.208 |
+| call | S08 | discrete | 8 | 232.3 | ≤ 340.0 | 0.000 | 1 | 99.0 | none | 0.100–0.145 | 0.886–0.939 | -0.062–-0.011 |
+| call | S08 | edge | 8 | 16.1 | ≤ 340.0 | 0.000 | 1 | 22.0 | none | 0.107–0.175 | 0.856–0.899 | -0.040–-0.014 |
+| call | S08 | continuous | 8 | 4.3 | ≤ 340.0 | 0.000 | 1 | 0.0 | none | 0.125–0.163 | 0.853–0.912 | -0.025–-0.016 |
+
+### 9.7 Gates
+
+Gates (`front_gates.sh`, `RUBBLE_FRONT_RULES`; `gen3_rig` on the generated sedan), before / the
+cell alone / all seven switches:
+
+| test | before | cell | all seven |
+|---|---|---|---|
+| `engine-vehiclegen` lib (63), `crash_zones`, `mechanical`; authoring `crash_zones`, `truck_cab`, `box_trailer`, `sedan_energy` (6), `crash_invariants` (9), `rig_export` (2), `skin_lint` (3), `paint_binds_skin` (1) | pass | pass | pass |
+| `every_design` (≤ 5 mm parked, nothing bent) | pass (4x4 `bf_g2` 4.9 mm) | pass | pass |
+| `generated_vehicle_lint` | the two listed failures | the same rules on the same designs, every line identical | the same two tests fail; inside them (rule 5's hood row and triangles): Mach 1 skin winding 4 → 6 edges (`bb_o10-11`, `bb_o15-16`), Mach 1 gasser inward-facing triangles 54 → 56, the 4x4's contacter pairs inside the contact range 21 → 23, more open edges on the Mach 1s and the 4x4 (holes 1 each, as before) |
+| `gen3_rig::rest_fidelity_at_spawn_and_parked` (≤ 1 mm, ≤ 1°; fails before) | spawn 0.105 mm / 0.05°, parked 0.065 mm / 1.090° | 0.105 mm / 0.05°, 0.065 mm / 1.110° | parked 0.065 mm / 1.097° |
+| `gen_sedan_contact` | the six listed failures | the same six | the same six |
+| `continuous_contact` | the three listed | the same three | the same three |
+| `gen_sedan_paint::accept_head_30_pressed` (10 mm from 0.3 s) | pass, 8 mm | pass, 2 mm | pass |
+| `gen_sedan_paint::accept_head_60_pressed` (50 mm) | pass, 21 mm | pass, 14 mm | pass |
+| `gen_sedan_paint::accept_side_90` (listed failing) | fails, 55 mm | **passes**, 48 mm | **passes** |
+| `gen_sedan_paint::accept_side_60_pressed` (listed failing) | fails, 16 mm | **passes**, 0 mm | **passes** |
+| `gen_sedan_paint::accept_head_100` (listed failing) | fails, 61 mm | **passes**, 32 mm | fails |
+| `gen_sedan_paint::own_paint_ends_apart` (listed) | fails | fails | fails |
+
+The visual mesh: every design's `.glb` byte for byte the same with the cell (and with every
+rule); the collision surface at rest is the same in the stills (`stills_S11_side_off_vs_cell.png`);
+the skins change (`.rskin`: the body binds the new nodes) and the rest fidelity holds as before.
+
+### 9.8 Defaults
+
+**Every switch stays off by default, the cell included.** The standard (the owner's): on only if,
+alone and together, it holds every hard rule and gate that held before.
+
+| switch | alone: what stops it | category |
+|---|---|---|
+| `crash_box_cell` | S08 continuous: momentum across the road 2/8 (540 N·s, bar 450) and "turns the same sense" 2/8; S08 edge "turns the same sense" 1/8. And it does not do what it is for: the box still turns (§26.2) | (c) S08's own laws (momentum, the yaw symmetry), not the edge energy fault |
+| 1 subframe mounts | `every_design`: the 4x4's bumper row 5.5 mm (bar 5); S08 continuous "turns the same sense" 2/8 | (c) |
+| 2 bay alone | S08 edge no energy created 5/8 (2.8 kJ) | (a) the edge contact's energy fault |
+| 3 stroke | S08 edge no energy created 1/8 (674 J) | (a) |
+| 4 yielding stops | paint, head 60 pressed 53 mm (bar 50) | (b) the owner's paint limits |
+| 5 hood row, panels | paint, head 30 pressed 21 mm (bar 10); S08 continuous "turns the same sense" 1/8 | (b) and (c) |
+| 6 crash rate | `real_crash` only: S08 continuous momentum across 1/8, "turns the same sense" (edge 3/8) | (c) (`real_crash` before the rule already fails S08's and S11's laws: momentum, energy) |
+
+**Together:** the cell with rule 5, and all seven switches on, hold every hard rule in all 15
+settings and every gate that held before (and three listed paint failures pass with the cell;
+side 90 and side 60 pressed with all seven). The one-at-a-time standard still keeps them off,
+because the cell alone fails S08's momentum in 2 of 8 continuous runs: those laws are decided run
+by run by chaotic two-car contact, so a set can pass where its members fail. That is a conflict
+the rule does not order: the owner's call. **All seven together** measure (S11 run 0): t_m 54.5
+ms, crush 0.507 m, restitution 0.315, residual 0.307 m, peak 535 kN at 40 ms; S12 t_m 66 ms,
+restitution 0.301 (Camry 69–75 ms, 0.11–0.15). The cell is necessary for rules 2 and 3 (their
+energy creation goes away with it) but not sufficient for the box to fold.
+
+**If the owner switched a set on, what would have to change** (none was changed here):
+`tests-expected-failures.txt` loses `gen_sedan_paint::accept_side_90` and `accept_side_60_pressed`
+(they pass; with the cell alone `accept_head_100` too); S08's known failure "the common centre
+of mass stays still" in continuous contact passes in every run with rules 4 or 5 and with all
+seven (`crash_verdict`: "remove the entry"); in `real_crash` without rule 6, S11's discrete and edge
+restitution known failures pass; the scenario matrix's car (`out/gen/sedan_new`), its saved
+states and the portable fixtures, the site's `__mods/*_new`, and the crash reference's
+`crash-reference.md` §4.3 rows are regenerated; the generated vehicles' JBeam and `.rskin` files
+change (the `.glb` does not).

@@ -993,8 +993,194 @@ by working around it. Next, in order: the crash box's four-corner cell (§25.2),
 and 3 need; the paint's guard in the folded hood (rule 5) and the softer seams (rule 4); the
 4x4's bumper row (rule 1, §22's open item).
 
+## 26. The crash box as a closed cell (2026-11-27, `crash-ref/crash-box-cell`)
+
+The owner's decision after §25: rebuild the crash box's lattice cell as a box first, then
+re-measure the six rules. The rule is a switch like them, `crash_box_cell`
+(`gen2/crash_box_cell.rs`, `engine_vehiclegen::front_rules::impact_beam_on_crash_box_corners`);
+off, every design's files are byte for byte those of `33b57f525` (465 files, checked after each
+change).
+
+**26.1 The cell.**
+- **(Fact)** Each crash box end gets a node at every corner of its 70 × 110 mm section: the
+  definitions' nodes (`sh_a1_u*`, `sh_a1_d*`, `sh_a2_*`, on the rail's lane) move 35 mm to the
+  outboard corners and an inboard pair is added (`sh_a1_ui*`, `sh_a1_di*`, `sh_a2_ui*`,
+  `sh_a2_di*`): 4 more shell nodes a side, 139 in all (study rule 1: 110–140). Each corner pair
+  shares its node's group mass (A1 3.5 → 2 × 1.75 kg, A2 4.0 → 2 × 2.0), so the car's mass and
+  centre of mass do not move. A side's cell: four corner chords; each end face closed (four edges,
+  both diagonals); one diagonal on each long face (outboard, inboard, top, bottom): it carries
+  axial load, bending about both axes and torsion. Every other beam between two of its eight
+  nodes is removed; the springs are fitted to the node budget again (`shell::budget`). The front
+  impact beam mounts on all four front corners (its 8 beams a side kept).
+- **(Decision, from section-matching.md §2 rule 3, "by role") It matches the axial mean crush
+  force.** A crash box is loaded along its axis, so the cell's axial yield, the four chords plus
+  the long faces' diagonals along the car, is the section's P_m (`Member::crush_n`,
+  Abramowicz–Jones, 45.4 kN) × the character's front multiple (× the crash rate with rule 6 in
+  `real_crash`). The diagonals keep the zone's yield (`Zone::CrashBox`, 5 kN × 1.8 = 9 kN, as the
+  planar cell's), 32.1 kN along the car together; the chords take the rest, 4 × 12.4 kN
+  (`beamng_feel`).
+- **(Consequence) Its bending is under the section's**, as section-matching.md §2 says corner
+  chords at P_m must be: about a horizontal axis the chords' 2·F·h = 2 × 12.4 × 0.11 = 2.7 kN·m
+  plus the top and bottom diagonals' ~0.9 kN·m, ~3.6 kN·m, against the section's σ_y·Z = 340 MPa ×
+  19,979 mm³ = 6.8 kN·m (9.6 kN·m as the same character's gauge, 1.8^0.6). A pin-jointed cell
+  cannot have the wall's shear strength without the axial capacity that comes with it: with the
+  long faces' diagonals at the walls' shear yield (τ_y·b·t / sin θ, `CELL_DIAG_SHEAR=1`, a
+  measurement) they carry 382 kN along the car, 4.7 × P_m.
+- **(Fact) The rail's first bay from the box's four rear corners.** With the closed box on the
+  rail's single chord (`sh_a2_d*` → `sh_a4_*`) the box turned about its rear end; the rule makes
+  that bay a pyramid from the four rear corners to the rail station behind them, together the
+  rail's P_m × the multiple (4 × 28.4 kN).
+
+**26.2 Does it fold? (Measurement, the slow push, the box's span along the car against its
+chords' lengths, m.)**
+
+| variant | 0.1 m: span / chords (m) | 0.2 m: span / chords (m) | 0.3 m: span / chords (m) | 0.4 m: span / chords (m) | 0.5 m: span / chords (m) | 0.6 m: span / chords (m) | 0.7 m: span / chords (m) |
+|---|---|---|---|---|---|---|---|
+| off | 0.179 / 0.177, 0.179 | 0.173 / 0.173, 0.173 | 0.123 / 0.138, 0.125 | 0.078 / 0.129, 0.113 | 0.010 / 0.142, 0.147 | -0.000 / 0.143, 0.151 | -0.000 / 0.144, 0.151 |
+| cell | 0.178 / 0.178, 0.178 | 0.169 / 0.173, 0.169 | 0.119 / 0.145, 0.126 | 0.055 / 0.129, 0.119 | 0.000 / 0.135, 0.125 | -0.000 / 0.137, 0.125 | -0.000 / 0.146, 0.141 |
+| cellshear | 0.176 / 0.179, 0.176 | 0.167 / 0.169, 0.167 | 0.133 / 0.147, 0.137 | 0.095 / 0.125, 0.109 | 0.006 / 0.088, 0.093 | 0.001 / 0.092, 0.099 | 0.003 / 0.090, 0.100 |
+| cr1 | 0.178 / 0.178, 0.179 | 0.172 / 0.174, 0.172 | 0.136 / 0.151, 0.138 | 0.096 / 0.137, 0.119 | 0.001 / 0.148, 0.133 | 0.000 / 0.165, 0.127 | 0.000 / 0.167, 0.127 |
+| cr2 | 0.178 / 0.178, 0.178 | 0.130 / 0.180, 0.176 | -0.091 / 0.184, 0.189 | -0.093 / 0.190, 0.185 | -0.101 / 0.189, 0.184 | -0.100 / 0.185, 0.192 | -0.095 / 0.184, 0.194 |
+| cr3 | 0.178 / 0.178, 0.178 | 0.169 / 0.173, 0.169 | 0.117 / 0.143, 0.124 | 0.051 / 0.116, 0.107 | -0.002 / 0.120, 0.110 | -0.002 / 0.122, 0.110 | -0.002 / 0.122, 0.111 |
+| cr4 | 0.178 / 0.178, 0.178 | 0.165 / 0.169, 0.166 | 0.100 / 0.136, 0.124 | 0.060 / 0.137, 0.132 | -0.000 / 0.143, 0.133 | -0.000 / 0.144, 0.133 | -0.000 / 0.147, 0.139 |
+| cr5 | 0.178 / 0.178, 0.178 | 0.168 / 0.169, 0.168 | 0.098 / 0.135, 0.124 | 0.000 / 0.134, 0.127 | 0.000 / 0.134, 0.127 | -0.000 / 0.136, 0.127 | -0.000 / 0.139, 0.141 |
+| cc12 | 0.178 / 0.178, 0.178 | 0.132 / 0.179, 0.176 | -0.089 / 0.181, 0.188 | -0.099 / 0.188, 0.183 | -0.112 / 0.189, 0.182 | -0.115 / 0.187, 0.184 | -0.135 / 0.185, 0.187 |
+| cc123 | 0.178 / 0.178, 0.178 | 0.134 / 0.179, 0.176 | -0.085 / 0.183, 0.190 | -0.098 / 0.189, 0.186 | -0.103 / 0.187, 0.185 | -0.103 / 0.188, 0.185 | -0.109 / 0.188, 0.185 |
+| cc1234 | 0.178 / 0.178, 0.178 | 0.140 / 0.180, 0.176 | -0.078 / 0.183, 0.189 | -0.098 / 0.185, 0.187 | -0.103 / 0.184, 0.186 | -0.099 / 0.183, 0.185 | -0.099 / 0.182, 0.183 |
+| cc12345 | 0.178 / 0.178, 0.178 | 0.148 / 0.180, 0.176 | -0.078 / 0.185, 0.183 | -0.093 / 0.185, 0.183 | -0.096 / 0.184, 0.182 | -0.096 / 0.184, 0.182 | -0.095 / 0.183, 0.182 |
+| call | 0.178 / 0.178, 0.178 | 0.148 / 0.180, 0.176 | -0.078 / 0.185, 0.183 | -0.093 / 0.185, 0.183 | -0.096 / 0.184, 0.182 | -0.096 / 0.184, 0.182 | -0.095 / 0.183, 0.182 |
+| rc_cell | 0.179 / 0.178, 0.179 | 0.160 / 0.166, 0.160 | 0.084 / 0.115, 0.103 | 0.037 / 0.107, 0.103 | -0.000 / 0.113, 0.120 | -0.000 / 0.121, 0.122 | -0.007 / 0.129, 0.147 |
+| rc_cr6 | 0.178 / 0.178, 0.178 | 0.163 / 0.171, 0.164 | 0.098 / 0.150, 0.131 | -0.011 / 0.163, 0.146 | -0.028 / 0.168, 0.158 | -0.029 / 0.172, 0.167 | -0.027 / 0.173, 0.169 |
+| rc_call | 0.178 / 0.179, 0.178 | 0.127 / 0.180, 0.177 | -0.069 / 0.181, 0.181 | -0.091 / 0.183, 0.181 | -0.093 / 0.183, 0.180 | -0.087 / 0.183, 0.180 | -0.085 / 0.183, 0.179 |
+
+**No. The box still turns:** at 0.5 m of push its front and rear nodes are both at the wall's
+face (span 0) while its chords are 0.13 m long. The closed cell keeps its section (chords 0.12–
+0.15 m, not stretched) and turns as a whole, front corners 0.11 m down and 0.06 m outboard of its
+rear corners: a bending collapse of the box and the rail's first bay at a few kN·m (26.1), not a
+hinge of a flat cell. With the diagonals at the walls' shear (`CELL_DIAG_SHEAR=1`) it turns the
+other way (up), at the same depth. What drives it (measured): the impact beam slides off the
+boxes' ends (beam to box front +28 mm at rest, −80 mm by 0.45 m), so the wall loads the boxes'
+corners eccentrically. A crash box folds axially only while the bumper beam stays square on its
+front plate and the rail behind it is stiff in bending; ours has a rail of one chord (§25) and a
+bumper beam on mounts that yield at 20 kN. **Next (proposals, not built):** the rail's own
+four-corner cell to the firewall (6 more nodes a side) and the bumper beam's mount to the box's
+plate as a stiff joint, then this cell again.
+
+**26.3 The cell with the six rules (S11 run 0, edge).** Alone the cell makes the front stiffer:
+the new nodes take the shell's nearest-node bracing too (braces across the bay 224 → 298 kN),
+S11 restitution 0.342 → 0.346, peak 661 → 704 kN, the cabin's plastic share 6 % → 10 %. Rule 5's
+gain disappears with it (0.247 alone, 0.358 with the cell); rule 2's mechanism stays (the box
+turns from 0.2 m). Full tables: the audit's §9.
+
+**26.4 Stroke within the approved geometry (rule 3; Fact and arithmetic, nothing changed).** The
+box is 0.18 m long in its definition and in the drawn car; its chords run from its front plate to
+its rear plate, so the cell does not lengthen them. The solver keeps every JBeam beam's rest at
+`MIN_REST` = 0.1 m or more (`explicit_beams.rs`, and in the CPU JBeam extension and four Slang
+kernels: `explicit_beams_beam_phase`, `_jbeams` twice, `_centred`); it came with the solver
+(785e5c91a, "a beam yielding in compression keeps at least this rest length"), with no stated
+reason; the evident one is that a beam shorter than a few steps' travel can be passed through
+(its direction flips at zero length).
+
+| option | crash box stroke (of 0.131 m at 73 %) | what changes | cost, risk |
+|---|---|---|---|
+| leave it | 0.080 m (44 %) | nothing | 0.051 m a box unused: at 82 kN 4.2 kJ a box, 8.4 kJ of S11's 177 kJ (4.7 %) goes elsewhere (the rails, the cabin) |
+| `MIN_REST` a setting: engine-wide 0.05 m, or per beam (a JBeam key) | 0.131 m (73 %, the `deformLimit` then binds) | the solver and its kernels (5 places), bit for bit CPU = GPU | the explicit bound depends on k/m, not the rest length: ω·h unchanged at 2 kHz. Pass-through: at 56 km/h a node moves 7.8 mm a step, a closing pair ≤ 16 mm: 0.05 m is 3 steps (0.1 m is 6); contact's 2 cm range: nodes 5 cm apart stay outside it. A rest under 0.05 m (`deformLimit` 0.73 on a 0.18 m beam is 0.049) needs the floor at most 0.048 m |
+| a longer physics member: the box's rear corner nodes 0.19 m into the rail (chord 0.37 m) | 0.131 m with `deformLimit` 0.35 (or 0.27 m at 0.73: twice the box's) | the rail's first bay 0.38 → 0.19 m, its stroke 0.28 → 0.09 m | the drawn car stays (physics nodes only); 0.19 m of rail then crushes at the box's force or not at all: the front's travel is the same, its force order is not the car's |
+| the box's front nodes on the impact beam's rear face | none: the beam's rear face is the box's front plate (z within 1 mm) | – | – |
+
+Hard rules on 8 runs × discrete/edge/continuous × S11, S12, S01, S02 (the 4x4), S08, judged by
+`crash_reference::verdict` (`crash_verdict`; known failures listed in the scenarios do not fail,
+new ones do; `off` is ok everywhere). Variants with one file are S08 edge only, the setting where
+the edge contact's energy fault shows:
+
+| variant | settings judged | new failures (scenario, setting: criterion, runs) | known failures that now pass in every run |
+|---|---|---|---|
+| off | 15 | none | – |
+| r1 | 15 | S08 continuous: turns the same sense as the other 2/8 | – |
+| r2 | 1 | S08 edge: no energy created 5/8 | – |
+| r3 | 1 | S08 edge: no energy created 1/8 | – |
+| r4 | 15 | none | S08 continuous: the common centre of mass stays still |
+| r5 | 15 | S08 continuous: turns the same sense as the other 1/8 | S08 continuous: the common centre of mass stays still |
+| all | 15 | S08 edge: no energy created 1/8 | S08 continuous: the common centre of mass stays still |
+| c12 | 1 | S08 edge: no energy created 5/8 | – |
+| c123 | 1 | S08 edge: no energy created 8/8 | – |
+| c1234 | 1 | S08 edge: no energy created 3/8 | – |
+| c12345 | 1 | S08 edge: no energy created 1/8 | – |
+| rc_off | 15 | S08 continuous: momentum across the road 2/8, S08 continuous: turns the same sense as the other 5/8, S08 discrete: momentum along the road 1/8, S08 discrete: no energy created 2/8, S11 discrete: no energy created 1/8, S11 edge: no energy created 1/8, S12 continuous: no energy created 1/8 | S11 discrete: restitution within the 56 km/h sedan fleet's; S11 edge: restitution within the 56 km/h sedan fleet's |
+| rc_r6 | 15 | S08 continuous: momentum across the road 1/8, S08 continuous: turns the same sense as the other 5/8, S08 edge: turns the same sense as the other 3/8 | – |
+| cell | 15 | S08 continuous: momentum across the road 2/8, S08 continuous: turns the same sense as the other 2/8, S08 edge: turns the same sense as the other 1/8 | – |
+| cr1 | 1 | none | – |
+| cr2 | 1 | S08 edge: turns the same sense as the other 2/8 | – |
+| cr3 | 1 | none | – |
+| cr4 | 1 | S08 edge: no energy created 2/8 | – |
+| cr5 | 15 | none | S08 continuous: the common centre of mass stays still |
+| call | 15 | none | S08 continuous: the common centre of mass stays still |
+
+With the cell, rules 2 and 3 no longer create energy in S08 edge (worst 296 and 69 J against 2.8
+kJ and 674 J without it); rule 4 still does (2 of 8). The cell alone fails S08's own laws in 2 of
+8 continuous runs (momentum across the road, 540 N·s against the 450 bar) and its "turns the same
+sense" in 3 runs; with rule 5 or with every rule on, S08 holds every criterion in every setting.
+S08's laws are chaotic in our runs (the same variant's run-by-run spread decides them), so the
+one-rule-at-a-time standard reads them run by run.
+
+Gates (`front_gates.sh`, `RUBBLE_FRONT_RULES`; `gen3_rig` on the generated sedan), before / the
+cell alone / all seven switches:
+
+| test | before | cell | all seven |
+|---|---|---|---|
+| `engine-vehiclegen` lib (63), `crash_zones`, `mechanical`; authoring `crash_zones`, `truck_cab`, `box_trailer`, `sedan_energy` (6), `crash_invariants` (9), `rig_export` (2), `skin_lint` (3), `paint_binds_skin` (1) | pass | pass | pass |
+| `every_design` (≤ 5 mm parked, nothing bent) | pass (4x4 `bf_g2` 4.9 mm) | pass | pass |
+| `generated_vehicle_lint` | the two listed failures | the same rules on the same designs, every line identical | the same two tests fail; inside them (rule 5's hood row and triangles): Mach 1 skin winding 4 → 6 edges (`bb_o10-11`, `bb_o15-16`), Mach 1 gasser inward-facing triangles 54 → 56, the 4x4's contacter pairs inside the contact range 21 → 23, more open edges on the Mach 1s and the 4x4 (holes 1 each, as before) |
+| `gen3_rig::rest_fidelity_at_spawn_and_parked` (≤ 1 mm, ≤ 1°; fails before) | spawn 0.105 mm / 0.05°, parked 0.065 mm / 1.090° | 0.105 mm / 0.05°, 0.065 mm / 1.110° | parked 0.065 mm / 1.097° |
+| `gen_sedan_contact` | the six listed failures | the same six | the same six |
+| `continuous_contact` | the three listed | the same three | the same three |
+| `gen_sedan_paint::accept_head_30_pressed` (10 mm from 0.3 s) | pass, 8 mm | pass, 2 mm | pass |
+| `gen_sedan_paint::accept_head_60_pressed` (50 mm) | pass, 21 mm | pass, 14 mm | pass |
+| `gen_sedan_paint::accept_side_90` (listed failing) | fails, 55 mm | **passes**, 48 mm | **passes** |
+| `gen_sedan_paint::accept_side_60_pressed` (listed failing) | fails, 16 mm | **passes**, 0 mm | **passes** |
+| `gen_sedan_paint::accept_head_100` (listed failing) | fails, 61 mm | **passes**, 32 mm | fails |
+| `gen_sedan_paint::own_paint_ends_apart` (listed) | fails | fails | fails |
+
+The visual mesh: every design's `.glb` byte for byte the same with the cell (and with every
+rule); the collision surface at rest is the same in the stills (`stills_S11_side_off_vs_cell.png`);
+the skins change (`.rskin`: the body binds the new nodes) and the rest fidelity holds as before.
+
+**26.5 Defaults.** **Every switch stays off by default, the cell included.** The standard (the owner's): on only if,
+alone and together, it holds every hard rule and gate that held before.
+
+| switch | alone: what stops it | category |
+|---|---|---|
+| `crash_box_cell` | S08 continuous: momentum across the road 2/8 (540 N·s, bar 450) and "turns the same sense" 2/8; S08 edge "turns the same sense" 1/8. And it does not do what it is for: the box still turns (§26.2) | (c) S08's own laws (momentum, the yaw symmetry), not the edge energy fault |
+| 1 subframe mounts | `every_design`: the 4x4's bumper row 5.5 mm (bar 5); S08 continuous "turns the same sense" 2/8 | (c) |
+| 2 bay alone | S08 edge no energy created 5/8 (2.8 kJ) | (a) the edge contact's energy fault |
+| 3 stroke | S08 edge no energy created 1/8 (674 J) | (a) |
+| 4 yielding stops | paint, head 60 pressed 53 mm (bar 50) | (b) the owner's paint limits |
+| 5 hood row, panels | paint, head 30 pressed 21 mm (bar 10); S08 continuous "turns the same sense" 1/8 | (b) and (c) |
+| 6 crash rate | `real_crash` only: S08 continuous momentum across 1/8, "turns the same sense" (edge 3/8) | (c) (`real_crash` before the rule already fails S08's and S11's laws: momentum, energy) |
+
+**Together:** the cell with rule 5, and all seven switches on, hold every hard rule in all 15
+settings and every gate that held before (and three listed paint failures pass with the cell;
+side 90 and side 60 pressed with all seven). The one-at-a-time standard still keeps them off,
+because the cell alone fails S08's momentum in 2 of 8 continuous runs: those laws are decided run
+by run by chaotic two-car contact, so a set can pass where its members fail. That is a conflict
+the rule does not order: the owner's call. **All seven together** measure (S11 run 0): t_m 54.5
+ms, crush 0.507 m, restitution 0.315, residual 0.307 m, peak 535 kN at 40 ms; S12 t_m 66 ms,
+restitution 0.301 (Camry 69–75 ms, 0.11–0.15). The cell is necessary for rules 2 and 3 (their
+energy creation goes away with it) but not sufficient for the box to fold.
+
+**If the owner switched a set on, what would have to change** (none was changed here):
+`tests-expected-failures.txt` loses `gen_sedan_paint::accept_side_90` and `accept_side_60_pressed`
+(they pass; with the cell alone `accept_head_100` too); S08's known failure "the common centre
+of mass stays still" in continuous contact passes in every run with rules 4 or 5 and with all
+seven (`crash_verdict`: "remove the entry"); in `real_crash` without rule 6, S11's discrete and edge
+restitution known failures pass; the scenario matrix's car (`out/gen/sedan_new`), its saved
+states and the portable fixtures, the site's `__mods/*_new`, and the crash reference's
+`crash-reference.md` §4.3 rows are regenerated; the generated vehicles' JBeam and `.rskin` files
+change (the `.glb` does not).
+
 ## Changelog
 
+- 2026-11-27: section 26, the crash box as a closed cell (built, measured: it still turns; the six rules again; stroke options; defaults).
 - 2026-11-27: section 25, the front crash structure's rules (six switches, measured alone and together; defaults; the crash box's planar cell).
 
 - 2026-11-27: section 24, the parked 53 ft dry van `box_trailer` (sources, the FMVSS 223/224 guard and its strength test), the laden tractor, the hull's ear fix.
