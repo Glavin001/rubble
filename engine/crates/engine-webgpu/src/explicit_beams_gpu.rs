@@ -612,6 +612,7 @@ struct GroupSplit {
     /// The members' wheels on each other, created at first use.
     wheels: std::sync::OnceLock<wgpu::ComputePipeline>,
     edges: std::sync::OnceLock<wgpu::ComputePipeline>,
+    ccvel: std::sync::OnceLock<wgpu::ComputePipeline>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -709,6 +710,7 @@ impl GroupSplit {
             fleet: std::sync::OnceLock::new(),
             wheels: std::sync::OnceLock::new(),
             edges: std::sync::OnceLock::new(),
+            ccvel: std::sync::OnceLock::new(),
             args_layout,
             bind_args,
             bind_first,
@@ -743,11 +745,6 @@ impl GroupSplit {
             let (which, name) = entry.which_entry();
             split_pipe(&self.device, &self.args_layout, self.kind, self.bit_exact, which, name)
         })
-    }
-
-    fn edges(&self) -> &wgpu::ComputePipeline {
-        self.edges
-            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, "edges", plan::SPLIT_EDGE_ENTRY))
     }
 
     fn wheels(&self) -> &wgpu::ComputePipeline {
@@ -1937,8 +1934,8 @@ impl ExplicitBeamsGpu {
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
         self.drive_flags = vehicles.iter().map(|v| drive_flags_of(v).0).collect();
         self.wheels_bodies = vehicles.iter().any(|v| drive_flags_of(v).1);
-        let f = self.perf_asked;
-        self.set_perf_flags(f);
+        self.set_perf_flags(self.perf_asked);
+        self.write_cc_mode();
         self.sleep_grab = None;
         self.sleep_wake.lock().unwrap().clear();
         self.contact_errors.lock().unwrap().clear();
@@ -4564,8 +4561,8 @@ impl ExplicitBeamsGpu {
                 pass.set_bind_group(0, &g.bind, &at(copy));
                 self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
             }
-            GroupOp::Edge { copy, wide } => {
-                pass.set_pipeline(g.edges());
+            GroupOp::Edge { copy, wide, vel } => {
+                pass.set_pipeline(g.edges(vel));
                 pass.set_bind_group(0, &g.bind, &at(copy));
                 if wide > 0 { pass.dispatch_workgroups(wide, 1, 1) } else { self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS) }
             }

@@ -31,7 +31,9 @@ pub(super) fn respond(vehicles: &mut [ExplicitBeams], dat: &mut Dat, recs: &mut 
     // The kicked velocities: the impact law's guard's reference (`ccd::resolve`).
     dat.warm.vf = vse.clone();
     super::super::ccd::resolve(&all, &x0e, &mut x1e, &mut vse, &me, &ime, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpe, dat.velocity_restitution, Some(&mut dat.warm));
-    relist_velocity(dat, recs, own_reach, surf, off, &x0e, &mut x1e, &mut vse, &me, &ime, &vpe, reach_v, all.len(), &extra, st);
+    if dat.relist {
+        relist_velocity(dat, recs, own_reach, surf, off, &x0e, &mut x1e, &mut vse, &me, &ime, &vpe, reach_v, all.len(), &extra, st);
+    }
     if std::env::var("DAT_MISS").is_ok() {
         miss_dbg(surf, &x0e, &x1e, &all, recs);
     }

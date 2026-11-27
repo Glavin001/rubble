@@ -70,7 +70,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint boxOff = r1.z;
     uint boxCount = r1.w;
     uint candOff = r2.x;
-    uint candCount = r2.y;
+    uint candCount = noPositionSteps(v) ? 0u : r2.y;
     uint groupOff = r2.z;
     uint groupCount = r2.w;
     uint flagsV = r3.x;
@@ -726,7 +726,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.steps > 0u && groupCount > 0u)
     {
         uint last = (stepBase + gP.steps - 1u) & 1u;
-        for (uint j = lane, jStop = EB_END(92, j, beamCount, LANES); j < jStop; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
+        for (uint j = lane, jStop = EB_END(92, j, beamCount, LANES); j < jStop; j += LANES) groupDropsAtFrameEnd(beamOff + j, beamOff, groupOff, last);
     }
     if (sleepOn)
     {

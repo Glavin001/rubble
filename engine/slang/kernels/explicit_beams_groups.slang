@@ -127,7 +127,7 @@ uint contactMemberStepHeadPhase(uint v, uint lane, uint s, bool first, uint phas
     uint boxOff = r1.z;
     uint boxCount = r1.w;
     uint candOff = r2.x;
-    uint candCount = r2.y;
+    uint candCount = noPositionSteps(v) ? 0u : r2.y;
     uint groupOff = r2.z;
     uint groupCount = r2.w;
     uint flagsV = r3.x;

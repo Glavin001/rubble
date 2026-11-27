@@ -92,6 +92,25 @@ pub(super) const ROUND_ULPS: f32 = 4.0;
 /// APGD's momentum restarts every this many iterations.
 pub(super) const APGD_RESTART: u32 = 16;
 
+/// Nesterov's momentum β after the k-th iteration since a restart (k = 1..15): θ₀ = 1,
+/// θ' = ½(1 + √(1 + 4θ²)), β = (θ − 1)/θ', in f32 (as computed in the loop until 2026-11-27; a
+/// table so the kernel's are the same bits, `apgd_beta_table` checks it).
+pub(super) const APGD_BETA_BITS: [u32; 15] = [0x00000000, 0x3e9041ff, 0x3ede3adc, 0x3f07f3cc, 0x3f19498e, 0x3f261fd6, 0x3f30098f, 0x3f37ef9c, 0x3f3e6289, 0x3f43c112, 0x3f484bf8, 0x3f4c311d, 0x3f4f91e5, 0x3f528746, 0x3f552441];
+
+/// The preconditioner's per-node |w| sums' unit (fixed point; exact below 256 rows a node).
+pub(super) const GERSH_FIXED: f32 = 65536.0;
+
+#[cfg(test)]
+#[test]
+fn apgd_beta_table() {
+    let mut th = 1.0f32;
+    for (k, &b) in APGD_BETA_BITS.iter().enumerate() {
+        let t1 = 0.5 * (1.0 + (1.0 + 4.0 * th * th).sqrt());
+        assert_eq!(((th - 1.0) / t1).to_bits(), b, "k {}", k + 1);
+        th = t1;
+    }
+}
+
 struct VRow {
     q: usize,
     k: [(usize, u32); 4],
@@ -220,18 +239,18 @@ impl Ctx<'_> {
         // |w| of every row at node j. (Mass splitting's Σⱼ cⱼ·wᵢⱼ²/mⱼ, cⱼ the rows at j, falls
         // under A where barycentric weights are below 1, and the accelerated steps then
         // diverged on a head-on crush's 744 rows: 2026-11-27.)
-        let mut sum: Vec<Vec<f32>> = base.iter().map(|x| vec![0.0; x.len()]).collect();
+        // (The |w| sums in fixed point, [`GERSH_FIXED`] units: order free, as the kernel's.)
+        let mut sum: Vec<Vec<i32>> = base.iter().map(|x| vec![0; x.len()]).collect();
         for r in rows.iter() {
             for j in 0..4 {
                 if self.mi(r.k[j]) > 0.0 {
-                    sum[r.k[j].0][r.k[j].1 as usize] += r.w[j].abs();
+                    sum[r.k[j].0][r.k[j].1 as usize] += (r.w[j].abs() * GERSH_FIXED).round_ties_even() as i32;
                 }
             }
         }
-        let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j].abs() * self.mi(r.k[j]) * sum[r.k[j].0][r.k[j].1 as usize]).sum()).collect();
+        let d: Vec<f32> = rows.iter().map(|r| (0..4).map(|j| r.w[j].abs() * self.mi(r.k[j]) * (sum[r.k[j].0][r.k[j].1 as usize] as f32 / GERSH_FIXED)).sum()).collect();
         let mut l: Vec<f32> = rows.iter().map(|r| r.l).collect();
         let mut y = l.clone();
-        let mut theta = 1.0f32;
         let mut vy = base.to_vec();
         self.velocities(rows, &l, 1.0, base, vel);
         let mut ok = self.settled(rows, &l, vel);
@@ -241,12 +260,9 @@ impl Ctx<'_> {
             self.velocities(rows, &y, 1.0, base, &mut vy);
             let next: Vec<f32> = rows.iter().zip(&y).zip(&d).map(|((r, &y), &d)| if d > 0.0 { (y - (Self::normal(r, &vy) + r.b) / d).max(0.0) } else { 0.0 }).collect();
             if used % APGD_RESTART == 0 {
-                theta = 1.0;
                 y.clone_from(&next);
             } else {
-                let t1 = 0.5 * (1.0 + (1.0 + 4.0 * theta * theta).sqrt());
-                let beta = (theta - 1.0) / t1;
-                theta = t1;
+                let beta = f32::from_bits(APGD_BETA_BITS[(used % APGD_RESTART) as usize - 1]);
                 for ((y, &n), &o) in y.iter_mut().zip(&next).zip(&l) {
                     *y = n + beta * (n - o);
                 }

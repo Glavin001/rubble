@@ -60,6 +60,13 @@ pub struct Dat {
     pub velocity: bool,
     /// Velocity contact's warm starts (`ccd_vel::Warm`).
     pub(crate) warm: super::ccd_vel::Warm,
+    /// Velocity contact starts each step's rows from the last step's impulses (on; off:
+    /// `DAT_NOWARM=1`, and the GPU's first port, which has none yet).
+    pub warm_starts: bool,
+    /// Velocity contact lists the records again where its response moved nodes past the
+    /// listing's reach (`dat_vel::relist_velocity`; on; off: the GPU's first port, which counts
+    /// those steps instead).
+    pub relist: bool,
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
     /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
@@ -213,7 +220,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: std::env::var("DAT_CCD").ok().and_then(|v| v.parse().ok()).unwrap_or(8), zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), velocity_restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::VELOCITY_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), warm: Default::default(), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: std::env::var("DAT_CCD").ok().and_then(|v| v.parse().ok()).unwrap_or(8), zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), velocity_restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::VELOCITY_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), warm: Default::default(), warm_starts: std::env::var("DAT_NOWARM").is_err(), relist: true, min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -464,6 +471,9 @@ impl ExplicitBeamsWorld {
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
         if dat.velocity {
             dat.warm.prev = std::mem::take(&mut dat.warm.next);
+            if !dat.warm_starts {
+                dat.warm.prev.clear();
+            }
             dat.warm.touched_prev = std::mem::take(&mut dat.warm.touched_next);
         }
         if dat.total.steps == 0 {

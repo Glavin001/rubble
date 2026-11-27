@@ -33,7 +33,7 @@ mod dat;
 mod restitute;
 pub use ccd::{fixed_overflows, CcdStats};
 pub use dat::{close_pairs_at, closest_on_triangle, own_clearance, closest_segments, Dat, DatStats};
-pub use restitute::{CONTACT_RESTITUTION, RESTITUTION_STRIPES};
+pub use restitute::{CONTACT_RESTITUTION, RESTITUTION_STRIPES, VELOCITY_RESTITUTION};
 use residual::*;
 pub(crate) use edge::self_edge_hits;
 

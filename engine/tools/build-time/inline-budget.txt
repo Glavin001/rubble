@@ -245,6 +245,10 @@ explicit_surface_plan 664
 explicit_surface_prep 89154
 explicit_surface_prep_args 82750
 explicit_vv_gate 167
+explicit_beams_split_ccvel 38163
+explicit_beams_split_ccvel_aero 38163
+explicit_beams_split_ccvel_aero_wide 38163
+explicit_beams_split_ccvel_wide 38163
 explicit_beams_split_edges 96800
 explicit_beams_split_edges_aero 97261
 explicit_beams_split_edges_aero_wide 97261

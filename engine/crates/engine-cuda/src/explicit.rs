@@ -263,7 +263,7 @@ impl CudaExplicitBeams {
         if layout.sleep.is_some() {
             out.push(Key::Plan(Kernel::Sleep));
         }
-        for which in plan::SPLIT_WHICH.into_iter().filter(|w| *w != "wheels" && (*w != "edges" || layout.words[plan::W_EDGE] != 0)) {
+        for which in plan::SPLIT_WHICH.into_iter().filter(|w| *w != "wheels" && (!matches!(*w, "edges" | "ccvel") || layout.words[plan::W_EDGE] != 0)) {
             out.push(Key::Split(plan::split_module_name(which, aero, lanes)));
         }
         for vv in [false, true] {

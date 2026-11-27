@@ -22,9 +22,19 @@ const PER_STEP: u32 = 8;
 /// The parameter buffer's room for them, past its other copies ([`super::params_bytes`]).
 pub const PARAM_CC_COPIES: u32 = PER_STEP * (super::PARAM_COPIES - 1);
 
+/// Continuous contact on the split group path (the planner's): off by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CcMode {
+    pub on: bool,
+    /// Its response: velocity contact (`engine_softbody::explicit_contact::Dat::velocity`) in
+    /// place of the position response; the hosts write it into the tables' statics
+    /// ([`cc_mode_words`]).
+    pub velocity: bool,
+}
+
 /// Whether this frame's members run in two halves.
 pub fn on(planner: &FramePlanner, kind: &FrameKind) -> bool {
-    planner.continuous && kind.group_split && !kind.self_split_vv
+    planner.continuous.on && kind.group_split && !kind.self_split_vv
 }
 
 /// The first of the halves' copies ([`PER_STEP`] a step): after the frame's others
@@ -51,7 +61,8 @@ pub fn member_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps
     out.push(GroupOp::Member(c));
     let (wide, nv) = (CC_SLICES * planner.vehicles(), planner.vehicles());
     for (k, w) in [(1, 0), (2, wide), (3, nv), (4, wide), (5, wide), (6, 0)] {
-        out.push(GroupOp::Edge { copy: c + k, wide: w });
+        // (The response, part 0, in velocity contact's module when it is on.)
+        out.push(GroupOp::Edge { copy: c + k, wide: w, vel: k == 6 && planner.continuous.velocity });
     }
     out.push(GroupOp::Member(c + 7));
 }
@@ -95,19 +106,35 @@ pub fn copies(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, steps: u3
 /// (Word W_CC + 1: the per-vehicle pair counts' first word in gAcc, then the counters.)
 pub const W_CC: usize = 109;
 pub const CC_BEAMS_NODE: usize = 6;
-pub const CC_ACC_NODE: usize = 9;
+pub const CC_ACC_NODE: usize = 17;
 /// Words a vehicle in gAcc at word W_CC + 1: its listed pairs, its reach's bits, its largest
 /// offset's bits, its box as six keys, its two compact lists' counts, its touched nodes', its
-/// group's round flag (a group's first member), four spare.
+/// group's round flag (a group's first member), velocity contact's fresh-row and unsettled
+/// flags (a group's first member), its own pairs' listing reach's bits.
 pub const CC_VEH_WORDS: usize = 16;
 pub const CC_COUNTERS: usize = 16;
-pub const CC_PAIR_WORDS: usize = 16;
+pub const CC_PAIR_WORDS: usize = 32;
 pub const CC_GRID_BUCKETS: usize = 4096;
 /// Pairs a surface node or edge may list on average (the list's capacity; past it the frame
 /// fails with an error, never drops a pair).
 pub const CC_PAIRS_PER_ITEM: usize = 32;
 /// The own clearance (m): `engine_softbody::explicit_contact::Dat::self_gap`'s default.
 pub const CC_SELF_GAP: f32 = 0.002;
+
+/// The continuous response's mode in the tables' statics, per vehicle: (its statics record's
+/// index, its words y and z) = (the restitution's bits, 1 for velocity contact). Velocity
+/// contact: the response's rows (`explicit_beams_split_cc_vel.slang`), no speculative pass, its
+/// own restitution, and the members' self-collision position steps off (the CPU's
+/// `no_position_steps`). Empty without the tables.
+pub fn cc_mode_words(planner: &FramePlanner, layout: &super::ExplicitLayout) -> Vec<(usize, [u32; 2])> {
+    let base = layout.words[W_CC] as usize;
+    if base == 0 {
+        return Vec::new();
+    }
+    let vel = planner.continuous.on && planner.continuous.velocity;
+    let e = if vel { engine_softbody::explicit_contact::VELOCITY_RESTITUTION } else { engine_softbody::explicit_contact::CONTACT_RESTITUTION };
+    (0..layout.spans.len()).map(|v| (base + 2 + 3 * v + 2, [e.to_bits(), u32::from(vel)])).collect()
+}
 
 pub(super) fn cc_tables(
     vehicles: &[engine_softbody::explicit_beams::ExplicitBeams],

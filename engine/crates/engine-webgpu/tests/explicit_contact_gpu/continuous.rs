@@ -62,6 +62,45 @@ fn continuous_head_on_steps_like_the_cpu() {
     }
 }
 
+/// Velocity contact (`set_continuous_velocity`; the CPU's `Dat::velocity` with its warm starts
+/// and relisting off, which the GPU's first port has not) through the generated sedans' head-on,
+/// GPU == CPU bit for bit every step: the rows, the APGD solve, the rounds and the impact zones,
+/// through the first torn triangles (step 26: a break group's beams torn at a frame's end as
+/// within a frame, `explicit_beams_numerics.slang`'s gDropsAtFrameEnd).
+#[test]
+fn continuous_velocity_head_on_steps_like_the_cpu() {
+    let fleet = sedans_head_on();
+    let Some(mut g) = gpu(&fleet) else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    g.set_bit_exact(true);
+    g.set_vehicle_contact(true);
+    g.set_group_split(true);
+    g.set_continuous(true).expect("the sedan keeps its clearance");
+    g.set_continuous_velocity(true);
+    let mut w = ExplicitBeamsWorld::new(fleet.clone());
+    let mut d = engine_softbody::explicit_contact::Dat::new(0.08, 0.85);
+    (d.velocity, d.warm_starts, d.relist) = (true, false, false);
+    w.continuous = Some(d);
+    for f in 0..80 {
+        g.frame(1);
+        w.frame(1);
+        let pos = g.positions();
+        let (_, c) = g.continuous_counts().expect("continuous tables");
+        for k in 0..2 {
+            let d = rms(&pos[k], &w.vehicles[k].positions());
+            assert_eq!(d, 0.0, "step {f}, sedan {k}: GPU-CPU {d} m; GPU counters {c:?}");
+        }
+        assert_eq!(c[0], 0, "step {f}: an overflow");
+    }
+    let cpu = w.continuous.as_ref().unwrap().total.ccd;
+    let (_, c) = g.continuous_counts().unwrap();
+    eprintln!("velocity: GPU counters {c:?}; CPU impacts {} zones {} unresolved {} rounds {} row iterations {}", cpu.hits, cpu.zones, cpu.unresolved, cpu.rounds, cpu.row_iters);
+    assert!(cpu.hits > 0 && cpu.zones > 0, "the cars met");
+    assert_eq!([c[1], c[2], c[3], c[6], c[7]].map(|x| x as u64), [cpu.hits, cpu.zones, cpu.unresolved, cpu.rounds, cpu.row_iters], "impacts, zones, unresolved, rounds, APGD iterations");
+}
+
 /// The pass's pair list against the CPU's, every step through the hit: as many pairs
 /// (point-triangle and edge-edge, between the cars and each car's own) as the CPU lists,
 /// nothing overflowed.
@@ -131,16 +170,18 @@ fn continuous_head_on_lab_frames_like_the_cpu() {
     }
 }
 
-/// Measurement (ignored): wall time a 34-step frame with and without continuous contact.
+/// Measurement (ignored): wall time a 34-step frame without continuous contact, with its
+/// position response and with velocity contact.
 #[test]
 #[ignore]
 fn continuous_cost() {
     let fleet = sedans_head_on();
-    for on in [false, true] {
+    for (on, vel) in [(false, false), (true, false), (true, true)] {
         let Some(mut g) = gpu(&fleet) else { return };
         g.set_vehicle_contact(true);
         g.set_group_split(true);
         g.set_continuous(on).expect("the sedan keeps its clearance");
+        g.set_continuous_velocity(vel);
         let mut ms = Vec::new();
         for _ in 0..8 {
             let t = std::time::Instant::now();
@@ -151,6 +192,7 @@ fn continuous_cost() {
                 let _ = g.continuous_counts();
             }
         }
-        eprintln!("continuous {on}: ms a frame {:?}", ms.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
+        let c = g.continuous_counts().map(|c| c.1);
+        eprintln!("continuous {on}, velocity {vel}: ms a frame {:?}; counters {c:?}", ms.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
     }
 }

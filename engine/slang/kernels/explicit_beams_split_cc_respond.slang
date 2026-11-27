@@ -46,7 +46,29 @@ float3 ccAt(CcPair q, float t, out float4 w, out float3 dp[4])
     return ccClosest(q.nn, p, w);
 }
 // collide: the time of impact of pair q over its paths (−1: none, or not closing there).
+#ifdef EB_CC_VEL
+float ccCollideAt(CcPair q, float xi);
 float ccCollide(CcPair q, float xi)
+{
+    // Velocity contact: a pair that starts inside its gap and parts there can still turn and
+    // pass through later in the step; an impact when it comes within half its start distance
+    // (a second try, one call site).
+    float3 a[4];
+    for (uint j = 0u; j < 4u; j++) a[j] = ccX0(j < q.nn ? q.vb : q.va, q.k[j]);
+    float4 w;
+    float d0 = ccLen(ccClosest(q.nn, a, w));
+    float t = -1.0;
+    for (uint pass = 0u; pass < 2u; pass++)
+    {
+        t = ccCollideAt(q, pass == 0u ? xi : smul(0.5, d0));
+        if (t >= 0.0 || !(d0 <= xi && d0 > 0.0)) break;
+    }
+    return t;
+}
+float ccCollideAt(CcPair q, float xi)
+#else
+float ccCollide(CcPair q, float xi)
+#endif
 {
     float3 a[4];
     float3 dp[4];
@@ -65,6 +87,9 @@ float ccCollide(CcPair q, float xi)
     return c < 0.0 ? t : -1.0;
 }
 float ccXi(CcRec r) { return max(smul(0.5, r.d), CC_MIN_GAP); }
+// Velocity contact's gap: the whole thickness (the CPU's ccd_pairs share 1).
+float ccXiV(CcRec r) { return max(r.d, CC_MIN_GAP); }
+float ccXiOf(uint v, CcRec r) { return ccVelocity(v) ? ccXiV(r) : ccXi(r); }
 
 // Applies every group node's sums (velocity; position too with `pos`) and clears them.
 // The nodes a round's pairs touched (their count went from 0 to 1), a list a vehicle after
@@ -80,7 +105,7 @@ void ccCountNode(uint gi)
 }
 void ccApplyAll(uint off, uint k, bool pos, float stamp, uint lane)
 {
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(979, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         uint n = asuint(gAcc[ccVW(v, 11u)].load());
@@ -108,7 +133,7 @@ bool ccMoved(CcPair q, float round)
 float ccCollideCached(uint v, uint p, CcPair q, float round)
 {
     if (!ccMoved(q, round)) return asfloat(gNext[ccPairAt(v, p) + 15u]);
-    float t = ccCollide(q, ccXi(ccRecAt(v, p)));
+    float t = ccCollide(q, ccXiOf(v, ccRecAt(v, p)));
     gNext[ccPairAt(v, p) + 15u] = asuint(t);
     return t;
 }
@@ -129,11 +154,11 @@ bool ccRigidZone(uint off, uint k, int root, float stamp)
     float mass = 0.0;
     float3 cm = float3(0.0, 0.0, 0.0);
     float3 p = float3(0.0, 0.0, 0.0);
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(980, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];
-        for (uint j = 0u; j < ccZonedN(v); j++)
+        for (uint j = 0u, jStop = EB_END(981, j, ccZonedN(v), 1u); j < jStop; j++)
         {
             uint gi = ccZoned(v, j);
             if (ccZoneOf(gi) != root) continue;
@@ -146,11 +171,11 @@ bool ccRigidZone(uint off, uint k, int root, float stamp)
     }
     if (pinned)
     {
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(982, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             uint4 r0 = gStatic[v * 4u];
-            for (uint j = 0u; j < ccZonedN(v); j++)
+            for (uint j = 0u, jStop = EB_END(983, j, ccZonedN(v), 1u); j < jStop; j++)
             {
                 uint gi = ccZoned(v, j);
                 if (ccZoneOf(gi) != root) continue;
@@ -164,11 +189,11 @@ bool ccRigidZone(uint off, uint k, int root, float stamp)
     float3 vc = float3(sdiv(p.x, mass), sdiv(p.y, mass), sdiv(p.z, mass));
     float3 l = float3(0.0, 0.0, 0.0);
     float3 I[3] = { float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0) };
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(984, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];
-        for (uint j = 0u; j < ccZonedN(v); j++)
+        for (uint j = 0u, jStop = EB_END(985, j, ccZonedN(v), 1u); j < jStop; j++)
         {
             uint gi = ccZoned(v, j);
             if (ccZoneOf(gi) != root) continue;
@@ -195,11 +220,11 @@ bool ccRigidZone(uint off, uint k, int root, float stamp)
     if (ang > 1.0) return false;
     float2 sc = ccSinCos(ang);
     float3 axis = wl > 0.0 ? float3(sdiv(w.x, wl), sdiv(w.y, wl), sdiv(w.z, wl)) : float3(0.0, 0.0, 0.0);
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(986, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];
-        for (uint j = 0u; j < ccZonedN(v); j++)
+        for (uint j = 0u, jStop = EB_END(987, j, ccZonedN(v), 1u); j < jStop; j++)
         {
             uint gi = ccZoned(v, j);
             if (ccZoneOf(gi) != root) continue;
@@ -256,14 +281,14 @@ void ccRestitute(uint off, uint k, float rq, uint lane)
     }
     if (lane == 0u)
     {
-        for (uint m = 0u; m < k; m++) gsCcLab[m] = m;
+        for (uint m = 0u, mStop = EB_END(988, m, k, 1u); m < mStop; m++) gsCcLab[m] = m;
         bool changed = true;
-        for (uint it = 0u; changed && it < k; it++)
+        for (uint it = 0u, itStop = EB_END(1029, it, k, 1u); it < itStop && changed; it++)
         {
             changed = false;
-            for (uint a = 0u; a < k; a++)
+            for (uint a = 0u, aStop = EB_END(989, a, k, 1u); a < aStop; a++)
             {
-                for (uint b = a + 1u; b < k; b++)
+                for (uint b = a + 1u, bStop = EB_END(990, b, k, 1u); b < bStop; b++)
                 {
                     if (!ccNear(vvMember(off, a), vvMember(off, b), rq)) continue;
                     uint lo = min(gsCcLab[a], gsCcLab[b]);
@@ -278,13 +303,13 @@ void ccRestitute(uint off, uint k, float rq, uint lane)
         }
     }
     sync();
-    for (uint c = 0u; c < k; c++)
+    for (uint c = 0u, cStop = EB_END_UNIFORM(991, c, k, 1u, EB_MAX_MEMBERS); c < cStop; c++)
     {
         if (splitUniform(lane, gsCcLab[c] == c ? 1u : 0u) == 0u) continue;
         if (lane < CC_STRIPES)
         {
             float4 s = float4(0.0, 0.0, 0.0, 0.0);
-            for (uint m = 0u; m < k; m++)
+            for (uint m = 0u, mStop = EB_END(992, m, k, 1u); m < mStop; m++)
             {
                 if (gsCcLab[m] != c) continue;
                 uint4 r0 = gStatic[vvMember(off, m) * 4u];
@@ -323,7 +348,7 @@ void ccRestitute(uint off, uint k, float rq, uint lane)
         }
         sync();
         float th = gsCcE[0].x;
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(993, m, k, 1u); m < mStop; m++)
         {
             if (gsCcLab[m] != c) continue;
             uint4 r0 = gStatic[vvMember(off, m) * 4u];
@@ -338,11 +363,16 @@ void ccRestitute(uint off, uint k, float rq, uint lane)
     }
 }
 
+#ifdef EB_CC_VEL
+#include "explicit_beams_split_cc_vel.slang"
+#endif
+
 void ccRespond(uint off, uint k, float rq, uint lane)
 {
+    bool vel = splitUniform(lane, ccVelocity(vvMember(off, 0u)) ? 1u : 0u) != 0u;
     // The candidates: the speculative pass's (their gap past the thickness within the sides'
     // reach), with speeds.
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(994, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         for (uint p = lane, pStop = EB_END(900, p, ccPairs(v), LANES); p < pStop; p += LANES)
@@ -353,12 +383,14 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         }
     }
     sync();
+#ifndef EB_CC_VEL
     // The speculative inelastic contact (dat.rs speculative), CC_SPEC_ROUNDS rounds.
-    for (uint round = 0u, rStop = EB_END_UNIFORM(901, round, CC_SPEC_ROUNDS, 1u, CC_SPEC_ROUNDS); round < rStop; round++)
+    uint specRounds = vel ? 0u : CC_SPEC_ROUNDS;
+    for (uint round = 0u, roundStop = EB_END_UNIFORM(901, round, specRounds, 1u, CC_SPEC_ROUNDS); round < roundStop; round++)
     {
         if (lane == 0u) gAcc[ccG(off)].store(0);
         sync();
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(995, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             for (uint i = lane, iStop = EB_END(902, i, ccListN(v, 0u), LANES); i < iStop; i += LANES)
@@ -381,7 +413,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         }
         sync();
         if (splitUniform(lane, uint(gAcc[ccG(off)].load())) == 0u) break;
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(996, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             for (uint i = lane, iStop = EB_END(903, i, ccListN(v, 0u), LANES); i < iStop; i += LANES)
@@ -408,8 +440,9 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         sync();
         ccApplyAll(off, k, false, 0.0, lane);
     }
+#endif
     // x1 += (v1 − v0) h, then the CCD's velocities: v0 + (x1 − x1 before) / h.
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(997, m, k, 1u); m < mStop; m++)
     {
         uint4 r0 = gStatic[vvMember(off, m) * 4u];
         for (uint i = lane, iStop = EB_END(904, i, r0.y, LANES); i < iStop; i += LANES)
@@ -424,21 +457,21 @@ void ccRespond(uint off, uint k, float rq, uint lane)
     }
     sync();
     // (The listing's bound: past half its own pairs' reach from its first node, an error counted.)
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(998, m, k, 1u); m < mStop; m++)
     {
         uint vv = vvMember(off, m);
         uint4 r0 = gStatic[vv * 4u];
+        float own = asfloat(gAcc[ccVW(vv, 15u)].load());
         for (uint i = lane, iStop = EB_END(917, i, r0.y, LANES); i < iStop; i += LANES)
         {
             uint gi = r0.x + i;
-            float own = min(rq, smul(4.0, nf(nf(ccReachV(vv) + ccReachV(vv)) + ccApartNear(off, k, vv, rq))));
             if (ccOnSurface(vv, gi) && ccLen(ssub3(ssub3(ccX1(gi), ccX0(vv, gi)), ccRefDx(vv))) > smul(0.5, own))
                 gAcc[ccC(CC_C_REACH)].add(1);
         }
     }
     sync();
     // The CCD's pairs: their gap past the thickness within twice the sides' steps.
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(999, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         for (uint p = lane, pStop = EB_END(905, p, ccPairs(v), LANES); p < pStop; p += LANES)
@@ -449,13 +482,21 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         }
     }
     sync();
-    // The impulse rounds (ccd.rs resolve).
+    // The impulse rounds (ccd.rs resolve), or velocity contact's (ccd_vel.rs).
+#ifdef EB_CC_VEL
+    bool clear = vel && ccRespondVel(off, k, lane);
+#else
+    // (Velocity contact runs in its own module, ccvel: here an error, never a silent pass.)
+    if (vel && lane == 0u) gAcc[ccC(CC_C_OVERFLOW)].add(1);
     bool clear = false;
-    for (uint round = 0u, rStop = EB_END_UNIFORM(906, round, CC_CCD_ROUNDS, 1u, CC_CCD_ROUNDS); round < rStop; round++)
+#endif
+#ifndef EB_CC_VEL
+    uint ccdRounds = vel ? 0u : CC_CCD_ROUNDS;
+    for (uint round = 0u, roundStop = EB_END_UNIFORM(906, round, ccdRounds, 1u, CC_CCD_ROUNDS); round < roundStop; round++)
     {
         if (lane == 0u) gAcc[ccG(off)].store(0);
         sync();
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(1000, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             for (uint i = lane, iStop = EB_END(907, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
@@ -497,7 +538,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         }
         sync();
         if (splitUniform(lane, uint(gAcc[ccG(off)].load())) == 0u) { clear = true; break; }
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(1001, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             for (uint i = lane, iStop = EB_END(908, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
@@ -537,12 +578,14 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         sync();
         ccApplyAll(off, k, true, float(round + 1u), lane);
     }
+#endif
     // Impact zones, while pairs still collide (ccd.rs resolve's zone rounds).
-    for (uint round = 0u, rStop = EB_END_UNIFORM(909, round, clear ? 0u : CC_ZONE_ROUNDS, 1u, CC_ZONE_ROUNDS); round < rStop; round++)
+    uint zoneRounds = clear ? 0u : CC_ZONE_ROUNDS;
+    for (uint round = 0u, roundStop = EB_END_UNIFORM(909, round, zoneRounds, 1u, CC_ZONE_ROUNDS); round < roundStop; round++)
     {
         if (lane == 0u) gAcc[ccG(off)].store(0);
         sync();
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(1002, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             for (uint i = lane, iStop = EB_END(910, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
@@ -563,7 +606,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         {
             if (lane == 0u) gAcc[ccG(off)].store(0);
             sync();
-            for (uint m = 0u; m < k; m++)
+            for (uint m = 0u, mStop = EB_END(1003, m, k, 1u); m < mStop; m++)
             {
                 uint v = vvMember(off, m);
                 for (uint i = lane, iStop = EB_END(912, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
@@ -579,7 +622,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
             sync();
             if (splitUniform(lane, uint(gAcc[ccG(off)].load())) == 0u) break;
         }
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(1004, m, k, 1u); m < mStop; m++)
         {
             uint4 r0 = gStatic[vvMember(off, m) * 4u];
             for (uint i = lane, iStop = EB_END(918, i, r0.y, LANES); i < iStop; i += LANES)
@@ -588,7 +631,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
         sync();
         // Each vehicle's zoned nodes listed, then ranked into ascending order (a node's rank:
         // the zoned nodes below it), so the zones' sums run in the CPU's order.
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END_UNIFORM(1005, m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             uint4 r0 = gStatic[v * 4u];
@@ -608,7 +651,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
             sync();
         }
         // Each zone (rooted at its smallest node) moved rigidly, a lane a zone.
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(1006, m, k, 1u); m < mStop; m++)
         {
             uint4 r0 = gStatic[vvMember(off, m) * 4u];
             for (uint i = lane, iStop = EB_END(913, i, r0.y, LANES); i < iStop; i += LANES)
@@ -623,7 +666,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
     }
     if (!clear)
     {
-        for (uint m = 0u; m < k; m++)
+        for (uint m = 0u, mStop = EB_END(1007, m, k, 1u); m < mStop; m++)
         {
             uint v = vvMember(off, m);
             for (uint i = lane, iStop = EB_END(914, i, ccListN(v, 1u), LANES); i < iStop; i += LANES)
@@ -637,7 +680,7 @@ void ccRespond(uint off, uint k, float rq, uint lane)
     }
     ccRestitute(off, k, rq, lane);
     // The nodes' new positions and velocities (relative to the origin), where they changed.
-    for (uint m = 0u; m < k; m++)
+    for (uint m = 0u, mStop = EB_END(1008, m, k, 1u); m < mStop; m++)
     {
         uint v = vvMember(off, m);
         uint4 r0 = gStatic[v * 4u];

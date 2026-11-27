@@ -995,7 +995,64 @@ step with a CCD step bound, which is closer to BeamNG's penalty contact but prov
 - The exact solve waits on the generator's paint at the door top and on a torque-free form of
   the rows.
 
-## Velocity contact on the GPU (design, 2026-11-27; not started)
+## Velocity contact on the GPU: the first port (2026-11-27, off by default)
+
+`ExplicitBeamsGpu::set_continuous_velocity` (CUDA: `CudaExplicitBeams::set_continuous_velocity`)
+runs velocity contact as continuous contact's response, GPU == CPU bit for bit with bit-exact
+results on (`engine-webgpu/tests/explicit_contact_gpu/continuous.rs`,
+`continuous_velocity_head_on_steps_like_the_cpu`: the generated sedans head on at 60 km/h each,
+80 steps, 175,995 impacts, 880 impact zones, 549 rounds and 17,102 APGD iterations, every count
+equal to the CPU's).
+
+**What it is.**
+- The kernel: `slang/kernels/explicit_beams_split_cc_vel.slang`, the CPU's `ccd_vel.rs`
+  operation for operation:
+  - the rows from the CCD's hits, with the re-linearisation and the settle test with its rounding
+    floor;
+  - APGD with the Gershgorin preconditioner and Nesterov's β as a table (`APGD_BETA_BITS`);
+  - the impulses summed per node in 64-bit fixed point as two 32-bit words (the low word's atomic
+    add returns the old value and its carry goes into the high word), converted back with one
+    rounding as the CPU's f64 path;
+  - the half-distance retest in collide; the impact zones reused.
+- Its own module, `explicit_beams_split_ccvel` (the edges' module with `EB_CC_VEL`): the
+  response alone. The edges' module, which every page with edge contact loads, compiles as
+  before. The plan's response op carries `vel` (`GroupOp::Edge`).
+- The mode is a word of the tables' statics (`continuous::cc_mode_words`): velocity contact also
+  turns off the members' self-collision position steps, the vehicle pass and the edge pass, as
+  the CPU's `no_position_steps` and `contact_pass` do.
+- The CPU reference changed with it, losslessly:
+  - the preconditioner's |w| sums are in fixed point (`GERSH_FIXED`, order free);
+  - β comes from the table;
+  - `Dat::warm_starts` and `Dat::relist` are switches (on by default; the port has neither yet).
+
+**A tearing bug it found** (it predates the port; every path had it). At each frame's end the
+kernels mark the last step's group-broken beams for the read-back (`groupDrops`' mark). That
+mark tore their triangles for the next step's contact at once. The CPU tears a group's beams up
+to its master at the next pass (`explicit_beams_torn.rs`). So the GPU's tearing depended on how
+steps were cut into frames, and it differed from the CPU at a frame that ends right after a
+cascade. Now the frame end's marks of those beams are pending (`groupDropsAtFrameEnd`), as a beam
+broken under its own load. The contact, jbeam, bitwise, Metal and World suites pass bit for bit.
+
+**Cost, measured** (Metal, M3 Max, one 34-step frame, the head-on above, `continuous_cost`):
+
+| | ms a frame |
+|---|---|
+| continuous contact off | 25–31 |
+| the position response | 64–114 |
+| velocity contact | 850–1,180 |
+
+About 7.7 rounds and 243 APGD iterations a step: the rounds never settle before the zones. Each
+iteration is four barrier-separated phases over every row and node of the group, on one
+workgroup. Real time is about 100× away.
+
+**What is left.**
+- Warm starts and relisting (the CPU's defaults).
+- The rigid spheres as bodies (a fast rigid body into a car).
+- The cost: the rounds that never settle (the zones' cause, and the energy's), then fewer and
+  fused phases.
+- The lab's control.
+
+## Velocity contact on the GPU (design, 2026-11-27)
 
 The CPU reference (`ccd_vel.rs`, `dat_vel.rs`) is the spec. It takes the position response's
 place inside `ccRespond` (`slang/kernels/explicit_beams_split_cc_respond.slang`), behind a step-word

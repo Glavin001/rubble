@@ -124,7 +124,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     uint boxOff = r1.z;
     uint boxCount = r1.w;
     uint candOff = r2.x;
-    uint candCount = on ? r2.y : 0u;
+    uint candCount = on && !noPositionSteps(v) ? r2.y : 0u;
     uint groupOff = r2.z;
     uint groupCount = on ? r2.w : 0u;
     uint flagsV = r3.x;
@@ -443,7 +443,7 @@ void contactMemberEnd(uint v, uint lane)
     if (gP.steps > 0u && r2.w > 0u)
     {
         uint last = (misc.w + gP.steps - 1u) & 1u;
-        for (uint j = lane, jStop = EB_END(180, j, r0.w, LANES); j < jStop; j += LANES) groupDrops(r0.z + j, r0.z, r2.z, last, true);
+        for (uint j = lane, jStop = EB_END(180, j, r0.w, LANES); j < jStop; j += LANES) groupDropsAtFrameEnd(r0.z + j, r0.z, r2.z, last);
     }
     if (lane < 12u) gAcc[gP.vvAcc + v * 12u + lane].store((lane % 6u) < 3u ? VV_INT_MAX : VV_INT_MIN);
     sync();

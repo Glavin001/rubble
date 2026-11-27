@@ -187,7 +187,7 @@ void edgeWorkStage(uint v, float cell, uint stage, uint lane)
         }
         return;
     }
-    for (uint blk = lane, bStop = EB_END(849, blk, blocks, LANES); blk < bStop; blk += LANES)
+    for (uint blk = lane, blkStop = EB_END(849, blk, blocks, LANES); blk < blkStop; blk += LANES)
     {
         uint i0 = blk * EDGE_BLOCK;
         uint i1 = min(i0 + EDGE_BLOCK, la);

@@ -2,7 +2,16 @@
 //! host's switch. The split group path's members then run each step in two halves (the node
 //! update, the rest) with the continuous passes between (`engine_exec::explicit_plan::continuous`).
 
-use super::ExplicitBeamsGpu;
+use super::{plan, split_pipe, ExplicitBeamsGpu, GroupSplit};
+
+impl GroupSplit {
+    /// The edges' module, or with velocity contact the response's own (`ccvel`), created at
+    /// first use.
+    pub(super) fn edges(&self, vel: bool) -> &wgpu::ComputePipeline {
+        let (cell, which) = if vel { (&self.ccvel, "ccvel") } else { (&self.edges, "edges") };
+        cell.get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, self.bit_exact, which, plan::SPLIT_EDGE_ENTRY))
+    }
+}
 
 impl ExplicitBeamsGpu {
     /// Continuous contact on or off (off, the default). It runs on the split group path
@@ -13,14 +22,31 @@ impl ExplicitBeamsGpu {
         if let (true, Some(e)) = (on, &self.layout.cc_refused) {
             return Err(e.clone());
         }
-        self.planner.continuous = on;
+        self.planner.continuous.on = on;
+        self.write_cc_mode();
         Ok(())
+    }
+
+    /// Velocity contact as continuous contact's response (off: the position response; the
+    /// CPU's `Dat::velocity`). Its first GPU port has no warm starts and no relisting (the CPU's
+    /// `Dat::warm_starts` and `Dat::relist` off), and no rigid spheres as bodies.
+    pub fn set_continuous_velocity(&mut self, on: bool) {
+        self.planner.continuous.velocity = on;
+        self.write_cc_mode();
+    }
+
+    /// The response's mode into the tables' statics ([`engine_exec::explicit_plan::continuous::cc_mode_words`]).
+    pub(crate) fn write_cc_mode(&self) {
+        for (rec, w) in engine_exec::explicit_plan::continuous::cc_mode_words(&self.planner, &self.layout) {
+            self.queue.write_buffer(&self.bufs[1], rec as u64 * 16 + 4, bytemuck::cast_slice(&w));
+        }
     }
 
     /// Continuous contact's counts after the last frame (None without its tables): each
     /// vehicle's listed pairs at its last pass, then the counters (overflow, impacts, zones,
-    /// unresolved, zones past 1 rad, nodes past the listing's reach).
-    pub fn continuous_counts(&self) -> Option<(Vec<u32>, [i32; 6])> {
+    /// unresolved, zones past 1 rad, nodes past the listing's reach, velocity contact's rounds
+    /// and its APGD iterations).
+    pub fn continuous_counts(&self) -> Option<(Vec<u32>, [i32; 8])> {
         let at = self.layout.words[engine_exec::explicit_plan::continuous::W_CC + 1] as usize;
         if self.layout.words[engine_exec::explicit_plan::continuous::W_CC] == 0 {
             return None;
@@ -29,8 +55,8 @@ impl ExplicitBeamsGpu {
         let nv = self.layout.spans.len();
         let w = engine_exec::explicit_plan::continuous::CC_VEH_WORDS;
         let pairs = (0..nv).map(|v| acc[at + w * v] as u32).collect();
-        let mut c = [0; 6];
-        c.copy_from_slice(&acc[at + w * nv..at + w * nv + 6]);
+        let mut c = [0; 8];
+        c.copy_from_slice(&acc[at + w * nv..at + w * nv + 8]);
         Some((pairs, c))
     }
 

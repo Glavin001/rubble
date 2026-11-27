@@ -379,6 +379,9 @@ void splitGroupStep(uint g, uint lane, uint word)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     uint parity = (stepBase + s) & 1u;
     bool small = k <= VV_PART;
+    // No vehicle pass: measured off (the ablation word's 512), or velocity contact, which
+    // covers vehicle contact (the CPU's contact_pass returns).
+    bool vvOff = (gP.ablate & 512u) != 0u || splitUniform(lane, noPositionSteps(vvMember(off, 0u)) ? 1u : 0u) != 0u;
 #ifdef EB_VV_FLEET
     // The owners' state by vehicle (PERF_FLEET_STATE, explicit_beams_fleet.slang; the
     // host sets it only with the tests split, the candidates' grid and the pair list).
@@ -386,7 +389,7 @@ void splitGroupStep(uint g, uint lane, uint word)
     // size on the fleet-wide passes, its levels fleetLevelsAny; the second measurement word's
     // bit 0x80000000, tests only (set_ablation2), takes those levels whatever the hit lists.)
     bool anySize = (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_ANY)) == (PERF_FLEET_FRONT | PERF_FLEET_ANY);
-    if ((small || anySize) && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && (gP.ablate & 512u) == 0u)
+    if ((small || anySize) && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && !vvOff)
     {
         if (!levels)
         {
@@ -449,7 +452,7 @@ void splitGroupStep(uint g, uint lane, uint word)
         sync();
         // Measurement only (time; contact-groups-design.md): the ablation word's 512 skips
         // the pass here too (the split modules have no EB_ABLATE build).
-        if ((gP.ablate & 512u) != 0u)
+        if (vvOff)
         {
             if (lane == 0u && small) gAcc[splitVvAt(off) + 8u * VV_PART + VV_PART * VV_PART].store(0);
         }

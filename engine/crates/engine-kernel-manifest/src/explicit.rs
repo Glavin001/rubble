@@ -231,9 +231,9 @@ pub fn solo_rest_module_name(aero: bool, lanes: u32, vv: bool) -> String {
 
 /// The split group path's modules by `which` (`split_module_name`), each at the frame
 /// module's four variants (`split_modules`).
-pub const SPLIT_WHICH: [&str; 12] = [
+pub const SPLIT_WHICH: [&str; 13] = [
     "member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels", "groupbegin", "grouplevels", "grouplv",
-    "edges",
+    "edges", "ccvel",
 ];
 
 /// Every module of the split paths, which every host's build compiles from the one
@@ -260,7 +260,7 @@ pub fn split_modules() -> Vec<SplitModule> {
                 "member" => ("EB_SOLO_STEP", "1"),
                 // Raycast wheels on each other (explicit_beams_split_wheels: the groups'
                 // module's defines, a small kernel).
-                "group" | "wheels" | "groupbegin" | "grouplevels" | "grouplv" | "edges" => GROUPS,
+                "group" | "wheels" | "groupbegin" | "grouplevels" | "grouplv" | "edges" | "ccvel" => GROUPS,
                 // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => ("EB_FLEET_FRONT", "1"),
@@ -278,8 +278,14 @@ pub fn split_modules() -> Vec<SplitModule> {
             }
             // Edge vehicle contact's pass (explicit_beams_split_edges.slang): its code in
             // this module alone, not in the contact modules (Chrome's compile limit).
-            if which == "edges" {
+            if which == "edges" || which == "ccvel" {
                 d.push(("EB_EDGE", "1"));
+            }
+            // The edges' module with velocity contact as continuous contact's response
+            // (explicit_beams_split_cc_vel.slang): its code in this module alone, so the
+            // edges' module, which every page with edge contact loads, compiles as before.
+            if which == "ccvel" {
+                d.push(("EB_CC_VEL", "1"));
             }
             // Its node hits' residual clamp (vvResOf's lam0): the groups' module runs a
             // frame's levels whenever edge contact is on (the fleet-wide schedules are off).
@@ -298,7 +304,7 @@ pub fn split_modules() -> Vec<SplitModule> {
                 "grouplevels" => SPLIT_GROUP_LEVELS_ENTRY,
                 "grouplv" => SPLIT_GROUP_LV_ENTRY,
                 "wheels" => SPLIT_WHEELS_ENTRY,
-                "edges" => SPLIT_EDGE_ENTRY,
+                "edges" | "ccvel" => SPLIT_EDGE_ENTRY,
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
                 "fleetpost" => "explicit_beams_fleet_post",

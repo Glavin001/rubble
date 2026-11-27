@@ -501,6 +501,9 @@ float clipTriSpeed(uint4 tn)
     if (c > m) m = c;
     return m;
 }
+// Velocity contact (the continuous tables' mode word, engine_exec continuous::cc_mode_words) runs
+// no self-collision position steps (the CPU's ExplicitBeams::no_position_steps).
+bool noPositionSteps(uint v) { return gP.cc != 0u && gStatic[gP.cc + 4u + 3u * v].z != 0u; }
 // Self-collision's box reach (explicit_beams.rs collision_pass): r, or with
 // anti-clip r + (triangle speed + vehicle's fastest) · h + CLIP_DEPTH.
 float triReach(uint4 tn, float r, uint parity)
@@ -610,6 +613,19 @@ bool groupDropsExt(uint j, uint beamOff, uint groupOff, uint parity, bool mark, 
         if ((e0.x & EXT_DEFORM) != 0u) extDeform(x, 0u);
     }
     return j - beamOff > master;
+}
+
+// A frame end's marks of the last step's group breaks, for the read-back (groupDrops' mark):
+// a beam up to the group's master in beam order is pending (s1.w = 1), as a beam broken under
+// its own load, torn for contact at its next update, as within a frame (the CPU's
+// explicit_beams_torn.rs: a group's beams after its master torn in the pass, the others at the
+// next), so how the steps are cut into frames changes nothing. Once a frame end, one call site
+// each.
+void groupDropsAtFrameEnd(uint j, uint beamOff, uint groupOff, uint parity)
+{
+    bool fresh = gBeams[j * 2u + 1u].z == 0.0;
+    bool after = groupDrops(j, beamOff, groupOff, parity, true);
+    if (fresh && !after && gBeams[j * 2u + 1u].z != 0.0) gBeams[j * 2u + 1u].w = 1.0;
 }
 
 // A node's force slot `f` plus its beam forces, in beam order as the CPU adds them.

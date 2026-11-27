@@ -2954,8 +2954,8 @@ pub struct FramePlanner {
     loop_unit: u64,
     vv_wide: bool,
     vv_seen: Option<u32>,
-    /// Continuous contact (the split path's members in two halves: [`continuous`]).
-    pub continuous: bool,
+    /// Continuous contact (the split path's members in two halves) and its response ([`continuous::CcMode`]).
+    pub continuous: continuous::CcMode,
 }
 
 impl FramePlanner {
@@ -2983,7 +2983,7 @@ impl FramePlanner {
             loop_unit: layout.loop_unit,
             vv_wide: false,
             vv_seen: None,
-            continuous: false,
+            continuous: Default::default(),
         }
     }
 

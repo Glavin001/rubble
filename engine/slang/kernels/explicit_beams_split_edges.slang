@@ -22,6 +22,14 @@ void explicit_beams_split_edge(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
     // Continuous contact's pass between a step's two halves (both seam bits in the step
     // word: explicit_plan::continuous): its prep and response a workgroup a group, its
     // listing CC_SLICES workgroups a vehicle.
+#ifdef EB_CC_VEL
+    // (Velocity contact's module, ccvel: the response alone, part 0; the host dispatches the
+    // edges' module for everything else.)
+    uint4 Gv = gMisc[gP.vvGroups + gid.x];
+    uint kv = splitUniform(lane, gP.cc != 0u ? splitAwake(Gv) : 0u);
+    if (kv != 0u && (gP.pad2 & (SPLIT_CC_NODES | SPLIT_CC_REST)) == (SPLIT_CC_NODES | SPLIT_CC_REST)) ccRespondPass(Gv.x, kv, lane);
+    return ebLoopCapFlush();
+#endif
     if ((gP.pad2 & (SPLIT_CC_NODES | SPLIT_CC_REST)) == (SPLIT_CC_NODES | SPLIT_CC_REST))
     {
         uint part = (gP.pad2 >> SPLIT_CC_PART_SHIFT) & 15u;
@@ -71,6 +79,8 @@ bool edgePartner(uint off, uint a, uint m, uint parity)
 
 void edgePass(uint off, uint k, uint s, uint lane)
 {
+    // (Velocity contact covers edge contact: the CPU's contact_pass returns before its turns.)
+    if (splitUniform(lane, noPositionSteps(vvMember(off, 0u)) ? 1u : 0u) != 0u) return;
     uint parity = (gMisc[vvMember(off, 0u)].w + s) & 1u;
     bool big = k > VV_PART;
     gVvTag = 0u;
