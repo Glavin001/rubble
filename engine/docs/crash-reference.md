@@ -98,6 +98,54 @@ it (every speed, and the first moving body's lateral and yaw).
   ones, marked `recreated` (`registry.rs`; the crash lab's `crashReferenceRegistry(data)`,
   `crashRef: { desc }`).
 
+## Scenario families (configurations)
+
+Every scenario is a preset of a **scenario family** (`family.rs`, `families.rs`): one layout
+per kind of crash, its parameters declared as data (key, label, unit, help; a number with
+min, max, step and default, a design from the registered ones, a flag or a choice), and one
+function from their values (and the designs' extents, and the run's jitter) to the run's
+layout. A scenario file states its family and values, plus what makes it a reference (its
+criteria, cameras, moments, footage):
+
+| Family | Parameters | Presets |
+|---|---|---|
+| `block` (car into a block or wall) | car, speed, overlap (of width; 1: full wall a metre past each side), block width (0: to a metre past the side), height, depth, block angle, lead (s) | S01, S02, S07, S10, S11, S12 |
+| `pole` | car, speed, offset, heading, pole width, lead | (the lab's `pole`) |
+| `side_pole` (on a carrier) | car, speed, travel angle, pole width, aim left of centre, aim behind the front axle, lead | S13 |
+| `head_on` | vehicle A, vehicle B, both speeds, overlap (of A's width), B's angle, lead | S08, S09 |
+| `tbone` | striking, struck, both speeds, aim along the side, angle off square, run-up (s) | S05 |
+| `side_barrier` (moving barrier) | struck car, barrier, speed, crab, aim along the side, run-up | S03, S14 |
+| `underride` | car, trailer, speed, overlap, run-up | S04 |
+| `sandwich` | striking, car, trailer, speed, gap to the trailer, run-up | S06 |
+| `low_bar`, `drop`, `coast` | car, speed, bar height / height, heading / speed | (the lab's `limbo`, `drop`, `idle`, `coast`) |
+
+- **Same fleets.** Each layout keeps the arithmetic its scenarios stated (where a new
+  parameter generalises one, an angle or an aim, its neutral value takes the stated
+  arithmetic). `engine-softbody-lab/tests/crash_fleet_digests.rs` holds every scenario's
+  spawned fleet (8 runs × 3 contact settings, 336 fleets) to the digests committed before
+  the move; the CPU reference's 8-run reports of S01, S02, S03, S08, S11 and S13 in all three
+  settings came out byte for byte the same.
+- **Changed values.** `CrashScenario::with_values` lays a scenario out from other values and
+  marks it `modified_from`; its criteria are then the law-based ones (`desc::law_criteria`:
+  energy within 0.1 % of the run's own starting kinetic energy, nothing into a box, momentum
+  within the outside's impulse), never bands derived for the preset's numbers.
+  `family::scenario` opens a family directly with the same criteria.
+- **Adding a parameter** is a line in the family's `params` (`kmh("speed2", "B's speed",
+  55.0)`, `num(..)`, `degrees(..)`, `design(..)`, `flag(..)`, `choice(..)`) and a read in its
+  layout (`v.ms("speed2")`, `v.f32(..)`, `v.rad(..)`, `v.text(..)`): the registry, the lab's
+  controls, the URL, `crash_ref --set` and the studio's types follow.
+- `crash_ref -- S11 --set speed=64 --set car=wagon`, `crash_ref -- --family pole --set
+  offset=0.4`, `crash_ref -- --families`, `--list` (each scenario's family and values). The
+  registry lists each scenario's `family` and `values` and every family's parameters.
+- **In the crash lab** the Scene panel shows the parameters of what is open (a reference
+  crash's family, a family opened with `?crashFamily=<id>`, or a lab scene's own, from
+  `crashLabCatalog`), each a control starting from the preset's value, with *reset* and a
+  *modified* mark; a change places the scene again at once (no reload: the sim rebuilt, a
+  new design's folder fetched once). Family values go in the URL as `f.<key>=`. The lab's
+  own scenes keep their geometry (they spawn whatever car the page loads, by its collision
+  skin, with a run-up in metres); `lab_scenes.rs` declares their parameters and presets
+  with the same types, and the picker files them under the family they stage.
+
 ## Outlines: shape differences per part (prototype, S01 and S02)
 
 Side-by-side stills hide shape differences (a hood that folds into a tent against one that
