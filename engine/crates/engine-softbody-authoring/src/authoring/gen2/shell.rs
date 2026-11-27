@@ -646,7 +646,7 @@ pub fn sum_k_over_m(st: &Structure, beams: &[ShellBeam]) -> Vec<f64> {
 /// Fit the springs to the node budget: no node over [`NODE_BUDGET`], every
 /// beam as near its zone's spring as its two nodes allow, then the whole
 /// lattice under [`OMEGA_H`].
-fn budget(st: &Structure, beams: &mut [ShellBeam]) {
+pub(super) fn budget(st: &Structure, beams: &mut [ShellBeam]) {
     // The zone table gives the springs their proportions; the budget, not
     // the table, is the rule (§10.4): a beam rises to the table's greatest
     // spring where both its nodes have room, and falls where one has none.
