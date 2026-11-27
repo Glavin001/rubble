@@ -974,14 +974,10 @@ pub struct ExplicitBeams {
     /// whose front faces out of the whole vehicle at rest); the others keep
     /// anti-clip's rule. Empty: every triangle.
     pub outward_tris: Vec<bool>,
-    /// Edge vehicle contact (a Rubble setting, off by default; `explicit_contact::edge`,
-    /// `docs/contact-design.md`): with this vehicle in a pair, (1) the two skins' edges are
-    /// kept apart as the nodes are from the triangles (edge against edge), (2) the
-    /// partner's nodes are kept off this skin's convex edges (node against edge, in each
-    /// edge's wedge), so two skins cannot cross between their nodes, and (3) the pair's
-    /// residual pass may take back force (the accumulated clamp: a hit's normal force is
-    /// moved toward the stop at the forces now, never below zero), which halves the
-    /// edges' energy rise.
+    /// Edge vehicle contact (a Rubble setting, off by default; `explicit_contact::edge`, `docs/contact-design.md`):
+    /// with this vehicle in a pair, (1) the two skins' edges are kept apart as the nodes are from the triangles,
+    /// (2) the partner's nodes are kept off this skin's convex edges (node against edge, in each edge's wedge), and
+    /// (3) the pair's residual pass may take back force (the accumulated clamp), which halves the edges' energy rise.
     pub edge_contact: bool,
     /// Per node, its outward contact offset (m; empty: none): in vehicle contact this
     /// vehicle's triangles and skin edges are at the nodes pushed out along their vertex
@@ -1061,6 +1057,8 @@ pub struct ExplicitBeams {
     pub contact_shift: Vec<[i32; 3]>,
     /// The position steps the last node pass applied (m; empty: none).
     pub shift_applied: Vec<Vec3>,
+    /// Velocity contact (`Dat::velocity`, which covers self and vehicle contact): self collision off (`docs/continuous-contact-design.md`).
+    pub no_position_steps: bool,
     /// The ground position steps the last node pass applied (m up, per node; empty
     /// without [`Self::dissipative_contact`]).
     pub ground_lift: Vec<f32>,
@@ -1804,6 +1802,7 @@ impl ExplicitBeams {
             surface_force: glam::DVec3::ZERO,
             contact_shift: Vec::new(),
             shift_applied: Vec::new(),
+            no_position_steps: false,
             ground_lift: Vec::new(),
             plastic_strength_drop: true,
             exact_friction: false,
@@ -3623,7 +3622,7 @@ impl ExplicitBeams {
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 1);
         }
-        if !self.triangles.is_empty() && !self.candidates.is_empty() {
+        if !self.triangles.is_empty() && !self.candidates.is_empty() && !self.no_position_steps {
             self.collision_pass();
         }
         if self.surface_contact {

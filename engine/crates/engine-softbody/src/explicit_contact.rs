@@ -683,6 +683,7 @@ impl ExplicitBeamsWorld {
                 .push((lo - om - Vec3::splat(BOX_MARGIN), hi + om + Vec3::splat(BOX_MARGIN)));
         }
         self.edge_begin();
+        if self.continuous.as_ref().is_some_and(|d| d.velocity) { return; } // (velocity contact covers it)
         let mut stats = ContactStats::default();
         let mut partners: Vec<usize> = Vec::new();
         let mut edge_turns: Vec<(usize, Vec<usize>)> = Vec::new();

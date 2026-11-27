@@ -187,8 +187,9 @@ pub(super) fn resolve(
     st: &mut CcdStats,
     vpre: &[Vec<Vec3>],
     e: f32,
-    vel_only: bool,
+    warm: Option<&mut super::ccd_vel::Warm>,
 ) {
+    let vel_only = warm.is_some();
     let ke = |vel: &[Vec<Vec3>]| -> f64 {
         vel.iter().zip(m).map(|(v, m)| v.iter().zip(m).map(|(v, &m)| 0.5 * m as f64 * v.length_squared() as f64).sum::<f64>()).sum()
     };
@@ -239,8 +240,8 @@ pub(super) fn resolve(
     let mut count: Vec<Vec<u32>> = x1.iter().map(|x| vec![0; x.len()]).collect();
     // (DAT_RESPONSE=vel: velocity-only impulse contact, `ccd_vel::velocity_rounds`, in place of
     // these rounds and with no non-rigid zones (they move positions alone).)
-    if vel_only {
-        if super::ccd_vel::velocity_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide, vpre, e) {
+    if let Some(warm) = warm {
+        if super::ccd_vel::velocity_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide, vpre, e, warm) {
             finish(st, x1, vel);
             return;
         }

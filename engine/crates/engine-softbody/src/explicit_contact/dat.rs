@@ -55,6 +55,8 @@ pub struct Dat {
     /// Velocity-only impulse contact (`ccd_vel`; `DAT_RESPONSE=vel` sets it): its rows take the
     /// speculative pass's place too, so every contact goes through one law.
     pub velocity: bool,
+    /// Velocity contact's warm starts (`ccd_vel::Warm`).
+    pub(crate) warm: super::ccd_vel::Warm,
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
     /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
@@ -192,7 +194,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), substeps: std::env::var("DAT_SUBSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), velocity: std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel"), warm: Default::default(), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -397,7 +399,12 @@ pub(super) type DatStart = (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>, Vec<Vec<(Vec3, Vec3)
 
 impl ExplicitBeamsWorld {
     /// The continuous mode's start of a step: every node's World position (None: off).
-    pub(super) fn dat_start(&self) -> Option<DatStart> {
+    pub(super) fn dat_start(&mut self) -> Option<DatStart> {
+        let dat = self.continuous.as_ref()?;
+        let velocity = dat.velocity;
+        for v in &mut self.vehicles {
+            v.no_position_steps = velocity;
+        }
         let dat = self.continuous.as_ref()?;
         (self.contact && (self.vehicles.len() > 1 || dat.self_contact)).then(|| {
             let x = world_positions(&self.vehicles);
@@ -436,6 +443,9 @@ impl ExplicitBeamsWorld {
             .collect();
         let mut t: Vec<Vec<f32>> = x0.iter().map(|x| vec![1.0; x.len()]).collect();
         let mut st = DatStats { steps: 1, min_t: 1.0, min_gap: f32::MAX, ..Default::default() };
+        if dat.velocity {
+            dat.warm.prev = std::mem::take(&mut dat.warm.next);
+        }
         if dat.total.steps == 0 {
             st.ke_start = self.vehicles.iter().flat_map(|v| v.nodes.iter()).map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
             // (and the rigid bodies the vehicles hold as proxies: a ball fired into a car)
@@ -540,7 +550,7 @@ impl ExplicitBeamsWorld {
                 .map(|v| (0..x1[v].len()).map(|i| v0[v][i] + (x1[v][i] - x1p[v][i] - shift[v][i]) / STEP).collect())
                 .collect();
             let vpre: Vec<Vec<Vec3>> = if pre.is_empty() { Vec::new() } else { pre.iter().map(|p| p.iter().map(|q| q.1).collect()).collect() };
-            super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpre, dat.restitution, dat.velocity);
+            super::ccd::resolve(&pairs, &x0, &mut x1, &mut vs, &m, &im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, &vpre, dat.restitution, dat.velocity.then_some(&mut dat.warm));
             if dat.velocity {
                 relist_velocity(dat, &mut recs, &mut own_reach, &surf, &off, &x0, &mut x1, &mut vs, &m, &im, &vpre, &reach_v, pairs.len(), &mut st);
             }
@@ -825,7 +835,7 @@ fn relist_velocity(dat: &mut Dat, recs: &mut Vec<Rec>, own_reach: &mut [f32], su
         }
         n = more.len();
         st.relisted += 1;
-        super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.restitution, dat.velocity);
+        super::ccd::resolve(&more, x0, x1, vs, m, im, STEP, dat.ccd_rounds, dat.soft_zones, dat.zone_rounds, &mut st.ccd, vpre, dat.restitution, dat.velocity.then_some(&mut dat.warm));
     }
 }
 

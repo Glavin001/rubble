@@ -24,9 +24,21 @@
 use super::ccd::{closest, CcdPair, CcdStats, FixedSums};
 use super::ccd_rows::{ROW_GAP_SHARE, ROW_ITERS};
 use glam::Vec3;
+use std::collections::HashMap;
 
-/// A pushing row may part faster than its bound by at most this (m/s; `DAT_PUSH_TOL`).
-pub(super) const PUSH_TOL: f32 = 1.0e-4;
+/// Warm starts (`Dat::warm`): each pair's impulse at the end of the last step, keyed by its four
+/// nodes, as the first iterate of the next step's solve (Box2D's and PhysX's accumulated
+/// impulses): a contact a crush presses for many steps starts near its answer.
+#[derive(Default, Clone, Debug)]
+pub struct Warm {
+    pub prev: HashMap<[(usize, u32); 4], f32>,
+    pub next: HashMap<[(usize, u32); 4], f32>,
+}
+
+/// A pushing row's work past its bound, λ·excess (J, about twice the energy it may add; `DAT_PUSH_TOL`),
+/// at most this a step: 10 µJ, a car's 2,000 steps a second over its hundred-odd rows at most
+/// about 2 J a second of 200 kJ.
+pub(super) const PUSH_TOL: f32 = 1.0e-5;
 
 fn push_tol() -> f32 {
     std::env::var("DAT_PUSH_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(PUSH_TOL)
@@ -89,13 +101,13 @@ impl Ctx<'_> {
     }
 
     /// No row closes past its bound by more than [`ROW_GAP_SHARE`] of its gap over the step, and
-    /// no row pushing (λ > 0) parts faster than its bound by more than [`PUSH_TOL`]: a push past
-    /// the bound does work λ·excess/2 on the conserved energy.
+    /// no row pushing (λ > 0) does more than [`PUSH_TOL`] of work past its bound: a push past the
+    /// bound does work λ·excess/2 on the conserved energy.
     fn settled(&self, rows: &[VRow], l: &[f32], vel: &[Vec<Vec3>]) -> bool {
         let tol = push_tol();
         rows.iter().zip(l).all(|(r, &l)| {
             let g = Self::normal(r, vel) + r.b;
-            -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi && (l == 0.0 || g <= tol)
+            -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi && l * g <= tol
         })
     }
 
@@ -148,7 +160,22 @@ impl Ctx<'_> {
     /// The rounds: rows from the pairs colliding over the paths, solved, positions following, until
     /// nothing new collides. True when resolved.
     #[allow(clippy::too_many_arguments)]
-    fn rounds(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32) -> bool {
+    fn rounds(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
+        self.rounds_inner(x1, vel, rounds, st, collide, vpre, e, warm)
+    }
+
+    /// The rows' impulses into the next step's warm starts: pressed contacts only (an impact's
+    /// impulse, b < 0, is no guess for the next step: seeded there, a node shared by many such
+    /// rows started past 476 m/s and its fixed-point sums overflowed, head-on 100).
+    fn keep(rows: &[VRow], warm: &mut Warm, done: bool) -> bool {
+        for r in rows.iter().filter(|r| r.l > 0.0 && r.b >= 0.0) {
+            warm.next.insert(r.k, r.l);
+        }
+        done
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rounds_inner(&self, x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
         let pos = |x: &[Vec<Vec3>], k: &[(usize, u32); 4]| k.map(|(v, i)| x[v][i as usize]);
         let (vb, xb) = (vel.to_vec(), x1.to_vec());
         let mut rows: Vec<VRow> = Vec::new();
@@ -158,7 +185,7 @@ impl Ctx<'_> {
             let hit = collide(x1);
             st.rounds += 1;
             if hit.is_empty() {
-                return true;
+                return Self::keep(&rows, warm, true);
             }
             st.hits += hit.len() as u64;
             let mut fresh = 0usize;
@@ -192,7 +219,7 @@ impl Ctx<'_> {
                 // (Measured from the step's start, as the CCD's paths are: the same bound taken
                 // from the rounds' start positions cut side 60's zones from 2,750 to 30 but let
                 // head 100 cross 7 times, 2026-11-27.)
-                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: 0.0, s0 };
+                let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: warm.prev.get(&pr.k).copied().unwrap_or(0.0), s0 };
                 // Newton's law on a true impact: closing before the kick (u⁻ < 0) leaves parting at
                 // e·|u⁻| at least.
                 if e > 0.0 && !vpre.is_empty() {
@@ -215,7 +242,7 @@ impl Ctx<'_> {
             }
             // Every pair still meeting its gap is a row the last solve settled: resolved.
             if fresh == 0 && settled {
-                return true;
+                return Self::keep(&rows, warm, true);
             }
             if std::env::var("DAT_VDBG").is_ok() {
                 eprintln!("vdbg round {} hits {} fresh {} relin {} settled {} rows {}", st.rounds, hit.len(), fresh, relin, settled, rows.len());
@@ -227,7 +254,7 @@ impl Ctx<'_> {
                 }
             }
         }
-        false
+        Self::keep(&rows, warm, false)
     }
 }
 
@@ -235,7 +262,7 @@ impl Ctx<'_> {
 /// velocities (both moved by the impulses), `vpre` the velocities before the kick, `e` the impact
 /// law's restitution. True when nothing collides any more.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32) -> bool {
+pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
     let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(ROW_ITERS);
-    Ctx { pairs, x0, im, h, iters }.rounds(x1, vel, rounds, st, collide, vpre, e)
+    Ctx { pairs, x0, im, h, iters }.rounds(x1, vel, rounds, st, collide, vpre, e, warm)
 }
