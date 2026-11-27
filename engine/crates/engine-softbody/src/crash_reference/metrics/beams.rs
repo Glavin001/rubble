@@ -67,7 +67,8 @@ pub(super) fn ramp(k: f64, k_lim: f64, bound: f64, zone: f64, o: f64) -> f64 {
 /// extension records). Broken beams store none. Counted: plain,
 /// support (compressed), rope (stretched), bounded (with its limit spring), anisotropic
 /// (with its expansion rate), coupler,
-/// torsion; others (LBEAMs, pressure, aerodynamic records, triggers) store none here.
+/// torsion, LBEAM ([`lbeam_rest`]); others (pressure groups, aerodynamic records,
+/// triggers) store none here (the crash scenes' designs have no pressure groups).
 pub fn elastic(beams: &[Beam], ext: Option<&ExplicitBeams>, j: usize, rest: f32, broken: bool, pos: &[Vec3]) -> f64 {
     use ExplicitKind::*;
     let b = &beams[j];
@@ -98,6 +99,12 @@ pub fn elastic(beams: &[Beam], ext: Option<&ExplicitBeams>, j: usize, rest: f32,
             stored(e, [off, off + zone], |y| if y > 0.0 { ramp(k, k1, off, zone, y) } else { k })
         }
         JbeamCoupler => 0.5 * k * len * len,
+        JbeamLbeam => {
+            // ½k (ℓ − L)², L the rest length id1–id2 the arms and the rest angle give
+            // (`lbeam_force`; the solver's `elastic_energy` the same).
+            let Some(l) = ext.and_then(|v| lbeam_rest(v, j, rest, pos)) else { return 0.0 };
+            0.5 * k * (len - l).powi(2)
+        }
         JbeamTorsion => {
             let Some(pair) = beams.get(j + 1) else { return 0.0 };
             let (Some(p3), Some(p4)) = (pos.get(pair.a as usize), pos.get(pair.b as usize)) else { return 0.0 };
@@ -105,6 +112,46 @@ pub fn elastic(beams: &[Beam], ext: Option<&ExplicitBeams>, j: usize, rest: f32,
             0.5 * k * phi * phi
         }
         _ => 0.0,
+    }
+}
+
+/// An LBEAM's rest length id1–id2 (m) for rest cos θ₀ `cos` with its nodes at `pos`:
+/// √(a² + b² − 2ab cos θ₀), a and b its arms to the vertex id3 (`lbeam_force`). None when
+/// beam `j` is no LBEAM of `v` or a node is missing.
+pub fn lbeam_rest(v: &ExplicitBeams, j: usize, cos: f32, pos: &[Vec3]) -> Option<f64> {
+    let b = v.beams.get(j).filter(|b| b.kind == ExplicitKind::JbeamLbeam)?;
+    let x = *v.ext_of.get(j)? as usize;
+    let c = v.beam_ext.get(x.checked_sub(1)?)?.index(0) as usize;
+    let (pa, pb, pc) = (pos.get(b.a as usize)?, pos.get(b.b as usize)?, pos.get(c)?);
+    let (a, bb) = (f64::from(pa.distance(*pc)), f64::from(pb.distance(*pc)));
+    Some((a * a + bb * bb - 2.0 * a * bb * f64::from(cos)).max(0.0).sqrt())
+}
+
+/// An LBEAM's yield, as the solver runs it (`lbeam_force`): past its deform force (`tc`)
+/// its rest angle moves so that its spring stays at that force, perfectly plastic (no
+/// hardening). The work of a move of the rest angle between samples is the deform force ×
+/// the move of its rest length id1–id2 at the arms of the later sample (exact while the
+/// arms do not change between them).
+#[derive(Clone, Copy, Debug)]
+pub struct LbeamPlastic {
+    tc: f64,
+    cos: f32,
+    pub work: f64,
+}
+
+impl LbeamPlastic {
+    /// None for a beam that is no LBEAM or cannot yield.
+    pub fn new(b: &Beam) -> Option<Self> {
+        (b.kind == ExplicitKind::JbeamLbeam && b.tc.is_finite() && b.k != 0.0).then(|| Self { tc: f64::from(b.tc), cos: b.rest, work: 0.0 })
+    }
+
+    pub fn advance(&mut self, v: &ExplicitBeams, j: usize, cos: f32, pos: &[Vec3]) {
+        if cos != self.cos {
+            if let (Some(a), Some(b)) = (lbeam_rest(v, j, self.cos, pos), lbeam_rest(v, j, cos, pos)) {
+                self.work += self.tc * (b - a).abs();
+            }
+            self.cos = cos;
+        }
     }
 }
 
