@@ -1178,8 +1178,46 @@ states and the portable fixtures, the site's `__mods/*_new`, and the crash refer
 `crash-reference.md` §4.3 rows are regenerated; the generated vehicles' JBeam and `.rskin` files
 change (the `.glb` does not).
 
+## 27. The front load path from the Camry's (2026-11-27, `crash-ref/front-load-path`)
+
+The owner's decision after §26: stop adding switches on the old lattice; read how a real car's
+front is connected and design the load path. Full account: [front-load-path.md](front-load-path.md).
+
+- **(Fact, the 2012 Camry's deck)** The crash box is the rail's own front (92 × 163 mm, 1.7 mm,
+  0.205 m, gauge steps to 2.06 and 2.65 mm behind it); the bumper beam (B-section 61 × 116, 1.16 mm,
+  1300 MPa) is **bolted** (three a side) to a short box bracket on it; the subframe hangs under the
+  rail just behind the crash zone and under the toe pan at the kick-down; the upper rail is its own
+  thin member to the A-pillar; the rail ends at the firewall and continues under the floor. Free
+  distances: beam to engine 0.337 m, engine to firewall 0.249 m. The members through the calculator
+  reproduce the tests' sequence (first plateau ≈ 295 kN from the two crash zones and upper rails,
+  the engine's peak at 0.40–0.43 m, the second at the firewall at ≈ 0.62 m).
+- **(Fact) What the generator lacked**: a planar bumper beam on 20 kN mounts to the box's two lane
+  nodes; a single-chord rail; the subframe mounted on the crash box, the apron and the radiator
+  support; braces across every bay; engine stops that load the block after 10 % of their length; the
+  engine 0.08 m further back than the Camry's proportion (drawn: not moved).
+- **(Rule) `front_rules.load_path`**, one switch (off: every file byte for byte as before; on: no
+  `.glb` changes): closed four-corner cells from the box to the firewall, each bay at its section's
+  P_m, flat, end faces held in shape, diagonals at most a quarter; nothing else across a bay above
+  the brace share; the beam on a bolted plate on the box's four front corners; the subframe on the
+  rail stations above its corners; the upper rail at its own section; rules 1, 4, 5 called; the
+  engine's stops engage at the block's gap. `LOAD_PATH_STEPS` builds steps one at a time.
+- **(Measurement)** S11 run 0: t_m 44 → 73 ms (Camry 71–76), crush 0.39 → 0.70 m (0.66–0.69),
+  residual 0.20 → 0.54 m (0.55–0.58), mean deceleration 35.9 → 21.7 g (21.0–22.7), restitution
+  0.342 → 0.246 (0.06–0.10), peak 661 kN at 20 ms → 491 kN at 44 ms (830–920 at 30 ms). S12 is now
+  too soft (t_m 99 ms, crush 0.55 m against 69–75 ms and 0.48 m).
+- **(Finding) The cells turn, they do not fold.** Each bay shortens in order and the beam stays on
+  the boxes, but a bay loses its span while its chords keep their length: a pin-jointed cell
+  crushing at its section's P_m has no bending reserve (every chord at its yield), where the real
+  section folding at ≈ 0.3 of its squash keeps most of σ_y·Z (Camry crash zone 16.9 kN·m against the
+  cell's ≈ 4.5). Any eccentricity (the subframe at `a4`, the kick-down at `a5`) turns it. Fixing
+  that needs the solver's beam law (a compressive yield below the tensile, or a peak then a plateau)
+  or many more nodes: the owner's decision.
+- **(Measurement) Hard rules**: S08 edge creates 1.45 kJ in 1 of 8 runs and S12 continuous 107 J in
+  1 of 8 (bars 340 and 89 J): **off by default**.
+
 ## Changelog
 
+- 2026-11-27: section 27, the front load path read off the Camry and built behind one switch (measured; the cells turn; off).
 - 2026-11-27: section 26, the crash box as a closed cell (built, measured: it still turns; the six rules again; stroke options; defaults).
 - 2026-11-27: section 25, the front crash structure's rules (six switches, measured alone and together; defaults; the crash box's planar cell).
 
