@@ -25,6 +25,9 @@ export function crashRefParamsUrl(qs, values, base) {
   return qs;
 }
 
+// This server's local imported vehicles (community_cache writes __mods/index.json; absent on
+// the site: converted mods are never shipped): [{ folder, label, configs: [{ pc, nodes }] }].
+const localCars = await fetch("/__mods/index.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 /** A parameter's default (`ParamKind`). */
@@ -133,7 +136,9 @@ export function createParamControls({ mount, params, values, base, title, about 
       return `<div class="pr" data-k="${esc(p.key)}" title="${esc(help)}"><label for="${id}">${esc(p.label)}</label><input type="range" id="${id}" min="${min}" max="${max}" step="${step}" aria-label="${esc(p.label)}"><span><input type="number" min="${min}" max="${max}" step="any" aria-label="${esc(p.label)} value"> <span class="u">${esc(p.unit)}</span></span></div>`;
     }
     if (p.kind.kind === 'flag') return `<div class="pr" data-k="${esc(p.key)}" title="${esc(help)}"><label for="${id}">${esc(p.label)}</label><input type="checkbox" id="${id}"></div>`;
-    return `<div class="pr" data-k="${esc(p.key)}" title="${esc(help)}"><label for="${id}">${esc(p.label)}</label><select id="${id}">${p.kind.choices.map((c) => `<option>${esc(c)}</option>`).join('')}</select></div>`;
+    // A design also takes this server's local imported vehicles (`local:<folder>/<pc>`).
+    const more = p.kind.kind === 'design' ? localCars.map((c) => `<optgroup label="${esc(c.label)} (imported, local)">${c.configs.map((g) => `<option value="${esc(`local:${c.folder}/${g.pc}`)}">${esc(c.label)} · ${esc(g.pc.split('/').pop().replace(/\.pc$/, ''))} · ${g.nodes} nodes</option>`).join('')}</optgroup>`).join('') : '';
+    return `<div class="pr" data-k="${esc(p.key)}" title="${esc(help)}"><label for="${id}">${esc(p.label)}</label><select id="${id}">${p.kind.choices.map((c) => `<option>${esc(c)}</option>`).join('')}${more}</select></div>`;
   };
   el.innerHTML = `<div class="ph"><div class="sub">parameters</div><span class="mod" hidden title="These values differ from the preset's">modified</span><button type="button" class="reset" title="Back to the preset's values">reset</button></div>
     <div class="fam" title="${esc(about)}">${esc(title)}</div>${params.map(row).join('')}<div class="note"></div>`;

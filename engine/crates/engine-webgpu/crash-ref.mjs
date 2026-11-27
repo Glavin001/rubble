@@ -38,9 +38,11 @@ export async function crashRefFolders(scenario) {
 }
 const folderCache = new Map();
 async function loadFolder(d, listed) {
+  // A local imported vehicle (Rust's `family::LOCAL`): `local:<folder>/<path of its .pc>`.
+  const local = d.startsWith('local:') ? d.slice(6) : null;
   const row = listed.find((x) => x.name === d);
-  const folder = row?.folder ? `/__mods/${row.folder}` : `/__mods/${d}_new`;
-  const mod = await loadMod(folder, { pc: row?.pc ?? null });
+  const folder = local ? `/__mods/${local.split('/')[0]}` : row?.folder ? `/__mods/${row.folder}` : `/__mods/${d}_new`;
+  const mod = await loadMod(folder, { pc: local ? local.slice(local.indexOf('/') + 1) : row?.pc ?? null });
   const crash = mod.list.find((f) => f.endsWith('crash.json'));
   const files = [...mod.files];
   if (mod.pcName && mod.pc != null) files.push([mod.pcName, mod.pc]);

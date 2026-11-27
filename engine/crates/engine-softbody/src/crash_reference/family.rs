@@ -72,6 +72,11 @@ pub struct Param {
 /// (`engine_vehiclegen::designs::names`) and the FMVSS 214 barrier, each with a crash template
 /// (`engine-softbody-authoring` `crash_templates`). This crate cannot see the generator's
 /// registry; `engine-softbody-authoring/tests/crash_designs.rs` holds this list to it.
+/// A design parameter also takes a local imported vehicle: `local:<folder>/<path of its .pc>`
+/// (a converted JBeam mod, e.g. `local:etkk_tex/etkk/kc6.pc`; never shipped, so never a listed
+/// choice or a preset's car: the page lists the ones its server has, the CLI reads them from
+/// `RUBBLE_LOCAL_MODS`). It has no crash zones, so zone metrics are absent for it.
+pub const LOCAL: &str = "local:";
 pub const DESIGNS: [&str; 9] = ["sedan", "police_sedan", "wagon", "mach1_1969", "mach1_gasser", "suv_4x4", "truck_cab", "box_trailer", "mdb214"];
 
 /// A number parameter (`unit` as shown).
@@ -118,6 +123,7 @@ impl Param {
             (ParamKind::Number { min, max, .. }, Value::Num(x)) => Err(format!("{k} = {x}: a number in [{min}, {max}]")),
             (ParamKind::Flag { .. }, Value::Flag(_)) => Ok(()),
             (ParamKind::Design { choices, .. } | ParamKind::Choice { choices, .. }, Value::Text(s)) if choices.contains(s) => Ok(()),
+            (ParamKind::Design { .. }, Value::Text(s)) if s.strip_prefix(LOCAL).is_some_and(|r| r.contains('/') && r.ends_with(".pc")) => Ok(()),
             (ParamKind::Design { choices, .. } | ParamKind::Choice { choices, .. }, Value::Text(s)) => Err(format!("{k} = {s}: one of {}", choices.join(", "))),
             (_, v) => Err(format!("{k} = {v:?}: not a value of this parameter ({:?})", self.kind)),
         }
@@ -358,6 +364,8 @@ mod tests {
         assert_eq!(v.f64("speed"), 56.3);
         assert!(f.values(&Values([("speed".to_string(), Value::Num(-1.0))].into())).is_err(), "below min");
         assert!(f.values(&Values([("car".to_string(), Value::Text("bus".into()))].into())).is_err(), "not a design");
+        assert!(f.values(&Values([("car".to_string(), Value::Text("local:etkk_tex/etkk/kc6.pc".into()))].into())).is_ok(), "a local imported vehicle");
+        assert!(f.values(&Values([("car".to_string(), Value::Text("local:etkk".into()))].into())).is_err(), "a local name without its .pc");
         assert!(f.values(&Values([("nope".to_string(), Value::Num(1.0))].into())).is_err(), "not a parameter");
         assert!(f.values(&Values([("speed".to_string(), Value::Text("fast".into()))].into())).is_err(), "not a number");
         let set = f.parse_onto(&v, &[("speed".into(), "64".into()), ("car".into(), "wagon".into())]).unwrap();

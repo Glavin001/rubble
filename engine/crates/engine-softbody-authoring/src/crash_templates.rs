@@ -30,8 +30,30 @@ pub fn template_with(design: &str, params: Option<&str>) -> Result<Template, Str
         let desc = engine_softbody::jbeam::load_jbeam(&[("mdb214.jbeam", text.as_str())], None)?;
         return Ok(Template { desc, settings: crate::vehicle_compare::settings(), zones: ZoneMap::default() });
     }
+    if let Some(local) = design.strip_prefix(engine_softbody::crash_reference::family::LOCAL) {
+        return local_template(design, local);
+    }
     let built = rig::rig_vehicle(design, params, None)?;
     template_from_files(design, &rig::mod_files(&built))
+}
+
+/// A local imported vehicle (`local:<folder>/<pc>`, `crash_reference::family::LOCAL`): the
+/// folder's `.jbeam` files and that `.pc` under `RUBBLE_LOCAL_MODS` (the directory of converted
+/// mods, e.g. a checkout's `engine/crates/engine-webgpu/__mods`). Local content only: nothing
+/// in the repo's tests or builds names one.
+fn local_template(design: &str, local: &str) -> Result<Template, String> {
+    let root = std::env::var("RUBBLE_LOCAL_MODS").map_err(|_| format!("{design}: set RUBBLE_LOCAL_MODS to the directory of converted mods (it holds {})", local.split('/').next().unwrap_or(local)))?;
+    let (folder, pc) = local.split_once('/').ok_or_else(|| format!("{design}: local:<folder>/<path of its .pc>"))?;
+    let base = std::path::Path::new(&root).join(folder);
+    let list: Vec<String> = serde_json::from_slice(&std::fs::read(base.join("files.json")).map_err(|e| format!("{design}: {}: {e}", base.join("files.json").display()))?).map_err(|e| format!("{design}: files.json: {e}"))?;
+    let mut files = Vec::new();
+    for f in list.iter().filter(|f| f.ends_with(".jbeam") || f.as_str() == pc) {
+        files.push((f.clone(), std::fs::read(base.join(f)).map_err(|e| format!("{design}: {f}: {e}"))?));
+    }
+    if !files.iter().any(|(f, _)| f == pc) {
+        return Err(format!("{design}: {folder} has no {pc}"));
+    }
+    template_from_files(design, &files)
 }
 
 /// Whether [`template`] builds `design` from code alone, with no mod folder (the barrier).
