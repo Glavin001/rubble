@@ -157,21 +157,24 @@ pub(super) fn separate(recs: &[&Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], im
     }
 }
 
-/// Subcycled penalty contact (multiple-time-step splitting: RESPA, Tuckerman, Berne and
-/// Martyna 1992; crash codes' contact subcycling). The node update has kicked every node by the
-/// step's slow forces (beams, gravity, ...). Here the nodes of the listed pairs move over the
-/// step again from their start `x0`, in `subs` sub-steps of h/subs, each a kick by the pairs'
-/// springs at the current positions then a drift: symplectic Euler at the sub-step, so the
-/// springs are integrated stably at stiffness k = `scale`·m/h_s² (m the pair's lightest movable
-/// node; explicit crash codes' soft constraint) and their energy comes back. A pair's gap is
-/// linearised from its start record (as [`separate`]); the spring k·(d − gap) acts along its
-/// normal, shared over its nodes by its weights, equal and opposite: momentum kept. `x1` and
-/// `vel` are updated in place; returns, per vehicle, the nodes moved. A pair's thickness is at
-/// least `shell`, the sheets' own (crash codes' shell thickness), so the springs act before
-/// the collision meshes touch.
-pub(super) fn penalty_substeps(recs: &[Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], scale: f32, subs: u32, shell: f32) -> Vec<Vec<u32>> {
+/// Subcycled penalty contact (crash codes' contact subcycling; Belytschko's mixed-time
+/// integration). The contact nodes C (the movable nodes of the listed pairs) move over the step
+/// again from their start `x0` and their velocity before the node update, in `subs` sub-steps
+/// of h/subs (symplectic Euler: kick then drift). Their force each sub-step is the step's force
+/// (`pre`, everything the beam pass summed), plus the change since the step's start of their
+/// own linear beams' forces (k(ℓ − L) + c·ℓ̇ along the beam, with a neighbour outside C on its
+/// straight path from `x0` to `x1`), plus the pairs' springs: k = `scale`·m/h_s² (m the pair's
+/// lightest movable node; the soft constraint at the sub-step), ½k(d − dist)² on the pair's
+/// exact distance, so its force is the closest points' signed weights along the unit gap
+/// (equal and opposite). A neighbour outside C takes back the beams' change averaged over the
+/// sub-steps, so each beam's two ends stay equal and opposite: momentum kept. A pair's
+/// thickness is at least `shell` (crash codes' shell thickness). `x1` and `vel` are updated in
+/// place; returns, per vehicle, the nodes moved.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn penalty_substeps(recs: &[Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], scale: f32, subs: u32, shell: f32, vehicles: &[crate::explicit_beams::ExplicitBeams], pre: &[Vec<(Vec3, Vec3)>]) -> Vec<Vec<u32>> {
+    use crate::explicit_beams::ExplicitKind;
     let subs = subs.max(1);
-    let hs = STEP / subs as f32;
+    let (h, hs) = (STEP, STEP / subs as f32);
     let mut moved: Vec<Vec<u32>> = x1.iter().map(|_| Vec::new()).collect();
     let mut on: Vec<Vec<bool>> = x1.iter().map(|x| vec![false; x.len()]).collect();
     let mut springs: Vec<(&Rec, f32)> = Vec::new();
@@ -189,20 +192,75 @@ pub(super) fn penalty_substeps(recs: &[Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
             }
         }
     }
-    if springs.is_empty() {
+    if springs.is_empty() || pre.is_empty() {
         return moved;
     }
+    // The linear beams at a contact node (each once): (vehicle, beam).
+    let mut beams: Vec<(usize, u32)> = Vec::new();
+    for (v, m) in moved.iter().enumerate() {
+        let veh = &vehicles[v];
+        for &i in m {
+            for &j in veh.incidence.get(i as usize).map_or(&[][..], |x| x.as_slice()) {
+                let b = &veh.beams[j as usize];
+                if b.broken || !matches!(b.kind, ExplicitKind::Plain | ExplicitKind::JbeamPlain) {
+                    continue;
+                }
+                let other = if b.a == i { b.b } else { b.a };
+                // (A beam between two contact nodes: once, from its lower end.)
+                if on[v][other as usize] && other < i {
+                    continue;
+                }
+                beams.push((v, j));
+            }
+        }
+    }
+    let path = |v: usize, i: usize, t: f32, x1: &[Vec<Vec3>]| x0[v][i] + (x1[v][i] - x0[v][i]) * t;
+    // A beam's force on its end a (b's is the opposite) at positions and velocities given.
+    let force = |b: &crate::explicit_beams::Beam, xa: Vec3, xb: Vec3, va: Vec3, vb: Vec3| -> Vec3 {
+        let d = xb - xa;
+        let l = d.length();
+        if l <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let u = d / l;
+        u * (b.k * (l - b.rest) + b.c * (vb - va).dot(u))
+    };
+    // Each beam's force at the step's start (positions x0, velocities before the update).
+    let x1s: Vec<Vec<Vec3>> = x1.to_vec();
+    let start: Vec<Vec3> = beams.iter().map(|&(v, j)| {
+        let b = &vehicles[v].beams[j as usize];
+        force(b, x0[v][b.a as usize], x0[v][b.b as usize], pre[v][b.a as usize].1, pre[v][b.b as usize].1)
+    }).collect();
+    let mut avg: Vec<Vec3> = vec![Vec3::ZERO; beams.len()];
     for (v, m) in moved.iter().enumerate() {
         for &i in m {
             x1[v][i as usize] = x0[v][i as usize];
+            vel[v][i as usize] = pre[v][i as usize].1;
         }
     }
     let mut f: Vec<Vec<Vec3>> = x1.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
-    for _ in 0..subs {
+    for s in 0..subs {
+        let t = s as f32 / subs as f32;
+        for (v, m) in moved.iter().enumerate() {
+            for &i in m {
+                f[v][i as usize] = pre[v][i as usize].0;
+            }
+        }
+        for (q, &(v, j)) in beams.iter().enumerate() {
+            let b = &vehicles[v].beams[j as usize];
+            let (a, c) = (b.a as usize, b.b as usize);
+            let pos = |i: usize| if on[v][i] { x1[v][i] } else { path(v, i, t, &x1s) };
+            let vv = |i: usize| if on[v][i] { vel[v][i] } else { (x1s[v][i] - x0[v][i]) / h };
+            let df = force(b, pos(a), pos(c), vv(a), vv(c)) - start[q];
+            avg[q] += df / subs as f32;
+            if on[v][a] {
+                f[v][a] += df;
+            }
+            if on[v][c] {
+                f[v][c] -= df;
+            }
+        }
         for &(r, k) in &springs {
-            // The exact distance of the pair's primitives now (a function of the positions
-            // alone, so ½k(d − dist)² is a potential and its force, −k(d − dist)·∂dist/∂x =
-            // the closest points' signed weights along the unit gap, conserves energy).
             let p = r.k.map(|(v, i)| x1[v][i as usize]);
             let (w, gv) = super::super::ccd::closest(r.nn, p);
             let dist = gv.length();
@@ -214,15 +272,30 @@ pub(super) fn penalty_substeps(recs: &[Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec
             let push = k * (d - dist);
             for j in 0..4 {
                 let (v, i) = r.k[j];
-                f[v][i as usize] += n * (w[j] * push);
+                if on[v][i as usize] {
+                    f[v][i as usize] += n * (w[j] * push);
+                }
             }
         }
         for (v, m) in moved.iter().enumerate() {
             for &i in m {
                 let i = i as usize;
                 vel[v][i] += f[v][i] * (hs * im[v][i]);
-                f[v][i] = Vec3::ZERO;
                 x1[v][i] += vel[v][i] * hs;
+            }
+        }
+    }
+    // The neighbours outside C take back the beams' change, averaged over the step.
+    for (q, &(v, j)) in beams.iter().enumerate() {
+        let b = &vehicles[v].beams[j as usize];
+        for (end, sign) in [(b.a as usize, 1.0f32), (b.b as usize, -1.0)] {
+            if !on[v][end] && im[v][end] > 0.0 {
+                let dv = avg[q] * (sign * h * im[v][end]);
+                vel[v][end] += dv;
+                x1[v][end] += dv * h;
+                if !moved[v].contains(&(end as u32)) {
+                    moved[v].push(end as u32);
+                }
             }
         }
     }

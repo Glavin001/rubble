@@ -535,6 +535,21 @@ slow, and a crashing node's beams are not. Next: the contact nodes and their bea
 together, the neighbours' positions interpolated over the sub-steps (Belytschko's mixed-time
 integration, crash codes' subcycling).
 
+Second version, measured: contact nodes sub-stepped with their linear beams (the change of
+their forces since the step's start), neighbours on their straight path taking back the
+beams' averaged change (momentum kept). Elastic bars, 5 m/s, continuous contact alone:
+
+| sub-steps | 1 | 2 | 4 | 32 | 64 |
+|---|---|---|---|---|---|
+| energy kept (exact 1) | 0.978 | 1.017 | 1.063 | 1.751 | 1.201 |
+
+At one sub-step it is the plain penalty step (the bookkeeping holds); the energy error grows
+with the springs' stiffness over the step's: the resonance instability of multiple-time-step
+integration with a stiff fast force (Ma, Izaguirre and Skeel 2003). Crash codes run contact at
+their global small step rather than sub-stepping it against a long structural step. At 2 kHz
+that leaves: the whole of a crashing group's step at the small step during contact (the
+solver's cost times the sub-steps), or impulse time-stepping (Moreau-Jean).
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

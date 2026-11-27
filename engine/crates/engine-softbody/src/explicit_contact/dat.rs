@@ -379,7 +379,9 @@ fn bounds(ps: impl IntoIterator<Item = Vec3>) -> (Vec3, Vec3) {
 }
 
 /// A step's start: every node's World position and its offset to the paint.
-pub(super) type DatStart = (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>);
+/// The step's start: world positions, contact offsets, and each node's force and velocity
+/// before the node update (subcycled penalty contact's).
+pub(super) type DatStart = (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>, Vec<Vec<(Vec3, Vec3)>>);
 
 impl ExplicitBeamsWorld {
     /// The continuous mode's start of a step: every node's World position (None: off).
@@ -393,13 +395,14 @@ impl ExplicitBeamsWorld {
                 let o = super::edge::contact_offset_vectors(v);
                 if o.is_empty() { vec![Vec3::ZERO; x.len()] } else { o }
             }).collect();
-            (x, o)
+            let pre = if dat.penalty > 0.0 { self.vehicles.iter().map(|v| v.nodes.iter().map(|n| (n.force, n.vel)).collect()).collect() } else { Vec::new() };
+            (x, o, pre)
         })
     }
 
     /// After the node update and the work guard: the planes and the truncation.
     pub(super) fn dat_truncate(&mut self, start: Option<DatStart>) {
-        let (Some((mut x0, mut ov)), Some(dat)) = (start, self.continuous.as_mut()) else {
+        let (Some((mut x0, mut ov, pre)), Some(dat)) = (start, self.continuous.as_mut()) else {
             return;
         };
         let off: Vec<Vec<Vec3>> = if dat.paint { vec![Vec::new(); x0.len()] } else { ov.clone() };
@@ -459,7 +462,7 @@ impl ExplicitBeamsWorld {
         // move over the step again in sub-steps with the pairs' springs ([`passes::penalty_substeps`]).
         if dat.penalty > 0.0 {
             let mut vel: Vec<Vec<Vec3>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
-            let moved = passes::penalty_substeps(&recs, &x0, &mut x1p, &mut vel, &im, dat.penalty, dat.substeps, dat.self_gap);
+            let moved = passes::penalty_substeps(&recs, &x0, &mut x1p, &mut vel, &im, dat.penalty, dat.substeps, dat.self_gap, &self.vehicles, &pre);
             for (v, veh) in self.vehicles.iter_mut().enumerate() {
                 let o = veh.origin;
                 for &i in &moved[v] {
