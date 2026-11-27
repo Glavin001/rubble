@@ -902,6 +902,19 @@ overflow.
 | Head 60 pressed | 5 / 5 mm | 85 s |
 | Ball 100 | 44 / 0 mm | 13 s |
 
+**Newton's law on newly closing rows** (`DAT_E=1 DAT_RESTITUTE=newton`, a measurement, with the
+impact law's guard): J v⁺ ≥ −e·u⁻ only on rows that are true impacts (closing before the kick, no
+row the step before). It is the best variant measured, not adopted:
+
+| Contact's work (2 runs of 0.6 s) | Default (e = 0) | Newton, newly closing |
+|---|---|---|
+| Ball 100 | 17 % | 7–9 % (zones 71–83) |
+| Side 60 | 5 % | 4–6 % (zones 1,111–1,396) |
+| Head 100 | 12–14 % | 7–10 % (rows −219 / −167 kJ, zones +111 / +91 kJ; 4,662–8,030 zones) |
+
+The guard lowered e in 58–231 passes. In head 100 the zones' positive work on the conserved
+energy (+91 to +111 kJ) is the plainest sign that the zones break rule 1 and must be replaced.
+
 **Where the remaining zones form** (head 100, 0.3 s; `CcdStats::zones_relist`): all in the step's
 first solve, none in the response's re-listed solves.
 - Exact solve off: from APGD solves left unsettled.

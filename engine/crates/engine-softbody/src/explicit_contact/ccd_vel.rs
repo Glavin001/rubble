@@ -112,6 +112,9 @@ struct Ctx<'a> {
     im: &'a [Vec<f32>],
     h: f32,
     iters: u32,
+    /// Newton's law on newly closing rows (`DAT_RESTITUTE=newton`, a measurement): J v⁺ ≥ −e·u⁻
+    /// on a row that is a true impact ([`VRow::imp`]), in place of Poisson's form; 0: off.
+    newton_e: f32,
 }
 
 impl Ctx<'_> {
@@ -328,7 +331,7 @@ impl Ctx<'_> {
         // 100 at e = 1, 2026-11-27.)
         let mut rows = Vec::new();
         let done = self.rounds_inner(x1, vel, rounds, st, collide, vpre, warm, &mut rows);
-        if !done || e <= 0.0 {
+        if !done || e <= 0.0 || self.newton_e > 0.0 {
             return done;
         }
         let imp: Vec<VRow> = rows.into_iter().filter(|r| r.imp && r.l > 0.0).collect();
@@ -504,6 +507,9 @@ impl Ctx<'_> {
                 // head 100 cross 7 times, 2026-11-27.)
                 let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: warm.prev.get(&pr.k).copied().unwrap_or(0.0), s0, imp: false };
                 r.imp = !vpre.is_empty() && Self::normal(&r, vpre) < 0.0 && !warm.touched_prev.contains(&pr.k);
+                if self.newton_e > 0.0 && r.imp {
+                    r.b = r.b.min(self.newton_e * Self::normal(&r, vpre));
+                }
                 warm.touched_next.insert(pr.k);
                 match old {
                     Some(i) => {
@@ -543,7 +549,8 @@ impl Ctx<'_> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn velocity_rounds(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: &mut [Vec<Vec3>], im: &[Vec<f32>], h: f32, rounds: u32, st: &mut CcdStats, collide: &dyn Fn(&[Vec<Vec3>]) -> Vec<(usize, f32)>, vpre: &[Vec<Vec3>], e: f32, warm: &mut Warm) -> bool {
     let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(ROW_ITERS);
-    Ctx { pairs, x0, im, h, iters }.rounds(x1, vel, rounds, st, collide, vpre, e, warm)
+    let newton_e = if std::env::var("DAT_RESTITUTE").is_ok_and(|v| v == "newton") { e } else { 0.0 };
+    Ctx { pairs, x0, im, h, iters, newton_e }.rounds(x1, vel, rounds, st, collide, vpre, e, warm)
 }
 
 /// The contact's work m·(v − v_f)·(v⁻ + v)/2 is g(v) − g(v_f), g(v) = ½m(v·(v⁻ − v_f) + |v|²):
