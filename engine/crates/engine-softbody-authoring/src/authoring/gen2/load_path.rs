@@ -72,6 +72,11 @@ pub fn structure(st: &Structure, ph: &Physics) -> Structure {
     if !on(ph) || !step("cells") {
         return out;
     }
+    // (measurement `camry_sections`, with the crush law)
+    if ph.front_rules.crush_law && engine_vehiclegen::physics::crush_cell_exp("camry_sections") {
+        camry_sections(&mut out);
+    }
+    let st = &out.clone();
     let (Some(cb), Some(rail)) = (st.members.iter().find(|m| m.kind == "crash_box"), st.members.iter().find(|m| m.kind == "front_rail")) else { return out };
     let (Some((cw, _)), Some((rw, rh))) = (section(cb), section(rail)) else { return out };
     let mut added = Vec::new();
@@ -105,6 +110,36 @@ pub fn structure(st: &Structure, ph: &Physics) -> Structure {
     }
     out.nodes.extend(added);
     out
+}
+
+/// The measurement `camry_sections` ([`engine_vehiclegen::physics::crush_cell_exp`]): the crash box
+/// and rail at the 2012 Camry's crash zone and mid rail sections (`front-load-path.md` §1.3), the
+/// crash box's top and bottom nodes moved to the deeper section (the drawn rail is not changed).
+fn camry_sections(out: &mut Structure) {
+    let mut dh_box = 0.0;
+    for m in out.members.iter_mut() {
+        match m.kind {
+            "crash_box" => {
+                if let Section::Box { h, .. } = m.section {
+                    dh_box = 0.163 - h;
+                }
+                m.section = Section::Box { w: 0.092, h: 0.163 };
+                m.gauge = 1.70e-3;
+            }
+            "front_rail" => {
+                m.section = Section::Box { w: 0.083, h: 0.145 };
+                m.gauge = 2.06e-3;
+            }
+            _ => {}
+        }
+    }
+    for n in out.nodes.iter_mut() {
+        for (tag, sg) in [("u", 1.0), ("d", -1.0)] {
+            if ["a1", "a2"].iter().any(|stn| ["l", "r"].iter().any(|side| n.name == corner(stn, tag, side))) {
+                n.pos.y += sg * 0.5 * dh_box;
+            }
+        }
+    }
 }
 
 /// The crash-rate factor the character asks for: the section's in `real_crash` (front multiple
@@ -214,8 +249,11 @@ pub fn lattice(st: &Structure, l: &mut Lattice, ph: &Physics) {
             }
             // the chords take what the diagonals leave of the section's force
             let chord = (target - diag_axial) / 4.0;
+            // (measurement `chord_k`, with the crush law: the chords start the budget at 4 × the
+            // zone's spring)
+            let km = if ph.front_rules.crush_law && engine_vehiclegen::physics::crush_cell_exp("chord_k") { 4.0 } else { 1.0 };
             for x in 0..4 {
-                l.beams.push(ShellBeam { a: f[x], b: r[x], class: Class::Edge, zone, k: kk, c, deform: chord, limit_expansion: lim });
+                l.beams.push(ShellBeam { a: f[x], b: r[x], class: Class::Edge, zone, k: kk * km, c, deform: chord, limit_expansion: lim });
             }
             if log {
                 eprintln!("load path {s}: bay {kind} {:.3} m, target {:.1} kN, diagonals' axial {:.1} kN, chords 4 × {:.1} kN", z(fi) - z(ri), target / 1e3, diag_axial / 1e3, chord / 1e3);

@@ -1215,8 +1215,31 @@ front is connected and design the load path. Full account: [front-load-path.md](
 - **(Measurement) Hard rules**: S08 edge creates 1.45 kJ in 1 of 8 runs and S12 continuous 107 J in
   1 of 8 (bars 340 and 89 J): **off by default**.
 
+## 28. A lattice rail buckles before it folds (2026-11-27, `crash-ref/rail-content`)
+
+Full account: [beam-yield-law.md](beam-yield-law.md) §9 (`front_fold`, `tools/beam-law/fold.sh`).
+
+- **(Measurement)** With load path + crush law, no crush cell yields in any mode in S11 or S12:
+  the rail's moment at `a4` reaches 11 % of its collapse moment, its axial force 38 % of its peak.
+  The bays shear, turn and yaw elastically (span −0.07 to −0.26 m, chords within 2 cm of rest);
+  the subframe's load at `a4` is moderate (20–46 kN). The §27/§5.3 hypothesis (a bending hinge at
+  the subframe station) is refuted.
+- **(Rule, not a fix) Judge a lattice member by its stiffness against its strength**, not by its
+  strength alone: the elastic rotation to its collapse moment, M_c/(k·h²), and its shortening to its
+  peak, P/k, must be small (a steel rail: 0.02 rad, 0.6 mm). The sedan's rail cell: 0.9 rad and
+  52 mm, because the chords' k (1.3 MN/m, set by the 2 kHz node budget) is 69 × below E·A/4/L. A
+  member whose lattice buckles as a whole below its crush force will not fold whatever its yield
+  law; check this before tuning yields.
+- **(Measurement) What content cannot do**: Camry sections (the moment and the lever grow
+  together), the chords' share of the budget (k × 2 at most), compression-strong face diagonals
+  (the bays then turn whole), no first-buckle peak (the boxes fold 4–5 cm, still turn): none folds a
+  rail bay. The rear rail as cells was not built (no nodes behind `a5`; it cannot change the
+  above). Folding needs a solver or cost decision (implicit cell modes, sub-stepping, or heavier
+  or more stations).
+
 ## Changelog
 
+- 2026-11-27: section 28, the lattice rail buckles before it folds (measured mode by mode; content does not reach it).
 - 2026-11-27: section 27, the front load path read off the Camry and built behind one switch (measured; the cells turn; off).
 - 2026-11-27: section 26, the crash box as a closed cell (built, measured: it still turns; the six rules again; stroke options; defaults).
 - 2026-11-27: section 25, the front crash structure's rules (six switches, measured alone and together; defaults; the crash box's planar cell).
