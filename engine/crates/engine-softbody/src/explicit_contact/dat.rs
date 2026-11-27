@@ -20,6 +20,9 @@
 //! clamped: the step is then not covered, and the count says so.
 
 use super::ExplicitBeamsWorld;
+#[path = "dat_passes.rs"]
+mod passes;
+use passes::{separate, speculative};
 use crate::explicit_beams::{ExplicitBeams, NODE_IMMOVABLE, STEP};
 use engine_schema::feature_query as fq;
 use glam::Vec3;
@@ -52,6 +55,12 @@ pub struct Dat {
     /// The impact law's restitution e (Moreau: v⁺ = v_p + e·(v_p − v⁻) over the response's
     /// velocity change; [`CONTACT_RESTITUTION`]; `DAT_E` measures another, [`restitute`]).
     pub restitution: f32,
+    /// Penalty contact's stiffness scale (0: off; `DAT_PENALTY`): each pair under its thickness a
+    /// spring k = scale·m/h² (m the pair's lightest node, the soft-constraint stiffness of
+    /// explicit crash codes), forces in the beam pass; the CCD then only keeps the collision
+    /// mesh from crossing (gap `min_gap`), and the speculative pass is off.
+    pub penalty: f32,
+    pub penalty_f: Vec<Vec<Vec3>>,
     pub min_gap: f32,
     /// A car against itself too (`DAT_SELF=0`: only car against car).
     pub self_contact: bool,
@@ -169,7 +178,7 @@ impl Dat {
     }
 
     pub fn new(r_q: f32, gamma: f32) -> Self {
-        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
+        Self { r_q, gamma, iters: std::env::var("DAT_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8), paint: false, self_contact: true, enforce: false, ccd_rounds: 8, zone_rounds: std::env::var("DAT_ZONES").ok().and_then(|v| v.parse().ok()).unwrap_or(16), penalty: std::env::var("DAT_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), penalty_f: Vec::new(), restitution: std::env::var("DAT_E").ok().and_then(|v| v.parse().ok()).unwrap_or(super::restitute::CONTACT_RESTITUTION), soft_zones: std::env::var("DAT_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(0), min_gap: 0.0005, self_gap: 0.002, beta: 0.0, who: std::env::var("DAT_WHO").is_ok_and(|v| v == "1").then(HashMap::new), checked: Vec::new(), near: Vec::new(), keys: None, first: Vec::new(), last: DatStats::default(), total: DatStats { min_t: 1.0, min_gap: f32::MAX, ..Default::default() } }
     }
 }
 
@@ -292,157 +301,6 @@ impl Rec {
     }
 }
 
-/// The speculative inelastic contact: Jacobi with mass splitting over the pairs, `iters`
-/// rounds, on velocities. Each pair's closing speed along its normal is cut to what
-/// brings its gap to its paint thickness by the step's end (to zero closing speed when it
-/// is already closer): an inelastic impulse by the nodes' inverse masses, so momentum
-/// passes to the struck side. It removes approach and never adds separation. Each change
-/// of velocity moves the node by h times it (as the node update would have).
-fn speculative(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32) {
-    if std::env::var("DAT_RESPONSE").is_ok_and(|x| x == "rows") {
-        return speculative_rows(recs, v, im);
-    }
-    let h = STEP;
-    // Mass splitting (Tonge et al. 2012): a node's inverse mass is shared by its active pairs
-    // in each pair's effective mass, and each pair's impulse is applied in full, equal and
-    // opposite on its two sides: momentum is exact.
-    let mut count: Vec<Vec<u32>> = v.iter().map(|x| vec![0; x.len()]).collect();
-    for _ in 0..iters {
-        let act: Vec<(&Rec, f32)> = recs
-            .iter()
-            .filter_map(|&r| {
-                let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
-                let c = rel + (r.g - r.d).max(0.0) / h;
-                (c < 0.0).then_some((r, c))
-            })
-            .collect();
-        if act.is_empty() {
-            break;
-        }
-        for &(r, _) in &act {
-            for j in 0..r.len {
-                let (q, i) = r.k[j];
-                if r.w[j] > 0.0 && im[q][i as usize] > 0.0 {
-                    count[q][i as usize] += 1;
-                }
-            }
-        }
-        let mut sums = super::ccd::FixedSums::new(v);
-        for &(r, c) in &act {
-            let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize] * count[r.k[j].0][r.k[j].1 as usize] as f32).sum();
-            if wsum <= 0.0 {
-                continue;
-            }
-            let l = -c / wsum;
-            for j in 0..r.len {
-                let (q, i) = r.k[j];
-                let m = im[q][i as usize];
-                if m > 0.0 && r.w[j] > 0.0 {
-                    sums.add_v(q, i, r.n * (r.sign(j) * r.w[j] * m * l));
-                }
-            }
-        }
-        sums.apply(v, None);
-        for c in count.iter_mut() {
-            c.iter_mut().for_each(|c| *c = 0);
-        }
-    }
-}
-
-/// [`speculative`] as rows with accumulated impulses (`DAT_RESPONSE=rows`; design C): each
-/// pair's λ ≥ 0 moves to where its constraint (closing speed no more than brings its gap to its
-/// thickness by the step's end) would hold with its nodes shared among all the pairs, projected
-/// Jacobi to a fixed point (at most `ccd_rows::ROW_ITERS`), so the velocities end on the
-/// mass-weighted projection, not on whatever the rounds reached.
-fn speculative_rows(recs: &[&Rec], v: &mut [Vec<Vec3>], im: &[Vec<f32>]) {
-    let h = STEP;
-    let iters = std::env::var("DAT_ROW_ITERS").ok().and_then(|x| x.parse().ok()).unwrap_or(super::ccd_rows::ROW_ITERS);
-    let mut count: Vec<Vec<u32>> = v.iter().map(|x| vec![0; x.len()]).collect();
-    for r in recs {
-        for j in 0..r.len {
-            let (q, i) = r.k[j];
-            if r.w[j] > 0.0 && im[q][i as usize] > 0.0 {
-                count[q][i as usize] += 1;
-            }
-        }
-    }
-    let d: Vec<f32> = recs.iter().map(|r| (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize] * count[r.k[j].0][r.k[j].1 as usize] as f32).sum()).collect();
-    let mut lam = vec![0.0f32; recs.len()];
-    let mut sums = super::ccd::FixedSums::new(v);
-    for _ in 0..iters {
-        let mut changed = false;
-        for (q, r) in recs.iter().enumerate() {
-            if d[q] <= 0.0 {
-                continue;
-            }
-            let rel: f32 = (0..r.len).map(|j| r.sign(j) * r.w[j] * v[r.k[j].0][r.k[j].1 as usize].dot(r.n)).sum();
-            let c = rel + (r.g - r.d).max(0.0) / h;
-            let l = (lam[q] - c / d[q]).max(0.0);
-            let dl = l - lam[q];
-            if dl == 0.0 {
-                continue;
-            }
-            changed = true;
-            lam[q] = l;
-            for j in 0..r.len {
-                let (k, i) = r.k[j];
-                let m = im[k][i as usize];
-                if m > 0.0 && r.w[j] > 0.0 {
-                    sums.add_v(k, i, r.n * (r.sign(j) * r.w[j] * m * dl));
-                }
-            }
-        }
-        sums.apply(v, None);
-        if !changed {
-            break;
-        }
-    }
-}
-
-/// The split correction (Box2D's and Bullet's split impulse): pairs whose paint overlaps
-/// at the step's end (gap below their thickness) are moved apart by `beta` of the overlap,
-/// positions only, Jacobi with mass splitting, `iters` rounds. No velocity changes, so no
-/// kinetic energy is added; the truncation that follows keeps the node mesh uncrossed.
-fn separate(recs: &[&Rec], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], im: &[Vec<f32>], iters: u32, beta: f32) {
-    let mut acc: Vec<Vec<(Vec3, u32)>> = x1.iter().map(|x| vec![(Vec3::ZERO, 0); x.len()]).collect();
-    for _ in 0..iters {
-        let mut any = false;
-        for &r in recs {
-            let dx = |j: usize| x1[r.k[j].0][r.k[j].1 as usize] - x0[r.k[j].0][r.k[j].1 as usize];
-            let gap = r.g + (0..r.len).map(|j| r.sign(j) * r.w[j] * dx(j).dot(r.n)).sum::<f32>();
-            let c = gap - r.d;
-            if c >= 0.0 {
-                continue;
-            }
-            let wsum: f32 = (0..r.len).map(|j| r.w[j] * r.w[j] * im[r.k[j].0][r.k[j].1 as usize]).sum();
-            if wsum <= 0.0 {
-                continue;
-            }
-            let l = -c * beta / wsum;
-            for j in 0..r.len {
-                let (q, i) = r.k[j];
-                let m = im[q][i as usize];
-                if m > 0.0 && r.w[j] > 0.0 {
-                    let e = &mut acc[q][i as usize];
-                    e.0 += r.n * (r.sign(j) * r.w[j] * m * l);
-                    e.1 += 1;
-                    any = true;
-                }
-            }
-        }
-        if !any {
-            break;
-        }
-        for (x, a) in x1.iter_mut().zip(acc.iter_mut()) {
-            for (p, e) in x.iter_mut().zip(a.iter_mut()) {
-                if e.1 > 0 {
-                    *p += e.0 / e.1 as f32;
-                    *e = (Vec3::ZERO, 0);
-                }
-            }
-        }
-    }
-}
 
 struct Pass<'a> {
     x0: &'a [Vec<Vec3>],
@@ -595,6 +453,13 @@ impl ExplicitBeamsWorld {
         let refs: Vec<(Vec3, Vec3)> = (0..x0.len()).map(|v| (dx(v, 0), vel(v, 0))).collect();
         let mut own_reach = vec![0.0f32; x0.len()];
         let mut recs = list_pairs(dat, &x0, &surf, &off, &reach_v, &refs, &mut own_reach, &mut st);
+        // Penalty contact (`DAT_PENALTY`): the pairs' springs at this step's end positions, the
+        // forces the beam pass's sum takes next ([`ExplicitBeamsWorld::apply_penalty`]).
+        if dat.penalty > 0.0 {
+            let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();
+            let im0: Vec<Vec<f32>> = self.vehicles.iter().map(|v| (0..v.nodes.len()).map(|i| if v.nodes[i].has(NODE_IMMOVABLE) || v.is_retired(i) { 0.0 } else { 1.0 }).collect()).collect();
+            dat.penalty_f = passes::penalty_forces(&recs, &x0, &x1p, &m, &im0, dat.penalty);
+        }
         // How far each node can close on anything this step (its step, or its speed times h,
         // whichever is longer: the speculative pass works on speeds). A pair whose two sides
         // together cannot cover its gap cannot meet and is left out of either pass.
@@ -609,7 +474,7 @@ impl ExplicitBeamsWorld {
         };
         let v0: Vec<Vec<Vec3>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.vel).collect()).collect();
         let mut shift: Vec<Vec<Vec3>> = x0.iter().map(|x| vec![Vec3::ZERO; x.len()]).collect();
-        if dat.iters > 0 {
+        if dat.iters > 0 && dat.penalty == 0.0 {
             let q = reach(&x1, &v0);
             let near: Vec<&Rec> = recs.iter().filter(|r| r.g - r.d < side(r, &q, true) + side(r, &q, false)).collect();
             let mut v1 = v0.clone();
@@ -646,7 +511,7 @@ impl ExplicitBeamsWorld {
             let pairs: Vec<super::ccd::CcdPair> = recs
                 .iter()
                 .filter(|r| r.len == 4 && r.g - r.d < 2.0 * (side(r, &q, true) + side(r, &q, false)))
-                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: (xi_share() * r.d).max(dat.min_gap) })
+                .map(|r| super::ccd::CcdPair { k: r.k, nn: r.nn, xi: if dat.penalty > 0.0 { dat.min_gap } else { (xi_share() * r.d).max(dat.min_gap) } })
                 .collect();
             st.pairs_ccd = pairs.len() as u64;
             let m: Vec<Vec<f32>> = self.vehicles.iter().map(|v| v.nodes.iter().map(|n| n.mass).collect()).collect();

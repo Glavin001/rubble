@@ -495,6 +495,25 @@ e = 1): the rows rebuild every node's change from all rows' whole impulses each 
   velocities with positions following them (x1 = x0 + h·v), or as forces in the node update
   (explicit crash codes' penalty contact). Either is energy-consistent by construction.
 
+## Penalty contact at 2 kHz, measured (2026-11-26, `DAT_PENALTY`, off)
+
+Explicit crash codes' soft-constraint contact: a spring k = scale·m/h² for each pair under its
+thickness, forces in the beam pass, the CCD only as a backstop at `min_gap`, no speculative pass.
+On the elastic bars (`tests/contact_known_solutions.rs`, exact answer: energy kept):
+
+| scale | energy kept | CCD impacts (backstop) | zones |
+|---|---|---|---|
+| 0.05 | 1.024 (created) | 439 | 6 |
+| 0.1 | 0.972 | 209 | 1 |
+| 0.5 | unstable (a node in several pairs: their springs add past the step's bound) | | |
+
+The springs do not stop the bars before the backstop does, and the backstop is the old
+position-stepping response, so its energy errors return. The limit is the step: an explicit
+spring is stable up to about m/h², so at h = 0.5 ms a contact spring lets surfaces sink about
+1 cm at 10 m/s and several cm at crash speeds. Crash codes (LS-DYNA) run h ≈ 1 µs, which allows
+springs ~10⁵ times stiffer. At 2 kHz penalty contact needs centimetres of sinking (a cushion,
+ruled out) or the backstop doing the work.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the

@@ -538,6 +538,7 @@ impl ExplicitBeamsWorld {
             for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
                 v.step_rest();
             }
+            self.apply_penalty();
             self.steps += 1;
             if self.contact && nv > 1 {
                 self.skip = self.vehicles.iter().map(|v| v.sleep.asleep).collect();
@@ -583,6 +584,7 @@ impl ExplicitBeamsWorld {
             for v in &mut self.vehicles {
                 v.step_rest();
             }
+            self.apply_penalty();
             self.steps += 1;
             if self.contact && self.vehicles.len() > 1 {
                 self.contact_pass();
@@ -612,6 +614,7 @@ impl ExplicitBeamsWorld {
             v.step_rest();
             ledger.account(k, v, &before[k]);
         }
+        self.apply_penalty();
         self.steps += 1;
         ledger.vc_reset(&self.vehicles);
         self.ledger = Some(ledger);
@@ -1731,6 +1734,23 @@ impl ExplicitBeamsWorld {
             let de = mech(self) - e0;
             if let Some(d) = self.continuous.as_mut() {
                 d.total.contact_de += de;
+            }
+        }
+    }
+}
+
+
+impl ExplicitBeamsWorld {
+    /// Penalty contact's forces (`Dat::penalty`), into the vehicles' forces after their beam
+    /// pass, so the next node update integrates them with the beams' (symplectic Euler).
+    fn apply_penalty(&mut self) {
+        let Some(d) = self.continuous.as_mut() else { return };
+        if d.penalty_f.is_empty() {
+            return;
+        }
+        for (v, f) in self.vehicles.iter_mut().zip(std::mem::take(&mut d.penalty_f)) {
+            for (n, f) in v.nodes.iter_mut().zip(f) {
+                n.force += f;
             }
         }
     }

@@ -129,6 +129,8 @@ fn bars_head_on(v: f32) -> (f64, f64, f64) {
             ke + pe + g
         }).sum()
     };
+    let c = w.continuous.as_ref().unwrap().total;
+    println!("| contact | CCD impacts {}, zones {}, unresolved {}, speculative KE {:.1} J |", c.ccd.hits, c.ccd.zones, c.ccd.unresolved, c.spec_ke);
     println!("| by hand | mechanical now {:.1} J, start {:.1} J (ledger {:.1} -> {:.1}) |", own(&w), own0, e0, l.mechanical());
     let (_, va) = motion(&w.vehicles[0]);
     let (_, vb) = motion(&w.vehicles[1]);
