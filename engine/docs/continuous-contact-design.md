@@ -660,6 +660,45 @@ the integrator steps, so it is a design decision, measured on the elastic bars a
 suite before adoption. Also: a bound on the fixed-point sums' range, so an overflow is an error,
 not wrapped garbage.
 
+## Velocity contact: the band passes off, warm starts, a safe preconditioner (2026-11-27, later)
+
+**Correction to the section above.** The mismatch between end positions and velocities was not
+centred damping: its correction moves positions too. It was the older contact passes'
+position-only steps, `shift_applied` (§37 dissipative contact).
+
+What changed:
+- With velocity contact on, the band passes it covers are off: vehicle contact, and each car's
+  self collision. Kept on with their own band passes: surface contact, ground, static colliders,
+  rigid proxies. Without their position steps, the band passes' forces only dissipate: the
+  elastic bars kept 12 % of their energy.
+- Warm starts: each pressed pair starts the step from last step's impulse. Impacts are not
+  seeded: their impulse seeded into the next step overflowed the sums.
+- APGD's preconditioner is Gershgorin's bound, so D ⪰ A. Mass splitting fell under A with
+  barycentric weights, and the accelerated steps diverged on 744 rows.
+- Impulse sums are 64-bit fixed point. The 32-bit sums wrapped 902 times at head-on 130.
+- Over-push is judged by its work, λ·excess ≤ 10 µJ.
+
+Elastic bars with every pass on, velocity contact at e = 1: kept 0.989 at 1 m/s, 0.996 at 5 m/s,
+none created; rebound 0.89 / 0.90.
+
+Generated sedan, e = 1:
+
+| Scene | Crossings | Zones | Momentum (N·s) | Contact's work |
+|---|---|---|---|---|
+| Side 60 | 0 | 737 | 1e-4 | −2.9 % |
+| Head 100 | 0 | 2,910 | 7e-4 | −11.5 % |
+| Head 130 | 0 | 5,219 | 2e-3 | |
+| Offset 100 | 0 | 1,277 | 1.5e-3 | |
+| Ball 100 | 0 | 119 | | |
+
+Open:
+- The rows on a crushed front converge slowly. One impact row shared its nodes with 88 others
+  and overshot its bound by 0.07 % after 1,000 iterations. The rigid zones that catch these
+  steps are the energy sink: −11.5 % at head 100, against ≤ 5 %. Next: a solver for dense,
+  redundant clusters (a block solve per node cluster, or removing exactly duplicate rows).
+- Ball 100: the ball's centre comes 136 mm inside the door's paint, against 17 mm in the
+  default mode. Next: surface contact's position steps against the velocity rows.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
