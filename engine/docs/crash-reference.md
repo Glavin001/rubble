@@ -24,6 +24,14 @@ takes. The same definition, sampling, metrics and criteria run everywhere:
 
 `--json` reports carry the run's time histories (`series`, section 4.1) beside the metrics.
 
+The crash lab's panels (`crash-lab-ui.mjs`, one responsibility each): **Scene** (Shift+S:
+the scene picker, a reference crash's contact and run), **View** (Shift+V: the scenario's
+cameras with the lab's, drawing options, grab), **Playback** (Shift+P: time) and **Results**
+(Shift+R: the criteria, collapsed to a one-line summary; values arrive when the run ends).
+H (or the bar's "focus") hides them all: the recorders' `clean=1` frame. Their layout at
+800 to 1920 px is checked by `crash-lab-ui-check.mjs --case S05|S02|wall56` (screenshots
+and overlap checks to `out/lab-ui/`).
+
 In the browser the page sends the id; `engine-world-wasm` (`src/crash_ref.rs`) builds the
 fleet with `CrashScenario::build`, reads the GPU state at every sample step and judges the
 `CrashReport` with the same recorder. The generated designs' templates come from their mod

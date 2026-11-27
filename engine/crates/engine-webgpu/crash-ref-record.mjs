@@ -157,7 +157,8 @@ try {
   const report = await evaluate('window.__crashRef.report()');
   if (!report) throw new Error('no report: the run did not complete its samples');
   writeFileSync(join(OUT, 'report.json'), JSON.stringify(report, null, 1));
-  await L('(L.lab.setClean(false), true)');
+  // panel.png: the criteria, the Results panel open (it starts collapsed to its summary).
+  await L('(L.lab.setClean(false), L.lab.ui?.open("results", true), true)');
   for (let i = 0; i < 3; i++) await L('L.draw()');
   await shot('panel.png');
   if (VIDEO && frames.length) {

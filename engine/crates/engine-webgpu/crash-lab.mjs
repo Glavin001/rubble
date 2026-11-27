@@ -10,6 +10,7 @@
 // (crash-lab-render.mjs).
 
 import { COLOR_MODES, SKIN_MODES, PART_COLORS, partCss, strainGradientCss } from './crash-lab-render.mjs';
+import { createLabLayout } from './crash-lab-ui.mjs';
 
 /** One-click presets: the explicit scene, its fields (XPARAMS keys), pills, camera. */
 export const LAB_PRESETS = {
@@ -74,23 +75,11 @@ const CSS = `
 #labLegend .bar { width: 170px; height: 10px; border-radius: 5px; }
 #labLegend .chip { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; }
 #labLegend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-#labPanel { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(980px, calc(100vw - 32px)); background: rgba(10, 16, 30, 0.82); border: 1px solid rgba(160, 190, 255, 0.16); border-radius: 10px; padding: 8px 10px; font: 12px/1.4 system-ui, sans-serif; color: #dfe6f3; backdrop-filter: blur(8px); }
-#labPanel .r { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 3px 0; }
-#labPanel button, #labPanel select { background: #18233a; color: #e6ecf7; border: 1px solid #2c3b5c; border-radius: 6px; padding: 3px 8px; font: inherit; cursor: pointer; }
-#labPanel button:hover { background: #22324f; }
-#labPanel button.on { background: #2b4f8a; border-color: #4a78c4; }
-#labPanel label { color: #9fb0cf; }
-#labPanel input[type=range] { vertical-align: middle; }
-#labPanel .sep { width: 1px; height: 18px; background: #2c3b5c; margin: 0 4px; }
-#labScrub { flex: 1; min-width: 200px; }
+#labScrub { flex: 1; min-width: 120px; }
+#labPanel .sep { width: 1px; height: 18px; background: #2c3b5c; margin: 0 2px; }
 #labPanel .tag { color: #ffcf5a; font-weight: 700; letter-spacing: 0.1em; }
+#labPanel .tag:empty { display: none; }
 .lab-clean #info, .lab-clean #hud, .lab-clean #status, .lab-clean #labPanel { display: none !important; }
-body.lab-on #hud { top: 118px; }
-body.lab-on #info { top: auto; bottom: 118px; max-width: 360px; font-size: 12px; opacity: 0.92; }
-body.lab-on #infoText, body.lab-on #xkeys { display: none !important; }
-body.lab-on #status { display: none; }
-body.lab-on:not(.lab-clean) #labCounts, body.lab-on:not(.lab-clean) #labLegend { bottom: 118px; }
-body.lab-on:not(.lab-clean) #labCounts { left: auto; right: 22px; bottom: 146px; text-align: right; font-size: 20px; }
 `;
 
 /**
@@ -121,6 +110,7 @@ export function createCrashLab(ctx) {
   const timeEl = el('<div class="lab-ui" id="labTime"><div class="big">0 ms</div><div class="sub"></div></div>');
   const countsEl = el('<div class="lab-ui" id="labCounts"></div>');
   const legendEl = el('<div class="lab-ui" id="labLegend"></div>');
+  const ui = createLabLayout({ pills: pillsEl, time: timeEl, counts: countsEl, legend: legendEl, focus: () => st.clean, setFocus: (on) => setClean(on) });
   const preset = ctx.preset ? LAB_PRESETS[ctx.preset] : null;
   // 'body' only when the page draws an authored body (ctx.body).
   const skinModes = ctx.body ? SKIN_MODES : SKIN_MODES.filter((m) => m !== 'body');
@@ -162,40 +152,55 @@ export function createCrashLab(ctx) {
   });
   if (st.clean) document.body.classList.add('lab-clean');
 
-  // ---------------------------------------------------------------- panel
-  const panel = el(`<div id="labPanel">
-    <div class="r">
-      <select id="labPreset" title="Scene: a crash-test preset or any explicit scene (its knobs are in the side panel)">${ctx.refs?.length ? `<optgroup label="Reference crashes">${ctx.refs.map((r) => `<option value="r:${r.id}"${r.id === ctx.refId ? ' selected' : ''}>${r.id} · ${r.title}</option>`).join('')}</optgroup>` : ''}<optgroup label="Crash-test presets">${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="p:${k}"${k === ctx.preset && !ctx.refId ? ' selected' : ''}>${p.label}</option>`).join('')}</optgroup><optgroup label="Scenes">${Object.entries(ctx.scenes ?? {}).map(([k, t]) => `<option value="s:${k}"${!ctx.preset && !ctx.refId && k === ctx.xscene ? ' selected' : ''}>${t.replace(/^Explicit: (.)/, (_, c) => c.toUpperCase())}</option>`).join('')}</optgroup></select>
+  // ---------------------------------------------------------------- panels
+  // The layout (crash-lab-ui.mjs: each panel's one responsibility): the scene picker in
+  // Scene, time in Playback, how it is drawn and from where in View. The page and
+  // crash-ref.mjs add theirs (lab.ui.bodies).
+  const sceneOpts = `${ctx.refs?.length ? `<optgroup label="Reference crashes">${ctx.refs.map((r) => `<option value="r:${r.id}"${r.id === ctx.refId ? ' selected' : ''}>${r.id} · ${r.title}</option>`).join('')}</optgroup>` : ''}<optgroup label="Crash-test presets">${Object.entries(LAB_PRESETS).map(([k, p]) => `<option value="p:${k}"${k === ctx.preset && !ctx.refId ? ' selected' : ''}>${p.label}</option>`).join('')}</optgroup><optgroup label="Scenes">${Object.entries(ctx.scenes ?? {}).map(([k, t]) => `<option value="s:${k}"${!ctx.preset && !ctx.refId && k === ctx.xscene ? ' selected' : ''}>${t.replace(/^Explicit: (.)/, (_, c) => c.toUpperCase())}</option>`).join('')}</optgroup>`;
+  const into = (parent, html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); parent.append(...t.content.childNodes); };
+  into(ui.bodies.scene, `<div class="r"><select id="labPreset" aria-label="Scene" title="What is simulated: a reference crash, a crash-test preset or any explicit scene (its knobs below)">${sceneOpts}</select></div>`);
+  into(ui.bodies.playback, `<div class="r">
+      <button id="labRestart" title="Restart the run (R)" aria-keyshortcuts="R">restart</button>
+      <button id="labPlay" title="Play or pause (Space)" aria-keyshortcuts="Space">pause</button>
+      <button id="labFrame" title="One displayed frame (.)" aria-keyshortcuts=".">frame ▸</button>
+      <button id="labStep" title="One 0.5 ms physics step (,)" aria-keyshortcuts=",">step ▸</button>
       <span class="sep"></span>
-      <button id="labPlay" title="Space">pause</button>
-      <button id="labFrame" title="One displayed frame (.)">frame ▸</button>
-      <button id="labStep" title="One 0.5 ms physics step (,)">step ▸</button>
-      <button id="labRestart" title="R">restart</button>
-      <label>slow</label><select id="labSlow">${['auto', ...SLOW].map((s) => `<option value="${s}">${s === 'auto' ? 'auto (1x → 20x at impact)' : s === 1 ? '1x (real time)' : `${s}x slower`}</option>`).join('')}</select>
+      <label for="labSlow">slow</label><select id="labSlow">${['auto', ...SLOW].map((s) => `<option value="${s}">${s === 'auto' ? 'auto (1x → 20x at impact)' : s === 1 ? '1x (real time)' : `${s}x slower`}</option>`).join('')}</select>
       <span class="sep"></span>
-      <input id="labScrub" type="range" min="0" max="0" value="0" step="1" title="Recorded run: drag to scrub back" />
+      <input id="labScrub" type="range" min="0" max="0" value="0" step="1" aria-label="Recorded run" title="Recorded run: drag to scrub back" />
       <button id="labLive" title="Back to the live simulation">live</button>
       <span id="labReplayTag" class="tag"></span>
+      <span class="sep"></span>
+      <button id="labClean" title="Focus: hide every panel, keep the view and the clock (H; Esc leaves)" aria-keyshortcuts="H">focus</button>
+    </div>`);
+  // The one camera group: the scene's own cameras (a reference crash's), the presets, the
+  // chase, auto-orbit; the page adds its car-relative views (#labCamMore).
+  const refCams = Object.keys(ctx.cams ?? {});
+  into(ui.bodies.view, `<div role="group" aria-label="Camera" id="labCams">
+    ${refCams.length ? `<div class="r"><span class="lbl" title="The reference crash's own cameras">scenario</span>${refCams.map((c) => `<button data-cam="${c}" title="The scenario's own camera (fixed)">${c.replace(/^ref:/, '')}</button>`).join('')}</div>` : ''}
+    <div class="r"><span class="lbl" title="Cameras that follow the vehicles">camera</span>
+      ${['side', 'top', 'three', 'front'].map((c, i) => `<button data-cam="${c}" title="${c === 'three' ? 'Three-quarter' : c[0].toUpperCase() + c.slice(1)} view, following the vehicles (${i + 1})" aria-keyshortcuts="${i + 1}">${c === 'three' ? '¾' : c}</button>`).join('')}
+      <button id="labFollow" title="Chase the vehicle (5)" aria-keyshortcuts="5">follow</button>
+      <button id="labSpin" title="Orbit slowly around the subject (O)" aria-keyshortcuts="O">auto-orbit</button>
     </div>
-    <div class="r">
-      <button id="labSkel" title="K">skeleton</button>
-      <button id="labNodes" title="N">nodes</button>
-      <button id="labStubs" title="broken-beam stubs">stubs</button>
-      <label>colour</label><select id="labColor">${COLOR_MODES.map((m) => `<option>${m}</option>`).join('')}</select>
-      <label>skin</label><select id="labSkin">${skinModes.map((m) => `<option>${m}</option>`).join('')}</select>
-      <button id="labStudio">studio</button>
-      <span class="sep"></span>
-      <label>camera</label>${['side', 'top', 'three', 'front'].map((c) => `<button data-cam="${c}">${c === 'three' ? '¾' : c}</button>`).join('')}<button id="labFollow">follow</button><button id="labSpin" title="O">orbit</button>
-      <span class="sep"></span>
-      <button id="labGrab" title="G, or Ctrl+drag a node">grab</button>
-      <label>strength</label><input id="labGrabK" type="range" min="3" max="6.5" step="0.05" />
+    <div class="r" id="labCamMore"><span class="lbl" title="Cameras on the vehicle">on car</span></div>
+    </div>
+    <div class="r"><span class="lbl">draw</span>
+      <button id="labSkel" title="The beams (K or V)" aria-keyshortcuts="K">skeleton</button>
+      <button id="labNodes" title="The nodes (N)" aria-keyshortcuts="N">nodes</button>
+      <button id="labStubs" title="Broken-beam stubs">stubs</button>
+      <button id="labStudio" title="The studio floor and backdrop">studio</button>
+    </div>
+    <div class="r"><label class="lbl" for="labColor">colour</label><select id="labColor" title="Beam colour (B cycles)">${COLOR_MODES.map((m) => `<option>${m}</option>`).join('')}</select>
+      <label for="labSkin">skin</label><select id="labSkin" title="The body drawn (M cycles)">${skinModes.map((m) => `<option>${m}</option>`).join('')}</select></div>
+    <div class="r"><span class="lbl">grab</span>
+      <button id="labGrab" title="Drag a node on a spring (G, or Ctrl+drag a node)" aria-keyshortcuts="G">grab</button>
+      <label for="labGrabK">strength</label><input id="labGrabK" type="range" min="3" max="6.5" step="0.05" style="width:90px" />
       <span id="labGrabKv"></span>
-      <span class="sep"></span>
-      <button id="labClean" title="H: hide the panels (recording)">clean</button>
-    </div>
-  </div>`);
+    </div>`);
+  const view = ui.bodies.view;
   const $ = (id) => document.getElementById(id);
-  const toggle = (b, on) => b.classList.toggle('on', !!on);
+  const toggle = (b, on) => { b.classList.toggle('on', !!on); if (b.tagName === 'BUTTON') b.setAttribute('aria-pressed', String(!!on)); };
   const syncPanel = () => {
     $('labPlay').textContent = st.paused || st.replay >= 0 ? 'play ▶' : 'pause ❚❚';
     $('labSlow').value = st.auto ? 'auto' : String(st.slow);
@@ -203,15 +208,23 @@ export function createCrashLab(ctx) {
     toggle($('labSkel'), o.skeleton); toggle($('labNodes'), o.nodes); toggle($('labStubs'), o.stubs); toggle($('labStudio'), o.studio);
     $('labColor').value = o.colorMode; $('labSkin').value = o.skin;
     toggle($('labGrab'), st.grabTool); toggle($('labSpin'), st.spin);
-    for (const b of panel.querySelectorAll('[data-cam]')) toggle(b, b.dataset.cam === st.cam);
-    toggle($('labFollow'), st.cam === 'follow');
+    // The active camera: a preset or a scenario camera while the page orbits, follow while
+    // it chases (the page's car-relative views mark their own select).
+    const mode = ctx.camMode?.() ?? (st.cam === 'follow' ? 'chase' : 'orbit');
+    for (const b of view.querySelectorAll('[data-cam]')) toggle(b, mode === 'orbit' && b.dataset.cam === st.cam);
+    toggle($('labFollow'), mode === 'chase');
     $('labGrabK').value = Math.log10(st.grabK);
     $('labGrabKv').textContent = `${st.grabK >= 1e6 ? (st.grabK / 1e6).toFixed(1) + ' MN/m' : (st.grabK / 1e3).toFixed(0) + ' kN/m'}`;
     $('labReplayTag').textContent = st.replay >= 0 ? 'REPLAY' : '';
     pills();
     legend();
   };
-  const blur = (e) => e?.target?.blur?.();
+  // After a click the shortcuts go back to the page (a focused control keeps its own
+  // keys); a control reached by the keyboard keeps the focus.
+  let pointerAt = -1e9;
+  addEventListener('pointerdown', () => { pointerAt = performance.now(); }, { capture: true });
+  const byPointer = () => performance.now() - pointerAt < 1500;
+  const blur = (e) => { if (byPointer()) e?.target?.blur?.(); };
   $('labPreset').onchange = (e) => {
     const [kind, k] = e.target.value.split(':');
     if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
@@ -232,12 +245,13 @@ export function createCrashLab(ctx) {
   $('labStudio').onclick = (e) => { renderer.set({ studio: !renderer.opts.studio }); syncPanel(); blur(e); };
   $('labColor').onchange = (e) => { renderer.set({ colorMode: e.target.value }); syncPanel(); blur(e); };
   $('labSkin').onchange = (e) => { renderer.set({ skin: e.target.value }); syncPanel(); blur(e); };
-  for (const b of panel.querySelectorAll('[data-cam]')) b.onclick = (e) => { camera(b.dataset.cam); blur(e); };
+  for (const b of view.querySelectorAll('[data-cam]')) b.onclick = (e) => { camera(b.dataset.cam); blur(e); };
   $('labFollow').onclick = (e) => { camera('follow'); blur(e); };
   $('labSpin').onclick = (e) => { st.spin = !st.spin; syncPanel(); blur(e); };
   $('labGrab').onclick = (e) => { st.grabTool = !st.grabTool; syncPanel(); blur(e); };
   $('labGrabK').oninput = (e) => { st.grabK = 10 ** Number(e.target.value); syncPanel(); };
-  $('labClean').onclick = (e) => { setClean(true); blur(e); };
+  // From the keyboard the focus moves to the (otherwise invisible) way back.
+  $('labClean').onclick = (e) => { const kb = !byPointer(); setClean(true); blur(e); if (kb) $('labUnfocus')?.focus(); };
 
   // ---------------------------------------------------------------- HUD
   function pills() {
@@ -497,7 +511,12 @@ export function createCrashLab(ctx) {
   addEventListener('pointerup', () => releaseGrab());
 
   // ---------------------------------------------------------------- keys
-  function setClean(on) { st.clean = on; document.body.classList.toggle('lab-clean', on); }
+  function setClean(on) {
+    const back = !on && document.activeElement?.id === 'labUnfocus';
+    st.clean = on; document.body.classList.toggle('lab-clean', on);
+    if (back) $('labClean').focus();
+    ui.relayout();
+  }
   addEventListener('keydown', (e) => {
     if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' || e.repeat) return;
     const k = e.code;
@@ -562,6 +581,8 @@ export function createCrashLab(ctx) {
     release: releaseGrab,
     pick,
     playPause, frameStep, physicsStep, restart, enterReplay, camera, setClean,
+    /** The layout (crash-lab-ui.mjs): its panels' bodies, summaries, open/close. */
+    ui,
     setSlow(v) { st.auto = v === 'auto'; st.slow = st.auto ? 20 : v; syncPanel(); },
     setPaused(on) { st.paused = on; syncPanel(); },
     sync: syncPanel,
