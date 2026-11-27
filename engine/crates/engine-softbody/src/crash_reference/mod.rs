@@ -16,6 +16,7 @@
 pub mod criteria;
 pub mod metrics;
 mod s02_wall;
+mod s03_side_barrier;
 
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
@@ -82,6 +83,12 @@ pub type Templates = BTreeMap<String, Template>;
 pub struct Extent {
     pub lo: Vec3,
     pub hi: Vec3,
+    /// Its front and rear axles along +Z (the wheels' hub midpoints, foremost and
+    /// rearmost); None without wheels.
+    pub axles: Option<(f32, f32)>,
+    /// Its wheels' lowest point (the lowest hub's height less its radius); None without
+    /// wheels.
+    pub wheel_low: Option<f32>,
 }
 
 impl Extent {
@@ -91,7 +98,11 @@ impl Extent {
             lo = lo.min(Vec3::from(n.position));
             hi = hi.max(Vec3::from(n.position));
         }
-        Self { lo, hi }
+        let hub = |i: u32| d.nodes[i as usize].position[2];
+        let z: Vec<f32> = d.wheels.iter().map(|w| 0.5 * (hub(w.node1) + hub(w.node2))).collect();
+        let axles = (!z.is_empty()).then(|| z.iter().fold((f32::MIN, f32::MAX), |(f, r), &x| (f.max(x), r.min(x))));
+        let wheel_low = d.wheels.iter().map(|w| 0.5 * (d.nodes[w.node1 as usize].position[1] + d.nodes[w.node2 as usize].position[1]) - w.radius).reduce(f32::min);
+        Self { lo, hi, axles, wheel_low }
     }
     pub fn width(&self) -> f32 {
         self.hi.x - self.lo.x
@@ -234,7 +245,7 @@ pub struct CrashScenario {
 
 /// Every scenario, in order.
 pub fn all() -> Vec<CrashScenario> {
-    vec![s02_wall::scenario()]
+    vec![s02_wall::scenario(), s03_side_barrier::scenario()]
 }
 
 pub fn get(id: &str) -> Option<CrashScenario> {
