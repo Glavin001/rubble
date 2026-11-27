@@ -301,7 +301,8 @@ were downloaded with the user's permission into the gitignored
 
 9079 is excluded: its integral drifts (7.5 m/s rebound and 1.1 m crush are not
 physical for that car's measured residual crush), likely an accelerometer offset or
-saturation.
+saturation. (Corrected 2026-11-27, §8.1: its file is a corrupted download; the peaks in this
+table used a filter harder than CFC 60.)
 
 Over the other seven:
 - **dynamic crush** 0.617–0.753 m (median 0.647 m);
@@ -323,6 +324,48 @@ What this corrects:
 
 Caveat: these are 7 small and compact sedans of 1,250–1,400 kg. Mid-size sedans of
 about 1,450–1,550 kg sit in the same NCAP band (section 2's statistics cover them).
+
+### 8.1 Re-check, 2026-11-27
+
+On 2026-11-27 the same per-curve server (`nrd-static.nhtsa.dot.gov/tsv/...`) served one
+identical file, cut at 131,072 bytes, for every curve of 8 of 11 Camry tests
+(`fe-import-spike.md`). The section's eight downloads were checked for that signature and
+re-processed with `engine/tools/crash-reference/nhtsa_reference.py recheck
+inspiration/nhtsa-pulses` (the processing the crash suite's references use: bias over
+[−20, 0) ms removed, SAE J211-1 CFC 60, i.e. the two-pole Butterworth at 2.0775 × 60 Hz run
+both ways, trapezoidal integration from 56.3 km/h, rebound = −min v from t_m to 200 ms):
+
+| Test | File check | Dynamic crush (m) | t_m (ms) | Rebound (m/s) | e | Peak, CFC 60 (g) | Peak sampled as the suite samples (g) |
+|---|---|---|---|---|---|---|---|
+| 8407 | ok (two distinct curves, 0.30 s) | 0.724 | 69.5 | 2.45 | 0.157 | 45.4 | 44.2 |
+| 9065 | ok | 0.752 | 72.5 | 2.66 | 0.170 | 47.3 | 44.5 |
+| 9079 | **bad: both curves the same file, cut at 131,072 bytes** | — | — | — | — | — | — |
+| 9593 | ok | 0.681 | 76.3 | 3.04 | 0.194 | 35.5 | 31.9 |
+| 9764 | ok | 0.629 | 68.4 | 1.96 | 0.125 | 45.4 | 32.2 |
+| 9793 | ok | 0.648 | 65.1 | 2.36 | 0.151 | 44.5 | 42.6 |
+| 10688 | ok | 0.617 | 62.7 | 2.85 | 0.182 | 43.9 | 42.3 |
+| 11574 | ok | 0.633 | 69.5 | 2.23 | 0.143 | 45.9 | 35.9 |
+
+What changed:
+- **9079's exclusion was right for the wrong reason.** Its "drift" is the corrupted download
+  (its 093 and 094 files are the same truncated file), not an accelerometer offset.
+- **Peaks.** The table above used a two-pole Butterworth designed at 100 Hz, which filters
+  harder than CFC 60 (designed at 124.65 Hz): with CFC 60 the seven peaks are **35.5–47.3 g**
+  (median 45.4), not 34–47 (median 43.9); 9764 and 11574 move most (39.4 → 45.4, 39.6 → 45.9 g:
+  short spikes).
+- **Rebound and e** move by at most 0.07 m/s and 0.005 (rebound now read as −min v from t_m to
+  200 ms): **e 0.125–0.194** (median 0.157). Dynamic crush and t_m are unchanged to 3 mm and
+  0.5 ms.
+- The seven files pass the signature check but nothing else verifies that each is its test's
+  curve (they are not in the zips held locally).
+- **Two Camrys at 56 km/h** (from the full zips, `engine/docs/crash-reference/nhtsa/`): 8545
+  (2014, 1,664 kg) dynamic crush 0.663 m, t_m 70.9 ms, e 0.095, peak 39.8 g; 7520 (2012,
+  1,662 kg) 0.685 m, 75.9 ms, e 0.057, peak 45.0 g. With them the nine sedans span dynamic
+  crush 0.617–0.753 m, t_m 62.7–76.3 ms, e **0.057–0.194**, peak 35.5–47.3 g (CFC 60). The
+  integrated rebound is the least certain of these: 7520's two crossmember channels give 0.16
+  and 1.65 m/s.
+- **The suite's 4 ms series** keep less of a short peak than CFC 60 (the last column: 3–29 %
+  lower); `crash-reference.md` ("Time histories") compares like with like.
 
 ## 9. Door hardware strength (FMVSS 206 compliance reports)
 

@@ -3,8 +3,9 @@
 Ten real crash tests, each shown beside BeamNG in one video
 (<https://www.youtube.com/watch?v=Lqx2KKWI8aM>), staged in Rubble on the explicit 2 kHz
 node-beam solver with generated vehicles, and judged by acceptance criteria derived from
-first principles. This page holds the scenarios, how a crash is quantified, each scenario's
-criteria and what currently fails.
+first principles; and four US government agency test configurations (S11–S14, section 4)
+compared curve against curve with NHTSA's measured data. This page holds the scenarios, how
+a crash is quantified, each scenario's criteria and what currently fails.
 
 ## How to run one
 
@@ -19,6 +20,9 @@ takes. The same definition, sampling, metrics and criteria run everywhere:
 | Browser (WebGPU crash lab) | `softbody.html?solver=explicit&crashRef=S02[&run=0][&contact=edge][&cam=side]` (scene picker: "Reference crashes") |
 | Browser, stills and report | from `crates/engine-webgpu`: `python3 ../../scripts/with-gpu-lock.py --limit 300 -- node crash-ref-record.mjs --crashRef S02 [--cam side] [--contact edge] [--video] [--all-cams]` (to `out/crash-reference/<id>-<contact>-run<k>/`; `--all-cams`: a still from every camera at every moment) |
 | Page against CPU | `python3 tools/crash-reference/compare.py CPU.json report.json [--all]` (the asserted criteria side by side) |
+| Curves against NHTSA's | `crash_ref -- S11 --json > s11.jsonl`, then `python3 -I tools/crash-reference/overlay.py docs/crash-reference/nhtsa out/crash-reference/overlays s11.jsonl` (section 4) |
+
+`--json` reports carry the run's time histories (`series`, section 4.1) beside the metrics.
 
 In the browser the page sends the id; `engine-world-wasm` (`src/crash_ref.rs`) builds the
 fleet with `CrashScenario::build`, reads the GPU state at every sample step and judges the
@@ -95,6 +99,15 @@ ignored probe printing the solver's own work ledger every 4 ms):
 - Hypothesis, not established: edge hits on inner-face edges take their side from the
   partner, and their position step pushes inner door-panel nodes against the beams tying
   them to the outer skin every step, storing energy no force paid for.
+
+S11–S14 (added 2026-11-27; CPU reference, 8 runs each in each contact setting):
+
+| Scenario | Criterion (basis) | Band | Discrete | Edge | Edge + continuous |
+|---|---|---|---|---|---|
+| S11 sedan into the rigid wall, 56.3 km/h | restitution at the rear-seat crossmember (cited: nine sedans at 56 km/h, 0.057–0.194, + 0.05) | at most 0.25 | **0.30–0.35**, 8 of 8 fail | **0.30–0.35**, 8 of 8 | **0.29–0.36**, 8 of 8 |
+| S14 MDB crabbed 27° into the sedan, 62 km/h | no energy created (law) | at most 203 J | 4–5 J, holds | **4.7 kJ–1.0 MJ**, 8 of 8 fail | **6.3–13.1 kJ**, 8 of 8 fail |
+
+S14's created energy is S03's (below): edge-contact hits between the barrier and the door.
 
 Also failing with continuous contact, CPU reference, nominal run: S08 creates 443 J (at most
 340) and its common centre of mass ends at 0.454 m/s (at most 0.3); discrete: 48 J and 0.106.
@@ -346,4 +359,234 @@ residual speed instead of crush. That is why the rear survives here and not in S
   overlap (within 30 %).
 - Damage follows the hit: zone with the highest plastic work is the struck zone in every
   scenario.
+
+## 4. Agency tests with measured data (S11–S14)
+
+The four NHTSA configurations the CCSA 2012 Camry finite-element model was validated
+against, staged with the generated sedan, and NHTSA's measured curves for two Camrys each:
+
+| # | Configuration | Speed | NHTSA tests (Camry, test mass) | File |
+|---|---|---|---|---|
+| S11 | NCAP frontal, full-width rigid wall | 56.3 km/h | 8545 (2014, 1,664 kg), 7520 (2012, 1,662 kg) | `s11_ncap_frontal_56.rs` |
+| S12 | Full-width rigid wall (FMVSS 208 rigid barrier) | 40 km/h | 9692 (2015, 1,690 kg), 7793 (2011 Hybrid, 1,798 kg) | `s12_frontal_40.rs` |
+| S13 | NCAP side pole: carried on a carrier at 75°, 254 mm pole at the driver's head | 32 km/h | 7523 (2012, 1,566 kg), 8558 (2014, 1,579 kg) | `s13_side_pole.rs` |
+| S14 | NCAP side MDB: FMVSS 214 barrier crabbed 27° into the driver's side | 38.5 mph (61.96 km/h) | 7517 (2012, 1,641 kg), 8560 (2014, 1,649 kg) | `s14_ncap_side_mdb.rs` |
+
+**The generated sedan is not a Camry.** It is 1,448 kg as spawned (no dummies or ballast),
+12–19 % lighter than the tests' 1,566–1,798 kg test masses, and a different structure. A
+Camry's curve is therefore a comparison, never a band: only laws and fleet-wide ranges at the
+same speed and configuration are asserted (section "What may be asserted"). Everything
+curve-shaped, and every single-Camry number, is reported.
+
+**Reference data.** `docs/crash-reference/nhtsa/<test>.json`: our own numbers derived from
+NHTSA's public-domain test records (the downloads stay in the gitignored
+`inspiration/ccsa-camry-2012/`) by `tools/crash-reference/nhtsa_reference.py camry <data>
+<out>`: per test the channels used, the vehicle (test mass, curb mass, C1–C6 crush profile,
+maximum crush, length loss), the scalars, the side tests' per-level maximum exterior crush
+(read from the report with `pdftotext`), and the CFC 60 curves at 1 kHz from −10 to 250 ms.
+No test or build reads them; the overlay tool does.
+
+### 4.1 Time histories (`metrics::series`)
+
+Per body, on the run's 4 ms samples, in SAE axes of its first frame (x forward, y right),
+from the layout's first contact: the acceleration, velocity and displacement of its
+**reference location** (the rear-seat crossmember's place: the mean of the cabin-floor nodes
+behind the B-pillar and ahead of the rear axle, chosen by position at rest,
+`series::reference_nodes`; 14 nodes on the generated sedan) and of its centre of mass; for
+the scene, the **force on the static boxes**, −d(Σ m v)/dt over every node along body 0's
+initial velocity. Every executor's samples go through this host code; the web runner and
+CUDA report the same `series`.
+
+- **Velocity** is the samples' own (point samples). **Displacement** is from positions
+  (Hermite on the velocity when read between samples). **Acceleration** is the central
+  difference of the velocity samples, exactly the mean acceleration over the 8 ms around each
+  sample.
+- **CFC 60 cannot be applied to 4 ms samples**: SAE J211's design frequency for CFC 60
+  (2.0775 × 60 = 124.7 Hz) is the sampling's 125 Hz Nyquist frequency (`signal::cfc` refuses
+  it). So the CPU reference also **traces every step** (`Runner::start_trace`): each body's
+  reference location's and centre of mass's velocity after every 2 kHz step, through central
+  differences and CFC 60 (`series::Fine`, `{ref,com}.cfc60_*`). The trace replays
+  `ExplicitBeamsWorld::frame` and is held bit for bit to an untraced run
+  (`engine-softbody-lab/tests/crash_series_rate.rs`). CUDA and the browser do not trace; their
+  series is the 4 ms one.
+- **Force on the boxes**: exact for vehicles against fixed boxes except for the other
+  horizontal forces, tyre and ground friction and drag. Measured over the 40 ms before contact
+  (`all.box_force_pre_n`) and bounded during it by μ m g (about 14 kN on the sedan, 2 % of a
+  660 kN peak). The solver does not count the static boxes' contact force itself (it acts in
+  the node pass, the surface pass and the edge pass), so momentum is the cheaper exact route.
+- **Filter and integration, closed forms** (`metrics/signal.rs`, `metrics/tests.rs`): a 40 g
+  half-sine of 80 ms keeps its peak to 0.001 % and its Δv to 1e-6 through CFC 60 at 10 kHz;
+  the J211 filter is −3 dB at 100 Hz (|H| = 0.707 ± 0.02), 0.05 at 400 Hz; trapezoidal Δv and
+  displacement of a half-sine within (π Δt / T)² / 4 of the closed form. Through the recorder,
+  a rigid body with a 40 g, 100 ms half-sine against a wall, sampled at 4 ms: peak 39.82 g
+  against the box-car's exact 39.82 (the 8 ms mean of the sine at the sample nearest the
+  peak, 0.46 % under 40 g), t_m 58.04 ms against 58.02, dynamic crush to 1 µm, rebound and
+  wall impulse to 1e-5, ∫F dt over the force curve to 0.1 %.
+- **What the 4 ms estimator loses on real pulses.** A crash pulse has short spikes; an 8 ms
+  mean keeps less of them than CFC 60:
+
+| Record | CFC 60 peak | 4 ms estimator on the CFC 60 velocity | on the raw samples |
+|---|---|---|---|
+| S11 generated sedan (CPU, 2 kHz trace) | 59.1 g at 15.5 ms | 49.1 g | 50.0 g (the report) |
+| S12 generated sedan | 52.7 g at 31.0 ms | 43.8 g | 46.2 g |
+| NHTSA 8545 / 7520 (56 km/h) | 39.8 / 45.0 g | 36.8 / 40.7 g | — |
+| NHTSA 9692 / 7793 (40 km/h) | 34.1 / 31.5 g | 27.1 / 26.1 g | — |
+| NHTSA §8 sedans (56 km/h) | 35.5–47.3 g | 31.9–44.5 g | — |
+| NHTSA 7523 / 8558 pole, CG Y | 16.5 / 17.9 g | 13.2 / 13.2 g | — |
+| NHTSA 7517 / 8560 side MDB, CG Y | 31.8 / 35.6 g | 23.6 / 27.4 g | — |
+
+  So peaks are compared like with like: Rubble's 4 ms peak against the tests' "as Rubble
+  samples" (their CFC 60 velocity sampled every 4 ms and differenced), and Rubble's CPU CFC 60
+  peak against the tests' CFC 60. The aliasing of the raw samples (raw against CFC 60
+  velocity, both every 4 ms) is 2–5 % on the sedan. Velocity and displacement are not
+  affected (the integrated CFC 60 velocity is within 0.3 m/s of the raw one).
+
+### 4.2 Criteria and results
+
+CPU reference, 8 runs (jitter as every scenario), discrete / edge / edge + continuous. For
+S11–S13 discrete and edge give the same numbers (a single car against static boxes has no
+edge-pair contact).
+
+**S11, asserted:** finite, no energy created (≤ 177 J: measured 0 in every run and setting),
+nothing into the wall (0 m), no rebound past elastic, the wall stops the car (law), and the
+fleet's restitution (cited, ≤ 0.25): **fails, 0.29–0.36** in every run and setting. Reported
+(nine sedans at 56 km/h, targets §8.1): dynamic crush 0.385–0.403 m (fleet 0.617–0.753), t_m
+43–47 ms (62.7–76.3), mean deceleration to t_m 34–37 g (21.0–25.4), 4 ms peak 50–53 g (as
+the fleet is sampled: 31.9–44.5), residual length loss 0.19–0.23 m (82 sedans p10–p90
+0.311–0.602), wall force peak 656–675 kN (Camry 830, 921).
+
+**S12, asserted:** the same laws (≤ 89 J: measured 0–2.8 J); all hold. Reported against the
+two Camrys only (no 40 km/h fleet is held): dynamic crush 0.27–0.28 m (0.475, 0.489), t_m
+39 ms (69, 75), restitution 0.46–0.50 (0.107, 0.149), 4 ms peak 43–49 g (as sampled 26.1,
+27.1), residual length loss 0.09–0.10 m (0.279, 0.304).
+
+**S13, asserted:** finite, no energy created (≤ 57 J: 9–15 J), nothing into the pole (0 m),
+the pole throws it back no faster than it came and the pole and carrier only slow it (the
+COM's velocity along the travel at the end, −1.0 to −0.46 m/s), the struck side absorbs more
+(left/right work 10–18). All hold. Reported: residual crush of the struck door band
+0.215–0.306 m (116 sedans' min–max 0.169–0.537; Camry 0.394, 0.379: not asserted, the
+definitions differ), pole force peak 236–330 kN (Camry 191, 197), CG Δv_y by 150 ms
+9.7–10.4 m/s (10.26, 10.82).
+
+**S14, asserted:** finite; no energy created (≤ 203 J): **fails with edge contact (4.7 kJ to
+1.0 MJ) and continuous (6.3–13.1 kJ)**, holds with discrete (4–5 J); momentum along the
+barrier's travel stays in [0, 24,033] N s (17,400–18,700); the car leaves no faster than an
+elastic hit (8.3–9.9 m/s ≤ 17.05); the struck side absorbs more (2.9–60). Reported below.
+
+### 4.3 Beside the real tests
+
+Nominal run (run 0), edge contact; Rubble's car is the 1,448 kg generated sedan in every row.
+The overlays (`out/crash-reference/overlays/<id>-<contact>.png`, made by
+`tools/crash-reference/overlay.py`) draw the same curves on the same axes.
+
+#### S11, edge contact, run 0
+
+| quantity | Rubble | test 8545 | test 7520 |
+|---|---|---|---|
+| mass (kg) | 1448 | 1664 | 1662 |
+| speed (km/h) | 56.3 | 56.7 | 56.3 |
+| peak decel, 4 ms estimator (g) | 50.0 | 36.8 | 40.7 |
+| peak decel, CFC 60 (g) | 59.1 | 39.8 | 45.0 |
+| time of peak, CFC 60 (ms) | 15.5 | 44.1 | 43.9 |
+| t_m, v = 0 (ms) | 44.4 | 70.9 | 75.9 |
+| dynamic crush (m) | 0.394 | 0.663 | 0.685 |
+| mean decel to t_m (g) | 35.9 | 22.7 | 21.0 |
+| rebound, t_m-200 ms (m/s) | 5.34 | 1.50 | 0.89 |
+| restitution | 0.342 | 0.095 | 0.057 |
+| residual crush (m) | 0.199 | 0.554 (length), 0.529 (max) | 0.579 (length), 0.579 (max) |
+| peak wall force (kN) | 661 | 921 | 829 |
+| time of peak force (ms) | 20.0 | 29.5 | 30.1 |
+
+
+#### S12, edge contact, run 0
+
+| quantity | Rubble | test 9692 | test 7793 |
+|---|---|---|---|
+| mass (kg) | 1448 | 1690 | 1798 |
+| speed (km/h) | 40.0 | 39.6 | 39.6 |
+| peak decel, 4 ms estimator (g) | 46.2 | 27.1 | 26.1 |
+| peak decel, CFC 60 (g) | 52.7 | 34.1 | 31.5 |
+| time of peak, CFC 60 (ms) | 31.0 | 55.1 | 43.2 |
+| t_m, v = 0 (ms) | 39.5 | 69.3 | 74.7 |
+| dynamic crush (m) | 0.275 | 0.475 | 0.489 |
+| mean decel to t_m (g) | 28.6 | 16.2 | 15.0 |
+| rebound, t_m-200 ms (m/s) | 5.37 | 1.64 | 1.17 |
+| restitution | 0.484 | 0.149 | 0.107 |
+| residual crush (m) | 0.099 | 0.304 (length), 0.326 (max) | 0.279 (length), 0.279 (max) |
+| peak wall force (kN) | 576 | - | - |
+| time of peak force (ms) | 32.0 | - | - |
+
+
+#### S13, edge contact, run 0
+
+| quantity | Rubble | test 8558 | test 7523 |
+|---|---|---|---|
+| struck car mass (kg) | 1448 | 1579 | 1566 |
+| speed (km/h) | 32.0 | 31.9 | 32.1 |
+| CG lateral peak, 4 ms estimator (g) | 21.0 | 13.2 | 13.2 |
+| CG lateral peak, CFC 60 (g) | 21.9 | 17.9 | 16.5 |
+| CG dv_y by 150 ms (m/s) | 9.75 | 10.82 | 10.26 |
+| CG dv_y largest (m/s) | 9.75 | 10.89 | 10.38 |
+| peak pole force (kN) | 307 | 197 | 191 |
+| time of peak force (ms) | 44.0 | 46.0 | 43.9 |
+| residual side crush (m) | 0.236 | 0.379 | 0.394 |
+| peak side crush, dynamic (m) | 0.321 | - | - |
+| CG travel at stop (m) | - | 0.455 | 0.510 |
+
+
+#### S14, edge contact, run 0
+
+| quantity | Rubble | test 8560 | test 7517 |
+|---|---|---|---|
+| struck car mass (kg) | 1448 | 1649 | 1641 |
+| barrier mass (kg) | 1368 | 1362 | 1362 |
+| barrier speed (km/h) | 62.0 | 61.9 | 62.3 |
+| CG lateral peak, 4 ms estimator (g) | 13.6 | 27.4 | 23.6 |
+| CG lateral peak, CFC 60 (g) | 15.2 | 35.6 | 31.8 |
+| CG dv_y largest (m/s) | 8.37 | 6.79 | 6.60 |
+|   when (ms) | 96 | 110 | 88 |
+| CG dv_y by 150 ms (m/s) | 8.25 | 6.35 | 6.22 |
+| barrier dv_x by 150 ms (m/s) | -10.67 | -8.15 | -8.56 |
+| residual side crush (m) | 0.368 | 0.258 | 0.275 |
+| peak side crush, dynamic (m) | 0.431 | - | - |
+
+S14 with discrete contact (every law holds there):
+
+#### S14, discrete contact, run 0
+
+| quantity | Rubble | test 8560 | test 7517 |
+|---|---|---|---|
+| struck car mass (kg) | 1448 | 1649 | 1641 |
+| barrier mass (kg) | 1368 | 1362 | 1362 |
+| barrier speed (km/h) | 62.0 | 61.9 | 62.3 |
+| CG lateral peak, 4 ms estimator (g) | 16.8 | 27.4 | 23.6 |
+| CG lateral peak, CFC 60 (g) | 17.0 | 35.6 | 31.8 |
+| CG dv_y largest (m/s) | 9.27 | 6.79 | 6.60 |
+|   when (ms) | 96 | 110 | 88 |
+| CG dv_y by 150 ms (m/s) | 9.15 | 6.35 | 6.22 |
+| barrier dv_x by 150 ms (m/s) | -11.19 | -8.15 | -8.56 |
+| residual side crush (m) | 0.051 | 0.258 | 0.275 |
+| peak side crush, dynamic (m) | 0.156 | - | - |
+
+In words (what the overlays show):
+- **S11, S12 (frontal): too stiff early, too short, too bouncy.** Rubble's wall force rises
+  at once to about 650 kN by 15–20 ms (the Camrys ramp through 200–300 kN and peak at 830–920 kN
+  at 30 ms, when the engine reaches the firewall, with a second peak at 55 ms); the generated
+  sedan stops at 44 ms (Camry 71–76) after 0.39 m of crush (0.66–0.69) and springs back at
+  5.3 m/s (Camry 0.9–1.5): restitution 0.34 against 0.06–0.10, three to six times the Camrys'.
+  Its residual crush, 0.20 m, is a third of theirs. At 40 km/h the same: t_m 40 ms (69–75),
+  crush 0.28 m (0.48–0.49), restitution 0.48 (0.11–0.15). The front holds too hard and gives
+  too much back.
+- **S13 (pole): the right impulse, delivered too fast.** The lateral Δv by 150 ms is within
+  10 % of the Camrys' (9.8 against 10.3–10.8 m/s), but the pole force peaks at 307 kN against
+  191–197 and the pulse is over by about 100 ms (the Camrys' lasts 150 ms); the car's centre
+  of mass moves 0.32 m sideways before it stops (Camry 0.44–0.50) and residual door crush
+  is 0.24 m (Camry 0.38–0.39). Stiffer and shallower than a Camry's side.
+- **S14 (side MDB):** with edge contact the run creates energy (section "Currently failing"),
+  so its numbers are not physics; with discrete contact (which holds every law) the struck car
+  leaves at 9.3 m/s across (Camry 6.6–6.8; a plastic hit on a 1,448 kg car gives 7.45), the
+  barrier loses 11.2 m/s (Camry 8.2–8.6), and the door band springs back to 0.05 m of
+  residual crush (Camry 0.26–0.28): an elastic side. The CG's lateral pulse lacks the Camrys'
+  first 30–35 g spike at 6–7 ms (their door and sill meeting the barrier's bumper element).
+
 
