@@ -622,6 +622,44 @@ cushion under AGENTS.md):
 Fable's fix for these: retire them where the velocity rows cover the same contact, or bound
 each hit's impulse to 0 ≤ J ≤ 2·m_eff·max(0, −u), which gives no impulse at relative rest.
 
+## Velocity contact in the cars (2026-11-27, `DAT_RESPONSE=vel`, off)
+
+Bugs found and fixed, each one a crossing or a cushion:
+- **Signed end test.** A row's "ends far enough apart" test was unsigned. An engine node passed
+  through the front apron within one step, and 1.1 mm on the far side passed the test. The end
+  separation is now measured along the row's own normal.
+- **Re-listing.** Impulses can carry a node farther than the reach its pairs and records were
+  listed for. Records and pairs are now listed again after the response (`relist_velocity`).
+- **Newton's law on true impacts only.** Every row with e > 0 used to get b ≤ 0, so a pair
+  that wasn't closing was held where it stood, up to 3 mm apart: a cushion.
+
+Generated sedan at e = 1, after these fixes:
+
+| Scene | Crossings | Zones |
+|---|---|---|
+| Side 60 | 0 | 2,750 |
+| Head 100 | 0 | 4,784 |
+
+Momentum is kept to 1e-3 N·s. The zones are the rounds not finishing.
+
+**Why the rounds don't finish: centred damping.** The node update moves positions with the
+velocity before centred damping's correction, then the correction changes the velocity. So the
+end positions are not x0 + h·v. A row's bound taken from the step start, (s0 − ξ)/h, then misses
+by the correction's share. The pair ends short of 99 % of its gap, is linearised again, and runs
+out of rounds.
+
+**Measured, not adopted:** the bound taken from the rounds' start positions, (sb − min(ξ, s0))/h − J·vb.
+- Side 60: zones 2,750 → 33, 0 crossings.
+- Head 100: the rows must also undo the correction, tens of m/s in the crush. APGD's iterates
+  reach 170–270 m/s, the fixed-point velocity sums overflow, and momentum is lost (850 N·s).
+  The cars cross 7 times.
+
+Next: reconcile centred damping with the contact pass, for example by applying the correction
+before the drift or by passing the correction to the contact pass explicitly. That changes how
+the integrator steps, so it is a design decision, measured on the elastic bars and the crash
+suite before adoption. Also: a bound on the fixed-point sums' range, so an overflow is an error,
+not wrapped garbage.
+
 ## The GPU port (design, 2026-11-26)
 
 **Where it runs.** A GPU frame normally runs each vehicle, or each contact group, for all of the
