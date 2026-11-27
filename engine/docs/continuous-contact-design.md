@@ -922,7 +922,11 @@ energy (+91 to +111 kJ) is the plainest sign that the zones break rule 1 and mus
 first solve, none in the response's re-listed solves.
 - Exact solve off: from APGD solves left unsettled.
 - Exact solve and torque-free rows on: from rounds that keep meeting new pairs. 8 rounds leave
-  2,361 zones, 16 rounds 2,603, 32 rounds 1,470.
+  2,361 zones, 16 rounds 2,603, 32 rounds 1,470, 128 rounds 1,119. With Newton's law on newly
+  closing rows, 128 rounds leave 862, and angular momentum per step reaches 5.8 N·m·s.
+  The rounds are not monotone: a re-linearised row replaces its last form, so a pair can cycle,
+  and finitely many pairs don't guarantee an end. Replacing the zones needs a response whose
+  iterations provably end, not more of them.
 - Speculative rows (`DAT_SPEC=1`, a measurement): every pair within its gap plus both sides' paths
   is a row from the first round, linearised at the start with b = (s0 − ξ)/h ≥ 0. No help:
   4,475 zones alone, 6,812 with the exact solve and torque-free rows.
