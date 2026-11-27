@@ -144,7 +144,7 @@ impl Ctx<'_> {
         let pos = |x: &[Vec<Vec3>], k: &[(usize, u32); 4]| k.map(|(v, i)| x[v][i as usize]);
         let (vb, xb) = (vel.to_vec(), x1.to_vec());
         let mut rows: Vec<VRow> = Vec::new();
-        let mut listed = std::collections::HashSet::new();
+        let mut listed: std::collections::HashMap<usize, usize> = Default::default();
         let mut settled = false;
         for _ in 0..rounds {
             let hit = collide(x1);
@@ -155,25 +155,38 @@ impl Ctx<'_> {
             st.hits += hit.len() as u64;
             let mut fresh = 0usize;
             for &(q, t) in &hit {
-                // A pair already a row keeps it (its λ warm-starts the solve).
-                if !listed.insert(q) {
-                    continue;
-                }
-                fresh += 1;
                 let pr = &self.pairs[q];
                 let (a, b) = (pos(self.x0, &pr.k), pos(x1, &pr.k));
+                // A pair already a row that ends at least (1 − ROW_GAP_SHARE) of what it may
+                // close to (its gap, or its start distance when it began inside the gap) keeps
+                // its row; one closer is linearised again at its impact now (its normal turns
+                // with its features), keeping its λ.
+                let old = listed.get(&q).copied();
+                if old.is_some() && closest(pr.nn, b).1.length() >= (1.0 - ROW_GAP_SHARE) * closest(pr.nn, a).1.length().min(pr.xi) {
+                    continue;
+                }
                 let at = [0, 1, 2, 3].map(|j| a[j] + (b[j] - a[j]) * t);
                 let (w, gv) = closest(pr.nn, at);
                 let n = gv.normalize_or_zero();
                 if n == Vec3::ZERO {
                     continue;
                 }
+                fresh += 1;
                 let s0: f32 = (0..4).map(|j| w[j] * n.dot(a[j])).sum();
                 let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: 0.0 };
                 if e > 0.0 && !vpre.is_empty() {
                     r.b = r.b.min(e * Self::normal(&r, vpre).min(0.0));
                 }
-                rows.push(r);
+                match old {
+                    Some(i) => {
+                        r.l = rows[i].l;
+                        rows[i] = r;
+                    }
+                    None => {
+                        listed.insert(q, rows.len());
+                        rows.push(r);
+                    }
+                }
             }
             // Every pair still meeting its gap is a row the last solve settled: resolved.
             if fresh == 0 && settled {

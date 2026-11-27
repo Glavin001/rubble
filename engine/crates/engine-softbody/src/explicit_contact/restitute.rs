@@ -26,7 +26,7 @@ pub const RESTITUTION_STRIPES: usize = 64;
 /// (`ccRestitute`): per stripe of [`RESTITUTION_STRIPES`] lanes over the vehicles' nodes in
 /// order, then the stripes in order.
 pub(super) fn restitute(vehicles: &[ExplicitBeams], vp: &mut [Vec<Vec3>], e: f32, near: &[(usize, usize)], st: &mut DatStats) {
-    if e <= 0.0 || std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel") {
+    if e <= 0.0 {
         return;
     }
     // The guard's groups: vehicles joined by the listing's near test, each labelled by its
