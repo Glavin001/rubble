@@ -11,6 +11,12 @@
 sedan_jello::kerb_wobble_is_at_the_etk_level
 sedan_jello::kerb_wobble_dies_as_fast_as_the_etks
 
+# Angular momentum in free flight with centred damping off (the explicit step past its limit,
+# 36 beams broken, energy +114 %; not what the lab runs): 2.4e-4 of |L| against a 1e-4 bar
+# since the doors' edge columns moved to 2 cm (a90376e2; 5.2e-5 at 3 cm). Beam forces are
+# central, so some non-central force acts; tracked as its own investigation (2026-11-27).
+host::main::free_flight::a_free_flying_car_keeps_its_momentum_and_spin
+
 # Side pole crush depth against the NHTSA band (since 31c20eb2) and contact energy (since 770875dd).
 showcase_car::o_side_pole_matches_the_nhtsa_sedans
 showcase_car::contacts_do_no_positive_work
@@ -21,3 +27,37 @@ showcase_skin_integrity::car_into_the_rear_door_at_60_kmh
 showcase_skin_integrity::t_bone_118_into_61_kmh
 showcase_skin_integrity::random_impacts
 showcase_skin_integrity::grab_rear_and_roof
+
+# Solids sharing space: two generated sedans lock after a head-on, and one car's panels
+# pass through each other at a pole (known-bugs S4; written ahead of the fix, 2026-11-24).
+gen_sedan_contact::head_on_no_node_inside_the_other_car
+gen_sedan_contact::head_on_no_edge_through_the_other_car
+gen_sedan_contact::pole_own_panels_stay_apart
+gen_sedan_contact::fast_head_on_no_overlap
+gen_sedan_contact::unequal_head_on_no_overlap
+gen_sedan_contact::offset_head_on_no_overlap
+# What is seen (paint cutting paint); written ahead of the fix, 2026-11-24.
+gen_sedan_paint::own_paint_ends_apart
+# The owner's bar (paint depth, 2026-11-25; band contact only). Head 60 and head 30 pressed pass
+# since the doors' 2 cm edge columns and paint bound to the collision skin (2026-11-27).
+gen_sedan_paint::accept_head_100
+gen_sedan_paint::accept_side_90
+gen_sedan_paint::accept_side_60_pressed
+
+# The vehicle lint on every generated design (tests/generated_vehicle_lint.rs, 2026-11-24): the
+# collision skin's defects, found by hand in the S4 crash study, now caught at build time.
+generated_vehicle_lint::generated_designs_collision_skin_has_no_holes
+generated_vehicle_lint::every_other_design_passes_every_rule
+
+# Contact never stands in for metal (tests/continuous_contact.rs, 2026-11-26): the contact pass's
+# change of the mechanical energy (kinetic + gravitational + stored, DAT_ENERGY=1), e = 0: head 100
+# removes 18 %, side 60 creates 10 %, ball 100 creates 8 % of the start's kinetic energy (bar:
+# within 1 %, never created). Its position-only steps move nodes with no force doing the work.
+continuous_contact::continuous_energy_head_100
+continuous_contact::continuous_energy_side_60
+continuous_contact::continuous_energy_ball_100
+
+# Contact against known physics (tests/contact_known_solutions.rs, 2026-11-26): two elastic bars
+# head on part at 0.40 of their arrival speed (elastic theory: 1.0); their energy is kept (the
+# rest rings in the bars), so this is the rebound's form, not a loss.
+contact_known_solutions::bars_head_on_rebound

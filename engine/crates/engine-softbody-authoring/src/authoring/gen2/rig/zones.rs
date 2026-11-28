@@ -380,6 +380,29 @@ pub(super) fn hull_faces(p: &[Vec3]) -> Vec<Vec<usize>> {
                     let f = |k: usize| (p[k] - cen).dot(v).atan2((p[k] - cen).dot(u));
                     f(i).total_cmp(&f(j))
                 });
+                // A point inside the face (the rear seat's `sear_c`, the centre of its four
+                // corners) has no angle of its own around the centre, so the sort put it
+                // anywhere: between two corners it made a polygon that folds over itself, and
+                // its fan laid a triangle across the same corners on top of the triangles to
+                // the centre (0 mm apart, the lint's skin_clearance). The face starts at it
+                // instead: its fan is the centre's to each rim edge (the rim's last edge is
+                // closed by fill_holes, as it was where the sort happened to put it first).
+                if on.len() > 3 {
+                    let inside = |k: usize| {
+                        let rim: Vec<usize> = on.iter().copied().filter(|&i| i != k).collect();
+                        let s: Vec<f32> = (0..rim.len())
+                            .map(|e| {
+                                let (a, b) = (p[rim[e]], p[rim[(e + 1) % rim.len()]]);
+                                n.dot((b - a).cross(p[k] - a)) / (b - a).length().max(1e-6)
+                            })
+                            .collect();
+                        s.iter().all(|&x| x > eps) || s.iter().all(|&x| x < -eps)
+                    };
+                    if let Some(at) = (0..on.len()).find(|&e| inside(on[e])) {
+                        let k = on.remove(at);
+                        on.insert(0, k);
+                    }
+                }
                 out.push(on);
             }
         }
@@ -402,7 +425,7 @@ pub(super) fn hull_faces(p: &[Vec3]) -> Vec<Vec<usize>> {
 /// Before this only the outer skin had triangles: a door T-boned at 50 km/h
 /// went through the sill's top edge and the A-pillar, and nothing in the
 /// cabin could stop it or be pushed by it.
-pub(super) fn interior_skins(r: &mut Rig) {
+pub(super) fn interior_skins(r: &mut Rig, inp: &dyn RigInput) {
     let ix: HashMap<String, usize> = r
         .car
         .nodes
@@ -422,15 +445,48 @@ pub(super) fn interior_skins(r: &mut Rig) {
         .collect();
     let mut add: Vec<Tri> = Vec::new();
     let pos: Vec<Vec3> = (0..r.car.nodes.len()).map(|i| r.g(i)).collect();
+    // The skin so far (the outer skin, then each face added), for the shell faces' choice
+    // of diagonal below (the lint's skin_self_crossing). `RIG_INNER_CROSSING=1`: as before.
+    let check = std::env::var("RIG_INNER_CROSSING").map_or(true, |v| v != "1");
+    let mut placed: Vec<[usize; 3]> = r.car.tris.iter().map(|t| t.n).collect();
     let mut poly = |ids: &[usize], part: Part, sub: Option<&str>| {
-        for k in 1..ids.len().saturating_sub(1) {
-            let n = [ids[0], ids[k], ids[k + 1]];
+        // A face's triangles (a fan); a shell face that would cross the skin so far tries
+        // its other fans (a quad's other diagonal), and when every fan crosses it is kept
+        // whole all the same (`RIG_INNER_CROSSING=1`: the first fan, unchecked): a sill's or
+        // floor's face stops a door pushed in, which matters more than its crossing at rest
+        // (the lint's skin_self_crossing reports what is left).
+        let fan = |start: usize| -> Vec<[usize; 3]> {
+            let m = ids.len();
+            (1..m.saturating_sub(1)).map(|k| [ids[start], ids[(start + k) % m], ids[(start + k + 1) % m]]).collect()
+        };
+        // A face already on the skin whole (one of its fans, every triangle there: the
+        // Mach 1's outer floor is its pan's quad) is not laid again. Its other diagonal
+        // would lie on top of it, the two crossing diagonals 0 mm apart (the lint's
+        // skin_clearance), and tri_crosses does not see a coplanar overlap.
+        let sorted = |mut k: [usize; 3]| {
+            k.sort_unstable();
+            k
+        };
+        if ids.len() > 3 && (0..ids.len()).map(fan).any(|f| f.iter().all(|&t| have.contains(&sorted(t)))) {
+            return;
+        }
+        let tris: Vec<[usize; 3]> = if check && sub.is_none() && ids.len() > 3 {
+            (0..ids.len())
+                .map(fan)
+                .find(|f| !f.iter().any(|&n| tri_crosses(&pos, n, &placed)))
+                .unwrap_or_else(|| fan(0))
+        } else {
+            fan(0)
+        };
+        for n in tris {
             let area = (pos[n[1]] - pos[n[0]]).cross(pos[n[2]] - pos[n[0]]).length();
             let mut key = n;
             key.sort_unstable();
-            if area < 1e-5 || !have.insert(key) {
+            if area < 1e-5 || have.contains(&key) {
                 continue;
             }
+            have.insert(key);
+            placed.push(n);
             add.push(Tri {
                 n,
                 part,
@@ -443,59 +499,8 @@ pub(super) fn interior_skins(r: &mut Rig) {
     let named = |names: &[String]| -> Option<Vec<usize>> {
         names.iter().map(|n| ix.get(n).copied()).collect()
     };
-    // The shell.
-    for s in ["l", "r"] {
-        for row in 1..=4 {
-            let (a, b) = (row, row + 1);
-            for q in [
-                // the sill's outer face
-                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c2_{b}{s}"), format!("sh_c2_{a}{s}")],
-                // the floor pan
-                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c1_{a}t{s}")],
-                // the tunnel's wall
-                [format!("sh_c1_{a}t{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c3_{b}"), format!("sh_c3_{a}")],
-            ] {
-                if let Some(ids) = named(&q) {
-                    poly(&ids, Part::Body, None);
-                }
-            }
-        }
-    }
-    let across = ["ol", "il", "ir", "or"];
-    let floor1 = ["ol", "tl", "tr", "or"];
-    for k in 0..3 {
-        for q in [
-            [format!("sh_b2_{}", across[k]), format!("sh_b2_{}", across[k + 1]), format!("sh_b1_{}", across[k + 1]), format!("sh_b1_{}", across[k])],
-            [format!("sh_b1_{}", across[k]), format!("sh_b1_{}", across[k + 1]), format!("sh_c1_1{}", floor1[k + 1]), format!("sh_c1_1{}", floor1[k])],
-        ] {
-            if let Some(ids) = named(&q) {
-                poly(&ids, Part::Body, None);
-            }
-        }
-    }
-    // The doors.
-    for part in [Part::DoorFL, Part::DoorFR, Part::DoorRL, Part::DoorRR] {
-        let dn = part.name().trim_start_matches("gen2_").to_string();
-        let o = |row: usize, k: usize| format!("{dn}_o{row}{k}");
-        let i = |row: usize, k: usize| format!("{dn}_i{row}{k}");
-        for k in 0..2 {
-            for q in [
-                [i(0, k), i(0, k + 1), i(1, k + 1), i(1, k)],
-                [o(0, k), o(0, k + 1), i(0, k + 1), i(0, k)],
-                [o(2, k), o(2, k + 1), i(1, k + 1), i(1, k)],
-            ] {
-                if let Some(ids) = named(&q) {
-                    poly(&ids, part, None);
-                }
-            }
-        }
-        for k in [0, 2] {
-            if let Some(ids) = named(&[o(0, k), i(0, k), i(1, k), o(2, k)]) {
-                poly(&ids, part, None);
-            }
-        }
-    }
-    // The parts that are solids of their own.
+    // The parts that are solids of their own, first: a closed solid takes precedence over
+    // the shell's faces it would cross (those duplicate the outer skin or meet the solid).
     for sub in HULL_PARTS {
         let ids: Vec<usize> = (0..r.car.nodes.len())
             .filter(|&i| r.car.nodes[i].sub.as_deref() == Some(sub))
@@ -509,7 +514,61 @@ pub(super) fn interior_skins(r: &mut Rig) {
             poly(&f, Part::Engine, Some(sub));
         }
     }
+    // The shell.
+    for s in ["l", "r"] {
+        for row in 1..=4 {
+            let (a, b) = (row, row + 1);
+            for q in [
+                // the sill's outer face
+                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c2_{b}{s}"), format!("sh_c2_{a}{s}")],
+                // the floor pan
+                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c1_{a}t{s}")],
+                // the tunnel's wall
+                [format!("sh_c1_{a}t{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c3_{b}"), format!("sh_c3_{a}")],
+            ] {
+                named(&q).into_iter().for_each(|ids| poly(&ids, Part::Body, None));
+            }
+        }
+        // The B-pillar, sill to waist to roof rail: without it doors crush past a pillar nothing can
+        // touch, and its paint stands in the other car (side 60: 88 mm -> 0).
+        for q in [["sh_c2_2", "sh_c2_3", "sh_d2_b"], ["sh_c2_3", "sh_c2_4", "sh_d2_b"], ["sh_d1_t", "sh_d2_t", "sh_d2_b"]] {
+            named(&q.map(|n| format!("{n}{s}"))).into_iter().for_each(|ids| poly(&ids, Part::Body, None));
+        }
+    }
+    let across = ["ol", "il", "ir", "or"];
+    let floor1 = ["ol", "tl", "tr", "or"];
+    for k in 0..3 {
+        for q in [
+            [format!("sh_b2_{}", across[k]), format!("sh_b2_{}", across[k + 1]), format!("sh_b1_{}", across[k + 1]), format!("sh_b1_{}", across[k])],
+            [format!("sh_b1_{}", across[k]), format!("sh_b1_{}", across[k + 1]), format!("sh_c1_1{}", floor1[k + 1]), format!("sh_c1_1{}", floor1[k])],
+        ] {
+            named(&q).into_iter().for_each(|ids| poly(&ids, Part::Body, None));
+        }
+    }
+    // The doors.
+    for part in [Part::DoorFL, Part::DoorFR, Part::DoorRL, Part::DoorRR] {
+        let dn = part.name().trim_start_matches("gen2_").to_string();
+        let o = |row: usize, k: usize| format!("{dn}_o{row}{k}");
+        let i = |row: usize, k: usize| format!("{dn}_i{row}{k}");
+        for k in 0..2 {
+            for q in [
+                [i(0, k), i(0, k + 1), i(1, k + 1), i(1, k)],
+                [o(0, k), o(0, k + 1), i(0, k + 1), i(0, k)],
+                [o(2, k), o(2, k + 1), i(1, k + 1), i(1, k)],
+            ] {
+                named(&q).into_iter().for_each(|ids| poly(&ids, part, None));
+            }
+        }
+        for k in [0, 2] {
+            named(&[o(0, k), i(0, k), i(1, k), o(2, k)]).into_iter().for_each(|ids| poly(&ids, part, None));
+        }
+    }
     r.car.tris.extend(add);
+    fill_holes(r);
+    belly_cap(r);
+    single_floor(r);
+    fill_holes(r);
+    cover_bare(r, inp);
 }
 
 /// The least share of an edge node's ties' directions along their weakest

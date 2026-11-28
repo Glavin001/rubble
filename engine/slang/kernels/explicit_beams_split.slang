@@ -168,7 +168,7 @@ void splitWheelsAhead(uint v, uint lane, uint s)
 
 // Vehicle v's step s (parameter copy s) when it is a member of a contact group this
 // frame; any other vehicle returns at once.
-uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
+uint splitMemberHead(uint v, uint lane, uint s, uint phase, out MemberTail t)
 {
     t.v = v;
     t.s = s;
@@ -201,18 +201,22 @@ uint splitMemberHead(uint v, uint lane, uint s, out MemberTail t)
     uint surfOn = surfaceOn();
     sync();
     uint stepBase = gMisc[vvMember(off, 0u)].w;
-    splitCoupleStep(v, rank, k, lane, s, coupleOn);
-    // (PERF_SPLIT_WHEELS_AHEAD: this step's rays and bars ran in the last step's rest
-    // dispatch; uniform.)
-    splitDrive(v, lane, s, driveOn, s > 0u && splitWheelsAheadOn());
+    // (The coupling and the drive before the node update: not in the rest's half.)
+    if (phase != 2u)
+    {
+        splitCoupleStep(v, rank, k, lane, s, coupleOn);
+        // (PERF_SPLIT_WHEELS_AHEAD: this step's rays and bars ran in the last step's rest
+        // dispatch; uniform.)
+        splitDrive(v, lane, s, driveOn, s > 0u && splitWheelsAheadOn());
+    }
     // Every member on the whole of its workgroup with the one member step
     // (contactMemberStep), whatever the group's size: the same results as a small
     // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which
     // this module no longer holds), bit for bit (group_split_gpu, self_split_gpu).
     // (contactMemberStep up to its tail: the entry runs memberTail, then splitMemberEnd.)
-    uint how = contactMemberStepHead(v, lane, s, rank == 0u, t);
+    uint how = contactMemberStepHeadPhase(v, lane, s, rank == 0u, phase, t);
     t.stepBase = stepBase;
-    return how | MT_STEPPED;
+    return phase == 1u ? 0u : how | MT_STEPPED;
 }
 // Member t.v's step's end after its tail (splitMemberHead's caller): the surface pass and
 // vehicle sleep's motion.
@@ -292,7 +296,14 @@ void splitGroupBegin(uint g, uint lane)
 // of them (the listed pairs).
 static const uint SPLIT_TESTS = 0x20000000u;
 static const uint SPLIT_LEVELS = 0x40000000u;
-static const uint SPLIT_STEP = 0x0FFFFFFFu;
+static const uint SPLIT_STEP = 0x000FFFFFu;
+// Continuous contact's seam (the members' step in two dispatches, the continuous passes
+// between): the node update's half and the rest's.
+static const uint SPLIT_CC_NODES = 0x08000000u;
+static const uint SPLIT_CC_REST = 0x04000000u;
+// With both, the pass's part in bits 20..23 (explicit_plan::continuous): 0 its response, 1 its
+// prep, 2 and 4 its grids' count and fill, 3 their prefix, 5 its listing.
+static const uint SPLIT_CC_PART_SHIFT = 20u;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
 static const uint SPLIT_TEST_WGS = 64u;
 
@@ -368,6 +379,9 @@ void splitGroupStep(uint g, uint lane, uint word)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     uint parity = (stepBase + s) & 1u;
     bool small = k <= VV_PART;
+    // No vehicle pass: measured off (the ablation word's 512), or velocity contact, which
+    // covers vehicle contact (the CPU's contact_pass returns).
+    bool vvOff = (gP.ablate & 512u) != 0u || splitUniform(lane, noPositionSteps(vvMember(off, 0u)) ? 1u : 0u) != 0u;
 #ifdef EB_VV_FLEET
     // The owners' state by vehicle (PERF_FLEET_STATE, explicit_beams_fleet.slang; the
     // host sets it only with the tests split, the candidates' grid and the pair list).
@@ -375,7 +389,7 @@ void splitGroupStep(uint g, uint lane, uint word)
     // size on the fleet-wide passes, its levels fleetLevelsAny; the second measurement word's
     // bit 0x80000000, tests only (set_ablation2), takes those levels whatever the hit lists.)
     bool anySize = (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_ANY)) == (PERF_FLEET_FRONT | PERF_FLEET_ANY);
-    if ((small || anySize) && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && (gP.ablate & 512u) == 0u)
+    if ((small || anySize) && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && !vvOff)
     {
         if (!levels)
         {
@@ -438,7 +452,7 @@ void splitGroupStep(uint g, uint lane, uint word)
         sync();
         // Measurement only (time; contact-groups-design.md): the ablation word's 512 skips
         // the pass here too (the split modules have no EB_ABLATE build).
-        if ((gP.ablate & 512u) != 0u)
+        if (vvOff)
         {
             if (lane == 0u && small) gAcc[splitVvAt(off) + 8u * VV_PART + VV_PART * VV_PART].store(0);
         }
@@ -478,7 +492,15 @@ void splitGroupStep(uint g, uint lane, uint word)
 }
 
 // After the last step's pass: the group's frame end (contactGroup's after its steps).
+void splitGroupEndNow(uint off, uint k, uint lane, uint s);
 void splitGroupEnd(uint off, uint k, uint lane, uint s)
+{
+    // (With edge vehicle contact the frame's end follows the last step's edge pass:
+    // explicit_beams_split_edges.slang runs it.)
+    if (edgeOn()) return;
+    splitGroupEndNow(off, k, lane, s);
+}
+void splitGroupEndNow(uint off, uint k, uint lane, uint s)
 {
     if (s + 1u != gP.steps) return;
     if (lane == 0u)
@@ -671,7 +693,7 @@ uint memberRestStepHead(uint v, uint lane, uint s, out MemberTail t)
     uint hitsOn = gsUniformHits;
     // (The tail, memberTail, in the entry: its hits applied, the slide nodes, the list.)
     t.origin = origin;
-    t.range = asfloat(r3.z);
+    t.range = selfRangeOf(v, asfloat(r3.z));
     t.beamOff = r0.z;
     t.groupOff = r2.z;
     t.groupCount = r2.w;
@@ -735,12 +757,20 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
         how = memberRestStepHead(vid.x, lid.x, gP.pad2 & SPLIT_STEP, t);
     else
 #endif
-        how = splitMemberHead(vid.x, lid.x, gP.pad2, t);
+        how = splitMemberHead(vid.x, lid.x, gP.pad2 & SPLIT_STEP,
+                              (gP.pad2 & SPLIT_CC_NODES) != 0u ? 1u : ((gP.pad2 & SPLIT_CC_REST) != 0u ? 2u : 0u), t);
     if ((how & MT_TAIL) != 0u) memberTail(t, how, lid.x);
 #ifdef EB_SELF_SPLIT
     if (rest) memberRestEnd(vid.x, lid.x);
 #endif
     if ((how & MT_STEPPED) != 0u) splitMemberEnd(t, lid.x);
+    // Contact offsets: the vehicle's offset vectors at its step's end, for every contact
+    // path after it (the fleet-wide front reads them; the groups' pass computes the same).
+    if ((how & MT_STEPPED) != 0u && gP.offsetBase != 0u)
+    {
+        sync();
+        contactOffsets(vid.x, lid.x, LANES);
+    }
     ebLoopCapFlush();
 }
 #endif

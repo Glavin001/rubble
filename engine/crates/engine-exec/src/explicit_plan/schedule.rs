@@ -132,6 +132,9 @@ pub enum GroupOp {
     /// frame's end, the last step's reactions only), a workgroup a group
     /// ([`Switches::wheels_bodies`]).
     Wheels { copy: u32 },
+    /// Edge vehicle contact's pass of a step after its groups' contact pass, parameter
+    /// copy `copy` (the step's), a workgroup a group (explicit_beams_split_edges.slang).
+    Edge { copy: u32, wide: u32, vel: bool },
     /// A launch of the wide frame a fleet with vehicle contact runs while the plan holds
     /// no group, or one of today's sized by its gate ([`super::vv_wide`]).
     Wide(super::vv_wide::WideOp),
@@ -210,6 +213,7 @@ impl GroupOp {
             GroupOp::SoloRest { .. } => "explicit self solo hits",
             GroupOp::Surf { pass, .. } => SURF_FAST_PASSES[pass as usize].0,
             GroupOp::Wheels { .. } => "explicit split wheels on cars",
+            GroupOp::Edge { .. } => "explicit split edge contact",
             GroupOp::Wide(w) => w.label(),
         }
     }
@@ -532,6 +536,13 @@ pub fn split_launch(op: &Op, aero: bool, lanes: u32, kind: &FrameKind) -> Option
             None,
             None,
         ),
+        Op::Group(GroupOp::Edge { copy, wide, vel }) => l(
+            (split(if vel { "ccvel" } else { "edges" }, aero, lanes), super::SPLIT_EDGE_ENTRY),
+            copy,
+            if wide > 0 { Grid::Groups(wide) } else { Grid::Indirect(ArgBuf::Plan, SPLIT_GROUP_ARGS) },
+            None,
+            None,
+        ),
         Op::Group(GroupOp::Member(s)) => l(
             (split("member", aero, lanes), SPLIT_MEMBER_ENTRY),
             s,
@@ -694,8 +705,10 @@ fn group_ready(planner: &FramePlanner, sw: &Switches, vv: bool) -> bool {
 }
 
 /// Whether this frame runs the split group path.
+
 pub fn group_split_on(planner: &FramePlanner, sw: &Switches, steps: u32) -> bool {
-    sw.group_split
+    // (Edge vehicle contact runs only on this path: its pass, edge_pass_on.)
+    (sw.group_split || planner.words[super::W_EDGE] != 0)
         && planner.contact_active()
         && sw.current
         && !sw.debug
@@ -845,6 +858,8 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
     // Raycast wheels on each other (Switches::wheels_bodies): before each step's members,
     // the last step's reactions and this step's rays; after the last step the reactions.
     let wheels = sw.wheels_bodies;
+    // Edge vehicle contact (the plan's W_EDGE): its pass after each step's groups' pass.
+    let edges = super::edge::edge_pass_on(planner);
     for s in 0..steps + u32::from(vv) {
         if wheels && s < steps {
             out.push(GroupOp::Wheels { copy: s });
@@ -869,7 +884,7 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
                 out.extend((0..SURF_FAST_PASSES.len()).map(|i| GroupOp::Surf { copy: s, pass: i as u8, groups: planner.vehicles() }));
             }
         } else {
-            out.push(GroupOp::Member(s));
+            super::continuous::member_ops(planner, sw, kind, steps, s, &mut out);
         }
         if sw.group_split_tests && fleet & PERF_FLEET_FRONT != 0 {
             // The front and the tests as fleet-wide dispatches (explicit_beams_fleet.slang),
@@ -910,6 +925,8 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
                     out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
                 }
             }
+            // (The levels-once module has no contact offsets' code: EB_NO_OFFSETS.)
+            assert!(planner.words[super::W_OFFSET] == 0 || !apart, "explicit beams: the levels-once module with contact offsets");
             out.push(GroupOp::Group { copy: cl, tests: false, args: SPLIT_GROUP_ARGS, part: 4, entry: pick(GroupEntry::LevelsOnce) });
             // The levels across the GPU (explicit_beams_fleet_levels.slang): the plan (one
             // workgroup when a group exists), the snapshot, each slot's application and
@@ -937,6 +954,9 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
         } else {
             out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS, part: 5, entry: any });
         }
+        if edges && s < steps {
+            out.push(GroupOp::Edge { copy: if sw.group_split_tests { steps + 2 + s } else { s }, wide: 0, vel: false });
+        }
     }
     if wheels {
         out.push(GroupOp::Wheels { copy: steps + 1 });
@@ -948,6 +968,21 @@ pub fn group_split_ops(planner: &FramePlanner, sw: &Switches, kind: &FrameKind, 
 /// ([`FramePlanner::write_params`], [`FramePlanner::commands`]), the split paths this
 /// frame runs, the parameter copies they read, and every launch in order.
 pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
+    // Edge vehicle contact runs as the split group path's pass, which also takes the
+    // groups' frame end (the kernel's splitGroupEnd leaves it to the pass with edgeBase
+    // set). Until its module is compiled (a browser host's async compiles) a frame runs
+    // with edge contact off in its parameters, never a group frame without its end.
+    let edge_word = planner.words[super::W_EDGE];
+    if edge_word != 0 && !super::edge::edge_module_ready(sw) {
+        planner.words[super::W_EDGE] = 0;
+    }
+    let out = frame_with(planner, sw, steps);
+    planner.words[super::W_EDGE] = edge_word;
+    out
+}
+
+
+fn frame_with(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
     let mut bytes = planner.write_params(steps);
     let mut cmds = planner.commands(steps, sw.wide_allowed);
     let mut kind = FrameKind { self_awake: planner.sleep_listed(), ..Default::default() };
@@ -956,6 +991,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
     let vv = !selfs && self_split_vv_on(planner, sw, steps, &cmds);
     kind.self_split_vv = vv;
     let group = vv || group_split_on(planner, sw, steps);
+    super::edge::edge_frame_check(planner, sw, group, steps);
     kind.vv_wide = group && super::vv_wide::on(planner, sw, steps, vv);
     // Vehicle sleep's awake-indexed dispatch on a split path (a step a dispatch): the
     // kernel's sleepPad0 = 2 in every copy. The awake list's kernel then also wakes
@@ -1003,8 +1039,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
         // Copy steps + 1: the groups' frame start (the kernel's SPLIT_BEGIN); with the
         // tests split, copy steps + 2 + s step s's second phase (SPLIT_LEVELS) and copy
         // 2 steps + 2 + s its first group dispatch and walk (SPLIT_TESTS). The
-        // vehicles' steps read copy s (the step alone).
-        // (The members' rest dispatches read the SPLIT_LEVELS copies too.)
+        // vehicles' steps read copy s (the step alone; the members' rest, SPLIT_LEVELS's).
         let rest = member_rest_on(planner, vv);
         let extra = if sw.group_split_tests { 2 * steps + 1 } else if rest { steps + 1 } else { 1 };
         // (The levels across the GPU: after those, four copies a level slot, then the
@@ -1053,6 +1088,7 @@ pub fn frame(planner: &mut FramePlanner, sw: &Switches, steps: u32) -> Frame {
             put(base + 4 * slots + 1, SPLIT_LV | LV_PLAN << 8 | slots);
             put(base + 4 * slots + 2, SPLIT_LV | LV_END << 8 | slots);
         }
+        super::continuous::copies(planner, sw, &kind, steps, &mut bytes);
         bytes
     } else {
         let used = cmds

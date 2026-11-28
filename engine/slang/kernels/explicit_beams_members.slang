@@ -124,12 +124,12 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
     uint boxOff = r1.z;
     uint boxCount = r1.w;
     uint candOff = r2.x;
-    uint candCount = on ? r2.y : 0u;
+    uint candCount = on && !noPositionSteps(v) ? r2.y : 0u;
     uint groupOff = r2.z;
     uint groupCount = on ? r2.w : 0u;
     uint flagsV = r3.x;
     float ground = asfloat(r3.y);
-    float range = asfloat(r3.z);
+    float range = selfRangeOf(v, asfloat(r3.z));
     float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
 #ifdef EB_AERO
@@ -443,7 +443,7 @@ void contactMemberEnd(uint v, uint lane)
     if (gP.steps > 0u && r2.w > 0u)
     {
         uint last = (misc.w + gP.steps - 1u) & 1u;
-        for (uint j = lane, jStop = EB_END(180, j, r0.w, LANES); j < jStop; j += LANES) groupDrops(r0.z + j, r0.z, r2.z, last, true);
+        for (uint j = lane, jStop = EB_END(180, j, r0.w, LANES); j < jStop; j += LANES) groupDropsAtFrameEnd(r0.z + j, r0.z, r2.z, last);
     }
     if (lane < 12u) gAcc[gP.vvAcc + v * 12u + lane].store((lane % 6u) < 3u ? VV_INT_MAX : VV_INT_MIN);
     sync();
@@ -498,6 +498,52 @@ void vvFrame(inout VvTri t, float3 p1, float3 p2)
 // vehicle contact differed in the last bit; contact-groups-design.md §8.10.)
 float3 vvRel(uint v, uint a) { return nf3(asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz)); }
 
+// --- Contact offsets (ExplicitBeams::contact_offset; explicit_plan's W_OFFSET) ---
+// gStatic at gP.offsetBase per global node (its outer triangles' first entry in gLists,
+// their count, its offset's bits, 0), then per vehicle (its largest offset's bits, ...);
+// at gP.offsetBase - 1 (the vectors' first float4 in gBeams). Each node's vector is its
+// offset along its vertex normal (the unit sum of its live outer triangles' unit
+// normals, explicit_contact/edge.rs contact_offset_vectors), computed at the contact pass's
+// start (contactOffsets) and added to a vehicle's triangles (vvTriangle, vvNearBox).
+// (EB_NO_OFFSETS: a module that runs only with the fleet-wide schedules, which the host
+// leaves off with contact offsets: explicit_plan's PERF_FLEET_FAMILY.)
+float3 contactOff(uint n)
+{
+    if (gP.offsetBase == 0u) return float3(0.0, 0.0, 0.0);
+    return gBeams[gStatic[gP.offsetBase - 1u].x + n].xyz;
+}
+float contactOffMax(uint v) { return gP.offsetBase == 0u ? 0.0 : asfloat(gStatic[gP.offsetBase + gP.totalNodes + v].x); }
+// glam's normalize_or_zero.
+float3 contactNormOrZero(float3 x)
+{
+    float rcp = sdiv(1.0, ssqrtCr(sdot(x, x)));
+    if (!(rcp > 0.0 && rcp <= 3.4028235e38)) return float3(0.0, 0.0, 0.0);
+    return sscale(x, rcp);
+}
+// Vehicle v's nodes' offset vectors (lane of lanes; the caller's barrier follows).
+void contactOffsets(uint v, uint lane, uint lanes)
+{
+    if (gP.offsetBase == 0u || contactOffMax(v) == 0.0) return;
+    uint4 r0 = gStatic[v * 4u];
+    uint vecs = gStatic[gP.offsetBase - 1u].x;
+    for (uint i = lane, iStop = EB_END(870, i, r0.y, lanes); i < iStop; i += lanes)
+    {
+        uint n = r0.x + i;
+        uint4 rec = gStatic[gP.offsetBase + n];
+        float o = asfloat(rec.z);
+        float3 sum = float3(0.0, 0.0, 0.0);
+        for (uint q = 0u, qStop = EB_END(871, q, o != 0.0 ? rec.y : 0u, 1u); q < qStop; q++)
+        {
+            uint gt = gLists[rec.x + q];
+            if ((gMisc[gP.vehicles + gt].z & TRI_BREAKABLE) != 0u && triangleDead(gt)) continue;
+            uint4 tn = gStatic[gP.triBase + gt];
+            float3 a = gNodes[tn.x * 3u].xyz;
+            sum = sadd3(sum, contactNormOrZero(scross(ssub3(gNodes[tn.y * 3u].xyz, a), ssub3(gNodes[tn.z * 3u].xyz, a))));
+        }
+        gBeams[vecs + n] = float4(o != 0.0 ? sscale(contactNormOrZero(sum), o) : float3(0.0, 0.0, 0.0), 0.0);
+    }
+}
+
 VvTri vvTriangle(uint gt, float3 origin, float r)
 {
     VvTri t;
@@ -505,6 +551,14 @@ VvTri vvTriangle(uint gt, float3 origin, float r)
     t.p0 = nf3(origin + gNodes[t.tn.x * 3u].xyz);
     float3 p1 = nf3(origin + gNodes[t.tn.y * 3u].xyz);
     float3 p2 = nf3(origin + gNodes[t.tn.z * 3u].xyz);
+#ifndef EB_NO_OFFSETS
+    if (gP.offsetBase != 0u)
+    {
+        t.p0 = sadd3(t.p0, contactOff(t.tn.x));
+        p1 = sadd3(p1, contactOff(t.tn.y));
+        p2 = sadd3(p2, contactOff(t.tn.z));
+    }
+#endif
     vvFrame(t, p1, p2);
     float3 r3 = float3(r, r, r);
     t.lo = ssub3(min(min(t.p0, p1), p2), r3);

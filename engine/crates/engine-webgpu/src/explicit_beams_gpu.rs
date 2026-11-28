@@ -50,6 +50,7 @@ pub use state_diff::state_differences;
 use surface_gpu::{split_entries, surface_split_for, Split};
 #[path = "explicit_vv_wide_gpu.rs"]
 mod vv_wide_gpu;
+#[path = "explicit_continuous_gpu.rs"] mod continuous_gpu;
 
 pub struct ExplicitBeamsGpu {
     device: wgpu::Device,
@@ -610,6 +611,8 @@ struct GroupSplit {
     fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 4]>,
     /// The members' wheels on each other, created at first use.
     wheels: std::sync::OnceLock<wgpu::ComputePipeline>,
+    edges: std::sync::OnceLock<wgpu::ComputePipeline>,
+    ccvel: std::sync::OnceLock<wgpu::ComputePipeline>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -706,6 +709,8 @@ impl GroupSplit {
             bind,
             fleet: std::sync::OnceLock::new(),
             wheels: std::sync::OnceLock::new(),
+            edges: std::sync::OnceLock::new(),
+            ccvel: std::sync::OnceLock::new(),
             args_layout,
             bind_args,
             bind_first,
@@ -1522,10 +1527,9 @@ impl ExplicitBeamsGpu {
                     deferred: false,
                 });
             }
-        }
-        if vehicles.len() > 1 {
-            // The split group path's three pipelines (GroupSplit::new's descriptors),
-            // after the first frame's: they run only once a contact group forms.
+            // The split group path's: ahead for edge contact or contact offsets (`group`, minutes cold).
+            let (edge, offs) = (vehicles.iter().any(|v| v.edge_contact), vehicles.iter().any(|v| !v.contact_offset.is_empty()));
+            let ahead = |w| if w == "edges" { edge } else { (edge || offs) && matches!(w, "member" | "tests" | "group" | "groupbegin" | "grouplevels" | "grouplv") };
             for (which, entry) in [
                 ("member", SPLIT_MEMBER_ENTRY),
                 ("group", SPLIT_GROUP_ENTRY),
@@ -1537,7 +1541,7 @@ impl ExplicitBeamsGpu {
                 ("fleetplan", FLEET_PLAN_ENTRY),
                 ("fleetpost", FLEET_POST_ENTRY),
                 ("fleetlevels", FLEET_LEVELS_ENTRY),
-            ] {
+            ].into_iter().chain(ahead("edges").then_some(("edges", plan::SPLIT_EDGE_ENTRY))) {
                 let module = split_module(which, aero, lanes);
                 // (The groups' and the fleet plan's modules bind the fleet's arguments.)
                 let args = matches!(which, "group" | "groupbegin" | "grouplevels" | "grouplv" | "fleetplan");
@@ -1547,7 +1551,7 @@ impl ExplicitBeamsGpu {
                     wgsl: u(module_wgsl(module)),
                     entry,
                     layout: Some(if args { fleet_args_entries() } else { split_entries() }),
-                    deferred: true,
+                    deferred: !ahead(which),
                 });
             }
         }
@@ -1633,13 +1637,13 @@ impl ExplicitBeamsGpu {
             return;
         }
         let fallback = [Kernel::Contact.entry(), Kernel::Solo.entry(), Kernel::ContactBig.entry()];
+        let edge = specs.iter().any(|s| s.entry == SPLIT_GROUP_ENTRY && !s.deferred);
         for s in specs.iter_mut() {
-            // (The groups' kernel with every pass stays in the background: with the
-            // default flags the groups' dispatches run the kernels of one kind each,
+            // (The groups' kernel with every pass stays in the background: with the default flags the groups' dispatches run the kernels of one kind each,
             // `explicit_beams_split_group*`, plan::schedule::group_entries_apart. It was
-            // 267 s of a cold load in Chrome.)
+            // 267 s of a cold load in Chrome. Edge contact's path needs it: compute_specs put it ahead.)
             if s.entry == SPLIT_GROUP_ENTRY {
-                s.deferred = true;
+                s.deferred = !edge;
             } else if ahead.iter().any(|m| s.module.starts_with(m)) {
                 s.deferred = false;
             } else if fallback.contains(&s.label) && !s.deferred {
@@ -1930,8 +1934,8 @@ impl ExplicitBeamsGpu {
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
         self.drive_flags = vehicles.iter().map(|v| drive_flags_of(v).0).collect();
         self.wheels_bodies = vehicles.iter().any(|v| drive_flags_of(v).1);
-        let f = self.perf_asked;
-        self.set_perf_flags(f);
+        self.set_perf_flags(self.perf_asked);
+        self.write_cc_mode();
         self.sleep_grab = None;
         self.sleep_wake.lock().unwrap().clear();
         self.contact_errors.lock().unwrap().clear();
@@ -4556,6 +4560,11 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(g.wheels());
                 pass.set_bind_group(0, &g.bind, &at(copy));
                 self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS);
+            }
+            GroupOp::Edge { copy, wide, vel } => {
+                pass.set_pipeline(g.edges(vel));
+                pass.set_bind_group(0, &g.bind, &at(copy));
+                if wide > 0 { pass.dispatch_workgroups(wide, 1, 1) } else { self.dispatch_plan_args(pass, SPLIT_GROUP_ARGS) }
             }
             GroupOp::Fleet { copy, kernel, args: off, from, .. } => {
                 // (The plan kernel writes the arguments after the ones it runs from: the

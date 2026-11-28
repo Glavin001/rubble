@@ -3,6 +3,7 @@
 //! modules, a measurement's override directory, or a test-only module compiled on
 //! demand ([`crate::test_kernels_dir`]).
 
+use crate::kernel::{kernel, Kernel};
 use crate::{
     EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
     EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_WGSL,
@@ -10,6 +11,65 @@ use crate::{
     EXPLICIT_BEAMS_SOLO_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
     EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
 };
+
+/// The split group path (`EB_VV_SPLIT`, engine/docs/measurements/contact-groups-design.md):
+/// per frame-module variant (plain, wide, aero, aero wide) the members' step
+/// (`explicit_beams_split_member`), the groups' pass (`explicit_beams_split_group`) and
+/// its triangle tests across workgroups (`explicit_beams_split_tests`); and the pass's
+/// front as fleet-wide dispatches (`explicit_beams_fleet_front`, `explicit_beams_fleet_plan`:
+/// explicit_beams_fleet.slang, contact-groups-design.md §8); and the members' raycast
+/// wheels on each other (`explicit_beams_split_wheels`).
+/// WebGPU only (native wgpu and browsers).
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, Kernel); 48] = [
+    ("explicit_beams_split_edges", kernel!("explicit_beams_split_edges")),
+    ("explicit_beams_split_edges_wide", kernel!("explicit_beams_split_edges_wide")),
+    ("explicit_beams_split_edges_aero", kernel!("explicit_beams_split_edges_aero")),
+    ("explicit_beams_split_edges_aero_wide", kernel!("explicit_beams_split_edges_aero_wide")),
+    ("explicit_beams_split_groupbegin", kernel!("explicit_beams_split_groupbegin")),
+    ("explicit_beams_split_groupbegin_wide", kernel!("explicit_beams_split_groupbegin_wide")),
+    ("explicit_beams_split_groupbegin_aero", kernel!("explicit_beams_split_groupbegin_aero")),
+    ("explicit_beams_split_groupbegin_aero_wide", kernel!("explicit_beams_split_groupbegin_aero_wide")),
+    ("explicit_beams_split_grouplevels", kernel!("explicit_beams_split_grouplevels")),
+    ("explicit_beams_split_grouplevels_wide", kernel!("explicit_beams_split_grouplevels_wide")),
+    ("explicit_beams_split_grouplevels_aero", kernel!("explicit_beams_split_grouplevels_aero")),
+    ("explicit_beams_split_grouplevels_aero_wide", kernel!("explicit_beams_split_grouplevels_aero_wide")),
+    ("explicit_beams_split_grouplv", kernel!("explicit_beams_split_grouplv")),
+    ("explicit_beams_split_grouplv_wide", kernel!("explicit_beams_split_grouplv_wide")),
+    ("explicit_beams_split_grouplv_aero", kernel!("explicit_beams_split_grouplv_aero")),
+    ("explicit_beams_split_grouplv_aero_wide", kernel!("explicit_beams_split_grouplv_aero_wide")),
+    ("explicit_beams_split_wheels", kernel!("explicit_beams_split_wheels")),
+    ("explicit_beams_split_wheels_wide", kernel!("explicit_beams_split_wheels_wide")),
+    ("explicit_beams_split_wheels_aero", kernel!("explicit_beams_split_wheels_aero")),
+    ("explicit_beams_split_wheels_aero_wide", kernel!("explicit_beams_split_wheels_aero_wide")),
+    ("explicit_beams_split_fleetlevels", kernel!("explicit_beams_split_fleetlevels")),
+    ("explicit_beams_split_fleetlevels_wide", kernel!("explicit_beams_split_fleetlevels_wide")),
+    ("explicit_beams_split_fleetlevels_aero", kernel!("explicit_beams_split_fleetlevels_aero")),
+    ("explicit_beams_split_fleetlevels_aero_wide", kernel!("explicit_beams_split_fleetlevels_aero_wide")),
+    ("explicit_beams_split_fleetpost", kernel!("explicit_beams_split_fleetpost")),
+    ("explicit_beams_split_fleetpost_wide", kernel!("explicit_beams_split_fleetpost_wide")),
+    ("explicit_beams_split_fleetpost_aero", kernel!("explicit_beams_split_fleetpost_aero")),
+    ("explicit_beams_split_fleetpost_aero_wide", kernel!("explicit_beams_split_fleetpost_aero_wide")),
+    ("explicit_beams_split_fleetfront", kernel!("explicit_beams_split_fleetfront")),
+    ("explicit_beams_split_fleetplan", kernel!("explicit_beams_split_fleetplan")),
+    ("explicit_beams_split_fleetfront_wide", kernel!("explicit_beams_split_fleetfront_wide")),
+    ("explicit_beams_split_fleetplan_wide", kernel!("explicit_beams_split_fleetplan_wide")),
+    ("explicit_beams_split_fleetfront_aero", kernel!("explicit_beams_split_fleetfront_aero")),
+    ("explicit_beams_split_fleetplan_aero", kernel!("explicit_beams_split_fleetplan_aero")),
+    ("explicit_beams_split_fleetfront_aero_wide", kernel!("explicit_beams_split_fleetfront_aero_wide")),
+    ("explicit_beams_split_fleetplan_aero_wide", kernel!("explicit_beams_split_fleetplan_aero_wide")),
+    ("explicit_beams_split_member", kernel!("explicit_beams_split_member")),
+    ("explicit_beams_split_group", kernel!("explicit_beams_split_group")),
+    ("explicit_beams_split_tests", kernel!("explicit_beams_split_tests")),
+    ("explicit_beams_split_member_wide", kernel!("explicit_beams_split_member_wide")),
+    ("explicit_beams_split_group_wide", kernel!("explicit_beams_split_group_wide")),
+    ("explicit_beams_split_tests_wide", kernel!("explicit_beams_split_tests_wide")),
+    ("explicit_beams_split_member_aero", kernel!("explicit_beams_split_member_aero")),
+    ("explicit_beams_split_group_aero", kernel!("explicit_beams_split_group_aero")),
+    ("explicit_beams_split_tests_aero", kernel!("explicit_beams_split_tests_aero")),
+    ("explicit_beams_split_member_aero_wide", kernel!("explicit_beams_split_member_aero_wide")),
+    ("explicit_beams_split_group_aero_wide", kernel!("explicit_beams_split_group_aero_wide")),
+    ("explicit_beams_split_tests_aero_wide", kernel!("explicit_beams_split_tests_aero_wide")),
+];
 
 /// Measurement only: the explicit modules' WGSL read from another build's generated
 /// directory (`NAME.wgsl`, e.g. a copy of an older build's `OUT_DIR/wgsl`) instead of

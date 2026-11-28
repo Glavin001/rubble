@@ -376,7 +376,7 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
         uint4 r0 = gStatic[v * 4u];
         uint4 r2 = gStatic[v * 4u + 2u];
         uint4 r3 = gStatic[v * 4u + 3u];
-        float range = asfloat(r3.z);
+        float range = selfRangeOf(v, asfloat(r3.z));
         float cell = asfloat(r3.w);
         uint4 misc = gMisc[v];
         float3 origin = asfloat(misc.xyz);
@@ -403,7 +403,7 @@ void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint4 r0 = gStatic[v * 4u];
         uint4 r2 = gStatic[v * 4u + 2u];
         uint4 r3 = gStatic[v * 4u + 3u];
-        float range = asfloat(r3.z);
+        float range = selfRangeOf(v, asfloat(r3.z));
         float cell = asfloat(r3.w);
         uint4 misc = gMisc[v];
         float3 origin = asfloat(misc.xyz);

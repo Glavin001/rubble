@@ -107,8 +107,18 @@ uint vvClip(VvTri t, uint gt, uint h, float3 p, uint vh, float r, out float alph
         float3 oa = vvRel(va, va);
         VvTri pf;
         pf.p0 = ssub3(t.p0, sscale(gNodes[t.tn.x * 3u + 1u].xyz, STEP));
-        float3 b1 = ssub3(nf3(oa + gNodes[t.tn.y * 3u].xyz), sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
-        float3 b2 = ssub3(nf3(oa + gNodes[t.tn.z * 3u].xyz), sscale(gNodes[t.tn.z * 3u + 1u].xyz, STEP));
+        float3 a1 = nf3(oa + gNodes[t.tn.y * 3u].xyz);
+        float3 a2 = nf3(oa + gNodes[t.tn.z * 3u].xyz);
+#ifndef EB_NO_OFFSETS
+        if (gP.offsetBase != 0u)
+        {
+            // (Contact offsets: the triangle's corners as vvTriangle's.)
+            a1 = sadd3(a1, contactOff(t.tn.y));
+            a2 = sadd3(a2, contactOff(t.tn.z));
+        }
+#endif
+        float3 b1 = ssub3(a1, sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
+        float3 b2 = ssub3(a2, sscale(gNodes[t.tn.z * 3u + 1u].xyz, STEP));
         vvFrame(pf, b1, b2);
         float3 q0 = ssub3(ssub3(p, sscale(gNodes[h * 3u + 1u].xyz, STEP)), pf.p0);
         float a0 = 0.0;
@@ -350,16 +360,31 @@ bool vvStagedHit(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint pari
     return true;
 }
 
+// Edge vehicle contact's pairs (ExplicitBeams::edge_contact on either vehicle; the
+// vehicle flags' bit 21, explicit_plan.rs): their node hits' residual takes the
+// accumulated clamp (vvResOf's lam0), their edge hits a dispatch of their own
+// (explicit_beams_split_edges.slang).
+static const uint FLAG_EDGE = 2097152u;
+bool edgeOn() { return gP.edgeBase != 0u; }
+bool edgeVeh(uint v) { return (gStatic[v * 4u + 3u].x & FLAG_EDGE) != 0u; }
+bool edgePairOn(uint a, uint b) { return edgeOn() && (edgeVeh(a) || edgeVeh(b)); }
+
 // The staged hit's residual r (0: none): approaching and still approaching at A,
-// with the first pass's counts.
-float vvResOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, float3 nn, float3 v, uint slot)
+// with the first pass's counts. With lam0 >= 0 (an edge-contact pair: the first pass's
+// normal force) the accumulated clamp instead: toward the stop at A, never below zero
+// in total (explicit_contact.rs residual_vehicle_pass, `clamp`).
+float vvResOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, float3 nn, float3 v, uint slot, float lam0)
 {
     float3 at = sadd3(sadd3(sscale(vvResAcc(tn.y, S.y, false), alpha),
                             sscale(vvResAcc(tn.z, S.z, false), beta)),
                       sscale(vvResAcc(tn.x, S.x, false), gamma));
     float an = sdot(ssub3(vvResAcc(h, S.h, false), at), nn);
     float vn = sdot(v, nn);
+#ifdef EB_EDGE_CLAMP
+    if (lam0 < 0.0 && !(vn < 0.0 && nf(smul(an, STEP) + vn) < 0.0)) return 0.0;
+#else
     if (!(vn < 0.0 && nf(smul(an, STEP) + vn) < 0.0)) return 0.0;
+#endif
     float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), gNodes[h * 3u].w);
     float i1 = (alpha > 0.0 && !vvImmovable(tn.y)) ? smul(smul(alpha, alpha), sdiv(vvSplitK(vvSplitTri(tn.y)), gNodes[tn.y * 3u].w)) : 0.0;
     float i2 = (beta > 0.0 && !vvImmovable(tn.z)) ? smul(smul(beta, beta), sdiv(vvSplitK(vvSplitTri(tn.z)), gNodes[tn.z * 3u].w)) : 0.0;
@@ -368,8 +393,12 @@ float vvResOf(uint h, uint4 tn, VvSums S, float alpha, float beta, float gamma, 
     if (!(inv > 0.0)) return 0.0;
     float m = sdiv(1.0, inv);
     float r = nf(-smul(an, m) - sdiv(smul(vn, m), STEP));
+#ifdef EB_EDGE_CLAMP
+    if (lam0 >= 0.0) return nf(max(nf(lam0 + r), 0.0) - lam0);
+#endif
     return r > 0.0 ? r : 0.0;
 }
+
 
 // The guard of the staged hit's force t at A + B (explicit_contact.rs
 // guard_vehicle_pass).
@@ -420,14 +449,20 @@ void vvResidualPhase(uint va, uint base, uint n, float r, uint parity, uint lane
             continue;
         }
         VvSums S = vvSumsOf(va, vh, h, t.tn, parity);
-        float rr = vvResOf(h, t.tn, S, alpha, beta, gamma, nn, v, slot);
+#ifdef EB_EDGE_CLAMP
+        // (Edge contact runs only on the split group path, its groups' module: EB_EDGE_CLAMP.)
+        float lam0 = edgePairOn(va, vh) ? max(sdot(f1, nn), 0.0) : -1.0;
+#else
+        float lam0 = -1.0;
+#endif
+        float rr = vvResOf(h, t.tn, S, alpha, beta, gamma, nn, v, slot, lam0);
         if (phase == 0u)
         {
-            if (rr > 0.0) resStage(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, sscale(nn, rr));
+            if (rr != 0.0) resStage(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, sscale(nn, rr));
             continue;
         }
         float3 total = f1;
-        if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
+        if (rr != 0.0) total = sadd3(total, sscale(nn, rr));
         float3 g;
         if (vvGuardOf(h, t.tn, S, alpha, beta, gamma, v, total, g)) total = sadd3(total, g);
         resFinal(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, f1, total);
@@ -668,6 +703,14 @@ bool vvNearBox(uint gt, uint va, float r, float3 blo, float3 bhi, float extra)
     float3 p0 = nf3(o + gNodes[tn.x * 3u].xyz);
     float3 p1 = nf3(o + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(o + gNodes[tn.z * 3u].xyz);
+#ifndef EB_NO_OFFSETS
+    if (gP.offsetBase != 0u)
+    {
+        p0 = sadd3(p0, contactOff(tn.x));
+        p1 = sadd3(p1, contactOff(tn.y));
+        p2 = sadd3(p2, contactOff(tn.z));
+    }
+#endif
     float3 r3 = float3(r, r, r) + float3(extra, extra, extra);
     return vvOverlap(ssub3(min(min(p0, p1), p2), r3), sadd3(max(max(p0, p1), p2), r3), blo, bhi);
 }

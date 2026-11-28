@@ -15,6 +15,7 @@
 //! - `--car showcase` (default: the page's authored sedan, low resolution) | `sedan` (the
 //!   explicit solver's procedural sedan).
 //! - `--surface 0|1`: the car's opt-in surface contact (default: the script's, else off).
+//! - `--edge 0|1`: edge vehicle contact (default off).
 //! - `--secs S`: the run's length (default: the script's duration).
 //! - `--seed N`, `--steepness D`, `--roughness R`, `--terrain ledges|rolling`: the mountain's.
 //! - `--json <file>`: the stats as JSON.
@@ -144,8 +145,12 @@ fn car(name: &str) -> anyhow::Result<ExplicitBeams> {
 fn options(script: &Value) -> LabOptions {
     let mut v = script.clone();
     let o = v.as_object_mut().expect("a script object");
-    if let Some(s) = arg("--surface") {
-        o.insert("surface".into(), json!(s == "1"));
+    // `--surface`, `--edge` (edge vehicle contact, off by default), `--wheels-bodies` (off), `--pieces`
+    // (on) and `--bit-exact` (`RUBBLE_BIT_EXACT=1` too): 0|1, the lab's options of those names.
+    for (flag, key) in [("--surface", "surface"), ("--edge", "edge"), ("--bit-exact", "bitExact"), ("--wheels-bodies", "wheelsHitBodies"), ("--pieces", "pieceLabels")] {
+        if let Some(s) = arg(flag) {
+            o.insert(key.into(), json!(s == "1"));
+        }
     }
     // `--own-travel 0|1`: anti-clip's padding by each contacter's own travel (on in the lab).
     // `--debris 0|1`, `--debris-ttl S`, `--debris-kg M`, `--debris-nodes N`: the debris time
@@ -169,19 +174,6 @@ fn options(script: &Value) -> LabOptions {
             }
         }
         o.insert("vehicleSleep".into(), d);
-    }
-    // `--bit-exact 0|1`: bit-exact results (the lab's `bitExact`; off by default,
-    // `RUBBLE_BIT_EXACT=1` turns it on: the bit-for-bit harnesses).
-    if let Some(s) = arg("--bit-exact") {
-        o.insert("bitExact".into(), json!(s == "1"));
-    }
-    // `--wheels-bodies 0|1`: raycast wheels hit World bodies (off by default).
-    if let Some(s) = arg("--wheels-bodies") {
-        o.insert("wheelsHitBodies".into(), json!(s == "1"));
-    }
-    // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
-    if let Some(s) = arg("--pieces") {
-        o.insert("pieceLabels".into(), json!(s == "1"));
     }
     if let Some(s) = arg("--own-travel") {
         o.insert("ownTravel".into(), json!(s == "1"));

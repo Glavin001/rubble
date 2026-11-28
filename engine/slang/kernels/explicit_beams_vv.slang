@@ -136,6 +136,7 @@ void vvBoundsRest(uint v, float3 blo, float3 bhi, float3 vl, float3 vh, float ti
 }
 
 [shader("compute")]
+float contactOffMax(uint v);
 [numthreads(256, 1, 1)]
 void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
@@ -186,6 +187,10 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         // velocity covers over the plan, plus the margin (min/max start at 0).
         float3 vl = float3(vvUnkey(gsVvBox[6].load()), vvUnkey(gsVvBox[7].load()), vvUnkey(gsVvBox[8].load()));
         float3 vh = float3(vvUnkey(gsVvBox[9].load()), vvUnkey(gsVvBox[10].load()), vvUnkey(gsVvBox[11].load()));
+        // (Contact offsets: the triangles reach past the nodes by up to the largest.)
+        float om = contactOffMax(v);
+        blo = blo - float3(om, om, om);
+        bhi = bhi + float3(om, om, om);
         float time = 2.0 * float(gP.vvPlanSteps) * STEP;
         float margin = asfloat(gP.vvMargin);
         float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);

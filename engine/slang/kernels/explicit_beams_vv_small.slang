@@ -12,6 +12,15 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
         vvSnapshot(off, k, parity, lane);
         sync();
     }
+    // Contact offsets: every member's vectors at the pass's start. (On the split path each member's step
+    // computed them: explicit_beams_split_member.)
+#ifndef EB_VV_SPLIT
+    if (gP.offsetBase != 0u)
+    {
+        for (uint m = 0u, mStop = EB_END(873, m, k, 1u); m < mStop; m++) contactOffsets(vvMember(off, m), lane, LANES);
+        sync();
+    }
+#endif
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     uint prevTri = 0u;
     uint prevListed = 0u;

@@ -211,6 +211,8 @@ pub const SPLIT_GROUP_BEGIN_ENTRY: &str = "explicit_beams_split_group_begin";
 pub const SPLIT_GROUP_LEVELS_ENTRY: &str = "explicit_beams_split_group_levels";
 pub const SPLIT_GROUP_LV_ENTRY: &str = "explicit_beams_split_group_lv";
 pub const SPLIT_WHEELS_ENTRY: &str = "explicit_beams_split_wheels";
+/// Edge vehicle contact's pass, a dispatch a substep after the groups' contact pass.
+pub const SPLIT_EDGE_ENTRY: &str = "explicit_beams_split_edge";
 pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
 pub const SELF_STEP_ENTRY: &str = "explicit_beams_self_step";
 pub const SELF_WALK_ENTRY: &str = "explicit_beams_self_walk";
@@ -229,8 +231,13 @@ pub fn solo_rest_module_name(aero: bool, lanes: u32, vv: bool) -> String {
 
 /// The split group path's modules by `which` (`split_module_name`), each at the frame
 /// module's four variants (`split_modules`).
-pub const SPLIT_WHICH: [&str; 11] =
-    ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels", "groupbegin", "grouplevels", "grouplv"];
+/// (Velocity contact's response module, `ccvel` (`EB_CC_VEL`), is not built: each kernel file it
+/// includes would rerun four more compiles an edit, past its line in fanout-allowlist.txt, an
+/// owner's decision; `ExplicitBeamsGpu::set_continuous_velocity` refuses meanwhile.)
+pub const SPLIT_WHICH: [&str; 12] = [
+    "member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "wheels", "groupbegin", "grouplevels", "grouplv",
+    "edges",
+];
 
 /// Every module of the split paths, which every host's build compiles from the one
 /// Slang source as it does `MODULES`: the split group path (EB_VV_SPLIT;
@@ -256,7 +263,7 @@ pub fn split_modules() -> Vec<SplitModule> {
                 "member" => ("EB_SOLO_STEP", "1"),
                 // Raycast wheels on each other (explicit_beams_split_wheels: the groups'
                 // module's defines, a small kernel).
-                "group" | "wheels" | "groupbegin" | "grouplevels" | "grouplv" => GROUPS,
+                "group" | "wheels" | "groupbegin" | "grouplevels" | "grouplv" | "edges" | "ccvel" => GROUPS,
                 // The front as fleet-wide dispatches (explicit_beams_fleet.slang): its
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => ("EB_FLEET_FRONT", "1"),
@@ -272,6 +279,27 @@ pub fn split_modules() -> Vec<SplitModule> {
             if which != "member" {
                 d.push(("EB_VV_FLEET", "1"));
             }
+            // Edge vehicle contact's pass (explicit_beams_split_edges.slang): its code in
+            // this module alone, not in the contact modules (Chrome's compile limit).
+            if which == "edges" || which == "ccvel" {
+                d.push(("EB_EDGE", "1"));
+            }
+            // The edges' module with velocity contact as continuous contact's response
+            // (explicit_beams_split_cc_vel.slang): its code in this module alone, so the
+            // edges' module, which every page with edge contact loads, compiles as before.
+            if which == "ccvel" {
+                d.push(("EB_CC_VEL", "1"));
+            }
+            // Its node hits' residual clamp (vvResOf's lam0): the groups' module runs a
+            // frame's levels whenever edge contact is on (the fleet-wide schedules are off).
+            if which == "group" || which == "fleetlevels" {
+                d.push(("EB_EDGE_CLAMP", "1"));
+            }
+            // The levels-once module runs only with the fleet-wide schedules, which an upload
+            // with contact offsets leaves off (PERF_FLEET_FAMILY): no offsets' code in it.
+            if which == "grouplevels" {
+                d.push(("EB_NO_OFFSETS", "1"));
+            }
             let entry = match which {
                 "member" => SPLIT_MEMBER_ENTRY,
                 "group" => SPLIT_GROUP_ENTRY,
@@ -279,6 +307,7 @@ pub fn split_modules() -> Vec<SplitModule> {
                 "grouplevels" => SPLIT_GROUP_LEVELS_ENTRY,
                 "grouplv" => SPLIT_GROUP_LV_ENTRY,
                 "wheels" => SPLIT_WHEELS_ENTRY,
+                "edges" | "ccvel" => SPLIT_EDGE_ENTRY,
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
                 "fleetpost" => "explicit_beams_fleet_post",

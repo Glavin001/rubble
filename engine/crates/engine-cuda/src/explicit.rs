@@ -34,6 +34,7 @@ use glam::Vec3;
 use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 
+mod continuous;
 pub mod table {
     pub struct ExplicitCudaKernel {
         /// The plan module (`engine_exec::explicit_plan::MODULES`).
@@ -262,7 +263,7 @@ impl CudaExplicitBeams {
         if layout.sleep.is_some() {
             out.push(Key::Plan(Kernel::Sleep));
         }
-        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels", "groupbegin", "grouplevels", "grouplv"] {
+        for which in plan::SPLIT_WHICH.into_iter().filter(|w| *w != "wheels" && (!matches!(*w, "edges" | "ccvel") || layout.words[plan::W_EDGE] != 0)) {
             out.push(Key::Split(plan::split_module_name(which, aero, lanes)));
         }
         for vv in [false, true] {
@@ -817,9 +818,7 @@ impl CudaExplicitBeams {
     pub fn set_group_split_tests(&mut self, on: bool) {
         self.group_split_tests = on;
     }
-    pub fn set_self_split(&mut self, on: bool) {
-        self.self_split = on;
-    }
+    pub fn set_self_split(&mut self, on: bool) { self.self_split = on; }
     pub fn set_wide_list(&mut self, on: bool) {
         self.wide_list = on;
     }

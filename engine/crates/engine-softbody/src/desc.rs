@@ -77,6 +77,9 @@ pub struct SoftNode {
     pub friction: f32,
     /// Part of the rigid core attachment set (filled by the lowering).
     pub frame: bool,
+    /// Its contact surface's outward offset (m; Rubble's JBeam option
+    /// `rubbleContactOffset`): `ExplicitBeams::contact_offset`.
+    pub contact_offset: f32,
 }
 
 impl Default for SoftNode {
@@ -92,6 +95,7 @@ impl Default for SoftNode {
             self_group: 0,
             friction: 0.8,
             frame: false,
+            contact_offset: 0.0,
         }
     }
 }

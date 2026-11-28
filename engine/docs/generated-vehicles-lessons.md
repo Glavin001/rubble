@@ -311,8 +311,213 @@ A design is one Rust file in `engine/crates/engine-vehiclegen/src/designs/` plus
 - **(Fact) Two things a tall or posed car taught the rigger,** each fixed at its source and neutral for the earlier designs (their results are bit for bit the same): a tailgate over 0.9 m tall had nodes only along its top edge and its foot, one plane, so no flexbody skin fit was well posed ("no well-posed fit": it now has rows up its face); and the shell's brace lengths (1.25 m, and 0.9 m before a beam counts as long) were the study's for a cabin up to 1.07 m from the tunnel to the roof bow, so a 4x4's roof bow centre had no beam with a vertical part and sagged 42 mm (they now scale with a taller cabin).
 - **(Process)** A gate that only compares a car with its own design cannot see a car that fell through the ground, since a rigid fit removes the fall: `every_design` also asserts the parked car's lowest point is at the ground.
 
+## 19. The collision skin is checked at build time (2026-11-24, S4)
+
+- **(Process) Defects are detected, not discovered.** The S4 crash study found the
+  generated sedan's collision-skin defects by hand: holes over the lamps, doubled layers
+  at seams, a skin through itself at rest. The vehicle lint (`authoring::lint`) existed
+  but ran only by hand (`vehicle_lint` example), so even its hard `skin_coverage` rule
+  failed unseen (p99 0.149 m against 0.127 m).
+- **(Decision) Every generated design is linted in CI.**
+  `tests/generated_vehicle_lint.rs` rigs each design in `engine_vehiclegen::designs::REGISTRY`
+  and gives every hard rule a test of its own; `every_hard_rule_has_a_test` fails when
+  the lint gains a hard rule with no test. Failing rules sit on
+  `tests-expected-failures.txt` with their measured values (CI fails on a new failure
+  and on a listed one that starts passing). A design added to the generator goes in
+  `DESIGNS` and is linted from then on.
+- **(Rules) The collision skin's own** (`lint::collision_skin`, proven on synthetic
+  boxes in `tests/host/vehicle_lint.rs`: a sound skin passes, each broken one fails its
+  rule): `skin_winding` (outer edges walked oppositely by their two triangles),
+  `skin_facing` (outer triangles face out; one under a second layer within 5 cm is
+  tagged), `skin_self_crossing` (no edge through the skin at rest), `skin_holes` (no
+  loop of open edges under 2.5 m round), and warnings for inner faces' winding,
+  edges on three or more triangles and slivers.
+- **(Process) The rig tool prints the verdict.** `vehicle_gen_rig` ends with the lint's
+  rules that need no render skin on what it wrote, and a warning with the count of hard
+  failures.
+- **(Measurement) The generated sedan today:** coverage p99 0.149 m; 15 outer edges
+  wound the same way and 27 outer faces under a doubled layer (hood–fender and
+  body–rear-bumper seam bridges over the parts' own triangles); 89 crossings at rest
+  (sill and floor faces through the dash, rear bumper through the body); 12 holes under
+  2.5 m round (door edges, the corners over the lamps).
+
+- **(Fix, 2026-11-24) The lint's first findings, fixed in the rigger** (`gen2/rig.rs`):
+  seam bridges and zipper triangles may not fold over the triangle they share an edge
+  with or cross the skin (`RIG_BRIDGE_OVERLAP=1`: as before); a body-shell triangle
+  crossing another part's goes (`RIG_HULL_KEEP_CROSSING=1`); `fill_holes` closes holes up
+  to 2.5 m round, split where a loop meets itself, each patch running against its rim
+  (on by default; `RIG_FILL_HOLES_M=0`); interior solids are placed before the shell's
+  faces and a shell face takes a diagonal that does not cross. Outer winding 15 → 0,
+  facing 27 → 2, holes 12 → 1, closed interior solids 5 → 8; crossings at rest 89 → 60
+  (dropping the crossing sill faces took them to 6 but let the T-bone's door pierce the
+  sill, `sedan_parts_collide`: they stay). Every other authoring and generator test as
+  before. Six runs of the 60 + 60 head-on: node-only contact 71 → 66 nodes inside,
+  191 → 145 L; with edge contact 26 → 33, 49 → 55 L (within the spread).
+
+- **(Fix, 2026-11-27) Two coplanar overlaps in the shared rigger** (`gen2/rig/zones.rs`;
+  the lab refuses a car whose own skin primitives sharing no node are closer than 2 mm at
+  rest, the lint's `skin_clearance`). Both laid a second surface in the plane of the first,
+  which `tri_crosses` cannot see (coplanar edges meet, they do not pass through):
+  - *A hull face with a point inside it.* `hull_faces` orders a face's points by angle
+    round their centre; the rear seat's `sear_c` *is* the centre of its four corners, so its
+    angle was noise. On the sedan it happened to sort first (a fan round the centre); on the
+    Mach 1s and the 4x4 it sorted between two corners, the polygon folded over itself and
+    its fan laid `sear_rl,sear_fr,sear_rr` across the centre's triangles (0.00 / 0.07 mm).
+    **Rule:** a point strictly inside its face starts the face's polygon, so the fan is the
+    centre's to each rim edge (fill_holes closes the last one, as on the sedan).
+  - *A quad given both diagonals.* On the Mach 1s the outer skin already had the first
+    floor-pan quad (`sh_c1_1o*`, `sh_c1_2t*`, one diagonal); `interior_skins` found that fan
+    "crossing" something else and took the other diagonal over the same quad. **Rule:** a
+    face one of whose fans is already on the skin whole is not laid again.
+  Sedan, police_sedan and wagon rig byte for byte as before (neither case occurs there).
+  Mach 1 / gasser `skin_clearance` 4 → 0, the 4x4's `sear_*` pairs gone (15 → 13; the rest
+  are the hood/fender and `sh_e5` seams). With the doubled quad gone, the Mach 1s' floor pan
+  also comes out whole in rows 3–4 (open edges 172 → 160, 169 → 157), which leaves
+  the tunnel's open rear end (`sh_c1_5t*`–`sh_c3_5`, two open edges, open on every design
+  including the sedan, where it runs into a larger opening) standing alone: the Mach 1's
+  `skin_holes` now reports it, as the gasser and 4x4 already did for the tunnel's front end.
+
+- **(Fix, 2026-11-27) The 4x4's own skin clearance** (`gen2/rig.rs` `fender_top_x`,
+  `gen2/rig_fill.rs` `cover_bare`; the PR preview refused to spawn the 4x4 with continuous
+  contact on):
+  - *A fender's top row under the hood's edge.* The fender's top row stands 2.5 cm out from
+    the fender's inner edge, and the hood's edge row 2.5 cm in from the hood's edge, both on
+    the top surface. The 4x4's flared fenders narrow at their ends (x 0.65 against the hood's
+    0.78), so the two rows crossed at the same height, 0.47–1.6 mm apart (10 pairs).
+    **Rule:** a fender's top row is never inside the hood's own edge (|x| ≥ the hood's
+    half-width there).
+  - *A bare node's cover across a skinned quad.* `cover_bare` gives a skin node in no
+    triangle a fan to its two nearest skin neighbours and nearest shell node. At the 4x4's
+    rear the fan's shell edge was the other diagonal of a quad already skinned, 0.3 and
+    0.6 mm from that quad's diagonal (and one edge 0.8 mm from the rear bumper's).
+    **Rule:** the nearest choice whose faces keep `SKIN_CLEARANCE` from every placed face
+    (`near_skin`), nearest neighbours first.
+  - Sedan, police sedan, wagon and Mach 1 rigs are byte for byte as before. Every design
+    now passes `skin_clearance`. The lint test checks every design, not only the sedan, so a
+    car the lab would refuse fails at build time.
+
+## 20. Glass binding: a pane interpolates its frame (2026-11-27)
+
+- **(Measurement) The 4x4's windscreen spike.** After a roof crush (vehicle lab, shoot, a
+  1.5 m steel sphere at 6 m/s from above, or a 0.1 m one at 49 m/s), a grey cone of the
+  windscreen rose 0.7–0.9 m above the car. On the CPU reference
+  (`engine-world-lab --example skin_spike_probe`) it is one region of the pane, its top
+  middle (vertex 3064 of `glass_windshield`, 18 cm below the header). Its weighted skin
+  (`.rskin`) had Σ|A| 4.46: −1.45 on the header's middle node `sh_d4_h`, +0.95 on each
+  header corner, +0.40 on the roof's next row, −0.28 on the roof's rear, the cowl 0.01.
+  The roof crush pushed `sh_d4_h` down 0.5 m more than the corners, so the vertex went up:
+  0.86 m past its rest distance from its nodes (the rest of the car: 0.37 m at most).
+- **(Cause) Extrapolation, not a bad node.** No node broke off and no weight went to
+  another part: the moving-least-squares fit (`flexskin::bind`) reached only the roof's
+  sparse nodes (long kernels) from the pane's top; the cowl's dense nodes (short kernels)
+  were out of reach, so the affine fit extrapolated below the roof plane with large
+  weights of both signs. A glass pane spans an opening with no nodes in it, so it is
+  where this happens. Panels have nodes on them.
+- **(Fix) `gen3::GLASS_AMP_MAX` = 3.0** (`flexskin::bind_with`, `amplification`): a glass
+  mesh with a vertex past Σ|A| 3 grows its kernels, like an ill-posed fit, until the frame
+  on every side is in reach. The 4x4's windscreen now binds at Σ|A| 1.32 (its rear glass
+  3.02 → 1.45, its quarter lights 3.43 → 2.64); after the same crush its worst vertex is
+  0.20 m past rest (from 0.85 m), the small shot's 0.14 m (from 0.67 m). Glass is visual
+  only: no physics changed.
+- **(Decision) Other designs unchanged.** Their glass reaches at most 2.98 (the wagon's
+  quarter lights) and none spikes under the same crush (glass 0.10–0.13 m past rest, below
+  their body shell's). Sedan, police sedan, wagon and both Mach 1 rigs are byte for byte as
+  before.
+- **Checks:** `every_design` fails a design with a glass vertex past the bound;
+  `flexskin::tests::a_pane_across_an_opening_interpolates_its_frame` holds the case (a
+  sparse roof, a dense cowl: unbounded the pane rises 0.89 m as its header falls 0.3 m,
+  bounded 3 cm).
+- **Open:** the same measure is high on some non-glass pieces (the 4x4's fenders 8.1, the
+  rigid headlamps 4.6–9.1, rigid pieces' centroid weights); none was seen to spike, but a
+  rigid piece's frame extrapolated that far turns with the nodes' bending.
+
+## 21. Paint binds to the collision skin (2026-11-27)
+
+- **(Measurement) The side 60 pressed paint failure.** In velocity contact (`DAT_RESPONSE=vel
+  DAT_E=1`) `continuous_side_60_pressed` failed its paint guard, 52 mm lasting against 30 mm,
+  with 0 crossings. `PAINT_WHERE=1`: car B's front-left door paint, bound to `door_FL_f1`,
+  `door_FL_o22` and `door_FL_i12`, the last an inner-panel node on no outer collision triangle.
+- **(Fact) Contact holds the outer skin only.** A car meets another's live outer triangles (the
+  paint guard's surface, the contact offsets, edge contact). The paint was bound by
+  `flexskin::bind` over every structural node of its part, inner panels and frames included.
+  Before the fix, on every design, almost all body paint had weight off the skin:
+
+| Design | Body-paint vertices | Weighted off the outer skin | Most Σ\|A\| off it |
+|---|---|---|---|
+| sedan, police_sedan | 301,290 | 289,942 | 2.60 |
+| wagon | 319,902 | 317,337 | 2.02 |
+| mach1_1969 / gasser | 403,137 / 371,901 | 385,397 / 354,161 | 7.26 |
+| suv_4x4 | 304,660 | 302,779 | 2.13 |
+
+- **(Fix) `gen3::binds_to_skin`, `flexskin::bind_sheet`.** A body-paint mesh (deforming, not
+  glass, a `paint` primitive) binds only to nodes on the outer skin (`gen3::outer_skin_nodes`):
+  its own part's, and where the outer triangle nearest a vertex is another part's, that
+  triangle's nodes.
+  - *The triangle under it.* The B-pillar's own nodes (`sh_b*`) are inside the doors' skin:
+    with the shell's skin alone its paint followed the roof rail and the sill 0.5 m away and
+    stayed out while the pillar crushed (side 60 pressed: 154 mm during the hit). A door's paint
+    past its own skin's edge (the front door's top rear corner by the pillar) is the same case:
+    with the door's skin alone the ball went 94 mm into the paint there, against 63.
+  - *A sheet's fit.* Skin nodes lie in one surface, where the volume fit (`bind`) has no third
+    direction: it fails (the Mach 1's trunk lid, 10 nodes) or reaches the paint's height with
+    weights of both signs. The sheet fit damps M⁻¹ to (M² + τ²)⁻¹M, τ = `SHEET_SPREAD`²·W:
+    smooth, affine along the surface, the height left to the offset, well posed where the nodes
+    spread in two directions. `SHEET_SPREAD` 5 cm, not `EIG_MIN`'s 12 mm: a door's edge column
+    bows 2–4 cm, and fitting that made its jamb paint (15 cm in from the skin) weigh it −2.0 and
+    +2.4 (Σ\|A\| 5.95), and side 90's door paint, tied to the C-pillar through it, stayed out as
+    the door went in (83 mm during the hit; 46 with 5 cm).
+  - *No amplification bound.* `GLASS_AMP_MAX`'s 3.0 has no fit for the 4x4's tailgate (10
+    nodes) on the way there; panels had none before either. `RIG_PAINT_ANY_NODE=1`: as before.
+- **(Result)** 0 body-paint vertices weighted off the skin on every design. Rest: every vertex
+  within 0.002 mm of the art before and after (the offset makes rest exact by construction).
+  The jbeam and `.pc` of every design are byte for byte the same (`DUMP_DIR` and `diff`); only
+  the `.rskin` changes (the sedan's 123.8 → 120.9 MB: fewer nodes a vertex). Amplification
+  (Σ\|A\|), before → after: sedan doors 3.83 → 1.42 and 2.54 → 1.57, body 3.28 → 1.87, hood
+  1.89 → 1.18, trunk 3.09 → 1.23, front bumper 2.20 → 2.26; wagon doors 3.83 → 1.42, tailgate
+  2.47 → 1.15; Mach 1 fenders 5.42 → 2.53 / 3.17, headlamp housings 7.26 → 1.9, body
+  3.40 → 4.48 (the one rise); 4x4 fenders 8.06 → 1.62, front bumper 3.82 → 1.95.
+
+- **(Result) The acceptance suite** (`tests/continuous_contact.rs`, 8 runs, generated sedan;
+  worst during the hit / from 0.3 s after it, mm; 0 crossings in every run, before and after;
+  physics unchanged, so only the paint numbers can move):
+
+| Scene | Velocity contact, before | after | Default mode, before | after |
+|---|---|---|---|---|
+| side 30 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| side 60 | 6 / 3 | 0 / 0 | 0 / 0 | 0 / 0 |
+| head 30 pressed | 3 / 0 | 0 / 0 | 8 / 8 | 0 / 0 |
+| head 60 pressed | 7 / 0 | 0 / 0 | 39 / 0 | 21 / 0 |
+| head 60 | 7 / 0 | 0 / 0 | 8 / 0 | 9 / 0 |
+| side 90 | 46 / 0 | 46 / 0 | 47 / 0 | 47 / 0 |
+| ball 100 | 63 / 0 | 54 / 0 | 19 / 0 | 39 / 0 |
+| side 60 pressed | 52 / 52 **fail** | 48 / 48 **fail** | 0 / 0 | 4 / 4 |
+| head 100, head 130, offset 100 | | | 22, 30, 59 / 0 | 13, 43, 26 / 0 |
+
+  Every scene passes in the default mode, before and after; the energy tests fail as listed
+  (`tests-expected-failures.txt`), unchanged.
+- **(Open) Side 60 pressed, velocity contact, still fails, on run 0 alone.** Runs 1–7 went from
+  7, 42, 7, 52, 25, 12, 0 mm to 0. Run 0 is 48.2 mm before and after: car B's front door paint at
+  its lower rear, bound to its own skin nodes only (`door_FL_o20`, `o21`, `o10`). It stands
+  31–56 mm off its own triangle, within that triangle's contact offsets, and 47 mm into car A's
+  sill: the two cars' offset surfaces overlap there. That is the contact's or the skin fit's,
+  not the binding's. Another case of the same kind: the door's paint over its top rear corner
+  stands 4 cm past the skin's top node `door_FL_f1`, whose offset is 2.7 mm (generator: fit the
+  skin to the paint there).
+- **Checks:** `tests/paint_binds_skin.rs` fails a design whose body paint puts any weight on a
+  node off the outer skin, or sits over 1 mm from the art at rest;
+  `flexskin::tests::a_sheet_fit_follows_its_surface_and_keeps_the_height_in_the_offset` holds
+  the sheet fit (one layer of nodes: the volume fit finds no fit, the sheet fit binds at Σ\|A\|
+  1.00, rest and rigid motion exact, a dent never moves a vertex more than the node). Also run:
+  `gen3_rig` rest fidelity (spawn 0.13 mm, parked 0.54 mm / 0.81°, bar 1 mm / 1°), `every_design`,
+  `generated_vehicle_lint` (as listed: holes, other designs), `flexskin` unit tests: all as before.
+- **Not changed:** glass (visual only, spans openings with no node: `GLASS_AMP_MAX`), rigid
+  pieces (mirrors, lamps: one frame at the centroid), the interior and the running gear.
+
 ## Changelog
 
+- 2026-11-27: section 21, paint binds to the collision skin (side 60 pressed's door paint on an inner node).
+- 2026-11-27: section 20, glass binding: a pane interpolates its frame (the 4x4's windscreen spike).
+- 2026-11-27: section 19, two coplanar overlaps fixed in the rigger (a hull face's inside point, a quad's second diagonal).
 - 2026-11-24: section 18, adding a vehicle (the registry, variant or standalone, what the rigger needs, the gate); mach1_gasser (pose, per-axle wheels) and suv_4x4 registered.
 - 2026-11-16: section 17, dark patches in a crushed car's paint (closed solids' back faces).
 - 2026-11-14: section 16, hinges that snap instead of bending.

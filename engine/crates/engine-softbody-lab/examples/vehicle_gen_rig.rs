@@ -228,5 +228,35 @@ fn main() -> Result<(), String> {
             built / rule
         );
     }
+    lint_written(&design, &files);
     Ok(())
+}
+
+/// The vehicle lint's rules that need no render skin (the collision skin's topology,
+/// rest penetration, energy bombs) on what was just written: a defect shows here, at
+/// build time (the full lint runs in CI: tests/generated_vehicle_lint.rs).
+fn lint_written(design: &str, files: &[(String, Vec<u8>)]) {
+    use engine_softbody_authoring::authoring::lint;
+    let refs: Vec<(String, String)> = files
+        .iter()
+        .filter(|(p, _)| p.ends_with(".jbeam"))
+        .map(|(p, b)| (p.clone(), String::from_utf8_lossy(b).into_owned()))
+        .collect();
+    let pc = files
+        .iter()
+        .find(|(p, _)| p.ends_with(".pc"))
+        .map(|(_, b)| String::from_utf8_lossy(b).into_owned());
+    let r: Vec<(&str, &str)> = refs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    match engine_softbody::jbeam::load_jbeam(&r, pc.as_deref()) {
+        Ok(desc) => {
+            let mut f = lint::collision_skin(&desc);
+            f.push(lint::rest_penetration(&desc));
+            f.extend(lint::energy_bombs(&desc));
+            let hard = lint::print(&format!("{design}: lint (no render skin)"), &f);
+            if hard > 0 {
+                println!("\nWARNING: {design} has {hard} hard lint failures (above); CI fails on new ones.");
+            }
+        }
+        Err(e) => println!("lint: could not load what was written: {e}"),
+    }
 }

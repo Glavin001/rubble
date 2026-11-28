@@ -222,7 +222,7 @@ void wideGeoThread(uint gt)
         int w = s > 0u ? triangleFinishPeek(gt) : asint(gMisc[gP.vehicles + gt].x);
         if (w > 0) return;
     }
-    triGeoFill(gt, asfloat(misc.xyz), asfloat(gStatic[v * 4u + 3u].z), (misc.w + s) & 1u);
+    triGeoFill(gt, asfloat(misc.xyz), selfRangeOf(v, asfloat(gStatic[v * 4u + 3u].z)), (misc.w + s) & 1u);
 }
 
 // Beams, then grid filling (candidates), then triangles' throttle and tested list.

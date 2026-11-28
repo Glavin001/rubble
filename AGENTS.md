@@ -20,6 +20,25 @@
     the desired settings) rather than altering data at load time.
   Measuring a lossy option to report its effect is fine; adopting it needs the
   user's decision.
+- **Required reading: the `deciding-tradeoffs` skill** (`.cursor/skills/deciding-tradeoffs/`),
+  the owner's rules for physics, accuracy, performance and visual trade-offs (2026-11-26).
+  Read it before any trade-off or design choice and before asking the owner anything: decide
+  by it, act, report the decision first; ask only where it says to.
+- Contact never stands in for metal (owner, 2026-11-26). Crashes are metal bodies
+  bending and breaking at every speed: the crash's energy goes into the beams
+  (bending, crumpling, breaking), not into contact. Not acceptable, and not to be
+  offered as an option: cushions or padding (a contact thickness the bodies are
+  held apart by beyond the true surfaces), contact that absorbs or damps a
+  crash's energy, scaling or freezing motion, or anything that makes cars crumple
+  less than their beams would. Contact keeps surfaces from passing through each
+  other, conserves momentum, creates no energy, and removes no more than the
+  colliding surfaces' own closing; report what it removes in every crash test.
+  Where drawn paint and the collision surface are far apart, fix it in the
+  generator (`engine-softbody-authoring` gen2, the living rulebook for physically
+  accurate vehicles: change it freely and codify why) without simply adding
+  nodes (that changes the physics): place nodes on the panels' crests and
+  character lines, choose diagonals that follow the curvature, fit the skin to
+  the paint.
 - Destruction is forward-only. Fracture is decided before or within a step and
   never by re-simulating one: no save-and-restore of the rigid engine and no
   "internal correction" pass that undoes a step and solves it again (PhysX's

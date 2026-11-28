@@ -34,6 +34,8 @@ use crate::authoring::sedan::{
 };
 use glam::Vec3;
 use std::collections::HashMap;
+#[path = "rig_fill.rs"] mod rig_fill;
+use rig_fill::*;
 
 mod closing;
 mod zones;
@@ -179,6 +181,20 @@ fn bounds(v: &[Vec3]) -> (Vec3, Vec3) {
     )
 }
 
+/// A door skin column's z at height `y`: the edge columns (`k` 0 the front, 2 the rear) 2 cm
+/// inside the door's own outline `pts` at that height, so a shut line that slants (the rear
+/// door's along the C-pillar) does not put the column's node over the body's skin beyond it.
+/// 2 cm: the least of 1, 2, 3 cm keeping every design's skin 2 mm apart (1 cm: the wagon's 0.9 mm).
+/// 3 cm left slots at the shut lines a scraping car caught in (5.0 m along against 14.8 m).
+fn door_column_z(pts: &[Vec3], k: usize, z: f32, y: f32) -> f32 {
+    let edge = |rear: bool| pts.iter().filter(|q| (q.y - y).abs() < 0.04).map(|q| q.z).reduce(if rear { f32::min } else { f32::max });
+    match k {
+        0 => edge(false).map_or(z, |e| z.min(e - 0.02)),
+        2 => edge(true).map_or(z, |e| z.max(e + 0.02)),
+        _ => z,
+    }
+}
+
 /// Lowest y of `v` within `dz` of section `z` (None if none).
 fn low_at(v: &[Vec3], z: f32, dz: f32) -> Option<f32> {
     v.iter()
@@ -193,6 +209,15 @@ fn half_w_at(v: &[Vec3], z: f32, dz: f32) -> Option<f32> {
         .filter(|p| (p.z - z).abs() < dz)
         .map(|p| p.x.abs())
         .reduce(f32::max)
+}
+
+/// A fender's top row (|x| at section `z`): 2.5 cm out from the fender's inner edge, and never
+/// inside the hood's own edge. A fender narrowing at its ends (the 4x4's flares) ran its top row
+/// under the hood's edge row (2.5 cm in from the hood's edge) at the same height, 0.5 mm apart,
+/// where continuous contact keeps a car's own skin 2 mm apart (the lint's `skin_clearance`). A
+/// fender already outside the hood is as before.
+fn fender_top_x(fen: &[Vec3], hood_top: &[Vec3], z: f32) -> f32 {
+    (inner_x_at(fen, z, 0.04).unwrap_or(0.6) + 0.025).max(half_w_at(hood_top, z, 0.04).unwrap_or(0.0))
 }
 
 /// Smallest |x| of `v` within `dz` of section `z`.
@@ -687,35 +712,7 @@ fn hull_mesh(name: &str) -> bool {
 /// triangles.
 fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
     let model = inp.model();
-    // Each part's nodes at its skin: structural, within 10 cm of the surface.
-    let mut pool: HashMap<Part, Vec<usize>> = HashMap::new();
-    for i in 0..r.car.nodes.len() {
-        let n = &r.car.nodes[i];
-        if n.contact
-            || n.no_group
-            || n.sub.is_some()
-            || n.name.starts_with("hub")
-            || n.name.starts_with("rim")
-        {
-            continue;
-        }
-        let within = std::env::var("RIG_HULL_POOL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.03f32);
-        if inp.sdf(r.g(i)).abs() < within {
-            if std::env::var("RIG_HULL_DEBUG").is_ok() {
-                eprintln!(
-                    "pool {:?} {} sdf {:.3} skin {}",
-                    n.part,
-                    n.name,
-                    inp.sdf(r.g(i)),
-                    r.skin[i]
-                );
-            }
-            pool.entry(n.part).or_default().push(i);
-        }
-    }
+    let pool = hull_pool(r, inp);
     let mut tris: Vec<Tri> = Vec::new();
     let mut seen: std::collections::HashSet<[usize; 3]> = Default::default();
     for m in &model.parts {
@@ -896,6 +893,7 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
             });
         }
     }
+    drop_body_crossing(r, &mut tris);
     if std::env::var("RIG_HULL_NOBRIDGE").is_err() {
         let n = bridge_seams(r, inp, &pool, &mut tris);
         if std::env::var("RIG_HULL_DEBUG").is_ok() {
@@ -970,6 +968,7 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
         }
     }
     r.car.tris = tris;
+    fill_holes(r);
 }
 
 /// Seams between the parts' collision patches. Each part's patch ends half
@@ -1196,7 +1195,7 @@ fn bridge_seams(
             let edges: Vec<(usize, usize)> = (0..3)
                 .map(|e| (t[e].min(t[(e + 1) % 3]), t[e].max(t[(e + 1) % 3])))
                 .collect();
-            if edges.iter().any(|e| uses.get(e).copied().unwrap_or(0) >= 2) {
+            if edges.iter().any(|e| uses.get(e).copied().unwrap_or(0) >= 2) || bridge_folds_or_crosses(r, t, nn.dot(nr) < 0.0, tris) || near_skin(r, t, tris) {
                 return false;
             }
             let cen = (qa + qb + qc) / 3.0;
@@ -2293,7 +2292,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                         grid[row].push(None);
                         continue;
                     }
-                    let p = mirror(side(z, y), s);
+                    let p = mirror(side(door_column_z(pts, k, z, y), y), s);
                     let i = r.node(&format!("{dn}_o{row}{k}"), p, part, Some(Role::Sheet), true);
                     grid[row].push(Some(i));
                 }
@@ -2756,7 +2755,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let cols = span(fe_lo.z + 0.03, fe_hi.z - 0.05, 5);
         let mut grid: Vec<Vec<Option<usize>>> = vec![Vec::new(), Vec::new(), Vec::new()];
         for (k, &z) in cols.iter().enumerate() {
-            let xi = inner_x_at(&fen, z, 0.04).unwrap_or(0.6) + 0.025;
+            let xi = fender_top_x(&fen, &hood_top, z);
             let topp = top(z, xi);
             let mut bottom = low_at(&fen, z, 0.04).unwrap_or(0.4) + 0.025;
             if let Some(a) = inp.arch_y(z) {
@@ -3838,7 +3837,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let inner_skins =
         defined.is_some() && std::env::var("RIG_NO_INNER_SKINS").map_or(true, |v| v != "1");
     if inner_skins {
-        interior_skins(&mut r);
+        interior_skins(&mut r, inp);
     }
     // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.

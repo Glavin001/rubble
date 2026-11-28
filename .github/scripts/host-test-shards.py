@@ -31,6 +31,24 @@ RUN_SECONDS = {
     ("engine-softbody-authoring", "test", "skin_lint"): 95,
     ("engine-softbody-authoring", "test", "sedan_energy"): 80,
     ("engine-softbody-authoring", "test", "showcase_skin_integrity"): 48,
+    # Measured locally (15 s on an M-series Mac); a runner's estimate.
+    ("engine-softbody-authoring", "test", "gen_sedan_contact"): 65,
+    # 1,242 s on CI (2026-11-27, shard 4 cancelled at 25 min with the binary after it).
+    ("engine-softbody-authoring", "test", "gen_sedan_paint"): 1300,
+    # Continuous contact's acceptance crashes (eleven scenes and three energy tests, 8 or 2
+    # runs each: 20-60 s each on an M-series Mac); a runner's estimate. It had no line and
+    # counted 2 s, so its shard ran past the job's 25 minutes (2026-11-27).
+    # Measured on a runner (2026-11-27): the one binary ran past 25 minutes, nine of its fifteen
+    # tests done at 22; split in two (continuous_contact_hard: the six longest crashes).
+    ("engine-softbody-authoring", "test", "continuous_contact"): 1000,
+    ("engine-softbody-authoring", "test", "continuous_contact_hard"): 1100,
+    # The two pressed crashes (2 s each): side 60 pressed alone did not finish in 23 minutes
+    # beside the others.
+    ("engine-softbody-authoring", "test", "continuous_contact_pressed"): 1100,
+    # Velocity contact on three short crashes, 2 runs each (37 s on an M3, 2026-11-27).
+    ("engine-softbody-authoring", "test", "continuous_contact_velocity"): 150,
+    ("engine-softbody-authoring", "test", "generated_vehicle_lint"): 150,
+    ("engine-softbody-authoring", "test", "every_design"): 120,
     ("engine-softbody", "lib", "engine_softbody"): 25,
     ("engine-softbody-authoring", "test", "raycast_wheel_visual"): 25,
     ("engine-softbody-authoring", "test", "explicit_drive"): 16,

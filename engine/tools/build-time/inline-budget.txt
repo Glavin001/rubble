@@ -169,10 +169,10 @@ explicit_beams_split_member 1223561
 explicit_beams_split_member_aero 1252492
 explicit_beams_split_member_aero_wide 1252492
 explicit_beams_split_member_wide 1223561
-explicit_beams_split_tests 75099
-explicit_beams_split_tests_aero 75099
-explicit_beams_split_tests_aero_wide 75099
-explicit_beams_split_tests_wide 75099
+explicit_beams_split_tests 76330
+explicit_beams_split_tests_aero 76330
+explicit_beams_split_tests_aero_wide 76330
+explicit_beams_split_tests_wide 76330
 explicit_beams_split_wheels 5087
 explicit_beams_split_wheels_aero 5087
 explicit_beams_split_wheels_aero_wide 5087
@@ -245,3 +245,7 @@ explicit_surface_plan 664
 explicit_surface_prep 89154
 explicit_surface_prep_args 82750
 explicit_vv_gate 167
+explicit_beams_split_edges 96800
+explicit_beams_split_edges_aero 97261
+explicit_beams_split_edges_aero_wide 97261
+explicit_beams_split_edges_wide 96800

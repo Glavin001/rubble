@@ -32,6 +32,12 @@ use engine_softbody::desc::{BeamKind, SoftVehicleDesc};
 use glam::{DMat3, DVec3, Vec3};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+#[path = "lint_skin.rs"]
+mod skin_rules;
+pub use skin_rules::{collision_skin, SKIN_CLEARANCE, SKIN_HOLE_MAX, SKIN_SLIVER};
+use skin_rules::tri_dist;
+pub(crate) use skin_rules::tri_dist as tri_dist_pub;
+
 /// A collision skin hole: an outer vertex this far from every collision
 /// triangle fails (half the FMVSS 214 pole's 254 mm); past [`COVER_WARN`] warns.
 pub const COVER_FAIL: f32 = 0.127;
@@ -391,50 +397,6 @@ fn sym_eig_min(m: DMat3) -> f64 {
         }
     }
     a[0][0].min(a[1][1]).min(a[2][2])
-}
-
-/// Point to triangle distance.
-fn tri_dist(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
-    // Ericson, Real-Time Collision Detection §5.1.5 (closest point).
-    let ab = b - a;
-    let ac = c - a;
-    let ap = p - a;
-    let d1 = ab.dot(ap);
-    let d2 = ac.dot(ap);
-    if d1 <= 0.0 && d2 <= 0.0 {
-        return p.distance(a);
-    }
-    let bp = p - b;
-    let d3 = ab.dot(bp);
-    let d4 = ac.dot(bp);
-    if d3 >= 0.0 && d4 <= d3 {
-        return p.distance(b);
-    }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        let v = d1 / (d1 - d3);
-        return p.distance(a + ab * v);
-    }
-    let cp = p - c;
-    let d5 = ab.dot(cp);
-    let d6 = ac.dot(cp);
-    if d6 >= 0.0 && d5 <= d6 {
-        return p.distance(c);
-    }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        let w = d2 / (d2 - d6);
-        return p.distance(a + ac * w);
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return p.distance(b + (c - b) * w);
-    }
-    let denom = 1.0 / (va + vb + vc);
-    let v = vb * denom;
-    let w = vc * denom;
-    p.distance(a + ab * v + ac * w)
 }
 
 /// Lint a car. `vis` positions and `node_rest` share a frame; the desc's
@@ -1099,7 +1061,7 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
     }
     out.extend(energy_bombs(d));
     out.push(rest_penetration(d));
-    let _ = HashSet::<u8>::new();
+    out.extend(collision_skin(d));
     out
 }
 

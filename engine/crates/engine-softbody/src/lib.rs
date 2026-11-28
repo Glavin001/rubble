@@ -56,3 +56,18 @@ pub use host::{
 };
 pub use layout::*;
 pub use pack::SpawnOptions;
+
+/// A measurement only: `RUBBLE_STEP_DIV=k` at build time runs the whole explicit update
+/// (beams, contact, everything) at k × 2 kHz; drivers then step k times a 0.5 ms frame. Default 1.
+pub const STEP_DIV: u32 = match option_env!("RUBBLE_STEP_DIV") {
+    Some(s) => parse_u32(s),
+    None => 1,
+};
+const fn parse_u32(s: &str) -> u32 {
+    let (b, mut i, mut n) = (s.as_bytes(), 0, 0u32);
+    while i < b.len() {
+        n = n * 10 + (b[i] - b'0') as u32;
+        i += 1;
+    }
+    n
+}

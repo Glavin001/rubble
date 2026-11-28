@@ -307,6 +307,19 @@ struct Params
     // their ranks hold this many times the fleet's contact points, and a node's two-body
     // point counts this many owners (0: VV_PART, a layout before the word).
     uint vvRoom;
+    // Edge vehicle contact's tables (explicit_plan's W_EDGE; 0: none;
+    // explicit_beams_vv_edges.slang, built with EB_EDGE only).
+    uint edgeBase;
+    // Contact offsets' tables (explicit_plan's W_OFFSET; 0: none; contactOffsets).
+    uint offsetBase;
+    // Self contact's bands where a vehicle's car-to-car band differs (explicit_plan's
+    // W_SELF_RANGE: gStatic per vehicle (its collision range's bits, 0, 0, 0); 0: none, the
+    // vehicle record's range is both).
+    uint selfRange;
+    // Continuous contact's tables (explicit_plan's continuous::W_CC; 0: none).
+    uint cc;
+    // Its per-vehicle pair counts' first word in gAcc, then its counters (the host reads them).
+    uint ccCounts;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -335,6 +348,8 @@ struct Surface
 
 [[vk::binding(0, 0)]] ConstantBuffer<Params> gP;
 [[vk::binding(1, 0)]] StructuredBuffer<uint4> gStatic;
+// Vehicle v's own band (self contact, surface contact) from its record's range `rec`.
+float selfRangeOf(uint v, float rec) { return gP.selfRange != 0u ? asfloat(gStatic[gP.selfRange + v].x) : rec; }
 [[vk::binding(2, 0)]] StructuredBuffer<uint> gLists;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> gNodes;
 [[vk::binding(4, 0)]] RWStructuredBuffer<float4> gBeams;
@@ -478,4 +493,7 @@ Surface contactSurfaceV(uint v, uint w)
 #include "explicit_beams_vv_hits.slang"
 #include "explicit_beams_vv_small.slang"
 #include "explicit_beams_vv_big.slang"
+#ifdef EB_EDGE
+#include "explicit_beams_vv_edges.slang"
+#endif
 #include "explicit_beams_vv_levels.slang"

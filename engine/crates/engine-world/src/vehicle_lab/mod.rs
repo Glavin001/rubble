@@ -40,6 +40,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+mod options;
+use options::continuous_on;
 mod setup;
 pub use setup::*;
 
@@ -93,6 +95,10 @@ pub struct LabOptions {
     pub scene: Scene,
     /// The car's opt-in triangle-against-shape contact (`ExplicitBeams::surface_contact`).
     pub surface_contact: bool,
+    /// Edge vehicle contact (`ExplicitBeams::edge_contact`; `{ edge }`, a build option).
+    pub edge_contact: bool,
+    /// The car-to-car band (m; `ExplicitBeams::vehicle_contact_range`; `{ vvBandMm }`; None: each car's own).
+    pub vehicle_contact_range: Option<f32>,
     /// Anti-clip's self-collision box padded by each contacter's own travel, not the
     /// car's fastest node's (`ExplicitBeams::own_travel_reach`; on in the lab: debris
     /// falling off the mountain no longer pads every triangle's box). Live
@@ -128,6 +134,9 @@ pub struct LabOptions {
     /// contact group on one workgroup; the same results bit for bit. Live
     /// (`{ groupSplit }`).
     pub group_split: bool,
+    /// Continuous contact (`ExplicitBeamsGpu::set_continuous`; `{ continuous }`, live): on the
+    /// split group path, so it turns group split on and self split and the wide passes off.
+    pub continuous: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -178,42 +187,6 @@ pub struct LabOptions {
     /// default): the cars' wheels drive on crates, bricks, blocks and ramps that are World
     /// bodies and push them. Live (`{ wheelsHitBodies: bool }`).
     pub wheels_hit_bodies: bool,
-}
-
-impl Default for LabOptions {
-    fn default() -> Self {
-        Self {
-            scene: Scene::Flat,
-            surface_contact: false,
-            own_travel_reach: true,
-            piece_labels: true,
-            piece_windows: true,
-            self_split: false,
-            wide: true,
-            wide_list: true,
-            wide_fused: true,
-            group_split: true,
-            debris_ttl: Some(LAB_DEBRIS_TTL),
-            parked: false,
-            cars: 1,
-            capacity: CouplingCapacity {
-                bodies: 256,
-                shapes: 256,
-                planes: 4096,
-            },
-            mountain: MountainSpec::default(),
-            sleep: true,
-            vehicle_sleep: false,
-            vehicle_sleep_cfg: VehicleSleep::default(),
-            bit_exact: engine_webgpu::bit_exact_default(),
-            parts: Vec::new(),
-            derby: derby::DerbySpec::default(),
-            others: Vec::new(),
-            structures: Vec::new(),
-            // Off by default (explicit-vehicles-in-world.md §13, "Open: Chrome").
-            wheels_hit_bodies: false,
-        }
-    }
 }
 
 /// `{ on, speed, reachMm, dwell }` (missing: `d`'s) as the vehicle sleep setting: on or
@@ -338,6 +311,8 @@ impl LabOptions {
                 .get("surface")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.surface_contact),
+            edge_contact: v.get("edge").and_then(Value::as_bool).unwrap_or(d.edge_contact),
+            vehicle_contact_range: v.get("vvBandMm").and_then(Value::as_f64).filter(|&x| x > 0.0).map(|x| x as f32 * 1e-3).or(d.vehicle_contact_range),
             own_travel_reach: v
                 .get("ownTravel")
                 .and_then(Value::as_bool)
@@ -358,6 +333,7 @@ impl LabOptions {
             wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
             wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
             group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
+            continuous: v.get("continuous").and_then(Value::as_bool).unwrap_or(d.continuous),
             wheels_hit_bodies: v.get("wheelsHitBodies").and_then(Value::as_bool).unwrap_or(d.wheels_hit_bodies),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
@@ -1979,6 +1955,8 @@ impl Bench {
             "t": self.t,
             "scene": self.opts.scene.name(),
             "surfaceContact": self.opts.surface_contact,
+            "edgeContact": self.opts.edge_contact,
+            "vvBandMm": self.opts.vehicle_contact_range.map(|r| r * 1e3),
             "ownTravel": self.opts.own_travel_reach,
             "wheelsHitBodies": self.opts.wheels_hit_bodies,
             "pieceLabels": self.opts.piece_labels,
@@ -2593,8 +2571,9 @@ impl Lab {
             x.set_self_split(opts.self_split);
             x.set_wide_list(opts.wide_list);
             x.set_wide_fused(opts.wide_fused);
-            x.set_group_split(opts.group_split);
-            x.set_wide(opts.wide);
+            x.set_group_split(opts.group_split || opts.continuous);
+            x.set_wide(opts.wide && !opts.continuous);
+            continuous_on(x, opts.continuous)?;
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
@@ -3083,6 +3062,14 @@ impl Lab {
             world.set_explicit_wheels_hit_bodies(on)?;
             self.bench.opts.wheels_hit_bodies = on;
             return Ok(json!({ "wheelsHitBodies": on }));
+        }
+        // { continuous: bool }: continuous contact (LabOptions::continuous).
+        if let Some(on) = cmd.get("continuous").and_then(Value::as_bool) {
+            self.bench.opts.continuous = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                continuous_on(x, on)?;
+            }
+            return Ok(json!({ "continuous": on }));
         }
         // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
         if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {

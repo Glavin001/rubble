@@ -15,6 +15,22 @@ pub const SKIN_FILE: &str = "gen2.rskin";
 /// The render model's file name in the vehicle folder.
 pub const GLB_FILE: &str = "gen2.glb";
 
+/// The most a glass vertex's skin may amplify its nodes' motion apart from each
+/// other ([`flexskin::amplification`]: Σ|Aⱼ|, 1 where it interpolates them).
+///
+/// Glass spans an opening with no nodes in it. Where the frame's nodes on one side
+/// are sparse (long kernels) and on the other dense (short ones), the pane's edge is
+/// in reach of the one side alone and the affine fit extrapolates from it: the
+/// generated 4x4's windscreen top bound −1.45 to the roof header's middle node
+/// (Σ|A| 4.46), so a roof crush that pushed the header down lifted the glass up, a
+/// grey spike 0.7–0.9 m above the car (`engine/docs/generated-vehicles-lessons.md`,
+/// "Glass binding"). A glass mesh whose vertex passes this grows its kernels until
+/// the frame on every side is in reach. **Choice**: 3.0, the most any other
+/// design's glass reaches (the wagon's quarter lights, 2.98) and none of them
+/// spikes in a crush; the 4x4's windscreen binds at 1.32 with it, its rear glass at
+/// 1.45 (3.02), its quarter lights at 2.64 (3.43).
+pub const GLASS_AMP_MAX: f64 = 3.0;
+
 /// The physics part a model mesh rides (None: a wheel's piece).
 pub fn part_of(mesh: &str) -> Option<Part> {
     let tail = |s: &str| mesh.ends_with(s);
@@ -107,6 +123,115 @@ pub fn pool_with(car: &Car, mesh: &str, part_of: &dyn Fn(&str) -> Option<Part>) 
     }
 }
 
+/// Per node of `car`: on its outer collision skin (a corner of a collision triangle
+/// that is not an inner face). Vehicle contact holds these and only these: a car meets
+/// another's live outer triangles (the paint guard's surface, the contact offsets', edge
+/// contact's).
+pub fn outer_skin_nodes(car: &Car) -> Vec<bool> {
+    let mut on = vec![false; car.nodes.len()];
+    for t in car.tris.iter().filter(|t| !t.inner) {
+        for &i in &t.n {
+            on[i] = true;
+        }
+    }
+    on
+}
+
+/// A mesh drawn as the car's outer paint: a deforming mesh (not a rigid piece, not
+/// glass) with a primitive in the `paint` material. It binds to nodes on the outer
+/// collision skin alone ([`outer_skin_nodes`]): its own part's, and those of the outer
+/// triangle under each of its vertices, which may be another part's (a B-pillar's paint
+/// between the doors lies over the doors' skin; the pillar's own nodes are inside it).
+/// Contact holds only those, so paint that followed an inner node (a door's inner panel,
+/// a hood's inner frame) could go where the skin does not, into another car whose skin it
+/// never crossed. The fit is a sheet's ([`flexskin::bind_sheet`]): the nodes lie in one
+/// surface and the paint's height over it is the offset's
+/// (`engine/docs/generated-vehicles-lessons.md`, "Paint binds to the collision skin").
+pub fn binds_to_skin(glb: &Glb, m: &crate::glb::Mesh, rigid: &dyn Fn(&str) -> bool) -> bool {
+    !rigid(&m.name)
+        && !m.name.starts_with("glass_")
+        && m.prims.iter().any(|p| glb.materials.get(p.material).is_some_and(|x| x.name == "paint"))
+}
+
+/// The outer collision triangles in a grid, to find the skin under a paint vertex.
+struct SkinUnder {
+    tris: Vec<[usize; 3]>,
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<usize>>,
+}
+
+/// The grid's cell (m), and how far from a paint vertex its skin is looked for: past the
+/// paint's bulge over the triangles between the nodes (`CONTACT_OFFSET_CAP`, 0.12 m).
+const UNDER_CELL: f32 = 0.1;
+const UNDER_REACH: f32 = 0.15;
+
+impl SkinUnder {
+    fn new(car: &Car) -> SkinUnder {
+        let tris: Vec<[usize; 3]> = car.tris.iter().filter(|t| !t.inner).map(|t| t.n).collect();
+        let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<usize>> = Default::default();
+        for (k, t) in tris.iter().enumerate() {
+            let [a, b, c] = t.map(|i| car.nodes[i].p);
+            let (lo, hi) = (cell(a.min(b).min(c)), cell(a.max(b).max(c)));
+            for x in lo.0..=hi.0 {
+                for y in lo.1..=hi.1 {
+                    for z in lo.2..=hi.2 {
+                        grid.entry((x, y, z)).or_default().push(k);
+                    }
+                }
+            }
+        }
+        SkinUnder { tris, grid }
+    }
+
+    /// Where the outer collision triangle nearest a vertex of a paint mesh (within
+    /// [`UNDER_REACH`]) has no node of `own` (the mesh's own skin), that triangle's nodes
+    /// a paint mesh may follow: a part's structural nodes, as [`pool_with`] takes them, on
+    /// any part. In first-found order (deterministic).
+    fn nodes_under(&self, car: &Car, verts: &[Vec3], own: &[bool]) -> Vec<u32> {
+        let usable = |i: usize| {
+            let n = &car.nodes[i];
+            !n.contact && !n.no_group && n.sub.is_none() && !n.name.starts_with("hub")
+        };
+        let mut seen = vec![false; car.nodes.len()];
+        let mut out = Vec::new();
+        let r = (UNDER_REACH / UNDER_CELL).ceil() as i32;
+        for &p in verts {
+            let c = cell(p);
+            let mut best = (UNDER_REACH, usize::MAX);
+            for dx in -r..=r {
+                for dy in -r..=r {
+                    for dz in -r..=r {
+                        for &k in self.grid.get(&(c.0 + dx, c.1 + dy, c.2 + dz)).map_or(&[][..], |l| l.as_slice()) {
+                            let [a, b, q] = self.tris[k].map(|i| car.nodes[i].p);
+                            let d = crate::authoring::lint::tri_dist_pub(p, a, b, q);
+                            if d < best.0 || (d == best.0 && k < best.1) {
+                                best = (d, k);
+                            }
+                        }
+                    }
+                }
+            }
+            if best.1 == usize::MAX || self.tris[best.1].iter().any(|&i| own[i]) {
+                continue;
+            }
+            for i in self.tris[best.1] {
+                if usable(i) && !seen[i] {
+                    seen[i] = true;
+                    out.push(i as u32);
+                }
+            }
+        }
+        out
+    }
+}
+
+fn cell(p: Vec3) -> (i32, i32, i32) {
+    (
+        (p.x / UNDER_CELL).floor() as i32,
+        (p.y / UNDER_CELL).floor() as i32,
+        (p.z / UNDER_CELL).floor() as i32,
+    )
+}
+
 /// The skins of every mesh of `glb` over the rig's nodes (JBeam frame).
 pub fn skins(glb: &Glb, car: &Car) -> Result<Skin, String> {
     skins_with(glb, car, super::surface::AXLE_F, &part_of, &rigid)
@@ -123,13 +248,10 @@ pub fn skins_with(
 ) -> Result<Skin, String> {
     let to_jbeam = |g: Vec3| Vec3::new(g.x, axle_f - g.z, g.y);
     let nodes: Vec<String> = car.nodes.iter().map(|n| n.name.clone()).collect();
+    let on_skin = outer_skin_nodes(car);
+    let mut under: Option<SkinUnder> = None;
     let mut meshes = Vec::new();
     for m in &glb.meshes {
-        let ids = pool_with(car, &m.name, part_of);
-        if ids.len() < 3 {
-            return Err(format!("{}: {} nodes to bind to", m.name, ids.len()));
-        }
-        let pos: Vec<Vec3> = ids.iter().map(|&i| car.nodes[i as usize].p).collect();
         let (mut vp, mut vn) = (Vec::new(), Vec::new());
         for p in &m.prims {
             vp.extend(p.pos.iter().map(|q| to_jbeam(Vec3::from_array(*q))));
@@ -138,8 +260,33 @@ pub fn skins_with(
                 Vec3::new(n.x, -n.z, n.y)
             }));
         }
+        let mut ids = pool_with(car, &m.name, part_of);
+        // (RIG_PAINT_ANY_NODE=1: paint on every node of its part, as before.)
+        let sheet = binds_to_skin(glb, m, rigid) && !std::env::var("RIG_PAINT_ANY_NODE").is_ok_and(|v| v == "1");
+        if sheet {
+            ids.retain(|&i| on_skin[i as usize]);
+            // Where the skin a vertex lies over is another part's: a B-pillar's paint between
+            // the doors (the pillar's own nodes are inside the doors' skin), a door's paint
+            // past its own skin's edge (its top rear corner by the pillar).
+            let u = under.get_or_insert_with(|| SkinUnder::new(car));
+            let mut own = vec![false; car.nodes.len()];
+            ids.iter().for_each(|&i| own[i as usize] = true);
+            for i in u.nodes_under(car, &vp, &own) {
+                if !ids.contains(&i) {
+                    ids.push(i);
+                }
+            }
+        }
+        if ids.len() < 3 {
+            return Err(format!("{}: {} nodes to bind to", m.name, ids.len()));
+        }
+        let pos: Vec<Vec3> = ids.iter().map(|&i| car.nodes[i as usize].p).collect();
         let (verts, _) = if rigid(&m.name) {
             flexskin::bind_rigid(&ids, &pos, &vp, &vn)
+        } else if m.name.starts_with("glass_") {
+            flexskin::bind_with(&ids, &pos, &vp, &vn, Some(GLASS_AMP_MAX))
+        } else if sheet {
+            flexskin::bind_sheet(&ids, &pos, &vp, &vn, None)
         } else {
             flexskin::bind(&ids, &pos, &vp, &vn)
         }

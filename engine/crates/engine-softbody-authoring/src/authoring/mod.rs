@@ -14,6 +14,7 @@
 //! Guide: `engine/docs/vehicle-authoring.md`.
 
 pub mod body;
+pub mod contact_offset;
 pub mod curve;
 pub mod gen2;
 pub mod lint;

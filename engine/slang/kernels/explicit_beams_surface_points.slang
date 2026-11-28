@@ -515,7 +515,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     uint nodeCount = mine ? r0.y : 0u;
     uint triCount = mine ? r1.y : 0u;
     float3 origin = asfloat(gMisc[v].xyz);
-    float r = asfloat(r3.z);
+    float r = selfRangeOf(v, asfloat(r3.z));
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;

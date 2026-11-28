@@ -16,6 +16,12 @@
 //! fast approximations, its yield force, its break exception) form the compatible
 //! profile; [`ExplicitBeamsSettings`] switches the optional ones.
 
+#[path = "explicit_beams_self_pass.rs"]
+mod self_pass;
+#[path = "explicit_beams_torn.rs"]
+pub mod torn;
+pub(crate) use self_pass::SelfHit;
+pub use self_pass::self_edge_on;
 use crate::desc::{BeamKind, SoftVehicleDesc};
 use crate::explicit_aero::{
     airfoil_from_env, chain_wings, Airfoil, CenteringCommand, FuseDrag, Wing, WingSide, BLD, BLU,
@@ -27,8 +33,8 @@ use glam::{Quat, Vec3};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The fixed step (s).
-pub const STEP: f32 = 0.0005;
+/// The fixed step (s): 0.5 ms, divided by [`crate::STEP_DIV`] (1 but in a measurement build).
+pub const STEP: f32 = 0.0005 / crate::STEP_DIV as f32;
 /// Gravity along y (m/s²).
 pub const GRAVITY: f32 = -9.807;
 /// Air drag: F = −coefficient·|v|·v.
@@ -871,6 +877,8 @@ pub struct ExplicitBeams {
     pub ground: f32,
     /// Self-collision range r (m).
     pub collision_range: f32,
+    /// The band against other vehicles (m; None: `collision_range`; [`Self::vv_band`]).
+    pub vehicle_contact_range: Option<f32>,
     /// Soft tyres built from a `.truck` file's `wheels` (for [`Self::roll_tyres`]).
     pub tyres: Vec<Tyre>,
     /// Pressure wheels' parking brakes (JBeam `parkingTorque`, spec §25.1), in
@@ -957,6 +965,34 @@ pub struct ExplicitBeams {
     /// triangle, is caught from the side it came from (a swept test, whatever its
     /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
     pub anti_clip: bool,
+    /// Outward skin (off by default): vehicle contact against this vehicle's triangles takes
+    /// their normal side for every partner node, in place of anti-clip's memory, swept
+    /// crossing and side vote (the triangles face out: the authoring checks). Self contact
+    /// keeps anti-clip's rule.
+    pub outward_skin: bool,
+    /// With [`Self::outward_skin`]: the triangles it applies to (the outer skin's,
+    /// whose front faces out of the whole vehicle at rest); the others keep
+    /// anti-clip's rule. Empty: every triangle.
+    pub outward_tris: Vec<bool>,
+    /// Edge vehicle contact (a Rubble setting, off by default; `explicit_contact::edge`, `docs/contact-design.md`):
+    /// with this vehicle in a pair, (1) the two skins' edges are kept apart as the nodes are from the triangles,
+    /// (2) the partner's nodes are kept off this skin's convex edges (node against edge, in each edge's wedge), and
+    /// (3) the pair's residual pass may take back force (the accumulated clamp), which halves the edges' energy rise.
+    pub edge_contact: bool,
+    /// Per node, its outward contact offset (m; empty: none): in vehicle contact this
+    /// vehicle's triangles and skin edges are at the nodes pushed out along their vertex
+    /// normals (the outer skin's live triangles) by this much, so the contact surface is its
+    /// paint, which bulges past the straight triangles between the nodes (authored from the
+    /// render skin: `authoring::contact_offset`). A partner's nodes stay where they are.
+    pub contact_offset: Vec<f32>,
+    /// Per collision triangle: on the outer skin (air on it, `dragCoef` > 0) or a face
+    /// inside the car (a floor pan, a seat's solid). Edge contact takes the outer skin's
+    /// edges (its winding is the lint's `skin_winding`; inner faces' is not checked).
+    /// Empty or short: every triangle outer.
+    pub tri_outer: Vec<bool>,
+    /// Self edge contact's pairs within the contact range at rest (never collide, as
+    /// node contact's spawn exclusion), found at its first pass. None: not yet.
+    pub self_edge_excl: Option<std::collections::HashSet<(u32, u32, u32, u32)>>,
     /// Anti-clip's box padding by each contacter's own travel (a Rubble setting, not
     /// in the specification; off by default): a contacter is tested against a triangle
     /// when inside its box padded by r + (the triangle's fastest node's speed + the
@@ -1021,6 +1057,8 @@ pub struct ExplicitBeams {
     pub contact_shift: Vec<[i32; 3]>,
     /// The position steps the last node pass applied (m; empty: none).
     pub shift_applied: Vec<Vec3>,
+    /// Velocity contact (`Dat::velocity`, which covers self and vehicle contact): self collision off (`docs/continuous-contact-design.md`).
+    pub no_position_steps: bool,
     /// The ground position steps the last node pass applied (m up, per node; empty
     /// without [`Self::dissipative_contact`]).
     pub ground_lift: Vec<f32>,
@@ -1069,6 +1107,8 @@ pub struct ExplicitBeams {
     /// in this one (state).
     pub groups_last: Vec<u32>,
     pub groups_now: Vec<u32>,
+    /// How the last beam pass's beams broke, for contact's torn triangles ([`torn::Torn`]).
+    pub torn: torn::Torn,
     /// The node grab applied each step ([`Grab`]); `None` (the default) for none.
     pub grab: Option<Grab>,
     /// JBeam Part II (`engine/docs/jbeam-semantics-spec.md` §16–§26;
@@ -1706,6 +1746,7 @@ impl ExplicitBeams {
             origin: Vec3::ZERO,
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
+            vehicle_contact_range: None,
             last_contacts: 0,
             last_self_pairs: 0,
             tyres: Vec::new(),
@@ -1741,6 +1782,12 @@ impl ExplicitBeams {
             rest_pose: None,
             two_body_contact: false,
             anti_clip: false,
+            outward_skin: false,
+            outward_tris: Vec::new(),
+            edge_contact: false,
+            contact_offset: Vec::new(),
+            tri_outer: Vec::new(),
+            self_edge_excl: None,
             own_travel_reach: false,
             retired: Vec::new(),
             clip_sides: Vec::new(),
@@ -1755,6 +1802,7 @@ impl ExplicitBeams {
             surface_force: glam::DVec3::ZERO,
             contact_shift: Vec::new(),
             shift_applied: Vec::new(),
+            no_position_steps: false,
             ground_lift: Vec::new(),
             plastic_strength_drop: true,
             exact_friction: false,
@@ -1769,6 +1817,7 @@ impl ExplicitBeams {
             torsion_watch: Vec::new(),
             groups_last: Vec::new(),
             groups_now: Vec::new(),
+            torn: Default::default(),
             grab: None,
             beam_ext: Vec::new(),
             ext_of: Vec::new(),
@@ -2973,6 +3022,7 @@ impl ExplicitBeams {
             })
             .collect();
         s.grid_cell = s.default_grid_cell();
+        s.contact_offset = desc_contact_offsets(desc);
         if !desc.node_groups.is_empty() {
             s.self_groups = (0..s.nodes.len())
                 .map(|i| desc.nodes.get(i).map_or(0, |n| n.self_group))
@@ -3156,6 +3206,7 @@ impl ExplicitBeams {
             for &n in &t.nodes {
                 self.nodes[n as usize].flags |= NODE_ON_TRIANGLE;
             }
+            self.tri_outer.push(t.aero[0] > 0.0);
             self.triangles.push(Triangle {
                 nodes: t.nodes,
                 wait: 0,
@@ -3571,7 +3622,7 @@ impl ExplicitBeams {
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 1);
         }
-        if !self.triangles.is_empty() && !self.candidates.is_empty() {
+        if !self.triangles.is_empty() && !self.candidates.is_empty() && !self.no_position_steps {
             self.collision_pass();
         }
         if self.surface_contact {
@@ -3768,13 +3819,12 @@ impl ExplicitBeams {
                     }
                 }
                 if let Some(r) = rigid.as_mut() {
-                    let c = r.node_contact_with(
-                        x,
-                        &n,
-                        fast_side,
+                    let c = r.node_contact_rows(
+                        x, &n, fast_side,
                         &ContactSurface::BOX
                             .exact_if(exact)
                             .dissipative_if(dissipative),
+                        self.no_position_steps,
                     );
                     if let Some(l) = cf.as_mut() {
                         l.add(i, c);
@@ -4141,7 +4191,9 @@ impl ExplicitBeams {
             .contact_force
             .as_ref()
             .is_some_and(|l| l.pending.contains(&1));
+        self.torn.begin(&self.beams);
         for j in 0..self.beams.len() {
+            self.torn.at = j as u32;
             if fire && j == 1 {
                 self.fire_contact_breaks();
             }
@@ -4259,13 +4311,17 @@ impl ExplicitBeams {
         if fire && self.beams.len() == 1 {
             self.fire_contact_breaks();
         }
+        self.torn.end();
     }
 
     /// Set off break group `g` (> 0): every member is broken (spec §8, §17).
     pub(crate) fn cascade(&mut self, g: i32) {
         self.groups_now.push(g as u32);
-        for other in &mut self.beams {
+        for (k, other) in self.beams.iter_mut().enumerate() {
             if other.group.abs() == g {
+                if !other.broken {
+                    self.torn.cascaded(k);
+                }
                 other.broken = true;
             }
         }
@@ -4290,6 +4346,7 @@ impl ExplicitBeams {
         let r = self.collision_range;
         let h = STEP;
         self.last_self_pairs = 0;
+        let at = self.self_positions();
         // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
         let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
         // The two-body rule (spec §36, as vehicle contact's §10.3): the step's hits
@@ -4298,7 +4355,7 @@ impl ExplicitBeams {
         // the pass's start. Without it RoR's rule applies each hit as it is found.
         let two_body = self.two_body_contact;
         let vmax = if self.anti_clip { self.max_speed() } else { 0.0 };
-        let mut found: Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)> = Vec::new();
+        let mut found: Vec<SelfHit> = Vec::new();
         for t in 0..self.triangles.len() {
             let tri = &mut self.triangles[t];
             if tri.wait > 0 {
@@ -4318,8 +4375,7 @@ impl ExplicitBeams {
                 continue;
             }
             let tri_group = self.triangle_self_group(t);
-            let world = |i: u32| self.origin + self.nodes[i as usize].pos;
-            let (p0, p1, p2) = (world(i0), world(i1), world(i2));
+            let [p0, p1, p2] = [i0, i1, i2].map(|i| self.origin + at.0[i as usize]);
             let frame = TriFrame::new(p0, p1, p2);
             // Anti-clip (§36): the box also reaches what crossed it over the step
             // or is remembered up to CLIP_DEPTH behind it.
@@ -4380,7 +4436,7 @@ impl ExplicitBeams {
                 if !self.tri_excl.is_empty() && self.tri_excl[t].contains(&hn) {
                     continue;
                 }
-                let p = self.origin + self.nodes[hn as usize].pos;
+                let p = self.origin + at.1[hn as usize];
                 if p.cmplt(lo).any() || p.cmpgt(hi).any() {
                     continue;
                 }
@@ -4397,7 +4453,7 @@ impl ExplicitBeams {
                 self.last_self_pairs += 1;
                 // (α, β, γ, depth into the contact, normal).
                 let found_hit = if anti {
-                    self.clip_hit(t, hn, p, &frame, [i0, i1, i2], r, only)
+                    self.clip_hit(t, hn, p, [p0, p1, p2], &frame, [i0, i1, i2], r, only)
                 } else {
                     frame.hit(p, r).map(|(a, b, g, d, n)| (a, b, g, r - d, n))
                 };
@@ -4407,7 +4463,7 @@ impl ExplicitBeams {
                 hit = true;
                 self.last_contacts += 1;
                 if two_body {
-                    found.push((hn, [i0, i1, i2], [alpha, beta, gamma], pen, n));
+                    found.push(SelfHit::node(hn, [i0, i1, i2], [alpha, beta, gamma], pen, n));
                     continue;
                 }
                 let node = self.nodes[hn as usize];
@@ -4450,8 +4506,15 @@ impl ExplicitBeams {
                 tri.wait = (tri.wait + 1).min(cap);
             }
         }
+        // Edge against edge within the car (`edge_contact`, two-body): into the same hits.
+        if self.edge_contact && two_body && self_edge_on() {
+            let more = crate::explicit_contact::self_edge_hits(self);
+            self.last_contacts += more.len() as u32;
+            found.extend(more);
+        }
         if let Some(l) = self.self_hit_log.as_mut() {
-            l.clone_from(&found);
+            l.clear();
+            l.extend(found.iter().filter(|x| x.kind == 0).map(|x| (x.hn, x.tri, x.w, x.depth, x.n)));
         }
         if !found.is_empty() {
             self.apply_two_body_self_hits(&found);
@@ -4503,6 +4566,7 @@ impl ExplicitBeams {
 
     /// Adds position step `d` (m) to node `i`'s ([`Self::contact_shift`]).
     pub fn add_shift(&mut self, i: usize, d: Vec3) {
+        if std::env::var("DAT_NOSHIFT").is_ok() { return; }
         if self.contact_shift.len() != self.nodes.len() {
             self.contact_shift = vec![[0; 3]; self.nodes.len()];
         }
@@ -4579,6 +4643,7 @@ impl ExplicitBeams {
         t: usize,
         hn: u32,
         p: Vec3,
+        corners: [Vec3; 3],
         frame: &TriFrame,
         tri: [u32; 3],
         r: f32,
@@ -4593,10 +4658,9 @@ impl ExplicitBeams {
         let local = frame.local(p);
         let held = clip_side(&self.clip_sides[hn as usize], CLIP_SELF, t as u32);
         let crossing = || {
-            let back = |i: u32| self.origin + self.nodes[i as usize].pos - self.nodes[i as usize].vel * STEP;
-            let pf = TriFrame::new(back(tri[0]), back(tri[1]), back(tri[2]));
+            let back = |k: usize| corners[k] - self.nodes[tri[k] as usize].vel * STEP;
             let p_prev = p - self.nodes[hn as usize].vel * STEP;
-            let (a0, b0, _, d0) = pf.local(p_prev);
+            let (a0, b0, _, d0) = TriFrame::new(back(0), back(1), back(2)).local(p_prev);
             crossing_weights(a0, b0, d0, local.0, local.1, local.3)
         };
         let delta = local.3;
@@ -4617,13 +4681,22 @@ impl ExplicitBeams {
     /// from the forces at the pass's start, in place of RoR's whole F_h (which
     /// moves the contacter's own load onto the triangle's nodes). Hits in the
     /// order they were found (triangles in order, then candidates).
-    fn apply_two_body_self_hits(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)]) {
+    fn apply_two_body_self_hits(&mut self, found: &[SelfHit]) {
         let exact = self.exact_friction;
         let mut split = vec![0u32; self.nodes.len()];
-        for (hn, tri, _, _, _) in found {
-            split[*hn as usize] += 1;
-            for &i in tri {
-                split[i as usize] += 1;
+        for x in found {
+            split[x.hn as usize] += 1;
+            if x.t > 0.0 {
+                split[x.hn2 as usize] += 1;
+            }
+            if x.kind == 0 {
+                for &i in &x.tri {
+                    split[i as usize] += 1;
+                }
+            } else {
+                for (i, _) in x.owner_nodes() {
+                    split[i as usize] += 1;
+                }
             }
         }
         let pass: Vec<Vec3> = self.forces_now();
@@ -4648,15 +4721,23 @@ impl ExplicitBeams {
         // quantisation, whatever the later passes add).
         let staged = self.dissipative_contact;
         let snapshot = staged.then(|| (self.contact_acc.clone(), self.contact_exact.clone()));
-        for &(hn, [i0, i1, i2], [alpha, beta, gamma], depth, n) in found {
+        for x in found {
+            let (hn, [i0, i1, i2], [alpha, beta, gamma], depth, n) = (x.hn, x.tri, x.w, x.depth, x.n);
             let node = self.nodes[hn as usize];
+            let node2 = self.nodes[x.hn2 as usize];
             let (n0, n1, n2) = (
                 self.nodes[i0 as usize],
                 self.nodes[i1 as usize],
                 self.nodes[i2 as usize],
             );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
-            let imh = im(&node, split[hn as usize]);
+            let cvel = if x.t > 0.0 { node.vel * (1.0 - x.t) + node2.vel * x.t } else { node.vel };
+            let v = cvel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let imh = if x.t > 0.0 {
+                (1.0 - x.t) * (1.0 - x.t) * im(&node, split[hn as usize])
+                    + x.t * x.t * im(&node2, split[x.hn2 as usize])
+            } else {
+                im(&node, split[hn as usize])
+            };
             let imt = crate::explicit_contact::two_body_inverse_mass(
                 [
                     im(&n1, split[i1 as usize]),
@@ -4670,7 +4751,12 @@ impl ExplicitBeams {
             let at = acc(pass[i1 as usize], &n1) * alpha
                 + acc(pass[i2 as usize], &n2) * beta
                 + acc(pass[i0 as usize], &n0) * gamma;
-            let fh = (acc(pass[hn as usize], &node) - at) * m;
+            let ca = if x.t > 0.0 {
+                acc(pass[hn as usize], &node) * (1.0 - x.t) + acc(pass[x.hn2 as usize], &node2) * x.t
+            } else {
+                acc(pass[hn as usize], &node)
+            };
+            let fh = (ca - at) * m;
             let (f, budget) = contact_response(
                 fh,
                 v,
@@ -4681,7 +4767,7 @@ impl ExplicitBeams {
                     .exact_if(exact)
                     .dissipative_if(self.dissipative_contact),
                 depth,
-                node.friction,
+                if x.t > 0.0 { node.friction.min(node2.friction) } else { node.friction },
             );
             if self.dissipative_contact && f != Vec3::ZERO {
                 // §37: the position step, a position impulse δ·m shared like the
@@ -4692,7 +4778,12 @@ impl ExplicitBeams {
                 let delta = shift_depth(depth, budget, fh.dot(n));
                 if delta > 0.0 {
                     let q = delta * m;
-                    self.add_shift(hn as usize, n * (q * im(&node, 1)));
+                    if x.t > 0.0 {
+                        self.add_shift(hn as usize, n * ((1.0 - x.t) * (q * im(&node, 1))));
+                        self.add_shift(x.hn2 as usize, n * (x.t * (q * im(&node2, 1))));
+                    } else {
+                        self.add_shift(hn as usize, n * (q * im(&node, 1)));
+                    }
                     for (i, w, nd) in tri {
                         if w > 0.0 {
                             self.add_shift(i as usize, n * -(w * (q * im(&nd, 1))));
@@ -4701,20 +4792,28 @@ impl ExplicitBeams {
                 }
             }
             first.push(f);
+            let cn = x.contacter();
             if let Some(p) = self.self_contact_parts.as_mut() {
                 let fnm = n * f.dot(n);
-                for (i, w) in [(hn, 1.0f32), (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                for (i, w) in [cn[0], cn[1], (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                    if w == 0.0 && i == x.hn2 && x.t == 0.0 {
+                        continue;
+                    }
                     p[i as usize][0] += fnm * w;
                     p[i as usize][1] += (f - fnm) * w;
                 }
             }
-            self.add_contact(hn as usize, f);
+            self.add_contacter(x, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));
             self.add_contact(i0 as usize, -(f * gamma));
             if !staged {
                 if let Some(l) = self.contact_force.as_mut() {
-                    l.add(hn as usize, f);
+                    for (i, w) in [cn[0], cn[1]] {
+                        if w != 0.0 {
+                            l.add(i as usize, f * w);
+                        }
+                    }
                     l.add(i1 as usize, f * alpha);
                     l.add(i2 as usize, f * beta);
                     l.add(i0 as usize, f * gamma);
@@ -4734,31 +4833,40 @@ impl ExplicitBeams {
             .zip(&first)
             .zip(&res)
             .map(|((x, &f), r)| match r {
-                Some(r) => f + x.4 * *r,
+                Some(r) => f + x.n * *r,
                 None => f,
             })
             .collect();
         let guard = self.friction_guard_pass(found, &with_res);
         self.contact_acc = acc0;
         self.contact_exact = exact0;
-        for (j, &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n)) in found.iter().enumerate() {
+        for (j, x) in found.iter().enumerate() {
+            let ([i0, i1, i2], [alpha, beta, gamma], n) = (x.tri, x.w, x.n);
             let mut f = with_res[j];
             if let Some(g) = guard[j] {
                 f = f + g;
             }
+            let cn = x.contacter();
             if let Some(p) = self.self_contact_parts.as_mut() {
                 let extra = [res[j].map_or(Vec3::ZERO, |r| n * r), guard[j].unwrap_or(Vec3::ZERO)];
-                for (i, w) in [(hn, 1.0f32), (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                for (i, w) in [cn[0], cn[1], (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                    if w == 0.0 && i == x.hn2 && x.t == 0.0 {
+                        continue;
+                    }
                     p[i as usize][2] += extra[0] * w;
                     p[i as usize][1] += extra[1] * w;
                 }
             }
-            self.add_contact(hn as usize, f);
+            self.add_contacter(x, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));
             self.add_contact(i0 as usize, -(f * gamma));
             if let Some(l) = self.contact_force.as_mut() {
-                l.add(hn as usize, f);
+                for (i, w) in [cn[0], cn[1]] {
+                    if w != 0.0 {
+                        l.add(i as usize, f * w);
+                    }
+                }
                 l.add(i1 as usize, f * alpha);
                 l.add(i2 as usize, f * beta);
                 l.add(i0 as usize, f * gamma);
@@ -4766,165 +4874,6 @@ impl ExplicitBeams {
         }
     }
 
-    /// §37's residual pass over the step's two-body self hits (after the first,
-    /// [`Self::apply_two_body_self_hits`], with its counts `split`): a second
-    /// iteration of the mass-split pass for the approach the first left. Its
-    /// sub-bodies are lighter than the nodes (k/m), so a hit whose nodes are in
-    /// other hits stops only m_split·inv of its pair's approach alone (the rest a
-    /// ghost speed the position steps cancel each step). Each hit's pair, at the
-    /// forces now (the first pass's contact sums with them), approaching (vn < 0)
-    /// and still approaching over the step, a·h + vn < 0 ([`contact_response`]'s
-    /// rule, a the pair's relative normal acceleration), takes r = −(a·m +
-    /// vn·m/h) > 0 along its normal with the first pass's reduced mass m:
-    /// momentum-exact, and never more than the first pass's split allows (counts of
-    /// the active hits only were measured to over-stop: +0.23 J of self-contact
-    /// work in a tenth of the 58 km/h wall). No friction and no position step (the
-    /// first pass's). All found from the sums before any is added (order free).
-    /// §37.1's work guard over the step's two-body self hits, after the residual
-    /// pass. A hit's force t (its first-pass force with its residual, `first`) is
-    /// judged at the pair's realised mean velocity over the step: the forces now
-    /// (the staging sums with the residual's) on the nodes' own masses. Its work is
-    /// W(s) = s·A + s²·B, with
-    /// * A = t·(2v + h·a′), a′ the pair's relative acceleration without t;
-    /// * B = h·|t|²·inv, inv the nodes' own inverse masses.
-    ///
-    /// Where W(1) > 0, the force is scaled to the root s = −A/B (0 if A ≥ 0), and
-    /// (1 − s)·t is taken back from the pair (returned per hit). The first pass's
-    /// caps judge each hit at its own predicted velocity with split masses; hits
-    /// sharing nodes then did +1–2 J of friction work in a tenth at rest. A force
-    /// that does positive work moves the pair the way it pushes, so scaling its
-    /// normal part lets nothing in. Every guard is found from the same sums before
-    /// any is applied (order free, momentum-exact).
-    fn friction_guard_pass(
-        &self,
-        found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)],
-        first: &[Vec3],
-    ) -> Vec<Option<Vec3>> {
-        let mut out = vec![None; found.len()];
-        if !friction_guard() {
-            return out;
-        }
-        let now: Vec<Vec3> = self.forces_now();
-        let acc = |i: u32| {
-            let n = &self.nodes[i as usize];
-            if n.has(NODE_IMMOVABLE) {
-                Vec3::ZERO
-            } else {
-                now[i as usize] / n.mass
-            }
-        };
-        let im = |i: u32| {
-            let n = &self.nodes[i as usize];
-            if n.has(NODE_IMMOVABLE) {
-                0.0
-            } else {
-                1.0 / n.mass
-            }
-        };
-        for (j, (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, _), &t)) in
-            found.iter().zip(first).enumerate()
-        {
-            if t == Vec3::ZERO {
-                continue;
-            }
-            let node = &self.nodes[hn as usize];
-            let (n0, n1, n2) = (
-                &self.nodes[i0 as usize],
-                &self.nodes[i1 as usize],
-                &self.nodes[i2 as usize],
-            );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
-            let a = acc(hn) - (acc(i1) * alpha + acc(i2) * beta + acc(i0) * gamma);
-            let inv = im(hn)
-                + crate::explicit_contact::two_body_inverse_mass(
-                    [im(i1), im(i2), im(i0)],
-                    [alpha, beta, gamma],
-                );
-            let a_rest = a - t * inv;
-            let aa = t.dot(v + v + a_rest * STEP);
-            let bb = STEP * t.dot(t) * inv;
-            if aa + bb > 0.0 && bb > 0.0 {
-                let s = if aa < 0.0 { (-aa / bb).min(1.0) } else { 0.0 };
-                out[j] = Some(t * -(1.0 - s));
-            }
-        }
-        out
-    }
-
-    fn residual_self_pass(
-        &mut self,
-        found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)],
-        split: &[u32],
-    ) -> Vec<Option<f32>> {
-        let now: Vec<Vec3> = self.forces_now();
-        let acc = |i: u32, n: &Node| {
-            if n.has(NODE_IMMOVABLE) {
-                Vec3::ZERO
-            } else {
-                now[i as usize] / n.mass
-            }
-        };
-        let mut drive = Vec::with_capacity(found.len());
-        for &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n) in found {
-            let node = &self.nodes[hn as usize];
-            let (n0, n1, n2) = (
-                &self.nodes[i0 as usize],
-                &self.nodes[i1 as usize],
-                &self.nodes[i2 as usize],
-            );
-            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
-            let at = acc(i1, n1) * alpha + acc(i2, n2) * beta + acc(i0, n0) * gamma;
-            let a = (acc(hn, node) - at).dot(n);
-            let vn = v.dot(n);
-            let x = vn + vn.max(0.0);
-            // (Approaching pairs only: a separating one has no ghost speed, and
-            // its residual over-stopped where hits share nodes, +0.4 J of
-            // self-contact work in a tenth of the 48 km/h wall.)
-            drive.push((a, x, vn < 0.0 && a * STEP + x < 0.0));
-        }
-        let im = |n: &Node, k: u32| {
-            if n.has(NODE_IMMOVABLE) {
-                0.0
-            } else {
-                k as f32 / n.mass
-            }
-        };
-        let mut out = vec![None; found.len()];
-        for (j, (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, _), &(a, x, on))) in
-            found.iter().zip(&drive).enumerate()
-        {
-            if !on {
-                continue;
-            }
-            let inv = im(&self.nodes[hn as usize], split[hn as usize])
-                + crate::explicit_contact::two_body_inverse_mass(
-                    [
-                        im(&self.nodes[i1 as usize], split[i1 as usize]),
-                        im(&self.nodes[i2 as usize], split[i2 as usize]),
-                        im(&self.nodes[i0 as usize], split[i0 as usize]),
-                    ],
-                    [alpha, beta, gamma],
-                );
-            if inv <= 0.0 {
-                continue;
-            }
-            let m = 1.0 / inv;
-            let r = -(a * m) - x * m / STEP;
-            if r > 0.0 {
-                out[j] = Some(r);
-            }
-        }
-        // (Into the staging sums, read by the guard.)
-        for (j, &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n)) in found.iter().enumerate() {
-            let Some(r) = out[j] else { continue };
-            let f = n * r;
-            self.add_contact(hn as usize, f);
-            self.add_contact(i1 as usize, -(f * alpha));
-            self.add_contact(i2 as usize, -(f * beta));
-            self.add_contact(i0 as usize, -(f * gamma));
-        }
-        out
-    }
 }
 
 /// A measurement switch (CPU only; `SHIFT_BUDGET=x`, default 1): the share of a
@@ -4933,6 +4882,7 @@ pub fn shift_budget_scale() -> f32 {
     static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *S.get_or_init(|| std::env::var("SHIFT_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0))
 }
+
 
 /// §37.1's friction guard (on; `FRICTION_GUARD=0`, a measurement switch: off).
 pub fn friction_guard() -> bool {
@@ -5878,4 +5828,11 @@ impl TriFrame {
             None
         }
     }
+}
+
+/// The contact surface's offsets (`rubbleContactOffset`), when the desc has any.
+fn desc_contact_offsets(desc: &SoftVehicleDesc) -> Vec<f32> {
+    // (`CONTACT_OFFSET_SCALE=s`, a measurement: every offset times s; 0 puts contact on the node triangles.)
+    let s = std::env::var("CONTACT_OFFSET_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+    if s > 0.0 && desc.nodes.iter().any(|n| n.contact_offset > 0.0) { desc.nodes.iter().map(|n| n.contact_offset * s).collect() } else { Vec::new() }
 }

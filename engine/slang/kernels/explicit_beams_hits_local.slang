@@ -549,8 +549,10 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
     if (i < gP.totalBeams)
     {
         uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
-        Vehicle x = vehicleAt(v);
-        if (x.groupCount > 0u && !sleepAsleep(v)) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
+        // (vehicleAt's beamOff, groupOff and groupCount: its records' words alone.)
+        uint4 r0 = gVt.rec[v * 4u];
+        uint4 r2 = gVt.rec[v * 4u + 2u];
+        if (r2.w > 0u && !sleepAsleep(v)) groupDropsAtFrameEnd(i, r0.z, r2.z, (vehicleStep(v) - 1u) & 1u);
     }
 }
 

@@ -30,9 +30,14 @@ pub mod coupling;
 pub mod drive;
 pub mod portable;
 pub mod schedule;
+pub mod continuous;
 mod loop_cap;
 pub use loop_cap::{explicit_loop_cap_hit, EXPLICIT_LOOP_CAP, EXPLICIT_LOOP_CAP_TAG};
 mod surface_fast;
+mod edge;
+mod contact_error;
+pub use contact_error::contact_error;
+pub use edge::PERF_FLEET_FAMILY;
 pub mod vv_wide;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
@@ -200,7 +205,47 @@ pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
-pub const PARAM_WORDS: usize = 106;
+pub const PARAM_WORDS: usize = 111;
+pub use edge::{W_EDGE, W_OFFSET, W_SELF_RANGE};
+/// gBeams float4 per skin edge of edge contact's step scratch (its ends, outward normal
+/// and flags, its faces' opposite corners).
+pub const EDGE_SCRATCH: usize = 5;
+/// gAcc words per vehicle of edge contact: hits, listed edges, listed points, a box (six
+/// keys), its longest live edge (float bits), its long edges, a spare word, then the grid's
+/// cursors and starts for its listed edges and points ([`EDGE_BUCKETS`] each), then the
+/// starts' scan's block sums (32 buckets a block), then the candidates' count, signature
+/// and overflow.
+pub const EDGE_ACC: usize = 12 + 4 * EDGE_BUCKETS + 2 * (EDGE_BUCKETS / 32) + 4;
+/// Edge contact's frame-coherent candidate pairs a listed edge or point (gNext room).
+pub const EDGE_CAND: usize = 32;
+/// The most grid cells an edge's padded box takes in edge contact's grid (more: the
+/// vehicle's long-edge list, tested against every owner edge).
+pub const EDGE_CELLS_MAX: usize = 64;
+/// Hash buckets of edge contact's per-vehicle grid (explicit_beams_vv_edges.slang EDGE_BUCKETS).
+pub const EDGE_BUCKETS: usize = 2048;
+
+/// Surface contact's segment records (`ExplicitUpload::with_sleep`'s surf_seg): per
+/// vehicle (start in gLists, count, its first segment's mask, its first node's mask), the
+/// global beams in gLists; `seg_mark` the first segment's mask in gAcc.
+fn surf_seg_records(
+    vehicles: &[ExplicitBeams],
+    surf_segs: &[Vec<u32>],
+    mut seg_mark: u32,
+    statics: &mut Vec<[u32; 4]>,
+    lists: &mut Vec<u32>,
+) -> u32 {
+    let base = statics.len() as u32;
+    let mut beam_at = 0u32;
+    let mut node_mark = seg_mark + surf_segs.iter().map(Vec::len).sum::<usize>() as u32;
+    for (v, segs) in vehicles.iter().zip(surf_segs) {
+        statics.push([lists.len() as u32, segs.len() as u32, seg_mark, node_mark]);
+        lists.extend(segs.iter().map(|&j| beam_at + j));
+        beam_at += v.beams.len() as u32;
+        seg_mark += segs.len() as u32;
+        node_mark += v.nodes.len() as u32;
+    }
+    base
+}
 
 /// [`PARAM_WORDS`] words through serde as a sequence (serde's arrays stop at 32).
 pub mod param_words_serde {
@@ -208,11 +253,18 @@ pub mod param_words_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(w: &[u32; PARAM_WORDS], s: S) -> Result<S::Ok, S::Error> {
-        w.as_slice().serialize(s)
+        // (Without edge contact, word 106 is 0: saved as the 106 words of the layout before
+        // it, so a state saved here replays in a build from before the word.)
+        let n = (106..=PARAM_WORDS).rev().find(|&n| n == 106 || w[n - 1] != 0).unwrap_or(PARAM_WORDS);
+        w[..n].serialize(s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u32; PARAM_WORDS], D::Error> {
-        let v = Vec::<u32>::deserialize(d)?;
+        let mut v = Vec::<u32>::deserialize(d)?;
+        // (A shorter list is a layout from before the last words: they were 0, off.)
+        if v.len() < PARAM_WORDS && v.len() >= 106 {
+            v.resize(PARAM_WORDS, 0);
+        }
         v.try_into().map_err(|v: Vec<u32>| serde::de::Error::custom(format!("{} parameter words, not {PARAM_WORDS}", v.len())))
     }
 }
@@ -492,6 +544,7 @@ pub const PERF_FLEET_WALK_BOX: u32 = 536870912;
 /// with 8 cars, a tie at 32; on by the owner's decision, 2026-11-19); and
 /// [`PERF_HIT_SLOT_MAP`] (§8.46);
 /// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off).
+
 pub fn perf_flags_default() -> u32 {
     std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).map(|f| f & !PERF_KEEP_TRACK_REST).unwrap_or(
         PERF_HIT_FB
@@ -1101,50 +1154,6 @@ impl StatusWords {
     }
 }
 
-/// The contact error the status counters (outside, overflow, unconverged, too big)
-/// report.
-pub fn contact_error(w: &[i32]) -> Result<(), String> {
-    if w[0] > 0 {
-        return Err(format!(
-            "vehicle {} left its frame bounds (a node moved past the travel the frame's \
-             contact plan allowed, so a contact may have been missed); raise \
-             ExplicitBeamsGpu::set_contact_margin",
-            w[0] - 1
-        ));
-    }
-    // (The overflow word: 1 the pair list; from 2 on the limits of the owners' state by
-    // vehicle, the kernel's FL_ERR_*, the largest raised.)
-    match w[1] {
-        0 => {}
-        2 => {
-            return Err(format!(
-                "the owners' candidates passed the fleet-wide run's room ({VV_ROOM_MAX} times the                  fleet's contact points: too many vehicles in contact with one another at                  once; that step's contact pass was cut short)"
-            ))
-        }
-        3 => {
-            return Err(
-                "an owner's hits passed its part of the fleet-wide hit list (twice its                  partners' contact points; the hits past it were not applied)"
-                    .into(),
-            )
-        }
-        4 => {
-            return Err(format!(
-                "a vehicle had more than {VV_ROOM_MAX} partners with two-body contact at once                  (the two-body point counts hold {VV_ROOM_MAX} owners a node)"
-            ))
-        }
-        _ => return Err("the overlapping-pair list overflowed".into()),
-    }
-    if w[2] != 0 {
-        return Err("the contact grouping did not converge".into());
-    }
-    if w[3] != 0 {
-        return Err(
-            "a contact group had more than 64 vehicles (they ran without contact that frame)"
-                .into(),
-        );
-    }
-    Ok(())
-}
 
 /// Vehicle sleep's records (`explicit_beams_sleep.slang`).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1186,6 +1195,8 @@ pub struct ExplicitUpload {
 /// Where everything lives, and the fleet's module choice.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitLayout {
+    /// Why continuous contact cannot run here (own surfaces too close at spawn, [`continuous::cc_tables`]).
+    #[serde(default)] pub cc_refused: Option<String>,
     /// gAcc word of the first vehicle's self-collision hit counters (two words a
     /// vehicle: the step's hits, its pending beams; the kernel's hitAcc).
     pub hit_acc: u32,
@@ -1268,6 +1279,8 @@ impl ExplicitUpload {
         sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
     ) -> Self {
         let nv = vehicles.len();
+        let any_edge = edge::any_edge(vehicles);
+        let any_offset = vehicles.iter().any(|v| v.contact_offset.iter().any(|&o| o > 0.0));
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
@@ -1467,7 +1480,8 @@ impl ExplicitUpload {
                 | (v.surface_contact as u32) << 17
                 | (v.settings.centred_damping as u32) << 18
                 | ((v.settings.centred_damping && v.settings.centred_objective) as u32) << 19
-                | (v.own_travel_reach as u32) << 20;
+                | (v.own_travel_reach as u32) << 20
+                | (v.edge_contact as u32) << 21;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1484,7 +1498,7 @@ impl ExplicitUpload {
             vehicle_recs.push([
                 flags,
                 v.ground.to_bits(),
-                v.collision_range.to_bits(),
+                v.vv_band().to_bits(),
                 grid_cell(v).to_bits(),
             ]);
             for (i, n) in v.nodes.iter().enumerate() {
@@ -2545,7 +2559,7 @@ impl ExplicitUpload {
         // The beam phase's records sorted by kind ([`W_BEAM_ORDER`]), from the beam records
         // as uploaded (filters patched).
         let beam_order = beam_order_records(&spans, &node_info, &beam_recs, &slots, &ext_index, &ext_recs);
-        let table_recs = vehicle_recs.clone();
+        let table_recs = edge::own_ranges(vehicles, vehicle_recs.clone());
         let mut statics = vehicle_recs;
         statics.extend(node_info);
         statics.extend(beam_recs);
@@ -2598,21 +2612,13 @@ impl ExplicitUpload {
         // gLists, count, its first segment's mask in gAcc, its first node's mask in
         // gAcc), the global beam indices in gLists.
         let surf_seg = if any_surface {
-            let base = statics.len() as u32;
-            let mut beam_at = 0u32;
-            let mut seg_mark = surf_mark + total_tris as u32;
-            let mut node_mark = seg_mark + surf_seg_total as u32;
-            for (v, segs) in vehicles.iter().zip(&surf_segs) {
-                statics.push([lists.len() as u32, segs.len() as u32, seg_mark, node_mark]);
-                lists.extend(segs.iter().map(|&j| beam_at + j));
-                beam_at += v.beams.len() as u32;
-                seg_mark += segs.len() as u32;
-                node_mark += v.nodes.len() as u32;
-            }
-            base
+            surf_seg_records(vehicles, &surf_segs, surf_mark + total_tris as u32, &mut statics, &mut lists)
         } else {
             0
         };
+        let edge_base = if any_edge { edge::edge_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { 0 };
+        let (offset_base, self_range_base) = edge::offset_and_self_tables(vehicles, any_offset, &mut statics, &mut lists, &mut beams);
+        let (cc_base, cc_counts, cc_refused) = if any_edge { continuous::cc_tables(vehicles, &mut statics, &mut lists, &mut beams, &mut next_init, &mut acc_init) } else { (0, 0, None) };
         let beam_order_base = if beam_order_default() && total_beams > 0 {
             let base = statics.len() as u32;
             statics.extend(beam_order);
@@ -2620,7 +2626,6 @@ impl ExplicitUpload {
         } else {
             0
         };
-
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
         // Two parities of group slots.
@@ -2733,7 +2738,8 @@ impl ExplicitUpload {
             beam_order_base,
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
-        (words[W_PERF_FLAGS], words[W_BEAM_ORDER + 1]) = (perf_flags_default() & !PERF_FLEET_WALK_BOX, (perf_flags_default() & PERF_FLEET_WALK_BOX) << 1);
+        let flags = edge::contact_flags(perf_flags_default(), any_edge, any_offset);
+        (words[W_PERF_FLAGS], words[W_BEAM_ORDER + 1]) = (flags & !PERF_FLEET_WALK_BOX, (flags & PERF_FLEET_WALK_BOX) << 1);
         words[W_VV_SCRATCH] = vv_scratch;
         words[W_VV_SCRATCH_OFF] = vv_scratch_off;
         words[W_VV_TRI_PAIRS] = vv_tri_pairs;
@@ -2741,6 +2747,8 @@ impl ExplicitUpload {
         words[W_VV_FLEET_NEXT] = vv_fleet_next;
         words[W_VV_FLEET_BOX] = vv_fleet_box;
         words[W_VV_ROOM] = vv_room(nv) as u32;
+        words[W_EDGE] = edge_base;
+        (words[W_OFFSET], words[W_SELF_RANGE], words[continuous::W_CC], words[continuous::W_CC + 1]) = (offset_base, self_range_base, cc_base, cc_counts);
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -2753,8 +2761,7 @@ impl ExplicitUpload {
         // (Surface contact runs in the frame modules: not in the wide passes.)
         // (RUBBLE_WIDE_FORCE=1, a measurement of time only: the wide passes for a fleet
         // with raycast wheels, whose wheels then do nothing.)
-        let force = std::env::var("RUBBLE_WIDE_FORCE").as_deref() == Ok("1");
-        let _ = force;
+        let _force = std::env::var("RUBBLE_WIDE_FORCE").as_deref() == Ok("1");
         // (Raycast wheels and the rigid coupling run in the wide passes' aux pass.)
         let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && !any_surface;
         // Every vehicle must have run the same steps for the wide passes (one
@@ -2765,7 +2772,7 @@ impl ExplicitUpload {
         let mut table = table_recs[..n].to_vec();
         table.resize(WIDE_MAX_VEHICLES * 5, [0; 4]);
         let layout = ExplicitLayout {
-            hit_acc: hit_acc as u32,
+            cc_refused, hit_acc: hit_acc as u32,
             spans,
             rest0,
             words,
@@ -2854,7 +2861,7 @@ impl ExplicitUpload {
 
 /// Bytes of the parameter buffer ([`PARAM_COPIES`] copies, then [`PARAM_LEVEL_COPIES`]).
 pub const fn params_bytes() -> u64 {
-    PARAM_STRIDE * (PARAM_COPIES + PARAM_LEVEL_COPIES) as u64
+    PARAM_STRIDE * (PARAM_COPIES + PARAM_LEVEL_COPIES + continuous::PARAM_CC_COPIES) as u64
 }
 
 // --- Per-frame planning.
@@ -2947,6 +2954,8 @@ pub struct FramePlanner {
     loop_unit: u64,
     vv_wide: bool,
     vv_seen: Option<u32>,
+    /// Continuous contact (the split path's members in two halves) and its response ([`continuous::CcMode`]).
+    pub continuous: continuous::CcMode,
 }
 
 impl FramePlanner {
@@ -2974,6 +2983,7 @@ impl FramePlanner {
             loop_unit: layout.loop_unit,
             vv_wide: false,
             vv_seen: None,
+            continuous: Default::default(),
         }
     }
 
@@ -3092,6 +3102,7 @@ impl FramePlanner {
     /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
     /// bit for bit either way).
     pub fn set_perf_flags(&mut self, flags: u32) {
+        let flags = edge::contact_flags(flags, self.words[W_EDGE] != 0, self.words[W_OFFSET] != 0);
         // (PERF_KEEP_TRACK_REST is the host's to set, frame by frame.)
         self.words[W_PERF_FLAGS] = flags & !(PERF_KEEP_TRACK_REST | PERF_FLEET_WALK_BOX);
         self.words[W_BEAM_ORDER + 1] = (self.words[W_BEAM_ORDER + 1] & !(PERF_FLEET_WALK_BOX << 1)) | (flags & PERF_FLEET_WALK_BOX) << 1;
@@ -3271,8 +3282,11 @@ impl FramePlanner {
     /// Everything this planner holds that its layout does not give it: the words, the
     /// contact plan's state, the host's frame choices ([`portable`]).
     pub fn settings(&self) -> PlannerSettings {
+        // (Without edge contact the last word, W_EDGE, is 0: saved as the 106 words of the
+        // layout before it, so a build from before the word reads the state.)
+        let n = (106..=PARAM_WORDS).rev().find(|&n| n == 106 || self.words[n - 1] != 0).unwrap_or(PARAM_WORDS);
         PlannerSettings {
-            words: self.words.to_vec(),
+            words: self.words[..n].to_vec(),
             state: self.state(),
             contact_on: self.contact.on,
             wide_on: self.wide_on,
@@ -3284,7 +3298,9 @@ impl FramePlanner {
 
     /// Put back [`Self::settings`] (on a planner made from the same layout).
     pub fn apply(&mut self, s: &PlannerSettings) {
-        self.words.copy_from_slice(&s.words);
+        // (Fewer words: a state from before the last words, which were 0.)
+        self.words.fill(0);
+        self.words[..s.words.len()].copy_from_slice(&s.words);
         self.restore(s.state);
         self.contact.on = s.contact_on;
         self.wide_on = s.wide_on;

@@ -40,6 +40,23 @@ float ssqrt(float x)
     float s = nf(sqrt(x));
     return nf(fma(fma(-s, s, x), 0.5 / s, s));
 }
+// ssqrt correctly rounded everywhere: its fma step can land one ulp off where the ulp
+// changes (sqrt(0.99999994) gave 1.0, the CPU 0.99999994), which a normalisation of a
+// near-unit sum meets (contact offsets' and skin edges' vertex normals). Keep s only if x
+// lies between the squares of the midpoints to its neighbours: r = x - s² is exact, s·u
+// too (u a power of two), and the differences near a midpoint are exact (Sterbenz). Only
+// where needed: ssqrt is inlined a hundred times a kernel (compile_cost.py).
+float ssqrtCr(float x)
+{
+    if (x <= 0.0) return sqrt(x);
+    float s = ssqrt(x);
+    float r = fma(-s, s, x);
+    float uh = nf(asfloat(asuint(s) + 1u) - s);
+    float ul = nf(s - asfloat(asuint(s) - 1u));
+    if (nf(r - smul(s, uh)) > smul(smul(uh, uh), 0.25)) return asfloat(asuint(s) + 1u);
+    if (nf(nf(-r) - smul(s, ul)) >= -smul(smul(ul, ul), 0.25)) return asfloat(asuint(s) - 1u);
+    return s;
+}
 
 float3 sadd3(float3 a, float3 b) { return nf3(a + b); }
 float3 ssub3(float3 a, float3 b) { return nf3(a - b); }

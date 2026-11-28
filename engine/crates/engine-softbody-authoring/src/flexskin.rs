@@ -46,6 +46,12 @@ pub const MIN_NODES: usize = 5;
 /// The frame's kernels: this multiple of the position's radii.
 pub const FRAME_SCALE: f64 = 1.6;
 pub const EIG_MIN: f64 = 0.012;
+/// A sheet's fit ([`Pool::sheet`]) reproduces affine motion only along directions its
+/// nodes spread in by well over this (m, an RMS spread): a panel's curvature within a
+/// kernel (a door's edge column bows 2–4 cm) is its shape, not a direction to fit, and
+/// fitting it made paint 15 cm off the skin (a door's jamb) weigh its nodes −2 and +2.4.
+/// The skin's nodes are 0.2–0.4 m apart, far past it.
+pub const SHEET_SPREAD: f64 = 0.05;
 
 /// One vertex's skin.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -553,6 +559,11 @@ pub struct Pool {
     pub ids: Vec<u32>,
     pub pos: Vec<DVec3>,
     pub radius: Vec<f64>,
+    /// A sheet's fit ([`bind_sheet`]): the nodes may lie in one surface, so the fit
+    /// reproduces affine motion along the directions the nodes spread in and leaves
+    /// the others to the offset (M⁻¹ damped to (M² + τ²)⁻¹ M, τ = `SHEET_SPREAD`²·W), and
+    /// it is well posed where they spread in two directions (by `EIG_MIN`).
+    pub sheet: bool,
 }
 
 impl Pool {
@@ -570,7 +581,7 @@ impl Pool {
                 (R_SPACING * dk).max(R_MIN) * scale
             })
             .collect();
-        Pool { ids, pos, radius }
+        Pool { ids, pos, radius, sheet: false }
     }
 
     /// The fit's point weights at `x`: (pool index, A) for nodes in reach,
@@ -595,14 +606,28 @@ impl Pool {
             m0 += DMat3::from_cols(d * d.x, d * d.y, d * d.z) * o;
         }
         let m = m0 + DMat3::IDENTITY * (LAMBDA * w);
-        let mi = m.inverse();
         let e = x - ps;
-        let g = mi * e;
+        let tau = EIG_MIN * EIG_MIN * w;
+        let g = if self.sheet {
+            // Along a direction the nodes spread in (eigenvalue μ ≫ τₛ) μ/(μ² + τₛ²) is
+            // 1/μ, the affine fit; across the sheet (μ ≪ τₛ) it goes to 0, so the
+            // vertex's height off the nodes' surface is the offset's, not weights of
+            // both signs on the nodes' few centimetres out of it. Smooth in x.
+            let ts = SHEET_SPREAD * SHEET_SPREAD * w;
+            (m * m + DMat3::IDENTITY * (ts * ts)).inverse() * (m * e)
+        } else {
+            m.inverse() * e
+        };
         let out: Vec<(usize, f64)> = om
             .iter()
             .map(|&(j, o)| (j, o / w + o * g.dot(self.pos[j] - ps)))
             .collect();
-        let ok = om.len() >= MIN_NODES && min_eig(m0) >= EIG_MIN * EIG_MIN * w;
+        let ok = om.len() >= MIN_NODES
+            && if self.sheet {
+                mid_eig(m0) >= tau
+            } else {
+                min_eig(m0) >= tau
+            };
         (out, ok)
     }
 
@@ -628,6 +653,28 @@ fn min_eig(a: DMat3) -> f64 {
     let r = (b.determinant() / 2.0).clamp(-1.0, 1.0);
     let phi = r.acos() / 3.0;
     q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos()
+}
+
+/// Middle eigenvalue of a symmetric 3 × 3 (the same closed form: the trace less
+/// the largest and the smallest).
+fn mid_eig(a: DMat3) -> f64 {
+    let (a11, a22, a33) = (a.x_axis.x, a.y_axis.y, a.z_axis.z);
+    let (a12, a13, a23) = (a.y_axis.x, a.z_axis.x, a.z_axis.y);
+    let p1 = a12 * a12 + a13 * a13 + a23 * a23;
+    let q = (a11 + a22 + a33) / 3.0;
+    if p1 < 1e-30 {
+        let mut d = [a11, a22, a33];
+        d.sort_by(|x, y| x.total_cmp(y));
+        return d[1];
+    }
+    let p2 = (a11 - q).powi(2) + (a22 - q).powi(2) + (a33 - q).powi(2) + 2.0 * p1;
+    let p = (p2 / 6.0).sqrt();
+    let b = (a - DMat3::IDENTITY * q) * (1.0 / p);
+    let r = (b.determinant() / 2.0).clamp(-1.0, 1.0);
+    let phi = r.acos() / 3.0;
+    let hi = q + 2.0 * p * phi.cos();
+    let lo = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
+    3.0 * q - hi - lo
 }
 
 /// The weight grid (A: 2⁻¹³, range ±4) and the gradient grid (∂A: 2⁻⁹ per
@@ -761,17 +808,66 @@ pub fn bind(
     verts: &[Vec3],
     nrms: &[Vec3],
 ) -> Result<(Vec<Vert>, f64), String> {
+    bind_with(ids, pos, verts, nrms, None)
+}
+
+/// A vertex's amplification: Σ|Aⱼ| over its entries. 1 where it interpolates its
+/// nodes (every weight at least 0); above 1 where the affine fit extrapolates past
+/// them, and a node's motion apart from the others' moves the vertex up to this
+/// many times as far (a weight of −1.45 moves it 1.45 times as far, the other way).
+pub fn amplification(v: &Vert) -> f64 {
+    v.w.iter().map(|e| e.1.abs() as f64).sum()
+}
+
+/// [`bind`], and with `amp_max` every vertex's [`amplification`] at most that: a
+/// pool that extrapolates past it grows its radii like an ill-posed one, until the
+/// nodes around the vertex on every side are in reach. (Glass spans an opening with
+/// no nodes in it: its middle would otherwise follow the frame on one side alone.)
+pub fn bind_with(
+    ids: &[u32],
+    pos: &[Vec3],
+    verts: &[Vec3],
+    nrms: &[Vec3],
+    amp_max: Option<f64>,
+) -> Result<(Vec<Vert>, f64), String> {
+    bind_opts(ids, pos, verts, nrms, amp_max, false)
+}
+
+/// [`bind`] over nodes that lie in one surface (a panel's nodes on its collision
+/// skin, [`Pool::sheet`]): the fit follows the surface's motion and the vertex keeps
+/// its rest height off it in the offset. Rest and rigid motion exact as [`bind`].
+/// `amp_max` as [`bind_with`]'s.
+pub fn bind_sheet(
+    ids: &[u32],
+    pos: &[Vec3],
+    verts: &[Vec3],
+    nrms: &[Vec3],
+    amp_max: Option<f64>,
+) -> Result<(Vec<Vert>, f64), String> {
+    bind_opts(ids, pos, verts, nrms, amp_max, true)
+}
+
+fn bind_opts(
+    ids: &[u32],
+    pos: &[Vec3],
+    verts: &[Vec3],
+    nrms: &[Vec3],
+    amp_max: Option<f64>,
+    sheet: bool,
+) -> Result<(Vec<Vert>, f64), String> {
     let dpos: Vec<DVec3> = pos.iter().map(|p| p.as_dvec3()).collect();
     let mut scale = 1.0;
     for _ in 0..12 {
-        let pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
-        let frame = Pool::new(ids.to_vec(), dpos.clone(), scale * FRAME_SCALE);
+        let mut pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
+        let mut frame = Pool::new(ids.to_vec(), dpos.clone(), scale * FRAME_SCALE);
+        pool.sheet = sheet;
+        frame.sheet = sheet;
         let mut out = Vec::with_capacity(verts.len());
         let mut failed = false;
         for (x, n) in verts.iter().zip(nrms) {
             match bind_vertex(&pool, &frame, x.as_dvec3(), n.as_dvec3()) {
-                Some(v) => out.push(v),
-                None => {
+                Some(v) if amp_max.is_none_or(|m| amplification(&v) <= m) => out.push(v),
+                _ => {
                     failed = true;
                     break;
                 }
@@ -878,239 +974,4 @@ pub fn glb_mesh(g: &crate::glb::Glb, m: &crate::glb::Mesh) -> crate::flexmesh::D
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use glam::Quat;
-
-    fn lattice() -> (Vec<u32>, Vec<Vec3>) {
-        let mut p = Vec::new();
-        for i in 0..5 {
-            for j in 0..4 {
-                for k in 0..2 {
-                    p.push(Vec3::new(
-                        i as f32 * 0.5,
-                        j as f32 * 0.45,
-                        k as f32 * 0.08 + 0.02 * (i as f32).sin(),
-                    ));
-                }
-            }
-        }
-        ((0..p.len() as u32).collect(), p)
-    }
-
-    fn verts() -> (Vec<Vec3>, Vec<Vec3>) {
-        let v: Vec<Vec3> = (0..200)
-            .map(|k| {
-                let f = k as f32;
-                Vec3::new(
-                    0.2 + 1.6 * (f * 0.37).fract(),
-                    0.1 + 1.1 * (f * 0.61).fract(),
-                    0.09 + 0.01 * (f * 0.13).fract(),
-                )
-            })
-            .collect();
-        let n: Vec<Vec3> = (0..200)
-            .map(|k| Vec3::new(0.1 * (k as f32 * 0.7).sin(), 0.05, 1.0).normalize())
-            .collect();
-        (v, n)
-    }
-
-    #[test]
-    fn rest_and_rigid_motion_are_exact() {
-        let (ids, p) = lattice();
-        let (v, n) = verts();
-        let (sk, _) = bind(&ids, &p, &v, &n).unwrap();
-        let q = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-0.3);
-        let t = Vec3::new(3.0, -1.0, 2.0);
-        let moved: Vec<Vec3> = p.iter().map(|x| q * *x + t).collect();
-        for ((s, x), nn) in sk.iter().zip(&v).zip(&n) {
-            let sum: f32 = s.w.iter().map(|e| e.1).sum();
-            assert!((sum - 1.0).abs() < 1e-5, "partition of unity {sum}");
-            let (a, an) = eval(&s.w, s.off, s.nrm, &p);
-            assert!(
-                a.distance(*x) < 2e-5 && an.angle_between(*nn) < 1e-3,
-                "rest"
-            );
-            let (b, bn) = eval(&s.w, s.off, s.nrm, &moved);
-            assert!(
-                b.distance(q * *x + t) < 2e-5,
-                "rigid {}",
-                b.distance(q * *x + t)
-            );
-            assert!(bn.angle_between(q * *nn) < 1e-3);
-        }
-    }
-
-    #[test]
-    fn a_smooth_bend_moves_the_skin_smoothly() {
-        let (ids, p) = lattice();
-        let (v, n) = verts();
-        let (sk, _) = bind(&ids, &p, &v, &n).unwrap();
-        // Bend about the y axis: x → arc.
-        let bend = |x: Vec3| {
-            let r = 2.0;
-            let a = x.x / r;
-            Vec3::new((r - x.z) * a.sin(), x.y, r - (r - x.z) * a.cos())
-        };
-        let moved: Vec<Vec3> = p.iter().map(|x| bend(*x)).collect();
-        for (s, x) in sk.iter().zip(&v) {
-            let (b, _) = eval(&s.w, s.off, s.nrm, &moved);
-            assert!(b.distance(bend(*x)) < 0.02, "{}", b.distance(bend(*x)));
-        }
-    }
-
-    #[test]
-    fn the_sidecar_round_trips() {
-        let (ids, p) = lattice();
-        let (v, n) = verts();
-        let (sk, _) = bind(&ids, &p, &v, &n).unwrap();
-        let s = Skin {
-            nodes: ids.iter().map(|i| format!("n{i}")).collect(),
-            meshes: vec![MeshSkin {
-                name: "panel".into(),
-                verts: sk,
-            }],
-        };
-        assert_eq!(Skin::decode(&s.encode()).unwrap(), s);
-    }
-
-    /// Two meshes on the lattice's nodes.
-    fn two_meshes() -> Skin {
-        let (ids, p) = lattice();
-        let (v, n) = verts();
-        let (sk, _) = bind(&ids, &p, &v, &n).unwrap();
-        Skin {
-            nodes: ids.iter().map(|i| format!("n{i}")).collect(),
-            meshes: vec![
-                MeshSkin {
-                    name: "panel".into(),
-                    verts: sk[..120].to_vec(),
-                },
-                MeshSkin {
-                    name: "door".into(),
-                    verts: sk[120..].to_vec(),
-                },
-            ],
-        }
-    }
-
-    /// The version 1 sidecar (f32 entries, per vertex its first entry), as the
-    /// first exports wrote it.
-    fn v1_bytes(s: &Skin) -> Vec<u8> {
-        let mut o = Vec::new();
-        o.extend_from_slice(MAGIC);
-        o.extend_from_slice(&1u32.to_le_bytes());
-        let st = |o: &mut Vec<u8>, t: &str| {
-            o.extend_from_slice(&(t.len() as u16).to_le_bytes());
-            o.extend_from_slice(t.as_bytes());
-        };
-        o.extend_from_slice(&(s.nodes.len() as u32).to_le_bytes());
-        for n in &s.nodes {
-            st(&mut o, n);
-        }
-        o.extend_from_slice(&(s.meshes.len() as u32).to_le_bytes());
-        for m in &s.meshes {
-            st(&mut o, &m.name);
-            let ne: usize = m.verts.iter().map(|v| v.w.len()).sum();
-            o.extend_from_slice(&(m.verts.len() as u32).to_le_bytes());
-            o.extend_from_slice(&(ne as u32).to_le_bytes());
-            let mut at = 0u32;
-            for v in &m.verts {
-                o.extend_from_slice(&at.to_le_bytes());
-                for f in v.off.iter().chain(&v.nrm) {
-                    o.extend_from_slice(&f.to_le_bytes());
-                }
-                at += v.w.len() as u32;
-            }
-            o.extend_from_slice(&at.to_le_bytes());
-            for v in &m.verts {
-                for &(n, a, b, c) in &v.w {
-                    o.extend_from_slice(&n.to_le_bytes());
-                    for f in [a, b, c] {
-                        o.extend_from_slice(&f.to_le_bytes());
-                    }
-                }
-            }
-        }
-        o
-    }
-
-    /// An entry as the sidecar's steps: exact (back to the same f32 bits) or none.
-    #[test]
-    fn steps_are_exact_or_none() {
-        let s = two_meshes();
-        let d = Skin::decode(&s.encode()).unwrap();
-        for v in d.meshes.iter().flat_map(|m| &m.verts) {
-            for &(n, a, b, c) in &v.w {
-                let (n16, q) = steps(n, [a, b, c]).expect("a decoded entry is on its grids");
-                assert_eq!(n16 as u32, n);
-                let back = [
-                    (q[0] as f64 * Q_A) as f32,
-                    (q[1] as f64 * Q_D) as f32,
-                    (q[2] as f64 * Q_D) as f32,
-                ];
-                assert_eq!(back.map(f32::to_bits), [a, b, c].map(f32::to_bits));
-            }
-        }
-        assert!(steps(3, [0.1, 0.0, 0.0]).is_none(), "off the A grid");
-        assert!(
-            steps(3, [0.0, 0.001, 0.0]).is_none(),
-            "off the gradient grid"
-        );
-        assert!(steps(3, [4.0, 0.0, 0.0]).is_none(), "past the i16 range");
-        assert!(steps(65_536, [0.5, 0.0, 0.0]).is_none(), "a node past u16");
-        assert!(steps(3, [f32::NAN, 0.0, 0.0]).is_none());
-        assert_eq!(
-            steps(65_535, [-4.0, -64.0, 0.0]),
-            Some((65_535, [-32_768, -32_768, 0]))
-        );
-        // -0.0 is not 0 steps' bits.
-        assert!(steps(1, [-0.0, 0.0, 0.0]).is_none());
-    }
-
-    /// Read in place, a sidecar gives the same bits as decoded, in both versions,
-    /// and fails where decode fails with decode's message.
-    #[test]
-    fn read_in_place_is_decode() {
-        let s = two_meshes();
-        for b in [s.encode(), v1_bytes(&s)] {
-            let d = Skin::decode(&b).unwrap();
-            let r = SkinBytes::parse(&b).unwrap();
-            assert_eq!(r.nodes, d.nodes);
-            assert_eq!(r.meshes.len(), d.meshes.len());
-            for (m, dm) in r.meshes.iter().zip(&d.meshes) {
-                assert_eq!(m.name, dm.name);
-                assert_eq!(m.len(), dm.verts.len());
-                assert_eq!(
-                    m.entries(),
-                    dm.verts.iter().map(|v| v.w.len()).sum::<usize>()
-                );
-                let got: Vec<Vert> = m.verts().collect();
-                assert_eq!(format!("{got:?}"), format!("{:?}", dm.verts));
-            }
-            for cut in (0..b.len()).step_by(7) {
-                assert_eq!(
-                    SkinBytes::parse(&b[..cut]).err(),
-                    Skin::decode(&b[..cut]).err(),
-                    "cut at {cut}"
-                );
-            }
-        }
-        // A node index past the names: the same error.
-        let mut bad = v1_bytes(&s);
-        let n = bad.len();
-        bad[n - 16..n - 12].copy_from_slice(&999u32.to_le_bytes());
-        assert_eq!(SkinBytes::parse(&bad).err(), Skin::decode(&bad).err());
-        assert!(SkinBytes::parse(&bad).is_err());
-        // Either reading, through SkinRef, the same meshes.
-        let b = s.encode();
-        let (d, r) = (Skin::decode(&b).unwrap(), SkinBytes::parse(&b).unwrap());
-        for name in ["panel", "door"] {
-            let a: Vec<Vert> = SkinRef::Decoded(&d).mesh(name).unwrap().verts().collect();
-            let c: Vec<Vert> = SkinRef::Bytes(&r).mesh(name).unwrap().verts().collect();
-            assert_eq!(format!("{a:?}"), format!("{c:?}"));
-        }
-        assert!(SkinRef::Bytes(&r).mesh("hood").is_none());
-        assert_eq!(SkinRef::Bytes(&r).nodes(), &d.nodes[..]);
-    }
-}
+mod tests;

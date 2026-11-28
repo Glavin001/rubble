@@ -11,6 +11,9 @@
 //! rigid wall), `pole` (32 km/h sideways on a carrier into a 254 mm pole at
 //! the front seat), `c2c` (two cars head on, 50 km/h each). Crash scenes are sampled
 //! every 4 ms (7.5× slow motion at 30 fps) and end with the car at rest.
+//! `FILM_KMH` sets `c2c`'s speed (each car), `FILM_OFFSET` its sideways offset (m),
+//! `FILM_FRAMES` the frame count, and `FILM_CONTINUOUS=1` turns on continuous contact with
+//! edge contact (`DAT_SOFT=N`: its non-rigid impact zones, `explicit_contact::ccd`).
 //! Writes `mesh.bin` (vertex and triangle counts, colours, triangles),
 //! `frame_NNNN.bin` (positions, f32, Rubble's frame: +Y up, +Z forward) and
 //! `scene.json` (the static obstacles, the frame interval, the camera's hint).
@@ -162,7 +165,7 @@ fn main() -> Result<(), String> {
             (1.0 / 30.0, 240, "chase")
         }
         "wall" => {
-            let v = 56.0 / 3.6;
+            let v = std::env::var("FILM_KMH").ok().and_then(|x| x.parse::<f32>().ok()).unwrap_or(56.0) / 3.6;
             let mut s = spawn(d, Vec3::ZERO, Vec3::Z * v)?;
             let wall_z = zmax + 0.05;
             s.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.0, wall_z + 0.5), Vec3::new(2.0, 1.0, 0.5)));
@@ -213,17 +216,27 @@ fn main() -> Result<(), String> {
             (0.004, 160, "side")
         }
         "c2c" => {
-            let v = 50.0 / 3.6;
+            let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            let (v, off) = (env("FILM_KMH", 50.0) / 3.6, env("FILM_OFFSET", 0.0));
             sims.push(spawn(d, Vec3::new(0.0, 0.0, -0.025 - zmax), Vec3::Z * v)?);
             descs.push(d.clone());
             let t = turned(d, 2);
-            sims.push(spawn(&t, Vec3::new(0.0, 0.0, 0.025 + zmax), -Vec3::Z * v)?);
+            sims.push(spawn(&t, Vec3::new(off, 0.0, 0.025 + zmax), -Vec3::Z * v)?);
             descs.push(t);
             (0.004, 160, "side")
         }
         _ => return Err(format!("unknown scene {scene}")),
     };
     let _ = half_w;
+    let frames: usize = std::env::var("FILM_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(frames);
+    let continuous = std::env::var("FILM_CONTINUOUS").is_ok_and(|v| v == "1");
+    // (FILM_EDGE=1: edge contact without continuous contact, its discrete comparison.)
+    if continuous || std::env::var("FILM_EDGE").is_ok_and(|v| v == "1") {
+        for s in &mut sims {
+            s.edge_contact = true;
+            s.finish();
+        }
+    }
     // Bound on a spawn at the desc's own positions (the loader matches the
     // skin's nodes by position); the same node order as the scene's spawn.
     let vis: Vec<ShowcaseVisual> = descs
@@ -235,7 +248,13 @@ fn main() -> Result<(), String> {
         })
         .collect::<Result<_, String>>()?;
     write_mesh(&out, &vis).map_err(|e| e.to_string())?;
+    // Each car's length along its travel (z) at the start: its crush is how much it loses.
+    let length = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.pos.z).fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
+    let len0: Vec<f32> = sims.iter().map(|s| { let (a, b) = length(s); b - a }).collect();
     let mut w = ExplicitBeamsWorld::new(sims);
+    if continuous {
+        w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
+    }
     let per = (dt / 0.0005).round() as usize;
     for k in 0..frames {
         if scene == "drive" {
@@ -253,6 +272,22 @@ fn main() -> Result<(), String> {
         }
     }
     let broken: Vec<usize> = w.vehicles.iter().map(|s| s.beams.iter().filter(|b| b.broken).count()).collect();
+    // Where the crash went: kinetic energy left, beams bent for good (rest length changed
+    // by over 1 mm) and by how much in all, and what continuous contact removed.
+    let ke: f64 = w.vehicles.iter().flat_map(|s| s.nodes.iter()).map(|n| 0.5 * n.mass as f64 * n.vel.length_squared() as f64).sum();
+    let bent: usize = w.vehicles.iter().flat_map(|s| s.beams.iter()).filter(|b| !b.broken && (b.rest - b.rest0).abs() > 1e-3).count();
+    let set: f32 = w.vehicles.iter().flat_map(|s| s.beams.iter()).filter(|b| !b.broken).map(|b| (b.rest - b.rest0).abs()).sum();
+    let removed = w.continuous.as_ref().map_or(0.0, |d| -d.total.ccd.ke);
+    // Per car: crush (length lost, m), permanent set (m), beams bent and broken, speed now.
+    for (k, s) in w.vehicles.iter().enumerate() {
+        let (a, b) = length(s);
+        let set: f32 = s.beams.iter().filter(|b| !b.broken).map(|b| (b.rest - b.rest0).abs()).sum();
+        let bent = s.beams.iter().filter(|b| !b.broken && (b.rest - b.rest0).abs() > 1e-3).count();
+        let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
+        let v = (s.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m).length();
+        println!("CAR {k}: crush {:.3} m (length {:.3} -> {:.3}), permanent set {set:.2} m, bent {bent}, broken {}, speed {v:.2} m/s", len0[k] - (b - a), len0[k], b - a, s.beams.iter().filter(|b| b.broken).count());
+    }
+    println!("SUMMARY kinetic left {:.1} kJ, broken {broken:?}, bent {bent} (set {set:.2} m), contact response removed {:.1} kJ", ke * 1e-3, removed * 1e-3);
     let speed: Vec<f32> = w
         .vehicles
         .iter()
@@ -264,7 +299,7 @@ fn main() -> Result<(), String> {
     std::fs::write(
         out.join("scene.json"),
         serde_json::to_string_pretty(&json!({
-            "scene": scene, "design": design, "dt": dt, "frames": frames, "camera": camera,
+            "scene": scene, "design": design, "continuous": continuous, "dt": dt, "frames": frames, "camera": camera,
             "obstacles": obstacles, "broken": broken, "final_speed": speed,
             "paint": engine_softbody_authoring::glb::paint_of(&l.built.input.glb),
         }))

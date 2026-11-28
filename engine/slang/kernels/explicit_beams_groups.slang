@@ -23,6 +23,7 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // local node 208 of the page's 463-node car, 256 lanes a member: the position of
 // global node 0), so vehicles reported frame-bounds errors native never shows. With
 // centred damping (§39) it runs again after the correction (a superset of the box).
+float contactOffMax(uint v);
 void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)
 {
     float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
@@ -36,6 +37,10 @@ void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity,
         has = true;
     }
     if (!has) return;
+    // (Contact offsets: the triangles reach out past the nodes by up to the largest.)
+    float om = contactOffMax(v);
+    lo = lo - float3(om, om, om);
+    hi = hi + float3(om, om, om);
     uint key = vvBoxKey(v, parity);
     gAcc[key].min(vvKey(lo.x));
     gAcc[key + 1u].min(vvKey(lo.y));
@@ -97,7 +102,15 @@ void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, u
 
 // Member v's step s up to its tail (memberTail, which t and the MT_* bits returned
 // describe; 0: no tail here).
+// `phase` (continuous contact's seam, docs/continuous-contact-design.md): 0 the whole step;
+// 1 up to the node update and its box (returns 0: no tail, not stepped); 2 the rest after
+// them (the node update not run again).
 uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail t)
+{
+    return contactMemberStepHeadPhase(v, lane, s, first, 0u, t);
+}
+
+uint contactMemberStepHeadPhase(uint v, uint lane, uint s, bool first, uint phase, out MemberTail t)
 {
     t.v = v;
     t.s = s;
@@ -114,12 +127,12 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
     uint boxOff = r1.z;
     uint boxCount = r1.w;
     uint candOff = r2.x;
-    uint candCount = r2.y;
+    uint candCount = noPositionSteps(v) ? 0u : r2.y;
     uint groupOff = r2.z;
     uint groupCount = r2.w;
     uint flagsV = r3.x;
     float ground = asfloat(r3.y);
-    float range = asfloat(r3.z);
+    float range = selfRangeOf(v, asfloat(r3.z));
     float cell = asfloat(r3.w);
     bool fast = (flagsV & FLAG_FAST_INV_SQRT) != 0u;
 #ifdef EB_AERO
@@ -150,6 +163,26 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
 #endif
     }
     sync();
+    // Continuous contact: the step's start positions (relative to the origin), for its pass.
+    if (phase == 1u && gP.cc != 0u)
+    {
+        for (uint i = lane, iStop = EB_END(892, i, nodeCount, LANES); i < iStop; i += LANES)
+            gBeams[gStatic[gP.cc].x + 6u * (nodeOff + i)] = gNodes[(nodeOff + i) * 3u];
+        // (The contact offsets at the step's start, which the pass reads: every step's
+        // member computes them at its end; before the run's first step, here.)
+        // (Uniform for Chrome: the step count is read from storage.)
+        sync();
+        if (lane == 0u) gsUniformLanes = gP.offsetBase != 0u && misc.w + s == 0u ? 1u : 0u;
+        sync();
+        uint first = gsUniformLanes;
+        sync();
+        if (first != 0u)
+        {
+            contactOffsets(v, lane, LANES);
+            sync();
+        }
+    }
+    if (phase != 2u)
     {
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(139, i, nodeCount, LANES); i < iStop; i += LANES)
@@ -165,11 +198,12 @@ uint contactMemberStepHead(uint v, uint lane, uint s, bool first, out MemberTail
         if (lane < 6u) gAcc[vvBoxKey(v, parity ^ 1u) + lane].store(lane < 3u ? VV_INT_MAX : VV_INT_MIN);
         memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
-    if (gP.centredDv != 0u)
+    if (gP.centredDv != 0u && phase != 2u)
     {
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if ((flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
+    if (phase == 1u) return 0u;
 #ifdef EB_SOLO_STEP
     if (keep) pairReuseTrack(nodeOff, nodeCount, lane);
 #endif

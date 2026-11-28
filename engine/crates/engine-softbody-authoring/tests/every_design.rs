@@ -41,6 +41,7 @@ fn designs() -> Vec<&'static str> {
 fn rig(design: &str) -> (engine_softbody::desc::SoftVehicleDesc, ExplicitBeams) {
     let inp = vg_input::VgInput::find(design, None, None).unwrap_or_else(|e| panic!("{design}: {e}"));
     let b = vg_input::build(inp).unwrap_or_else(|e| panic!("{design}: rig: {e}"));
+    glass_interpolates(design, &b.skin);
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("every_{design}"));
     for (p, bytes) in vg_input::files(&b) {
         let path = dir.join(&p);
@@ -54,6 +55,31 @@ fn rig(design: &str) -> (engine_softbody::desc::SoftVehicleDesc, ExplicitBeams) 
     let (mut sim, _) = ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
     sim.surface_contact = true;
     (desc, sim)
+}
+
+/// Every glass vertex's skin interpolates its frame: its amplification of the nodes'
+/// motion apart from each other (Σ|A|) at most `gen3::GLASS_AMP_MAX`. Past it a pane
+/// extrapolates from the frame on one side and a crush there throws it the other
+/// way (the generated 4x4's windscreen: 4.46, a spike 0.7–0.9 m above the car).
+fn glass_interpolates(design: &str, skin: &engine_softbody_authoring::flexskin::Skin) {
+    use engine_softbody_authoring::{authoring::gen2::gen3, flexskin};
+    let mut panes = 0;
+    for m in skin.meshes.iter().filter(|m| m.name.starts_with("glass_")) {
+        panes += 1;
+        let (i, amp) = m
+            .verts
+            .iter()
+            .map(flexskin::amplification)
+            .enumerate()
+            .fold((0, 0.0), |a, (i, x)| if x > a.1 { (i, x) } else { a });
+        assert!(
+            amp <= gen3::GLASS_AMP_MAX,
+            "{design}: {} vertex {i}: amplification {amp:.2} (Σ|A|; at most {}): it extrapolates from one side of its frame",
+            m.name,
+            gen3::GLASS_AMP_MAX
+        );
+    }
+    assert!(panes > 0, "{design}: no glass meshes");
 }
 
 fn lift(sim: &mut ExplicitBeams) {

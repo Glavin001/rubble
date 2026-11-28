@@ -88,14 +88,19 @@ void latResidual(uint va, uint base, uint i, float r, uint parity, uint a, uint 
         return;
     }
     VvSums S = vvSumsOf(va, vh, h, tn, parity);
-    float rr = vvResOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, a);
+#ifdef EB_EDGE_CLAMP
+    float lam0 = edgePairOn(va, vh) ? max(sdot(kept.f1, kept.nn), 0.0) : -1.0;
+#else
+    float lam0 = -1.0;
+#endif
+    float rr = vvResOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, a, lam0);
     if (phase == 0u)
     {
-        if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, sscale(kept.nn, rr));
+        if (rr != 0.0) resStage(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, sscale(kept.nn, rr));
         return;
     }
     float3 total = kept.f1;
-    if (rr > 0.0) total = sadd3(total, sscale(kept.nn, rr));
+    if (rr != 0.0) total = sadd3(total, sscale(kept.nn, rr));
     float3 g;
     if (vvGuardOf(h, tn, S, kept.alpha, kept.beta, kept.gamma, kept.v, total, g)) total = sadd3(total, g);
     resFinal(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, kept.f1, total);

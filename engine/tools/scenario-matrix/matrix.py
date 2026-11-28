@@ -165,7 +165,14 @@ GOAL = (
         ("mountain20_t6", 20, mountain(20), [], 6.2, "the mountain's worst vehicle step of a 20 s run (t 6.27), 20 cars"),
     ]
 )
-ROWS_ALL = ROWS + GOAL
+# Edge vehicle contact on (docs/contact-design.md; off by default, so not in the default
+# gate): the car-to-car rows' scenes. Named one by one (`run.sh SWITCH headon_e side_e`).
+EDGE = [
+    ("headon_e", 2, "headon.json", ["--cars", "2", "--edge", "1"], 0.7, "the headon row with edge contact on"),
+    ("side_e", 2, "side.json", ["--edge", "1"], 1.0, "the side row with edge contact on"),
+    ("pile8_e", 8, None, ["--cars", "8", "--edge", "1"], 8.0, "the pile8 row with edge contact on"),
+]
+ROWS_ALL = ROWS + GOAL + EDGE
 
 
 def target_ms(bodies):
