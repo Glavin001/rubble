@@ -17,6 +17,11 @@ log.workspace = true
 # just the NVIDIA driver (libcuda) where it runs.
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "dynamic-loading", "cuda-12060"] }
 
+[features]
+# The fracture world's kernels (the stress solver's shaders in
+# engine/stress-oracle/crates/stress-gpu/shaders), built for CUDA.
+stress = []
+
 [build-dependencies]
 engine-kernel-manifest.workspace = true
 engine-slang-build.workspace = true

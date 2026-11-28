@@ -180,6 +180,7 @@ pub fn compile_kernel_with_defines(
         out: dest,
         out_ext: "metal",
         reflection: Some(&reflection),
+        base: None,
     }
     .run()
     .with_context(|| format!("slangc {entry}"))?;

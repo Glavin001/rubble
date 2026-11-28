@@ -15,7 +15,7 @@
 //! `ENGINE_CUDA_REQUIRE_PTX=1` turns a missing nvcc into a build error (CI,
 //! Modal archives).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use engine_kernel_manifest::rigid::{kernel_source, PERSISTENT_ENTRIES};
 use engine_slang_build::cuda_layout::{compile_kernel, deferred_load_hazards, fatbin, CudaKernel};
 use engine_slang_build::msl_layout::bind_slots;
@@ -172,6 +172,139 @@ fn main() -> Result<()> {
     terrain_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
     explicit_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
     coupling_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    if env::var_os("CARGO_FEATURE_STRESS").is_some() {
+        let shaders = manifest.join("../../stress-oracle/crates/stress-gpu/shaders");
+        println!("cargo:rerun-if-changed={}", shaders.display());
+        fracture_kernels(nvcc.as_deref(), &arch, &sass, &shaders, &out_dir)?;
+    }
+    Ok(())
+}
+
+/// The stress solver's modules the fracture world runs (stress-gpu `GpuFracture`,
+/// `EngineIngest`, `BlastFrame`, `FractureLog`; engine/docs/world-on-cuda.md, C6): every
+/// compute entry of each, found in its source.
+const FRACTURE_MODULES: &[&str] = &[
+    "coupling",
+    "fracture",
+    "fracture_log",
+    "blast_fracture",
+    "blast_topology",
+    "blast_material",
+    "blast_native",
+    "blast_native_wide",
+    "blast_wide_gate",
+    "blast_motion",
+    "blast_cgls",
+    "blast_virial",
+    "blast_view",
+];
+
+/// The compute entries a stress shader declares, in source order: the function named
+/// after each `[shader("compute")]` (and its `[numthreads]`).
+fn compute_entries(text: &str) -> Result<Vec<String>> {
+    const ATTR: &str = "[shader(\"compute\")]";
+    let mut out = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.trim_start().strip_prefix(ATTR) else { continue };
+        // The declaration: on the attribute's own line after `[numthreads(...)]`, or
+        // the first line after it that is neither an attribute nor a comment.
+        let after_attrs = |l: &str| -> String {
+            let mut l = l.trim_start();
+            while l.starts_with('[') {
+                l = l.split_once(']').map_or("", |x| x.1).trim_start();
+            }
+            l.to_string()
+        };
+        let mut decl = after_attrs(rest);
+        while decl.is_empty() || decl.starts_with("//") {
+            let next = lines.next().ok_or_else(|| anyhow!("a {ATTR} with no function after it"))?;
+            decl = after_attrs(next);
+        }
+        let name = decl
+            .strip_prefix("void ")
+            .and_then(|r| r.split('(').next())
+            .ok_or_else(|| anyhow!("not a compute entry's declaration: {decl}"))?;
+        out.push(name.trim().to_string());
+    }
+    Ok(out)
+}
+
+/// The fracture world's kernels, Slang → CUDA an entry a module (as stress-gpu's
+/// `compile_shaders.sh` compiles them: no defines, `-I shaders`), with the hazard check,
+/// the indirect entry (`{entry}_gs`) and fatbins when nvcc is present; each
+/// `SLANG_globalParams` field mapped to its module's `[[vk::binding]]`. slangc runs in
+/// the stress-gpu crate, so the CUDA text is the same in every checkout. Emits
+/// `cuda_fracture_kernels.rs` (`CUDA_FRACTURE_KERNELS`).
+fn fracture_kernels(
+    nvcc: Option<&std::path::Path>,
+    arch: &str,
+    sass: &[&str],
+    shaders: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    use engine_slang_build::cuda_layout::{compile_kernel_at, fatbin_threads, grid_stride_entry};
+    use engine_slang_build::msl_layout::vk_binding_slots;
+    let dir = out_dir.join("cuda_fracture");
+    std::fs::create_dir_all(&dir)?;
+    let base = shaders.join("..");
+    let mut jobs: Vec<(&str, String, std::collections::HashMap<String, u32>)> = Vec::new();
+    for &module in FRACTURE_MODULES {
+        let source = shaders.join(format!("{module}.slang"));
+        let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+        for entry in compute_entries(&std::fs::read_to_string(&source)?)? {
+            jobs.push((module, entry, slots.clone()));
+        }
+    }
+    let compiled = engine_slang_build::par_map(&jobs, |(module, entry, _)| -> Compiled {
+        let source = shaders.join(format!("{module}.slang"));
+        let cu = dir.join(format!("{module}.{entry}.cu"));
+        let kernel = compile_kernel_at(Some(&base), &[shaders], &source, entry, &cu, &[])?;
+        let text = std::fs::read_to_string(&cu)?;
+        let hazards = deferred_load_hazards(&text);
+        if !hazards.is_empty() {
+            anyhow::bail!(
+                "{module}.{entry}: Slang's CUDA output reads a buffer element after storing to it \
+                 (use the value before the store in the .slang source):\n  {}",
+                hazards.join("\n  ")
+            );
+        }
+        std::fs::write(&cu, grid_stride_entry(&text, entry).with_context(|| format!("{module}.{entry}"))?)?;
+        if let Some(nvcc) = nvcc {
+            let threads = kernel.threads.iter().product();
+            fatbin_threads(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass, threads)?;
+        }
+        Ok((kernel, text.len() as u64, nvcc.is_some(), false))
+    });
+    let mut table = String::from(
+        "/// The fracture world's kernels: module, entry, CUDA source bytes, fatbin, threads,\n\
+         /// globals (byte offset in `SLANG_globalParams`, field bytes 8|16, the module's binding).\n\
+         pub static CUDA_FRACTURE_KERNELS: &[FractureCudaKernel] = &[\n",
+    );
+    for ((module, entry, slots), r) in jobs.iter().zip(compiled) {
+        let (kernel, cu_bytes, has_image, _) = r?;
+        let mut binds = String::new();
+        let mut params_bytes = 0;
+        for f in &kernel.fields {
+            let slot = slots
+                .get(&f.name)
+                .ok_or_else(|| anyhow!("{module}.{entry}: global {} has no vk::binding", f.name))?;
+            write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
+            params_bytes = params_bytes.max(f.offset + f.size);
+        }
+        let image = if has_image {
+            format!("include_bytes!({:?})", dir.join(format!("{module}.{entry}.fatbin")).display().to_string())
+        } else {
+            "&[]".into()
+        };
+        writeln!(
+            table,
+            "    FractureCudaKernel {{ module: {module:?}, entry: {entry:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, binds: &[{binds}] }},",
+            kernel.threads
+        )?;
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("cuda_fracture_kernels.rs"), table)?;
     Ok(())
 }
 

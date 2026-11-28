@@ -54,6 +54,10 @@ pub use table::{CudaKernel, CUDA_KERNELS, CUDA_TERRAIN_KERNELS, PTX_ARCH, SASS_A
 pub mod explicit;
 pub use explicit::{CudaExplicitBeams, CudaSnapshot, CUDA_EXPLICIT_KERNELS, CUDA_LOOP_CAP_TEST};
 pub mod world;
+
+/// The fracture world's kernels on CUDA (feature `stress`).
+#[cfg(feature = "stress")]
+pub mod fracture;
 pub use world::{CouplingDef, CouplingState, CudaWorld, StepTimes, CUDA_COUPLING_KERNELS};
 
 /// Binding 23: colour slots, work slots and convex slots, three words each.

@@ -32,6 +32,7 @@ impl<'a> Compile<'a> {
             out: self.out,
             out_ext: "",
             reflection: None,
+            base: None,
         }
     }
 }

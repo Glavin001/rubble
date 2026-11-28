@@ -196,6 +196,7 @@ pub fn compile_entries_to(
         out,
         out_ext: "",
         reflection: None,
+        base: None,
     }
     .run()
 }
@@ -219,9 +220,21 @@ pub(crate) struct Slangc<'a> {
     pub(crate) out_ext: &'a str,
     /// Slang's reflection JSON, written beside the output and cached with it.
     pub(crate) reflection: Option<&'a Path>,
+    /// The directory slangc runs in and is given paths relative to. None: the Slang
+    /// tree's root above the source ([`slang_base`]). Sources outside a `slang`
+    /// directory (the stress solver's shaders) name theirs, so their output is the
+    /// same in every checkout too.
+    pub(crate) base: Option<&'a Path>,
 }
 
 impl Slangc<'_> {
+    fn base_dir(&self) -> Option<PathBuf> {
+        match self.base {
+            Some(b) => b.canonicalize().ok(),
+            None => slang_base(self.source),
+        }
+    }
+
     pub(crate) fn run(&self) -> Result<()> {
         let slangc = find_slangc()?;
         if let Some(parent) = self.out.parent() {
@@ -238,7 +251,7 @@ impl Slangc<'_> {
 
     /// slangc itself, for this compile (no cache).
     pub(crate) fn spawn(&self, slangc: &Path) -> Result<()> {
-        let base = slang_base(self.source);
+        let base = self.base_dir();
         let mut cmd = Command::new(slangc);
         if let Some(b) = &base {
             cmd.current_dir(b);
@@ -276,7 +289,7 @@ impl Slangc<'_> {
 
     /// The compile's place in the per-compile cache (None: not cached).
     pub(crate) fn cache_entry(&self, slangc: &Path) -> Option<PathBuf> {
-        let base = slang_base(self.source);
+        let base = self.base_dir();
         let mut kind = self.target.to_string();
         if self.reflection.is_some() {
             kind.push_str("+reflection-json");
@@ -440,9 +453,10 @@ fn trim_cache(dir: &Path) {
 /// A key of everything one compile's output depends on: slangc itself (path, size,
 /// modification time), its arguments, and the names (relative to the Slang root,
 /// as slangc is given them) and bytes of the source and of every file it reaches by
-/// `#include "..."`. None (no cache for this compile) when a file in that closure
-/// uses `import` or `__include`, whose modules slangc finds by its own search: such a
-/// compile runs every time.
+/// `#include "..."` or `import name;`. None (no cache for this compile) when a file
+/// in that closure uses `__include`, or imports a module that is not beside it or in
+/// an include directory (slangc finds those by its own search): such a compile runs
+/// every time.
 fn compile_key(
     slangc: &Path,
     source: &Path,
@@ -517,7 +531,7 @@ fn compile_key(
 }
 
 /// The paths and texts of `source` and of every file it reaches by `#include "..."`
-/// (None: a file missing, or one that uses `import` / `__include`). With `known`, an
+/// or `import name;` (None: a file missing, or one that uses `__include`). With `known`, an
 /// include inside an `#ifdef NAME` block whose NAME is not in `known` is not followed.
 pub(crate) fn include_closure(
     source: &Path,
@@ -535,8 +549,24 @@ pub(crate) fn include_closure(
         let mut open: Vec<bool> = Vec::new();
         for line in text.lines() {
             let line = line.trim_start();
-            if line.starts_with("import ") || line.starts_with("__include") || line.starts_with("__import") {
+            if line.starts_with("__include") || line.starts_with("__import") {
                 return None;
+            }
+            // `import name;`: the module `name.slang` (dots are directories), found as
+            // slangc finds it: beside the importing file, then in the include
+            // directories. One that is not there (slangc's own search would have to
+            // find it) leaves the compile uncached.
+            if let Some(rest) = line.strip_prefix("import ") {
+                let name = rest.split(';').next()?.trim().replace('.', "/");
+                let name = format!("{name}.slang");
+                let found = std::iter::once(file.parent()?.join(&name))
+                    .chain(include_dirs.iter().map(|d| d.join(&name)))
+                    .find(|p| p.is_file())?;
+                let found = found.canonicalize().ok()?;
+                if !files.contains(&found) {
+                    files.push(found);
+                }
+                continue;
             }
             if let Some(rest) = line.strip_prefix("#ifdef") {
                 let name = rest.split_whitespace().next().unwrap_or("");
@@ -649,17 +679,35 @@ pub mod cuda_layout {
         defines: &[(&str, &str)],
     ) -> Result<CudaKernel> {
         let _ = slangc;
-        let reflection = dest.with_extension("json");
         let include_dirs = [root.join("physics"), root.join("kernels")];
+        compile_kernel_at(None, &include_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>(), source, entry, dest, defines)
+    }
+
+    /// [`compile_kernel_with_defines`] for a source outside the engine's Slang tree:
+    /// its own include directories (where its `import`s and `#include`s are found),
+    /// and `base`, the directory slangc runs in and is given paths relative to, so the
+    /// CUDA text (its `#line` directives name the files) and with it the fatbin
+    /// cache's key are the same in every checkout. `None`: the nearest `slang`
+    /// directory above the source.
+    pub fn compile_kernel_at(
+        base: Option<&Path>,
+        include_dirs: &[&Path],
+        source: &Path,
+        entry: &str,
+        dest: &Path,
+        defines: &[(&str, &str)],
+    ) -> Result<CudaKernel> {
+        let reflection = dest.with_extension("json");
         super::Slangc {
             source,
             entries: &[(entry, "compute")],
             target: "cuda",
-            include_dirs: &include_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+            include_dirs,
             defines,
             out: dest,
             out_ext: "cu",
             reflection: Some(&reflection),
+            base,
         }
         .run()
         .with_context(|| format!("slangc {entry}"))?;
