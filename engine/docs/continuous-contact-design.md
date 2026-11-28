@@ -1553,3 +1553,31 @@ into the panel over the contact's duration. Restitution (e = 1) returns it (rows
 Newton's law is ill-posed for simultaneous contacts and created energy on the elastic bars.
 This is the trade-off the crash codes avoid with a µs step (contact lasts many steps) and cloth
 accepts (dissipation does not matter there).
+
+## Smaller steps do not change contact's energy or its zones (measured 2026-11-28)
+
+`RUBBLE_STEP_DIV=k` (a build-time measurement, default 1; `engine_softbody::STEP_DIV`) runs the whole
+explicit update, beams and contact, at k × 2 kHz, with the crash driver stepping k times per 0.5 ms.
+At k = 4 (8 kHz), each step closes a quarter of the distance, so if stacked simultaneous contacts
+were what caused the collapse, the zones and the loss would fall. Velocity contact, generated sedan,
+CPU; 2 runs of the energy tests, one probe of head 100 for 0.3 s:
+
+| | 2 kHz | 8 kHz |
+|---|---|---|
+| Head 100, contact's work | −140 / −142 kJ (12.5–12.7 %): rows −115, zones −25 kJ | −148 / −143 kJ (12.8–13.2 %): rows −15, zones −130 kJ |
+| Head 100, zones | 6,036 / 4,888 | 27,327 / 28,945 (about the same per 0.5 ms of the 4 steps) |
+| Ball 100, contact's work | −7.9 / −8.5 kJ (18–20 %) | −6.0 / −7.4 kJ (14–17 %) |
+| Head 100 probe | 0 crossings, jitter 4.3 m/s | 0 crossings, jitter 5.2 m/s |
+
+What it shows:
+- **The loss does not depend on the step size.** A quarter of the step leaves head 100's loss
+  where it was. Only its split moves, from rows to zones. So it is not an artefact of 28 mm per
+  step. It is the impact law: an inelastic impact removes the struck node masses' closing energy,
+  however finely the approach is resolved. Time of impact (design 1), which also resolves each
+  impact inelastically, would remove the same energy. Only the impact law changes it
+  (restitution, above: the best variant measured was 7–10 % on head 100).
+- **The zones are not stacked contacts from a large step either.** They form at the same rate
+  per unit of time at 8 kHz. They are persistent clusters that stay stuck (opposite-normal rows,
+  the implicit equality constraints of Vouga et al. 2017, `contact-literature.md` §11), and more
+  steps re-form them more often.
+- Contact substeps are therefore not adopted. The switch stays as a measurement.

@@ -33,8 +33,8 @@ use glam::{Quat, Vec3};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The fixed step (s).
-pub const STEP: f32 = 0.0005;
+/// The fixed step (s): 0.5 ms, divided by [`crate::STEP_DIV`] (1 but in a measurement build).
+pub const STEP: f32 = 0.0005 / crate::STEP_DIV as f32;
 /// Gravity along y (m/s²).
 pub const GRAVITY: f32 = -9.807;
 /// Air drag: F = −coefficient·|v|·v.

@@ -636,7 +636,7 @@ pub fn crash_mode(scene: &str, kmh: f32, secs: f32, runs: usize, edge: bool, pre
             }
         }
         for s in 1..=steps {
-            w.step();
+            for _ in 0..engine_softbody::STEP_DIV { w.step(); }
             if check > 0 && s % check == 0 {
                 // (a car's own crossings past those it was built with: the sedan has none)
                 let own_x: usize = w.self_crossings().iter().zip(&self_x0).map(|(a, b)| a.saturating_sub(*b)).sum();
