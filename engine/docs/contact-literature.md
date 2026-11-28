@@ -584,3 +584,57 @@ draft.
 - Huang, Chitalu, Lin, Komura 2024, GIPC: <https://arxiv.org/abs/2308.09400>
 - Chen, Liu, Yang, Yuksel 2024, Vertex Block Descent: <https://arxiv.org/abs/2403.06321>
 - Karras 2012, HPG (LBVH); Teschner et al. 2003, VMV (spatial hashing); Le Grand 2007, GPU Gems 3 ch. 32 (cited from memory, not re-read).
+
+## 11. Simultaneous impact: Generalized Reflections (2012) and its termination proof (2017)
+
+Read 2026-11-27 (night), from copies in `out/lit/` (gitignored), after measuring that the
+head-on's rounds fail to settle mostly at the impact itself, at crowded nodes held by rows with
+nearly opposite normals (`continuous-contact-design.md`, "Three diagnostic measurements").
+
+**Smith, Kaufman, Vouga, Tamstorf, Grinspun 2012**, *Reflections on Simultaneous Impact*, TOG
+31(4) (<https://www.cs.columbia.edu/cg/rosi/rosi.pdf>).
+- Five desiderata for a multi-impact operator: break-away (BRK), symmetry (SYM), kinetic energy
+  bounded (KIN), momentum (MOM), one-sided impulses (ONE). The inelastic LCP (our projection at
+  e = 0) satisfies all only for c_r = 0; with c_r > 0 it sticks (no break-away). Gauss-Seidel
+  pairwise breaks symmetry; Jacobi breaks energy. Their table: no prior model has all five.
+- **Generalized Reflections (GR):** repeat { V = constraints whose normal velocity is
+  approaching; solve the LCP (a QP) on V alone with the elastic factor 1 + c_r; apply } until V is
+  empty. Each pass is the unique reflection of the velocity in the span of the violated normals.
+- **Restitution without inelastic collapse:** iterated dissipative impact (pairwise or GR with
+  c_r < 1) can need infinitely many iterations, the range of c_r where this happens grows to 1
+  with the number of bodies. Their model solves the elastic problem (GR, c_r = 1) and the purely
+  inelastic one (one LCP, well posed) separately and takes v⁺ = (1 − c_r) v₀⁺ + c_r v₁⁺. All five
+  desiderata hold.
+- Time stepping (their Alg. 4): free flight to find the active set, the impulses computed from
+  the step-start state (q_t, p_t), then the step. Rigid bodies and balls; CPU interior-point QPs,
+  up to 2M constraints; 11-15 GR iterations a step in their table.
+- Limits they state: sustained contact (drift-free resting contact) not addressed; GR's
+  termination was open.
+
+**Vouga, Smith, Kaufman, Tamstorf, Grinspun 2017**, *All's Well That Ends Well: Guaranteed
+Resolution of Simultaneous Rigid Body Impact*, TOG 36(4)
+(<https://www.cs.utexas.edu/~evouga/uploads/4/5/6/8/45689883/term-revised.pdf>).
+- Abstract, in short: iterative impact resolution needs no failsafe. For frictionless,
+  energy-conserving operators with a minimal set of properties (pairwise Gauss-Seidel and GR
+  included), finite termination is fully characterised.
+- **The only obstruction is implicit equality constraints:** constraint gradients that together
+  force the velocity into a subspace (for example two opposite normals on one DoF, n·v ≥ 0 and
+  −n·v ≥ 0). They give an algorithm to detect and remove them, and prove termination in
+  floating point.
+- Each property is necessary. With energy removed at each application (inelastic iterations),
+  inelastic collapse makes termination fail; dissipation is added as in 2012, by interpolating
+  two terminating solves.
+- Their Discussion names the practical workaround they make unnecessary: abort after a fixed
+  count and either leave collisions or apply Provot's rigid impact zones, "artificial dissipation
+  and sticking".
+
+**For us (my reading, to be checked by measurement):**
+- Our velocity rows are an inelastic projection iterated in rounds: the class the 2017 paper shows
+  can fail to terminate (inelastic collapse). Our rounds' failure ends in rigid zones: their
+  "failsafe".
+- Our stuck clusters, rows on shared nodes with nearly opposite normals, are near-implicit
+  equality constraints: the one obstruction the proof names, with a detection and removal step.
+- Our nodes are point masses (a diagonal M): the simplest case of their setting.
+- Not covered by the papers: our outer CCD rounds re-linearise the constraints as the closest
+  points slide within a step; theirs are fixed at an instant. Sustained, pressed contact is out
+  of their scope. Their solves are CPU QPs, not real time; GPU cost is unknown.
