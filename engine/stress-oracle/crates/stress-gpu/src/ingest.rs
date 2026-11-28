@@ -5,7 +5,9 @@
 //! layouts are engine-schema's `BodyState`, `Collider`, `Contact`, `StepCounters`); the
 //! coupling supplies the collider table (`ColliderInfo`).
 
+use crate::fracture::legacy_recorder;
 use crate::gpu::{groups, Binding, Gpu, Kernel};
+use stress_layout::plan::{self, Buf, Cmd};
 use crate::shaders;
 
 /// What the coupling knows of an engine collider (coupling.slang `ColliderInfo`).
@@ -122,7 +124,7 @@ pub struct EngineIngest {
 
 /// One pass's parameters and bind groups (`EngineIngest::cache`).
 struct Cached {
-    key: [u32; 5],
+    key: [u32; 8],
     buffers: Vec<wgpu::Buffer>,
     binds: Vec<wgpu::BindGroup>,
 }
@@ -176,7 +178,7 @@ impl EngineIngest {
 
     /// The bind groups of `kernels` over `params` (made by `make` on a miss), cached by `key` and
     /// every buffer bound.
-    fn binds(&self, gpu: &Gpu, kernels: &[&Kernel], key: [u32; 5], e: &EngineBuffers, gate: &wgpu::Buffer, make: impl FnOnce() -> IngestParams) -> Vec<wgpu::BindGroup> {
+    fn binds(&self, gpu: &Gpu, kernels: &[&Kernel], key: [u32; 8], e: &EngineBuffers, gate: &wgpu::Buffer, make: impl FnOnce() -> IngestParams) -> Vec<wgpu::BindGroup> {
         let buffers: Vec<wgpu::Buffer> = [e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts, &self.scan_blocks, gate]
             .into_iter()
             .cloned()
@@ -256,6 +258,62 @@ impl EngineIngest {
         gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts, &self.scan_blocks, gate])
     }
 
+    /// What the ingest was made for (the plan's lists are sized by it).
+    pub fn dims(&self) -> plan::ingest::Dims {
+        plan::ingest::Dims { max_rows: self.max_rows, max_substeps: self.max_substeps, max_bodies: self.max_bodies, chunk_count: self.chunk_count }
+    }
+
+    /// The plan's commands (`stress_layout::plan::ingest`), in order. `gate`: the
+    /// fracture's sizes and their indirect copy, for a merge behind the quiet gate.
+    fn replay(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, cmds: &[Cmd], e: &EngineBuffers, gate: Option<(&wgpu::Buffer, &wgpu::Buffer)>) {
+        const ENTRIES: [&str; 10] = ["ingest_rows", "ingest_clear", "ingest_count", "ingest_scan", "ingest_scan_blocks", "ingest_scan_add", "ingest_scatter", "ingest_merge", "ingest_any", "ingest_gate"];
+        let kernels = [&self.rows, &self.clear, &self.count, &self.scan, &self.scan_top, &self.scan_add, &self.scatter, &self.merge, &self.any, &self.gate];
+        let index = |entry: &str| ENTRIES.iter().position(|e| *e == entry).expect("ingest entry");
+        let mut binds: Vec<wgpu::BindGroup> = Vec::new();
+        let mut i = 0;
+        while i < cmds.len() {
+            let cmd = cmds[i];
+            i += 1;
+            match cmd {
+                Cmd::Params { words, .. } => {
+                    binds = self.binds(gpu, &kernels, words, e, gate.map_or(&self.no_gate, |g| g.0), || bytemuck::cast(words));
+                }
+                Cmd::Copy { src, src_offset, dst, dst_offset, size } => {
+                    let buffer = |b: Buf| match b {
+                        Buf::EngineBodies => e.bodies,
+                        Buf::StartBodies => &self.start_bodies,
+                        Buf::Sizes => gate.expect("a gated merge").0,
+                        Buf::Args => gate.expect("a gated merge").1,
+                        _ => unreachable!("{b:?}: not the ingest's"),
+                    };
+                    encoder.copy_buffer_to_buffer(buffer(src), src_offset, buffer(dst), dst_offset, size);
+                }
+                Cmd::Pass { label, .. } => {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label, timestamp_writes: None });
+                    while let Some(&cmd) = cmds.get(i) {
+                        match cmd {
+                            Cmd::Groups { entry, groups, .. } => {
+                                let k = index(entry);
+                                pass.set_pipeline(&kernels[k].pipeline);
+                                pass.set_bind_group(0, &binds[k], &[]);
+                                pass.dispatch_workgroups(groups, 1, 1);
+                            }
+                            Cmd::Indirect { entry, arg, .. } => {
+                                let k = index(entry);
+                                pass.set_pipeline(&kernels[k].pipeline);
+                                pass.set_bind_group(0, &binds[k], &[]);
+                                pass.dispatch_workgroups_indirect(gate.expect("a gated merge").1, 12 * arg);
+                            }
+                            _ => break,
+                        }
+                        i += 1;
+                    }
+                }
+                _ => unreachable!("not an ingest command: {cmd:?}"),
+            }
+        }
+    }
+
     /// The frame's start: the engine's bodies as they are now (closing speeds use them).
     pub fn begin_frame(&self, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers) {
         encoder.copy_buffer_to_buffer(e.bodies, 0, &self.start_bodies, 0, BODY_BYTES * self.max_bodies as u64);
@@ -279,7 +337,10 @@ impl EngineIngest {
     /// its records, at slot `substep`.
     pub fn substep(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, row_offset: u32, substep: u32, h: f64) {
         assert!(substep < self.max_substeps, "ingest: {substep} substeps, room for {}", self.max_substeps);
-        let key = [0, row_offset, substep, (h as f32).to_bits(), 0];
+        if !legacy_recorder() {
+            return self.replay(gpu, encoder, &plan::ingest::substep(&self.dims(), row_offset, substep, h as f32), e, None);
+        }
+        let key = [0, row_offset, substep, (h as f32).to_bits(), 0, 0, 0, 0];
         let bind = self.binds(gpu, &[&self.rows], key, e, &self.no_gate, || self.params(row_offset, substep, h)).remove(0);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ingest rows"), timestamp_writes: None });
         pass.set_pipeline(&self.rows.pipeline);
@@ -321,6 +382,10 @@ impl EngineIngest {
     }
 
     fn merge_records(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, record_count: u32, key: u32, gate: Option<(&wgpu::Buffer, &wgpu::Buffer, u32)>) {
+        if !legacy_recorder() {
+            let cmds = plan::ingest::merge(&self.dims(), record_count, gate.map(|g| g.2));
+            return self.replay(gpu, encoder, &cmds, e, gate.map(|g| (g.0, g.1)));
+        }
         let substeps = key;
         // Only the substeps run are merged, and in each only its rows (`record_live`): the
         // rest of the records is never read, so nothing is cleared.
@@ -341,7 +406,7 @@ impl EngineIngest {
         // The gate's slots of each pass (`coupling.slang` `GATE_IG_*`).
         let slots = [2u64, 3, 4, 5, 6, 3, 6];
         let labels = ["ingest clear", "ingest count", "ingest scan", "ingest scan blocks", "ingest scan add", "ingest scatter", "ingest merge"];
-        let binds = self.binds(gpu, &kernels, [1, gate.map_or(0, |g| 1 + g.2), record_count, 0, substeps], e, gate.map_or(&self.no_gate, |g| g.0), || params);
+        let binds = self.binds(gpu, &kernels, [1, gate.map_or(0, |g| 1 + g.2), record_count, 0, substeps, 0, 0, 0], e, gate.map_or(&self.no_gate, |g| g.0), || params);
         if let Some((sizes, args, _)) = gate {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ingest gate"), timestamp_writes: None });

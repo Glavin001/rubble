@@ -15,7 +15,10 @@ use stress_ref::blast_bond::{sym_apply, RigidFrame, SolverKind,
 };
 use stress_ref::math::Vec3;
 
+use crate::fracture::legacy_recorder;
 use crate::gpu::{Binding, Gpu, Kernel};
+use stress_layout::plan::solver::{Grid, WIDE_END, WIDE_ITERATION, WIDE_SETUP};
+use stress_layout::plan::{self, Buf, Cmd, Module};
 use crate::shaders;
 
 const REF_SECOND: u32 = 0x8000_0000;
@@ -110,20 +113,7 @@ const VIRIAL_BINDINGS: [Binding; 9] = [U, R, R, R, R, R, R, R, W];
 const VIEW_BINDINGS: [Binding; 6] = [U, R, R, R, R, W];
 
 /// The topology kernels and their indirect sizes (`blast_topology.slang` `A_*`, words).
-const TOPOLOGY: [(&str, u64); 12] = [
-    ("bt_reset", A_NODES),
-    ("bt_union", A_BONDS),
-    ("bt_flatten", A_NODES),
-    ("bt_count_nodes", A_NODES),
-    ("bt_count_bonds", A_BONDS),
-    ("bt_scan_blocks", A_SCAN),
-    ("bt_scan_top", A_ONE),
-    ("bt_scan_add", A_SCAN),
-    ("bt_islands", A_NODES),
-    ("bt_scatter_nodes", A_NODES),
-    ("bt_scatter_bonds", A_BONDS),
-    ("bt_sort", A_SORT),
-];
+const TOPOLOGY: [(&str, u64); 12] = plan::solver::TOPOLOGY;
 const A_SOLVE: u64 = 0;
 const A_COUNT: usize = 3;
 const A_NODES: u64 = 4;
@@ -290,58 +280,6 @@ struct Wide {
     min: u32,
 }
 
-/// What a wide kernel runs over.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Grid {
-    One,
-    Islands,
-    Nodes,
-    Bonds,
-    Rows,
-}
-
-/// The wide solve's kernels for one frame: set-up, the iteration (recorded `max_iterations`
-/// times), the end.
-const WIDE_SETUP: &[(&str, Grid)] = &[
-    ("w_reset", Grid::One),
-    ("w_classify", Grid::Islands),
-    ("w_args", Grid::One),
-    ("w_init_nodes", Grid::Nodes),
-    ("w_init_bonds", Grid::Bonds),
-    ("w_setup", Grid::Rows),
-    ("w_warm", Grid::Nodes),
-];
-const WIDE_ITERATION: &[(&str, Grid)] = &[
-    ("w_proj_part_r", Grid::Nodes),
-    ("w_proj_solve", Grid::Rows),
-    ("w_proj_apply_r", Grid::Nodes),
-    ("w_bond_r", Grid::Bonds),
-    ("w_node_rn", Grid::Nodes),
-    ("w_test", Grid::Rows),
-    ("w_rebuild", Grid::Nodes),
-    ("w_proj_part_rb", Grid::Nodes),
-    ("w_proj_solve_rb", Grid::Rows),
-    ("w_proj_apply_rb", Grid::Nodes),
-    ("w_bond_rb", Grid::Bonds),
-    ("w_node_rnb", Grid::Nodes),
-    ("w_decide", Grid::Rows),
-    ("w_pre1", Grid::Nodes),
-    ("w_bond_loc", Grid::Bonds),
-    ("w_pre2", Grid::Nodes),
-    ("w_proj_part_g", Grid::Nodes),
-    ("w_proj_solve", Grid::Rows),
-    ("w_proj_apply_g", Grid::Nodes),
-    ("w_max", Grid::Nodes),
-    ("w_mag", Grid::Rows),
-    ("w_scale", Grid::Nodes),
-    ("w_gamma", Grid::Rows),
-    ("w_dir", Grid::Nodes),
-    ("w_bond_p", Grid::Bonds),
-    ("w_node_q", Grid::Nodes),
-    ("w_den", Grid::Rows),
-    ("w_update", Grid::Nodes),
-];
-const WIDE_END: &[(&str, Grid)] = &[("w_final", Grid::Bonds), ("w_report", Grid::Rows)];
 const WIDE_BINDINGS: [Binding; 14] = [U, W, R, R, W, R, W, W, W, R, R, W, W, R];
 const WIDE_GATE_BINDINGS: [Binding; 4] = [U, R, R, W];
 /// `blast_native_wide.slang` `ROW_WORDS`, `PARTIAL`, `M_ROWS`.
@@ -1099,6 +1037,88 @@ impl BlastFrame {
         });
     }
 
+    /// The plan's commands (`stress_layout::plan::solver`), in order.
+    fn replay(&self, encoder: &mut wgpu::CommandEncoder, cmds: &[Cmd]) {
+        let s = &self.solver;
+        let frame_bind = self.bind.as_ref().expect("BlastFrame::bind before record");
+        // An entry's kernel and bind group.
+        let kernel = |module: Module, entry: &str| -> (&Kernel, &wgpu::BindGroup) {
+            match (module, entry) {
+                (Module::BlastFracture, "blast_sync") => (&self.sync, frame_bind),
+                (Module::BlastFracture, "blast_loads") => (&self.loads, frame_bind),
+                (Module::BlastFracture, "blast_breaks") => (&self.breaks, frame_bind),
+                (Module::BlastTopology, "bt_gate") => (&s.gate, &s.topology_bind),
+                (Module::BlastTopology, e) => {
+                    let i = plan::solver::TOPOLOGY.iter().position(|t| t.0 == e).expect("topology entry");
+                    (&s.topology[i].0, &s.topology_bind)
+                }
+                (Module::BlastMotion, _) => {
+                    let (k, bind, _) = s.motion.as_ref().expect("the native solve's frames");
+                    (k, bind)
+                }
+                (Module::BlastNative | Module::BlastCgls, _) => (&s.solve, &s.solve_bind),
+                (Module::BlastNativeWide, e) => {
+                    let w = s.wide.as_ref().expect("the native solve's wide path");
+                    let names = plan::solver::WIDE_SETUP.iter().chain(plan::solver::WIDE_ITERATION).chain(plan::solver::WIDE_END);
+                    let i = names.into_iter().position(|k| k.0 == e).expect("wide entry");
+                    (&w.kernels[i].0, &w.kernels[i].2)
+                }
+                (Module::BlastWideGate, _) => {
+                    let w = s.wide.as_ref().expect("the native solve's wide path");
+                    (&w.gate.0, &w.gate.1)
+                }
+                (Module::BlastVirial, _) => (&self.virial, &self.virial_bind.as_ref().expect("the virial's bind").0),
+                (Module::BlastMaterial, _) => (&s.stress, &s.stress_bind),
+                (Module::BlastView, "blast_view_clear") => (&self.view_kernels[0], &self.view_bind),
+                (Module::BlastView, _) => (&self.view_kernels[1], &self.view_bind),
+                (m, e) => unreachable!("{}::{e}: not the solver's", m.name()),
+            }
+        };
+        let buffer = |b: Buf| -> &wgpu::Buffer {
+            match b {
+                Buf::SolverArgs => &s.buffers.args,
+                Buf::SolverDispatch => &s.buffers.dispatch,
+                Buf::WideMeta => &s.wide.as_ref().expect("the wide path").meta,
+                Buf::WideDispatch => &s.wide.as_ref().expect("the wide path").dispatch,
+                _ => unreachable!("{b:?}: not the solver's"),
+            }
+        };
+        let mut i = 0;
+        while i < cmds.len() {
+            let cmd = cmds[i];
+            i += 1;
+            match cmd {
+                Cmd::Copy { src, src_offset, dst, dst_offset, size } => encoder.copy_buffer_to_buffer(buffer(src), src_offset, buffer(dst), dst_offset, size),
+                Cmd::Pass { label, .. } => {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label, timestamp_writes: None });
+                    while let Some(&cmd) = cmds.get(i) {
+                        match cmd {
+                            Cmd::Dispatch { module, entry, items } => {
+                                let (k, bind) = kernel(module, entry);
+                                k.dispatch(&mut pass, bind, items as usize);
+                            }
+                            Cmd::Groups { module, entry, groups } => {
+                                let (k, bind) = kernel(module, entry);
+                                pass.set_pipeline(&k.pipeline);
+                                pass.set_bind_group(0, bind, &[]);
+                                pass.dispatch_workgroups(groups, 1, 1);
+                            }
+                            Cmd::IndirectAt { module, entry, args, offset } => {
+                                let (k, bind) = kernel(module, entry);
+                                pass.set_pipeline(&k.pipeline);
+                                pass.set_bind_group(0, bind, &[]);
+                                pass.dispatch_workgroups_indirect(buffer(args), offset);
+                            }
+                            _ => break,
+                        }
+                        i += 1;
+                    }
+                }
+                _ => unreachable!("not a solver command: {cmd:?}"),
+            }
+        }
+    }
+
     /// Record the frame's Blast work after `fr_loads` (`dt`: the frame's duration, for the
     /// gradual damage), before the fracture's gate and split.
     pub fn record(&mut self, encoder: &mut wgpu::CommandEncoder, dt: f64) {
@@ -1116,6 +1136,19 @@ impl BlastFrame {
             self.solver.graph.node_count(),
             self.solver.graph.bond_count(),
         );
+        if !legacy_recorder() {
+            let opts = plan::solver::Opts {
+                nodes: n as u64,
+                bonds: m as u64,
+                native: self.solver.wide.is_some(),
+                iterations: self.solver.graph.settings.max_iterations,
+                virial: self.virial_bind.is_some(),
+                stress_view: self.stress_view,
+            };
+            self.replay(encoder, &plan::solver::frame(&opts));
+            self.solver.mark_solved();
+            return;
+        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             // The fracture's own breaks (strikes, crushes) into Blast first: one bond state.

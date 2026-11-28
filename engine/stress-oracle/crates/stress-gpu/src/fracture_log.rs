@@ -135,6 +135,15 @@ impl FractureLog {
         }
     }
 
+    /// One of the log's entries (`log_bonds`, `log_chunks`, `log_frames`) over the
+    /// workgroups at `offset` of `args`, in the plan's pass (`stress_layout::plan::log`).
+    pub(crate) fn indirect(&self, pass: &mut wgpu::ComputePass<'_>, entry: &str, args: &wgpu::Buffer, offset: u64) {
+        let i = ["log_bonds", "log_chunks", "log_frames"].iter().position(|e| *e == entry).expect("fracture log entry");
+        pass.set_pipeline(&self.kernels[i].pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.dispatch_workgroups_indirect(args, offset);
+    }
+
     /// The changes in a copy of the log (`bytes`) since `read`.
     pub fn decode(&self, bytes: &[u8], read: LogCursor) -> LogEntries {
         let w: &[u32] = bytemuck::cast_slice(bytes);

@@ -15,6 +15,7 @@
 use crate::gpu::{groups, Binding, Gpu, Kernel};
 use crate::ingest::{EngineBuffers, EngineIngest, NONE};
 use crate::shaders;
+use stress_layout::plan::{self, arg, Buf, Cmd};
 use stress_ref::capability::{LoadModel, StrikeModel};
 
 /// Per chunk (`fracture.slang` `chunks`): (centre (structure frame), mass); inertia about
@@ -717,31 +718,31 @@ const CS_STATE: usize = 14;
 /// (2), the in-step contact strike's (5).
 pub const LP_BODY: u32 = 7;
 /// The shots strike prediction checks, at most.
-pub const MAX_SHOTS: usize = 64;
+pub const MAX_SHOTS: usize = plan::MAX_SHOTS as usize;
 const BODY_WORDS: u32 = 7;
-const ARGS: u64 = 25;
-const ARG_CHUNKS: u64 = 0;
-const ARG_BONDS: u64 = 1;
-const ARG_BODIES: u64 = 2;
-const ARG_SCAN_CHUNKS: u64 = 3;
-const ARG_SCAN_BODIES: u64 = 4;
-const ARG_ONE: u64 = 5;
-const ARG_CS_BODIES: u64 = 6;
-const ARG_CS_ROWS: u64 = 7;
-const ARG_CS_PICK: u64 = 8;
-const ARG_CS_LIST: u64 = 9;
-const ARG_CS_CHUNKS: u64 = 10;
-const ARG_CS_BONDS: u64 = 11;
-const ARG_CS_SLOTS: u64 = 12;
-const ARG_CS_SAVE: u64 = 13;
-const ARG_CRUSH_CHUNKS: u64 = 14;
-const ARG_CRUSH_SCAN: u64 = 15;
-const ARG_CRUSH_ONE: u64 = 16;
+const ARGS: u64 = arg::COUNT;
+const ARG_CHUNKS: u64 = arg::CHUNKS;
+const ARG_BONDS: u64 = arg::BONDS;
+const ARG_BODIES: u64 = arg::BODIES;
+const ARG_SCAN_CHUNKS: u64 = arg::SCAN_CHUNKS;
+const ARG_SCAN_BODIES: u64 = arg::SCAN_BODIES;
+const ARG_ONE: u64 = arg::ONE;
+const ARG_CS_BODIES: u64 = arg::CS_BODIES;
+const ARG_CS_ROWS: u64 = arg::CS_ROWS;
+const ARG_CS_PICK: u64 = arg::CS_PICK;
+const ARG_CS_LIST: u64 = arg::CS_LIST;
+const ARG_CS_CHUNKS: u64 = arg::CS_CHUNKS;
+const ARG_CS_BONDS: u64 = arg::CS_BONDS;
+const ARG_CS_SLOTS: u64 = arg::CS_SLOTS;
+const ARG_CS_SAVE: u64 = arg::CS_SAVE;
+const ARG_CRUSH_CHUNKS: u64 = arg::CRUSH_CHUNKS;
+const ARG_CRUSH_SCAN: u64 = arg::CRUSH_SCAN;
+const ARG_CRUSH_ONE: u64 = arg::CRUSH_ONE;
 // The quiet gate's (`fr_quiet`, coupling.slang `ingest_gate`): the frame's loads and
 // threshold breaks; the ingest's own slots follow (19..23), then the gate's state.
-const ARG_Q_CHUNKS: u64 = 17;
-const ARG_Q_BONDS: u64 = 18;
-const ARG_Q_STATE: u64 = 24;
+const ARG_Q_CHUNKS: u64 = arg::Q_CHUNKS;
+const ARG_Q_BONDS: u64 = arg::Q_BONDS;
+const ARG_Q_STATE: u64 = arg::Q_STATE;
 
 /// The counters (`fracture.slang` `C_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -922,7 +923,7 @@ pub const MODEL_ENTRIES: [&str; 47] = [
 
 /// Every fracture entry point (`fracture.slang`), crush ones included.
 /// `fr_il_run`'s groups per row (`fracture.slang` `IL_RUN_ROW`).
-const IL_RUN_ROW: u32 = 65_535;
+const IL_RUN_ROW: u32 = plan::RUN_ROW;
 
 pub fn entries() -> &'static [&'static str] {
     &ENTRIES
@@ -1062,6 +1063,18 @@ struct View {
     mode: u32,
 }
 
+/// `STRESS_FRACTURE_RECORDER=legacy`: the frame as the host recorded it before the plan
+/// (`stress_layout::plan`), the reference the plan's replay is checked against.
+pub(crate) fn legacy_recorder() -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEGACY.get_or_init(|| std::env::var("STRESS_FRACTURE_RECORDER").is_ok_and(|v| v == "legacy"))
+}
+
+/// `STRESS_FRACTURE_SPLIT=0` (a diagnostic): bonds break, bodies never split.
+fn split_on() -> bool {
+    !std::env::var("STRESS_FRACTURE_SPLIT").is_ok_and(|v| v == "0")
+}
+
 fn cs_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, at: Option<wgpu::ComputePassTimestampWrites<'_>>) -> wgpu::ComputePass<'e> {
     encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("contact fracture"), timestamp_writes: at })
 }
@@ -1073,9 +1086,9 @@ struct CsTiming {
     read: wgpu::Buffer,
 }
 
-const CS_STAMPS: u32 = 6;
+const CS_STAMPS: u32 = plan::CS_STAMPS;
 /// The load path's frame stages' timestamps, after the in-step pass's.
-const LP_STAMPS: u32 = 6;
+const LP_STAMPS: u32 = plan::LP_STAMPS;
 
 impl CsTiming {
     fn new(gpu: &Gpu) -> Option<CsTiming> {
@@ -1862,7 +1875,119 @@ impl GpuFracture {
         }
     }
 
+    /// A frame from the plan (`stress_layout::plan::frame`), replayed; with
+    /// `STRESS_FRACTURE_RECORDER=legacy`, as the host recorded it before the plan.
     fn frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, merge: Option<(&EngineIngest, &EngineBuffers, u32, Option<u32>)>) {
+        use std::sync::atomic::Ordering;
+        if legacy_recorder() {
+            return self.frame_recorded(gpu, encoder, step, merge);
+        }
+        // The pool's halves swap every frame, and the step and log stamp move on: on the GPU
+        // (`fr_frame_begin`), the host writing them only off the expected sequence.
+        self.sync_frame(gpu, step, true);
+        let gated = merge.is_some();
+        if gated && self.quiet_reset.swap(false, Ordering::Relaxed) {
+            // The streak (`ARG_Q_STATE`'s second word), before this submission.
+            gpu.write_buffer(&self.sizes, 12 * ARG_Q_STATE + 4, bytemuck::bytes_of(&0u32));
+        }
+        if !gated {
+            // A frame the gate does not see: its streak no longer describes the state.
+            self.quiet_reset.store(true, Ordering::Relaxed);
+        }
+        let host_breaks = self.upload_host_breaks(gpu) as u64;
+        // Opened before the step's in-step contact fracture, which recorded into them.
+        let events = self.layout.events != Events::default() && !std::mem::take(&mut self.events_opened);
+        let load_path = self.params.load_model == 1;
+        let opts = plan::FrameOpts {
+            gated,
+            // The chunks and bonds in use (a shared fracture's tables are sized for its room).
+            chunks: self.params.chunk_used as u64,
+            bonds: self.params.bond_used as u64,
+            bodies: self.layout.b as u64,
+            table_chunks: self.layout.n as u64,
+            crush: self.crush.enabled != 0,
+            solver: self.blast.is_some(),
+            load_path: load_path.then_some(self.params.sweeps),
+            strike: match self.params.strike_model {
+                0 => plan::Strike::Hertz,
+                2 => plan::Strike::Radial,
+                _ => plan::Strike::Analytic,
+            },
+            response: self.params.gi_mode != 0,
+            shots: self.params.shot_count,
+            stress_view: self.stress_view,
+            events,
+            host_breaks,
+            timed: self.cs_timing.is_some(),
+            split: split_on(),
+        };
+        self.replay(encoder, &plan::frame(&opts), merge.map(|m| (gpu, m.0, m.1, m.2, m.3)));
+        if let (true, Some(t)) = (load_path, &self.cs_timing) {
+            encoder.resolve_query_set(&t.queries, CS_STAMPS..CS_STAMPS + LP_STAMPS, &t.resolve, 256);
+            encoder.copy_buffer_to_buffer(&t.resolve, 256, &t.read, 8 * CS_STAMPS as u64, 8 * LP_STAMPS as u64);
+        }
+    }
+
+    /// The plan's commands, in order: copies between passes, each pass's dispatches
+    /// together. `merge`: the ingest whose gated merge the list places.
+    fn replay(&mut self, encoder: &mut wgpu::CommandEncoder, cmds: &[Cmd], merge: Option<(&Gpu, &EngineIngest, &EngineBuffers, u32, Option<u32>)>) {
+        let mut i = 0;
+        while i < cmds.len() {
+            let cmd = cmds[i];
+            i += 1;
+            match cmd {
+                Cmd::Copy { src, src_offset, dst, dst_offset, size } => {
+                    encoder.copy_buffer_to_buffer(self.plan_buffer(src), src_offset, self.plan_buffer(dst), dst_offset, size);
+                }
+                Cmd::IngestMerge => {
+                    let (gpu, ingest, engine, substeps, rows) = merge.expect("a gated frame's ingest");
+                    ingest.merge_gated(gpu, encoder, engine, substeps, rows, &self.sizes, &self.args, ARG_Q_CHUNKS as u32);
+                }
+                Cmd::Solver => {
+                    let (view, dt) = (self.stress_view, self.params.dt as f64);
+                    let blast = self.blast.as_mut().expect("the plan's solver");
+                    blast.stress_view = view;
+                    blast.record(encoder, dt);
+                }
+                Cmd::Pass { label, stamp } => {
+                    let timestamp_writes = stamp.and_then(|s| {
+                        self.cs_timing.as_ref().map(|t| wgpu::ComputePassTimestampWrites {
+                            query_set: &t.queries,
+                            beginning_of_pass_write_index: (!s.end).then_some(s.index),
+                            end_of_pass_write_index: s.end.then_some(s.index),
+                        })
+                    });
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label, timestamp_writes });
+                    while let Some(&cmd) = cmds.get(i) {
+                        match cmd {
+                            Cmd::Dispatch { module: plan::Module::Fracture, entry, items } => self.direct(&mut pass, entry, items as usize),
+                            Cmd::DispatchRows { module: plan::Module::Fracture, entry, groups, row } => self.direct_rows(&mut pass, entry, groups as usize, row),
+                            Cmd::Indirect { module: plan::Module::Fracture, entry, arg, scan } => self.indirect(&mut pass, entry, arg, scan.map(usize::from)),
+                            Cmd::Indirect { module: plan::Module::FractureLog, entry, arg, .. } => self.log.indirect(&mut pass, entry, &self.args, 12 * arg),
+                            Cmd::Dispatch { .. } | Cmd::DispatchRows { .. } => unreachable!("the fracture log's entries are indirect"),
+                            _ => break,
+                        }
+                        i += 1;
+                    }
+                }
+                Cmd::Dispatch { entry, .. } | Cmd::DispatchRows { entry, .. } | Cmd::Indirect { entry, .. } | Cmd::IndirectAt { entry, .. } | Cmd::Groups { entry, .. } => unreachable!("{entry}: a dispatch outside a pass"),
+                Cmd::Params { .. } => unreachable!("the fracture's parameters are its own to write"),
+            }
+        }
+    }
+
+    fn plan_buffer(&self, buf: Buf) -> &wgpu::Buffer {
+        match buf {
+            Buf::Sizes => &self.sizes,
+            Buf::Args => &self.args,
+            Buf::Work => &self.work,
+            Buf::EngineCounters => self.engine_counters.as_ref().expect("engine bound"),
+            Buf::EngineBodies | Buf::StartBodies => unreachable!("the ingest's buffers"),
+            Buf::SolverArgs | Buf::SolverDispatch | Buf::WideMeta | Buf::WideDispatch => unreachable!("the solver's buffers"),
+        }
+    }
+
+    fn frame_recorded(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, merge: Option<(&EngineIngest, &EngineBuffers, u32, Option<u32>)>) {
         use std::sync::atomic::Ordering;
         // The pool's halves swap every frame, and the step and log stamp move on: on the GPU
         // (`fr_frame_begin`), the host writing them only off the expected sequence.
@@ -2147,6 +2272,16 @@ impl GpuFracture {
     /// wrote (cause Blast) and breaks the crushed chunks' bonds; after the split the
     /// crushed chunks' events and fragments (as a frame's).
     pub fn encode_split_crush(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, blast: bool) {
+        if legacy_recorder() {
+            return self.split_crush_recorded(gpu, encoder, step, blast);
+        }
+        self.set_step(gpu, step);
+        let host_breaks = self.upload_host_breaks(gpu) as u64;
+        let cmds = plan::split_only(host_breaks, self.crushes().then_some(blast), self.layout.n as u64, self.layout.e as u64, split_on());
+        self.replay(encoder, &cmds, None);
+    }
+
+    fn split_crush_recorded(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, blast: bool) {
         self.set_step(gpu, step);
         let crush = self.crushes();
         let host_breaks = self.upload_host_breaks(gpu);
@@ -2212,6 +2347,30 @@ impl GpuFracture {
         if self.params.cs_sweeps == 0 {
             return;
         }
+        if legacy_recorder() {
+            return self.contact_fracture_recorded(encoder);
+        }
+        // The step's event lists start here (`encode_frame` then keeps them).
+        let events = self.layout.events != Events::default();
+        self.events_opened |= events;
+        let load_path = self.params.load_model == 1;
+        let opts = plan::ContactOpts {
+            events,
+            rows_word: self.layout.w_cs_rows() as u64,
+            load_path,
+            analytic: !load_path && self.params.strike_model == 1,
+            response: self.params.gi_mode != 0,
+            timed: self.cs_timing.is_some(),
+            split: split_on(),
+        };
+        self.replay(encoder, &plan::contact_fracture(&opts), None);
+        if let Some(t) = &self.cs_timing {
+            encoder.resolve_query_set(&t.queries, 0..CS_STAMPS, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.read, 0, 8 * CS_STAMPS as u64);
+        }
+    }
+
+    fn contact_fracture_recorded(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if self.layout.events != Events::default() {
             // The step's event lists start here: the contact fracture's breaks and splits are
             // the step's first (`encode_frame` then keeps them).
@@ -2381,6 +2540,16 @@ impl GpuFracture {
     /// Only the split (the gate, then every split kernel): the bonds already marked broken
     /// and their bodies dirty (the tests' entry, and a frame's second half).
     pub fn encode_split(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
+        if legacy_recorder() {
+            return self.split_recorded(gpu, encoder, step);
+        }
+        self.set_step(gpu, step);
+        let host_breaks = self.upload_host_breaks(gpu) as u64;
+        let cmds = plan::split_only(host_breaks, None, self.layout.n as u64, self.layout.e as u64, split_on());
+        self.replay(encoder, &cmds, None);
+    }
+
+    fn split_recorded(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
         self.set_step(gpu, step);
         let host_breaks = self.upload_host_breaks(gpu);
         {

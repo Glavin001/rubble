@@ -5,6 +5,7 @@
 //! GPU stress kernels, so both read one layout.
 
 pub mod joint;
+pub mod plan;
 
 
 use stress_ref::math::{Mat3, Quat, Vec3};
