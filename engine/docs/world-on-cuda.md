@@ -1,9 +1,11 @@
 # The World on CUDA (Modal): plan
 
-Status (2026-11-22): **C0 to C4 done and measured; C6 step 1 measured** (§6). The World
+Status (2026-11-28): **C0 to C4 done and measured; C6 steps 1 and 2 done** (§6: the
+fracture world's kernels are built for CUDA by a crate, and its frame is a command list
+the wgpu host replays; no CUDA host runs it yet). The World
 step of the `run.sh --world` gate (the coupling's emit, the rigid step, the plan, the
 explicit frame, the loads) runs on CUDA in one context on one stream: `CudaWorld`,
-`run.sh --world --cuda`. Next: C5 (terrain) or C6 (stress), as demand decides.
+`run.sh --world --cuda`. Next: C6 steps 3 to 5 (the destruction plan below).
 Goal: every GPU pass of a World step runs on CUDA on Modal the way the explicit soft-body
 frame already does (`tools/scenario-matrix/run.sh --cuda`): kernels built locally by nvcc,
 Modal only runs the binary, a verdict costs cents and needs no cold driver compile. Today
@@ -38,7 +40,7 @@ indirect dispatch the explicit frame got in Glavin001/rubble#142.
 `World::step` records one encoder and one submission (`lib.rs:2472`; a second only to
 resolve timestamps when timing is on). Its GPU work, in order:
 
-| Stage of a World step (`World::step`, `crates/engine-world/src/lib.rs:2215`) | Slang | Built for CUDA today | Host on CUDA today | Schedule |
+| Stage of a World step (`World::step`, `crates/engine-world/src/lib.rs`) | Slang | Built for CUDA today | Host on CUDA today | Schedule |
 |---|---|---|---|---|
 | Terrain MPM coupled substeps (first: the rigid step applies their reactions) | `terrain_mpm` (56 `mpm_*`), `terrain_mpm_fast`, `terrain_mpm_cuda` (16 `_gs` entries) | **Yes** (`CUDA_TERRAIN_KERNELS`, engine-cuda `build.rs:349-420`) | **No**: never run on a GPU; executor designed in `docs/deformable-terrain.md`, "CUDA plan" | shared: `engine_terrain::plan::TerrainPlan` (`gpu_terrain.rs:553`) |
 | Terrain live surface, terrain watch | `terrain_surface` (9), `terrain_watch` (3) | No (Metal builds `terrain_watch`) | No | surface: shared (`SurfacePlan::frame`); watch: wgpu host (`gpu_terrain_watch.rs:95`) |
@@ -107,7 +109,7 @@ Per stage:
 | Rigid step (`CudaSim`) | ~57 entries dispatched indirectly (`Cmd::Indirect`); host reads binding 23 back after one of the 5 kernels that write it: **7.1 stream syncs a step** on the 10k columns | the counters, every step (`drain`) | contact hash, colour lists, archive, warm hash: atomic counters and CAS; already under the L2 rule | `_gs` for the indirect entries (as #142 did for the explicit modules); counters into a one-frame-late pinned read; the World's `StepInputs` instead of fixed ones (joints, convex, heightfield, soil, vehicles, commands), and the 37 missing entries built as the inputs that emit them are taken on |
 | Coupling, World side (`cpl_*`) | `list_args`: the count `cpl_plan` writes is copied to the args and dispatched in the same submission (`explicit_vehicles.rs:760, 770, 806`); `cpl_emit` reads the args the previous step wrote | none waited on: the status word every `STATUS_EVERY` windows, loop-cap / status / sleep words through the ring | integer `Atomic<uint>.add` on `gWork` / `gScratch` (impulse append, `vehicle_coupling.slang:1069`) and groupshared atomics; 8 `GroupMemoryBarrierWithGroupSync`; no float atomics | `_gs` for the list dispatches; its dispatch order out of `explicit_vehicles.rs` into a shared plan (`explicit_plan::coupling` gains `Cmd`s); one CUDA context for `CudaSim` and `CudaExplicitBeams`, since the passes bind rigid bodies and explicit records together |
 | Terrain | 16 `_gs` entries built | `RegionClock` substep count (one frame late), counters | P2G sums ordered; built under the L2 rule; no hazards found | the executor in `docs/deformable-terrain.md` "CUDA plan" step 4: bindings 37–54 in `CudaSim`, `TerrainPlan` lowered with `_gs`, counters to pinned memory |
-| Stress / fracture | every group: a `sizes → args` copy then indirect dispatches in the same submission (the split alone: 17); the Blast gate writes its own args per iteration | in the World, none to run (splits are applied on the GPU, the host adopts them from the ring); the Blast pressure loading blocks (5 reads and its own submission); `docs/stress-5d-one-command-buffer.md` §3 lists the stress lab's resident-path reads | CAS union-find loops (`blast_topology.slang:82,146`, `fracture.slang:486,517`), 51 `Atomic<uint>.add` sites in `fracture.slang`; no float atomics (fixed-order reductions); the split writes engine bodies directly, so it shares the rigid step's buffers; the barrage has a latent GPU race (charter log) that CUDA will expose, not hide | (a) build the stress modules through `engine-slang-build` for CUDA; (b) the stress stage as a backend-neutral command list (5d requirement 4, needed for Metal and the web anyway), with the `"warm"` hook as a plan point; (c) a `RigidEngine` over `CudaSim` for the stress lab (stress-rubble drives `WgpuSim`); (d) the pressure loading's reads moved to the ring or the GPU |
+| Stress / fracture | every group: a `sizes → args` copy then indirect dispatches in the same submission (the split alone: 19); the Blast gate writes its own args per iteration | in the World, none to run (splits are applied on the GPU, the host adopts them from the ring); the Blast pressure loading blocks (5 reads and its own submission); `docs/stress-5d-one-command-buffer.md` §3 lists the stress lab's resident-path reads | CAS union-find loops (`blast_topology.slang:82,146`, `fracture.slang:486,517`), 51 `Atomic<uint>.add` sites in `fracture.slang`; no float atomics (fixed-order reductions); the split writes engine bodies directly, so it shares the rigid step's buffers; the barrage has a latent GPU race (charter log) that CUDA will expose, not hide | (a) build the stress modules through `engine-slang-build` for CUDA; (b) the stress stage as a backend-neutral command list (5d requirement 4, needed for Metal and the web anyway), with the `"warm"` hook as a plan point; (c) a `RigidEngine` over `CudaSim` for the stress lab (stress-rubble drives `WgpuSim`); (d) the pressure loading's reads moved to the ring or the GPU |
 
 ## 3. Order
 
@@ -169,17 +171,60 @@ runs on CUDA.
 **C5. Terrain.** The executor in `docs/deformable-terrain.md` (kernels and `_gs` entries
 exist). Verdict: `terrain_parity` scenarios against the wgpu host's tolerances.
 
-**C6. Stress and fracture.** The largest step and the one with prerequisites outside
-CUDA:
+**C6. Stress and fracture: the fracture world on CUDA.** Everything the World's
+destruction runs is one GPU stage: stress-gpu's `GpuFracture`, `EngineIngest` and
+`BlastFrame` (13 of the stress shaders, 170 compute entries), behind every stress model
+(`StrengthModel::Threshold`, `LoadPath`, `ImpactLocal`, `BlastGpu`) and crushing. The
+stress lab's own `GpuWorld` (the `blast_parity` profiles, the explicit islands) is a
+separate host and is not ported: it stays on wgpu as a reference.
 
-1. Build the 43 stress modules through `engine-slang-build` (the CUDA target beside
-   Metal and WGSL), with the hazard check and the L2 rule; CPU-only, any machine.
-2. The stress stage as a backend-neutral command list (5d requirement 4). This is shared
-   work: Metal and the web need it too, and wgpu follows it first, bit for bit against
-   the recorded digests (`destruction_digests.json`, the quick tier) before any CUDA run.
-3. `RigidEngine` over `CudaSim` (what `stress-rubble` implements over `WgpuSim`).
-4. A CUDA executor for the stress plan; one status read a tick.
-Verdict: the `blast_parity` quick tier's digests on CUDA, and the punch / routing suites.
+1. **Done (2026-11-28).** The 13 modules built for CUDA by `engine-cuda` (feature
+   `stress`, `build.rs` `fracture_kernels`): an entry a module, the hazard check, the
+   `{entry}_gs` entry, fatbins with the L2 rule when nvcc is present.
+2. **Done (2026-11-28).** The stage as a backend-neutral command list:
+   `stress_layout::plan` (`frame`, `contact_fracture`, `split`, `crush`, `log`,
+   `ingest::*`, `solver::*`). The wgpu host replays it; `STRESS_FRACTURE_RECORDER=legacy`
+   keeps the old recorder as the reference.
+3. **The host's set-up and I/O without wgpu.** `GpuFracture` still creates, writes and
+   reads its buffers through wgpu (`Gpu::storage`, `write_buffer`, `read_range`: about 60
+   sites), and builds its bind groups there. The buffers' sizes and first contents, the
+   per-frame host writes (`sync_frame`, the quiet streak, the host's breaks, shots, crush
+   flow) and the readbacks move behind a small device interface (allocate, write, copy,
+   read a range, replay a list) that wgpu and CUDA implement, so one `GpuFracture` runs on
+   both. Not a `RigidEngine` over `CudaSim`: that trait is the CPU coupling's. The seam
+   the GPU path needs is the rigid host's buffers (bodies, colliders, contacts, counters;
+   the split writes bodies and colliders in place), its contact ring offsets, and a hook
+   at the rigid plan's `"warm"` phase, which only `WgpuSim` has today
+   (`step_encode_with`).
+4. **The CUDA executor** (`engine-cuda`, feature `stress`): banks filled from reflection
+   and the plan's buffers, the lists replayed on the one stream (`Indirect` and
+   `IndirectAt` through `{entry}_gs`), `CudaSim::step_submit_with(phase, hook)`, one
+   pinned status read a frame, one frame late. A check that no `_gs` entry writes the
+   arguments it is launched from (the wide solve's `w_gate` rewrites them between
+   launches, which is in order on a stream).
+5. **The fracture world on CUDA.** stress-rubble's `ThresholdWorld` over that host
+   interface, `stress_bench --solver fracture-gpu --backend cuda`, then `World` generic
+   over its rigid host (`World<H: RigidHost = WgpuSim>`) so the `engine-world` suites
+   (`threshold`, `stress_models`, `strike_prediction`, `support_loss`, `crush`, `blast`,
+   `reactions`, `city_scale`) run on CUDA unchanged. The city also needs the sleep
+   archive, the awake-indexed broadphase and `pose_pack` on CUDA (C7's). The blast
+   pressure loading is ported as it is first (its blocking reads counted), then its face
+   loads move to a kernel.
+
+Open before step 4: the loop audit of these kernels. Slang's CUDA for the 170 entries
+holds about 490 `for(;;)` loops (fracture 225, the wide solve 101, `blast_native` 66,
+`blast_motion` 52); the CAS union-find loops (`fracture.slang`, `blast_topology.slang`)
+and any other without a bound from its data get one, with a status bit, before any of
+them runs on a GPU that cannot be reset from here.
+
+Verdict: `stress-rubble/tests/fracture_models.rs` and the threshold tests on a T4; two
+CUDA runs of each scene bit for bit; CUDA against wgpu on the same scene (first break
+identical, totals within `engine-world/tests/stress_models.rs`'s tolerance); the stress
+solver's bond impulses within 3e-2 of its f32 reference.
+
+The accuracy side of the same goal (every model scored against the CPU reference,
+`stress-ref`, scene by scene, with the reference run on Modal's CPUs) is a second track
+with no file in common with this one until a model changes.
 
 **C7. The rest, as demand appears:** the rigid step's remaining riders (legacy soft
 bodies, guidance, locks, explosions, the sleep archive if C2 did not need it,
@@ -251,7 +296,7 @@ One run of the suite with the A/B and timing: about 20 container seconds, $0.006
 The colour check moved to `rigid_plan::validate_contact_coloring` (WgpuSim and CudaSim call
 it; wgpu `gables_hold` passes on the Mac). Both suites in one container: 38.6 s, $0.011.
 
-**C6 step 1, the stress modules on CUDA (measured, not yet built by a crate).** slangc
+**C6 step 1, the stress modules on CUDA (measured 2026-11-21; built by a crate since 2026-11-28, below).** slangc
 2026.19 compiles all 32 compute modules of `stress-gpu/shaders` to CUDA (286 entries, 7 s);
 the 3 render modules have no CUDA form and need none. The hazard scan
 (`cargo run -p engine-slang-build --example cuda_hazards -- *.cu`) found one instance of the
@@ -260,6 +305,32 @@ same way as `prefix_color_tiles_parallel` (the sum before the store), regenerate
 `resident_gpu` and `threshold_split` pass on the Mac. nvcc (`measure_nvcc.py`, SASS 75, 3
 jobs, emulated x86 Docker): all 32 compile, 42 s in all; the slowest are the stress lab's
 `world` / `world_ic` (27 s each), then `blast_motion` 9 s, `fracture` 7 s.
+
+**C6 steps 1 and 2 (2026-11-28).** `cargo test -p engine-cuda --features stress --test
+fracture_kernels` (CPU): 170 entries of 13 modules, each once, its globals bound without
+overlap. `engine-slang-build` compiles a source outside the `slang` tree from a named base
+directory (`cuda_layout::compile_kernel_at`), so the CUDA text is the same in every
+checkout, and its compile cache now follows `import name;` (before, an import left the
+compile uncached). `tools/build-time/kernel_digest.py`: 2,973 generated files identical to
+main's. nvcc time for the 170 single-entry modules is not measured yet.
+
+The command list (`stress_layout::plan`), each suite through the replay and through the
+legacy recorder on the M3 Max: stress-gpu `fracture` 7/7 (and with
+`STRESS_GPU_SHADERS=wgsl`), stress-rubble `ingest_gpu` 1/1, `threshold_split` 1/1,
+`fracture_log` 1/1, `fracture_models` 11/11, `threshold_crush` 2/2, `blast_gpu_world` 9/9.
+The plan's launch counts match the inventory above: a threshold frame 28 and the ingest's
+9; the in-step contact fracture 34 (threshold), 37 (load path), 42 (analytic strike); the
+solver's frame 492 at 16 iterations. Found on the way, broken on main since the quiet
+gate: `ingest_any`, `ingest_gate` and `fr_quiet` were not in the hand-kept entry tables,
+so the Metal library path could not build their pipelines (stress-gpu's `fracture` tests
+failed); the new CPU test `entry_tables` holds every table against the generated WGSL.
+
+Corrections to this document's earlier text, from the code: the split records 19 indirect
+dispatches; the stress shaders are 44 `.slang` files of which 32 are compute modules; the
+barrage's race is closed in the charter's log (six runs, one digest) and is the stress
+lab's scene, not the World's; the blast pressure loading waits more than "5 reads" (every
+ring slot, bodies and frames per slot before the split, six reads after it, and the
+bodies again for the impulses, on steps without a split too).
 
 **C3, first part: one rigid host state, joints and convex hulls on CUDA.**
 `engine_exec::rigid_host` now holds what the plan hosts each copied: body motion flags,
