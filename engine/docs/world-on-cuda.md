@@ -325,6 +325,17 @@ gate: `ingest_any`, `ingest_gate` and `fr_quiet` were not in the hand-kept entry
 so the Metal library path could not build their pipelines (stress-gpu's `fracture` tests
 failed); the new CPU test `entry_tables` holds every table against the generated WGSL.
 
+The World's suites on the same machine, each through the replay and through the legacy
+recorder: `stress_models` 3/3, `strike_prediction` 4/4, `support_loss` 10/10, `blast` 6/6,
+`crush` 12/12, `reactions` 7/7. `threshold` 5 of 6 both ways: its
+`cuboid_house_breaks_and_splits_as_in_the_lab` fails the same way on main's own build
+(b1bf3814f: the World's first break at frame 95 with 38 bonds, the lab's at frame 2 with
+2), so it is not this change's. Not run yet: the lab pages in Chrome.
+
+C0 again on this branch (2026-11-28, `gpu_run.sh --build modal -- -p engine-cuda --test
+cudasim`): 13 of 13 on a T4, 12.7 container seconds, $0.0036; the first build of the
+branch on Modal took 650 s, the next 11 s.
+
 Corrections to this document's earlier text, from the code: the split records 19 indirect
 dispatches; the stress shaders are 44 `.slang` files of which 32 are compute modules; the
 barrage's race is closed in the charter's log (six runs, one digest) and is the stress

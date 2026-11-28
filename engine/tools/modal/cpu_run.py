@@ -149,16 +149,28 @@ def run(key: str, scene: str, args: str) -> str:
     binary = f"/store/bin/{key}/stress-ref"
     scenes = Path("/tmp/scenes")
     subprocess.run([binary, "gen-scenes", str(scenes)], check=True, capture_output=True)
-    source = scenes / f"{scene}.json"
-    if not source.is_file():
-        known = sorted(p.stem for p in scenes.glob("*.json"))
-        raise ValueError(f"{scene}: not in the catalogue ({', '.join(known)})")
+    # The benchmarks, then the showcases (`scenes/showcases/`).
+    found = sorted(scenes.rglob(f"{scene}.json"))
+    failed = Path(f"/store/results/{key}/{name}.failed")
+
+    def fail(why: str) -> str:
+        failed.parent.mkdir(parents=True, exist_ok=True)
+        failed.write_text(why)
+        store.commit()
+        return f"failed: {why[:200]}"
+
+    if not found:
+        known = sorted(p.stem for p in scenes.rglob("*.json"))
+        return fail(f"{scene}: not in the catalogue ({', '.join(known)})")
+    source = found[0]
     out = Path("/tmp/observation.json")
     t0 = time.time()
     done = subprocess.run([binary, "run", str(source), "--out", str(out), *args.split()], capture_output=True, text=True)
     seconds = time.time() - t0
     if done.returncode != 0:
-        raise RuntimeError(f"{scene}: stress-ref run failed ({done.returncode}):\n{done.stderr[-4000:]}")
+        return fail(f"{scene}: stress-ref run exited {done.returncode} after {seconds:.0f} s:\n{done.stderr[-4000:]}")
+    if failed.is_file():
+        failed.unlink()
     record = {
         "scene": scene,
         "args": args,
@@ -179,7 +191,11 @@ def results(key: str) -> dict[str, str]:
     """Every finished run of `key`: name -> its record's text."""
     store.reload()
     folder = Path(f"/store/results/{key}")
-    return {p.stem: p.read_text() for p in sorted(folder.glob("*.json"))} if folder.is_dir() else {}
+    if not folder.is_dir():
+        return {}
+    done = {p.stem: p.read_text() for p in sorted(folder.glob("*.json"))}
+    done.update({f"{p.stem}.failed": p.read_text() for p in sorted(folder.glob("*.failed"))})
+    return done
 
 
 def deployed(name: str):
@@ -231,8 +247,13 @@ def collect(out: str = ""):
     done = deployed("results").remote(key)
     folder = Path(out) if out else ENGINE / "stress-oracle/reference/modal" / key
     folder.mkdir(parents=True, exist_ok=True)
+    failures = 0
     for name, text in done.items():
+        if name.endswith(".failed"):
+            failures += 1
+            print(f"cpu_run: {name}: {text.splitlines()[0][:200]}")
+            continue
         (folder / f"{name}.json").write_text(text)
         record = json.loads(text)
         print(f"cpu_run: {name}: {record['seconds']} s")
-    print(f"cpu_run: {len(done)} observations of stress-ref {key} in {folder}")
+    print(f"cpu_run: {len(done) - failures} observations of stress-ref {key} in {folder}; {failures} failed")
