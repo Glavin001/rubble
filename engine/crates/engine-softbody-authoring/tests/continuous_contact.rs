@@ -59,6 +59,7 @@ fn energy(scene: &str, kmh: f32, secs: f32) {
         // integrator's conserved energy is its measure, the contact's work (as the elastic bars':
         // `contact_known_solutions.rs`); the mechanical energy also counts the stiff beams' h·Δv
         // share of the step.
+        if std::env::var("DAT_ROW_SPLIT").is_ok() { println!("| rows' work so far, mJ [own only, across only, both] {:?} |", engine_softbody::explicit_contact::row_split()); }
         let vel = std::env::var("DAT_RESPONSE").is_ok_and(|v| v == "vel");
         let (made, share) = if vel { (d.contact_work, -d.contact_work / d.ke_start.max(1.0)) } else { (d.contact_de, share) };
         assert!(made <= 1e-3 * d.ke_start, "{scene} {kmh} run {k}: contact created {made} J");

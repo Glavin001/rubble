@@ -92,6 +92,38 @@ fn classify_zones(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &[Vec<Vec3>], hit: &[
     }
 }
 
+/// `DAT_ROW_SPLIT=1`, a measurement: the velocity rows' work (mJ, [`super::ccd_vel::shadow`]'s
+/// per-node terms) on nodes in a car's own candidate pairs only, in pairs across bodies only, and
+/// in both.
+static ROW_SPLIT: [std::sync::atomic::AtomicI64; 3] = [const { std::sync::atomic::AtomicI64::new(0) }; 3];
+
+/// [`ROW_SPLIT`] so far: [own only, across only, both] (mJ).
+pub fn row_split() -> [i64; 3] {
+    std::array::from_fn(|i| ROW_SPLIT[i].load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn split_rows(pairs: &[CcdPair], before: &[Vec<Vec3>], after: &[Vec<Vec3>], vpre: &[Vec<Vec3>], m: &[Vec<f32>], vf: &[Vec<Vec3>]) {
+    if vpre.is_empty() || vf.len() != after.len() {
+        return;
+    }
+    let mut class: std::collections::HashMap<(usize, u32), u8> = Default::default();
+    for pr in pairs {
+        let own = pr.k.iter().all(|k| k.0 == pr.k[0].0);
+        for k in pr.k {
+            *class.entry(k).or_default() |= if own { 1 } else { 2 };
+        }
+    }
+    let g = |v: Vec3, p: Vec3, f: Vec3, m: f32| 0.5 * m as f64 * (v.dot(p - f) as f64 + v.length_squared() as f64);
+    let mut sum = [0.0f64; 3];
+    for (&(b, i), &c) in &class {
+        let i = i as usize;
+        sum[c as usize - 1] += g(after[b][i], vpre[b][i], vf[b][i], m[b][i]) - g(before[b][i], vpre[b][i], vf[b][i], m[b][i]);
+    }
+    for (a, s) in ROW_SPLIT.iter().zip(sum) {
+        a.fetch_add((s * 1e3) as i64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn add_counted(a: i32, b: i32) -> i32 {
     let (r, o) = a.overflowing_add(b);
     if o {
@@ -337,9 +369,13 @@ pub(super) fn resolve(
     let f_in = if vel_only { shadow(vel) } else { 0.0 };
     let mut f_rows = f_in;
     if let Some(warm) = warm {
+        let split = std::env::var("DAT_ROW_SPLIT").is_ok().then(|| vel.to_vec());
         let done = super::ccd_vel::guarded_rounds(pairs, x0, x1, vel, im, h, rounds, st, &collide, vpre, e, warm, &|v| shadow(v), f_in);
         f_rows = shadow(vel);
         st.work_rows += f_rows - f_in;
+        if let Some(before) = split {
+            split_rows(pairs, &before, vel, vpre, m, &vf);
+        }
         if done {
             finish(st, x1, vel);
             return;

@@ -1626,3 +1626,22 @@ Not adopted: no better than Newton on every pair, and worse in side 60. A correc
 census above: the zones' net work is a small part of the loss (head 100 −25 of −140 kJ). The
 rows carry the rest, so the self-contact clusters' gross removal is mostly given back by the
 beams. The loss to explain is the rows' inelastic impacts, car against car as well as own.
+
+**The rows' work split by node** (`DAT_ROW_SPLIT=1`, a measurement: each node's term of the
+rows' work, by the candidate pairs it is in; 2 runs of 0.6 s summed; the split sums to the rows'
+total):
+
+| | own pairs only | pairs across bodies only | both |
+|---|---|---|---|
+| Head 100 (rows −232 kJ) | −146 kJ | −2 kJ | −84 kJ |
+| Side 60 | +16 kJ | +58 kJ | −93 kJ |
+| Ball 100 | +7 kJ | −40 kJ | +30 kJ |
+
+- Head 100: the rows' loss is on nodes in a car's own pairs: 63 % on nodes with nothing else,
+  36 % on nodes in both. Nodes that only touch the other car lose 1 %.
+- Side 60 and ball: rows move energy between node groups (signs of both kinds), so per-node
+  attribution does not isolate a cause there.
+- With the 8 kHz result: the rows' loss fell from −115 to −15 kJ when the step was a quarter,
+  as an inelastic law on held contact should (each step cancels h·a of approach, ½μ(h·a)²,
+  so O(h) over a crash). The zones took it over (−25 to −130 kJ). Two mechanisms, then: held
+  self-contact rows at 2 kHz, and at finer steps zones re-forming in the same clusters.
