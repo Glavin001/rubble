@@ -1612,3 +1612,17 @@ What it shows:
 - **Opposite-normal clusters (Vouga 2017's excluded case) are not the main cause:** 5 % of
   head 100's zones, none in side 60.
 - Crossings: 0 in all three runs.
+
+**Newton's law on a car's own pairs alone** (`DAT_E=1 DAT_RESTITUTE=newton DAT_E_SELF=1`, a
+measurement, 2 runs of 0.6 s; contact's work as a share of the start's kinetic energy):
+
+| | default (e = 0) | Newton, newly closing, all pairs | Newton, own pairs only |
+|---|---|---|---|
+| Head 100 | 12.5–12.7 % | 7–10 % | 11.0–11.1 % (rows −110 / −114 kJ, zones −15 / −9 kJ) |
+| Ball 100 | 18–20 % | 7–9 % | 6–12 % |
+| Side 60 | 4.6–4.7 % | 4–6 % | 5.8–6.2 % |
+
+Not adopted: no better than Newton on every pair, and worse in side 60. A correction to the
+census above: the zones' net work is a small part of the loss (head 100 −25 of −140 kJ). The
+rows carry the rest, so the self-contact clusters' gross removal is mostly given back by the
+beams. The loss to explain is the rows' inelastic impacts, car against car as well as own.

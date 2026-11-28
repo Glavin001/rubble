@@ -688,7 +688,8 @@ impl Ctx<'_> {
                 // head 100 cross 7 times, 2026-11-27.)
                 let mut r = VRow { q, k: pr.k, w, n, b: (s0 - pr.xi).max(0.0) / self.h, l: warm.prev.get(&pr.k).copied().unwrap_or(0.0), s0, imp: false };
                 r.imp = !vpre.is_empty() && Self::normal(&r, vpre) < 0.0 && !warm.touched_prev.contains(&pr.k);
-                if self.newton_e > 0.0 && r.imp {
+                // (`DAT_E_SELF=1`, a measurement: Newton's law on a car's own pairs alone.)
+                if self.newton_e > 0.0 && r.imp && (std::env::var("DAT_E_SELF").is_err() || pr.k.iter().all(|k| k.0 == pr.k[0].0)) {
                     r.b = r.b.min(self.newton_e * Self::normal(&r, vpre));
                 }
                 warm.touched_next.insert(pr.k);
