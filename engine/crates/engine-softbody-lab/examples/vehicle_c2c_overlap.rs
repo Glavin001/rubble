@@ -367,15 +367,9 @@ fn main() -> Result<(), String> {
         sb.contact_offset = offs;
     }
     let mut w = ExplicitBeamsWorld::new(vec![sa, sb]);
-    // NO_THROTTLE=1: vehicle contact tests every triangle every step (a measurement).
-    if std::env::var("NO_THROTTLE").is_ok_and(|v| v == "1") {
-        w.throttle = false;
-    }
-    // CONTINUOUS=1: continuous contact (`docs/continuous-contact-design.md`; `DAT_RESPONSE=vel`
-    // for velocity contact), as the crash suite runs it.
-    if std::env::var("CONTINUOUS").is_ok_and(|v| v == "1") {
-        w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85));
-    }
+    // NO_THROTTLE=1: every triangle every step (a measurement); CONTINUOUS=1: continuous contact as the crash suite runs it (`DAT_RESPONSE=vel`: velocity contact).
+    w.throttle = !std::env::var("NO_THROTTLE").is_ok_and(|v| v == "1");
+    if std::env::var("CONTINUOUS").is_ok_and(|v| v == "1") { w.continuous = Some(engine_softbody::explicit_contact::Dat::new(0.08, 0.85)); }
     let edges_of = |s: &ExplicitBeams| -> Vec<(u32, u32)> {
         let mut e: Vec<(u32, u32)> = (0..s.triangles.len())
             .filter(|&t| !s.tri_dead.get(t).copied().unwrap_or(false) && !s.tri_anti_only(t))
