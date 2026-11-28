@@ -638,3 +638,20 @@ Resolution of Simultaneous Rigid Body Impact*, TOG 36(4)
 - Not covered by the papers: our outer CCD rounds re-linearise the constraints as the closest
   points slide within a step; theirs are fixed at an instant. Sustained, pressed contact is out
   of their scope. Their solves are CPU QPs, not real time; GPU cost is unknown.
+
+**What transfers and what does not (checked against our solver, `ccd_vel.rs`):**
+- The papers' constraints are homogeneous: J v ≥ 0 at contact (g = 0). The energy proof (each
+  pass is a reflection on the ellipsoid of constant kinetic energy) needs that. Our rows are
+  affine, J v ≥ −b with b = max(s₀ − ξ, 0)/h: a pair may still close by its gap this step. A
+  reflection about an affine bound does not keep kinetic energy, so the proof does not cover our
+  rows as they are.
+- Positions follow velocities (x₁ = x₀ + h·v). An elastic reflection applied at the step's start
+  ends the pair at s₀ + h·|u| instead of the true 2ξ − s₀ + h·|u| (it bounces from up to 2.8 cm
+  early at 55 m/s). That is their Alg. 4 too, but there it costs nothing (rigid balls, no beams).
+  In ours the beams see the difference, the position-step energy error measured on 11-26.
+- This is consistent with the earlier measurement that Newton's law in the rows (J v⁺ ≥ −e·u⁻ on
+  coupled rows, u⁻ from before the kick) did +591 kJ of work at head 100.
+- What would make it apply: impacts resolved at their time of impact within the step (a
+  contact's own instant, as asynchronous methods do), or rows that are homogeneous (b = 0) with
+  the gap's closing done by free flight up to the contact. Both are open designs here, with costs
+  not measured.
