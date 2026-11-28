@@ -1238,6 +1238,14 @@ Contact's work (rule 8), 2 runs each:
   - Ball 100: with the exact solve and torque-free rows, 131 → 42.9 mm (guard 70); by default
     41–45 → 38.6 mm, zones 150–234 → 58–69.
   - The velocity CI guard passes (3 crashes, 2 runs).
+- **The combination, with the ball's edge pairs** (exact solve, torque-free rows, share 0.9,
+  Newton's law on newly closing rows), measured as a candidate default for velocity contact:
+  - ball 100: 7.2–7.4 % removed, 1 zone;
+  - side 60: 3.7–3.9 % removed, 9–30 zones;
+  - head 100: 12.4–14.0 % removed, 518–572 zones, and angular momentum 4.4 N·m·s in a step
+    (bar 2): the CI guard fails.
+
+  Not adopted.
 - **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
   ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
   adoptable as it stands.
