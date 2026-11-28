@@ -1645,3 +1645,36 @@ total):
   as an inelastic law on held contact should (each step cancels h·a of approach, ½μ(h·a)²,
   so O(h) over a crash). The zones took it over (−25 to −130 kJ). Two mechanisms, then: held
   self-contact rows at 2 kHz, and at finer steps zones re-forming in the same clusters.
+
+## Do the cars back apart? Fusion after a head-on (measured 2026-11-28)
+
+The owner's reframe (2026-11-28): the failure that matters is passing through and then
+fusing, cars that cannot back apart after a crash. Brief, shallow overlap is acceptable.
+`vehicle_c2c_overlap sedan KMH 0.6` with `REVERSE=2.0` (both drivers at full reverse after
+0.6 s) and the new `CONTINUOUS=1` (continuous contact as the crash suite runs it). Generated
+sedan, CPU, one run each; edges = the worst count of a car's collision-skin edges through the
+other's triangles (every 4 ms); paint = the deepest drawn vertex inside the other's hull during
+the run. Logs in `out/meas/fuse/`.
+
+| run | after the reverse | edges through triangles | paint deepest |
+|---|---|---|---|
+| default, 60 + 60 | 22.3 m apart, separating at 17.6 m/s | 59 / 66 | 93 / 103 mm |
+| default, 60 + 60, 0.8 m offset | 17.2 m, 11.4 m/s | | |
+| default, 100 + 100 | **fused**: 3.71 m, 0.01 m/s | 104 / 89 | 204 / 162 mm |
+| edge contact, 100 + 100 | **fused**: 3.63 m, 0.00 m/s | 36 / 28 | 211 / 140 mm |
+| velocity contact + edge contact, 100 + 100 | 42.2 m, 25.8 m/s | **0 / 0** | 33 / 32 mm |
+| the same, no rigid zones, 2 CCD rounds (`DAT_ZONES=0 DAT_CCD=2`; 1 s of reverse) | 12.7 m, 6.3 m/s | **0 / 0** | 144 / 147 mm |
+
+- At 60 + 60 the default now backs apart. Known bug S4's lock (0.15 m in 2 s) appears at
+  100 + 100.
+- Velocity contact removes the fusion at 100 + 100: no skin edge passes through, no node is
+  held inside, and the cars reverse apart. Edge contact alone does not.
+- Without the zones and with 2 rounds it still never fuses or tunnels (0 edges through). It
+  lets the paint sink deeper during the hit, 14–15 cm against 3 cm. That is the cheap
+  anti-fusion layer the owner described. The zones and the many rounds are what buy the
+  shallow paint, at the cost measured above (energy, GPU phases).
+- The 2-round run was slower on the CPU (2.6 s did not finish in 290 s, where the full
+  version did). Leaving pairs unresolved costs more in later steps, so fewer rounds is not
+  automatically cheaper.
+- The 20-30 nodes "inside" by winding number in the velocity runs are counted against a hull
+  with 222 open edges. No skin edge crosses a triangle, and none is held.
