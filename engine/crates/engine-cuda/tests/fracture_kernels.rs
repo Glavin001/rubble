@@ -113,3 +113,16 @@ fn the_frame_s_entries_are_found_by_name() {
         assert!(kernel(module, entry).is_some(), "{module}.{entry}");
     }
 }
+
+/// On a CUDA device: every module loads, with its entry, its `{entry}_gs` and its
+/// parameter block. Skips where there is no device or the build had no nvcc.
+#[test]
+fn every_module_loads_on_the_device() {
+    if !engine_cuda::CudaSim::available() {
+        eprintln!("skipped: no CUDA device, or the build has no device code");
+        return;
+    }
+    let loaded = engine_cuda::fracture::load_all().expect("the fracture kernels load");
+    eprintln!("loaded {loaded} modules");
+    assert_eq!(loaded, CUDA_FRACTURE_KERNELS.len());
+}

@@ -312,7 +312,12 @@ overlap. `engine-slang-build` compiles a source outside the `slang` tree from a 
 directory (`cuda_layout::compile_kernel_at`), so the CUDA text is the same in every
 checkout, and its compile cache now follows `import name;` (before, an import left the
 compile uncached). `tools/build-time/kernel_digest.py`: 2,973 generated files identical to
-main's. nvcc time for the 170 single-entry modules is not measured yet.
+main's. nvcc on Modal's builder (16 cores): the 170 single-entry modules in 83 s of cargo
+and packing (`blast_motion` 26 s, `blast_native` 8 s, the rest 2 s or less each). On a T4,
+`every_module_loads_on_the_device` loads all 170 (each module's entry, its `{entry}_gs`
+and a `SLANG_globalParams` of the reflected size): 4.7 container seconds, $0.0014
+(`gpu_run.sh --build modal -- -p engine-cuda --features stress --test fracture_kernels`).
+CI does not build the feature yet (its runner has 4 cores; the time there is not measured).
 
 The command list (`stress_layout::plan`), each suite through the replay and through the
 legacy recorder on the M3 Max: stress-gpu `fracture` 7/7 (and with

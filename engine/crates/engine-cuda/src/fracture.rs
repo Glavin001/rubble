@@ -30,3 +30,43 @@ pub fn kernel(module: &str, entry: &str) -> Option<&'static FractureCudaKernel> 
         .iter()
         .find(|k| k.module == module && k.entry == entry)
 }
+
+/// Loads every fracture kernel on the device (a context of this thread's own on device
+/// 0): each module's entry, its `{entry}_gs`, and its `SLANG_globalParams` no smaller
+/// than the reflection says. The first check a build's device code gets before a host
+/// runs it. Returns the modules loaded; an error names the first that does not load.
+pub fn load_all() -> anyhow::Result<usize> {
+    use cudarc::driver::result;
+    use std::ffi::{c_void, CString};
+    let map = |e: cudarc::driver::DriverError| anyhow::anyhow!("CUDA: {e:?}");
+    result::init().map_err(map)?;
+    let dev = result::device::get(0).map_err(map)?;
+    let ctx = unsafe { result::primary_ctx::retain(dev) }.map_err(map)?;
+    unsafe { result::ctx::set_current(ctx) }.map_err(map)?;
+    let mut loaded = 0;
+    for k in CUDA_FRACTURE_KERNELS {
+        let name = format!("{}.{}", k.module, k.entry);
+        anyhow::ensure!(
+            !k.image.is_empty(),
+            "{name}: no device code (the build had no nvcc)"
+        );
+        let module = unsafe { result::module::load_data(k.image.as_ptr() as *const c_void) }
+            .map_err(|e| anyhow::anyhow!("{name}: load: {e:?}"))?;
+        for function in [k.entry.to_string(), format!("{}_gs", k.entry)] {
+            unsafe { result::module::get_function(module, CString::new(function.clone())?) }
+                .map_err(|e| anyhow::anyhow!("{name}: function {function}: {e:?}"))?;
+        }
+        let (_, bytes) =
+            unsafe { result::module::get_global(module, CString::new("SLANG_globalParams")?) }
+                .map_err(|e| anyhow::anyhow!("{name}: SLANG_globalParams: {e:?}"))?;
+        anyhow::ensure!(
+            bytes >= k.params_bytes as usize,
+            "{name}: SLANG_globalParams is {bytes} bytes, reflection says {}",
+            k.params_bytes
+        );
+        unsafe { result::module::unload(module) }
+            .map_err(|e| anyhow::anyhow!("{name}: unload: {e:?}"))?;
+        loaded += 1;
+    }
+    Ok(loaded)
+}
