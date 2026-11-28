@@ -1212,6 +1212,22 @@ Contact's work (rule 8), 2 runs each:
   The faces are tilted against the normal, and large against the 0.5–2 mm gap, so their far
   corners start "inside" along it. Corner rows would hold separations the step starts far from.
   Killed by its own test; not built.
+- **The re-linearisation share swept** (the exact solve, torque-free rows; head 100, 0.3 s; a
+  looser share is a loosened tolerance, the owner's call: measured only):
+
+  | share | zones | paint | angular momentum, worst step |
+  |---|---|---|---|
+  | 0.98 (now) | 1,151 | 6.5 mm | 0.29 N·m·s |
+  | 0.9 | 531 | 0 mm | 1.1 |
+  | 0.8 | 239 | 61 mm | 1.3 |
+  | 0.7 | 74 | 36 mm | 5.7 |
+  | 0.5 | 56 | 77 mm | 2.2 |
+
+  - **The paint is erratic in the share**, not graded. That fits Fable's reading: the generator's
+    door-top paint, shown where zones stop holding panels, not the band itself.
+  - **At 0.9 with Newton's law on newly closing rows:** ball 5.8–6.5 %, side 3.7–3.9 %, head 100
+    12.4–14.0 %. Head 100's remaining 518–572 zones remove 77–112 kJ.
+  - **At 0.9 with 32 rounds:** 562 zones against 531. More rounds do not end them.
 - **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
   ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
   adoptable as it stands.
