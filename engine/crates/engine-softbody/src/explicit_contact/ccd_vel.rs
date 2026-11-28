@@ -52,6 +52,12 @@ pub struct Warm {
 /// about 2 J a second of 200 kJ.
 pub(super) const PUSH_TOL: f32 = 1.0e-5;
 
+/// The settle test's closing slack, a share of what a row may close to (`DAT_GAP_SHARE`, a
+/// measurement; default [`ROW_GAP_SHARE`]): near 1 lets a row close nearly to the collision skin.
+fn gap_share() -> f32 {
+    std::env::var("DAT_GAP_SHARE").ok().and_then(|v| v.parse().ok()).unwrap_or(ROW_GAP_SHARE)
+}
+
 fn push_tol() -> f32 {
     std::env::var("DAT_PUSH_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(PUSH_TOL)
 }
@@ -200,7 +206,7 @@ impl Ctx<'_> {
         // gap alone here, a pair inside its gap settled where the rounds linearised it again
         // every round, and the rounds ran out into rigid zones, 2026-11-27).
         let rounding: f32 = (0..4).map(|j| r.w[j].abs() * prec[r.k[j].0][r.k[j].1 as usize]).sum();
-        -g * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi.min(r.s0.max(0.0)) && (l * g <= push_tol() || g <= push_share() * r.b.abs() || g <= rounding)
+        -g * self.h <= gap_share() * self.pairs[r.q].xi.min(r.s0.max(0.0)) && (l * g <= push_tol() || g <= push_share() * r.b.abs() || g <= rounding)
     }
 
     /// Each node's velocity as far as its storage and sums can tell it (m/s): [`ROUND_ULPS`] units
@@ -323,7 +329,7 @@ impl Ctx<'_> {
             for (r, &lr) in rows.iter().zip(&l) {
                 if !self.row_settled(r, lr, vel, &prec) {
                     let g = Self::normal(r, vel) + r.b;
-                    let close = -g * self.h > ROW_GAP_SHARE * self.pairs[r.q].xi.min(r.s0.max(0.0));
+                    let close = -g * self.h > gap_share() * self.pairs[r.q].xi.min(r.s0.max(0.0));
                     eprintln!("UNSET s0/xi {:.3e} s0 {:.3e} b {:.3e} g {:.3e} l {:.3e} fails {}", r.s0 / self.pairs[r.q].xi, r.s0, r.b, g, lr, if close { "close" } else { "push" });
                 }
             }
@@ -441,7 +447,7 @@ impl Ctx<'_> {
 
     /// The row closes past its bound by at most [`ROW_GAP_SHARE`] of what it may close to.
     fn keeps_gap(&self, r: &VRow, vel: &[Vec<Vec3>]) -> bool {
-        -(Self::normal(r, vel) + r.b) * self.h <= ROW_GAP_SHARE * self.pairs[r.q].xi.min(r.s0.max(0.0))
+        -(Self::normal(r, vel) + r.b) * self.h <= gap_share() * self.pairs[r.q].xi.min(r.s0.max(0.0))
     }
 
     /// A measurement (`DAT_CLUSTERS=1`): the rows left unsettled and the sizes of the clusters

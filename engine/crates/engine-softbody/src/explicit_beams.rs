@@ -5832,9 +5832,7 @@ impl TriFrame {
 
 /// The contact surface's offsets (`rubbleContactOffset`), when the desc has any.
 fn desc_contact_offsets(desc: &SoftVehicleDesc) -> Vec<f32> {
-    if desc.nodes.iter().any(|n| n.contact_offset > 0.0) {
-        desc.nodes.iter().map(|n| n.contact_offset).collect()
-    } else {
-        Vec::new()
-    }
+    // (`CONTACT_OFFSET_SCALE=s`, a measurement: every offset times s; 0 puts contact on the node triangles.)
+    let s = std::env::var("CONTACT_OFFSET_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+    if s > 0.0 && desc.nodes.iter().any(|n| n.contact_offset > 0.0) { desc.nodes.iter().map(|n| n.contact_offset * s).collect() } else { Vec::new() }
 }

@@ -1507,3 +1507,49 @@ Tried and reverted: binding each paint mesh only to its part's collision-surface
 alone fits fenders poorly, and one hood mesh still bound `hd_i32`. The fix belongs in the
 skin's fit: weights for paint vertices that keep them on the surface sheet. It is not a
 change of contact.
+
+## Three diagnostic measurements: shells, settle tolerances, energy (2026-11-27, night; CPU, off)
+
+Asked "why is our problem different from the crash codes' and cloth's?", I proposed that the
+5-12 cm paint shells and the settle test's tight tolerances cause the zones. Measured, head 100,
+generated sedan, velocity contact, one run 0.3 s unless stated (runs are deterministic: three
+repeats gave 5,858 zones each):
+
+**(c) The paint shells.** `rubbleContactOffset` over the 256 offset nodes: median 36 mm, p90
+93 mm, max 120 mm (the cap); bumpers' median 57, fenders' 65. Two bumpers are held about 11 cm
+apart. But with the offsets scaled away (`CONTACT_OFFSET_SCALE`, a measurement):
+
+| offset scale | 0 | 0.25 | 0.5 | 1 |
+|---|---|---|---|---|
+| zones, e = 0 | 4,353 | 4,366 | 5,304 | 5,858 |
+| zones, e = 1 | 4,952 | 5,663 | 5,484 | 5,257 |
+
+The zones barely depend on the shells: **the hypothesis is refuted**. 5,410 of the 5,858 come in
+the first 0.1 s: the impact itself, not sustained crushed contact.
+
+**(b) The settle test.** `DAT_GAP_SHARE` (closing slack, default 0.01), `DAT_RELIN`,
+`DAT_PUSH_TOL` (over-push):
+
+| | zones | paint worst |
+|---|---|---|
+| default | 5,858 | 0 mm |
+| over-push accepted | 3,027 | 0 |
+| slack 0.5, re-aim 0.5 | 5,824 | 0 |
+| slack 0.9, re-aim 0.1, over-push accepted | 903 (e = 1: 864) | 4.9 mm (12.6) |
+
+0 crossings in every row. But the energy (`continuous_energy_*`, 2 runs, contact's work):
+
+| | head 100 rows / zones | head 100 total | ball 100 | side 60 |
+|---|---|---|---|---|
+| default (e = 0) | −115 / −25 kJ | 12.5-12.7 % | −7.9 to −8.5 kJ (18-20 %) | 4.6-4.7 % |
+| loosened (last row above) | +2 to −12 / −229 kJ | 20-22 % | **+3.8 kJ created** | 1.5-3.6 % (rows +1.6 kJ in one) |
+
+Fewer zones, each larger: the head-on loses more. Accepting over-push creates energy. **Not the fix.**
+
+**What the measurements say.** At e = 0 the rows alone, with almost no zones' share, remove
+115 kJ (10 %) of the head-on: the inelastic node impacts themselves, not the fallback. The
+impulse at a 2.5 kg lumped node takes, in one 0.5 ms step, the closing energy that in metal flows
+into the panel over the contact's duration. Restitution (e = 1) returns it (rows 5.2 %) but
+Newton's law is ill-posed for simultaneous contacts and created energy on the elastic bars.
+This is the trade-off the crash codes avoid with a µs step (contact lasts many steps) and cloth
+accepts (dissipation does not matter there).
