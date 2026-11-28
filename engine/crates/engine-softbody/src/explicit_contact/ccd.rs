@@ -36,6 +36,62 @@ pub fn fixed_overflows() -> u64 {
     FIXED_OVERFLOWS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `DAT_ZONE_WHY=1`, a measurement: the first round's zones classified ([`zone_why`]):
+/// zones, those of one pair, with a node pushed from opposite sides (normals' dot < −0.5),
+/// with a car's own pair, with a node zoned in the solve before, and their pairs.
+static ZONE_WHY: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
+static ZONED_BEFORE: std::sync::Mutex<Option<std::collections::HashSet<(usize, u32)>>> = std::sync::Mutex::new(None);
+
+/// [`ZONE_WHY`] so far: [zones, one pair, opposite, own, repeated, pairs, and of the one-pair
+/// zones: inside their gap at the start, sharing a node, edge-edge; their end gap over the gap
+/// kept, signed along the start's normal: < 0 (crossed), < 0.5, < 0.9, < 1, ≥ 1 (dips mid-path);
+/// every round: kinetic energy (mJ) the rigid zones of at most 4 nodes removed, and the larger ones'].
+pub fn zone_why() -> [u64; 16] {
+    std::array::from_fn(|i| ZONE_WHY[i].load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn classify_zones(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &[Vec<Vec3>], hit: &[(usize, f32)], zone_of: &std::collections::HashMap<(usize, u32), usize>, parent: &mut [usize], find: fn(&mut [usize], usize) -> usize) {
+    use std::collections::{HashMap, HashSet};
+    let mut push: HashMap<(usize, u32), Vec<Vec3>> = HashMap::new();
+    let mut per: HashMap<usize, (u64, bool, bool, bool, bool, f32)> = HashMap::new();
+    for &(q, _) in hit {
+        let pr = &pairs[q];
+        let (w, gv) = closest(pr.nn, pr.k.map(|(v, i)| x0[v][i as usize]));
+        let n = gv.normalize_or_zero();
+        for j in 0..4 {
+            if w[j] != 0.0 {
+                push.entry(pr.k[j]).or_default().push(n * w[j].signum());
+            }
+        }
+        let z = find(parent, zone_of[&pr.k[0]]);
+        let e = per.entry(z).or_default();
+        e.0 += 1;
+        e.1 |= pr.k.iter().all(|k| k.0 == pr.k[0].0);
+        e.5 = closest(pr.nn, pr.k.map(|(v, i)| x1[v][i as usize])).1.dot(n) / pr.xi.max(1e-9);
+        (e.2, e.3, e.4) = (gv.length() < pr.xi, (0..4).any(|a| (a + 1..4).any(|b| pr.k[a] == pr.k[b])), pr.nn == 2);
+    }
+    let mut opp: HashSet<usize> = HashSet::new();
+    for (key, l) in &push {
+        if l.iter().enumerate().any(|(a, na)| l[a + 1..].iter().any(|nb| na.dot(*nb) < -0.5)) {
+            opp.insert(find(parent, zone_of[key]));
+        }
+    }
+    let mut before = ZONED_BEFORE.lock().unwrap();
+    let prev = before.take().unwrap_or_default();
+    let mut rep: HashSet<usize> = HashSet::new();
+    for key in zone_of.keys() {
+        if prev.contains(key) {
+            rep.insert(find(parent, zone_of[key]));
+        }
+    }
+    *before = Some(zone_of.keys().copied().collect());
+    let one = |f: &dyn Fn(&(u64, bool, bool, bool, bool, f32)) -> bool| per.values().filter(|p| p.0 == 1 && f(p)).count() as u64;
+    let c = [per.len() as u64, per.values().filter(|p| p.0 == 1).count() as u64, opp.len() as u64, per.values().filter(|p| p.1).count() as u64, rep.len() as u64, per.values().map(|p| p.0).sum(), one(&|p| p.2), one(&|p| p.3), one(&|p| p.4), one(&|p| p.5 < 0.0), one(&|p| (0.0..0.5).contains(&p.5)), one(&|p| (0.5..0.9).contains(&p.5)), one(&|p| (0.9..1.0).contains(&p.5)), one(&|p| p.5 >= 1.0)];
+    for (i, v) in c.iter().enumerate() {
+        ZONE_WHY[i].fetch_add(*v, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn add_counted(a: i32, b: i32) -> i32 {
     let (r, o) = a.overflowing_add(b);
     if o {
@@ -382,7 +438,8 @@ fn impact_zones(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: 
         let ids: Vec<Option<usize>> = pairs[q].k.iter().map(|key| zone_of.get(key).map(|&z| find(parent, z))).collect();
         !(ids[0].is_some() && ids.iter().all(|z| *z == ids[0]))
     };
-    for _ in 0..zone_rounds {
+    let why = std::env::var("DAT_ZONE_WHY").is_ok();
+    for round in 0..zone_rounds {
         let hit: Vec<(usize, f32)> = collide(x1).into_iter().filter(|&(q, _)| across(q, &zone_of, &mut parent)).collect();
         if hit.is_empty() {
             return;
@@ -405,6 +462,9 @@ fn impact_zones(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: 
                 }
             }
         }
+        if why && round == 0 {
+            classify_zones(pairs, x0, x1, &hit, &zone_of, &mut parent, find);
+        }
         let mut zones: std::collections::BTreeMap<usize, Vec<(usize, u32)>> = Default::default();
         let keys: Vec<(usize, u32)> = zone_of.keys().copied().collect();
         for key in keys {
@@ -415,7 +475,13 @@ fn impact_zones(pairs: &[CcdPair], x0: &[Vec<Vec3>], x1: &mut [Vec<Vec3>], vel: 
         for nodes in zones.values_mut() {
             nodes.sort_unstable();
             st.zone_nodes += nodes.len() as u64;
-            if !rigid_zone(nodes, x0, x1, vel, m, im, h) {
+            let ke = |vel: &[Vec<Vec3>]| nodes.iter().map(|&(v, i)| 0.5 * m[v][i as usize] as f64 * vel[v][i as usize].length_squared() as f64).sum::<f64>();
+            let k0 = if why { ke(vel) } else { 0.0 };
+            let spun = !rigid_zone(nodes, x0, x1, vel, m, im, h);
+            if why {
+                ZONE_WHY[if nodes.len() <= 4 { 14 } else { 15 }].fetch_add(((k0 - ke(vel)).max(0.0) * 1e3) as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            if spun {
                 st.zone_spin += 1;
             }
         }

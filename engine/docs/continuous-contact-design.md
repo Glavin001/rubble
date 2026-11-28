@@ -1577,7 +1577,38 @@ What it shows:
   impact inelastically, would remove the same energy. Only the impact law changes it
   (restitution, above: the best variant measured was 7–10 % on head 100).
 - **The zones are not stacked contacts from a large step either.** They form at the same rate
-  per unit of time at 8 kHz. They are persistent clusters that stay stuck (opposite-normal rows,
-  the implicit equality constraints of Vouga et al. 2017, `contact-literature.md` §11), and more
-  steps re-form them more often.
+  per unit of time at 8 kHz, and more steps re-form them more often. (Opposite-normal clusters
+  were the guess here; the census below measures it: they are 5 % of head 100's zones.)
 - Contact substeps are therefore not adopted. The switch stays as a measurement.
+
+## What the zones are: a census (`DAT_ZONE_WHY=1`, measured 2026-11-28)
+
+`ccd::zone_why`, a measurement: each solve's first-round rigid zones, classified, and the
+kinetic energy every rigid zone removed (gross, summed over its nodes, every round). Velocity
+contact, generated sedan, CPU, one run of 0.3 s:
+
+| | head 100 | side 60 | ball 100 |
+|---|---|---|---|
+| first-round zones | 2,660 | 1,545 | 31 |
+| of one pair | 1,286 (48 %) | 1,007 (65 %) | 5 |
+| with a node pushed from opposite sides (normals' dot < −0.5) | 140 (5 %) | 0 | 18 |
+| with a car's own pair | 2,527 (95 %) | 1,340 (87 %) | 31 |
+| with a node zoned in the solve before | 2,405 (90 %) | 1,438 (93 %) | 25 |
+| one-pair zones: inside their gap at the start / edge-edge | 118 / 719 | 27 / 622 | 2 / 3 |
+| one-pair zones' end gap ÷ the gap kept: < 0.9 / 0.9–1 / ≥ 1 (dips mid-path) | 16 / 720 / 550 | 1 / 583 / 423 | 0 / 4 / 1 |
+| kinetic energy removed by zones of ≤ 4 nodes / larger | 52 kJ / 1,675 kJ | 11 kJ / 384 kJ | 0.02 kJ / 17 kJ |
+
+What it shows:
+- **Half the zones are near misses.** One pair, mostly edge-edge, none crossed, none below half
+  its gap. 56 % end the step within 10 % of the paint allowance ξ (a few mm at the median 36 mm
+  offset), and the rest end above it, dipping below only mid-path. They are many but cheap:
+  3 % of the zones' energy.
+- **The energy is in large clusters of a car's own pairs** that persist step after step: the
+  crumple zone folding onto itself. 97 % of head 100's zone removal, 97 % of side 60's.
+  Gross removal there (1.7 MJ in 0.3 s against 1.1 MJ at the start) exceeds the net change
+  (contact's work −25 kJ in the zones), so the zones keep freezing motion the beams put back:
+  they act as a damper on the folding metal. Non-rigid zones (above) leave the removal where it
+  was, so the cause is the inelastic law in self contact, not the zones' rigidity.
+- **Opposite-normal clusters (Vouga 2017's excluded case) are not the main cause:** 5 % of
+  head 100's zones, none in side 60.
+- Crossings: 0 in all three runs.
