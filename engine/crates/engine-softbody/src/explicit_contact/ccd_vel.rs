@@ -630,6 +630,17 @@ impl Ctx<'_> {
                     if passes && !(all && s_true > 0.0) {
                         continue;
                     }
+                    if std::env::var("DAT_CORNERS").is_ok() && s_end > 0.0 && s_end >= relin_share() * r.s0.min(pr.xi) {
+                        // (A measurement: a pair the true gap alone sends back; its corner pairs'
+                        // separations along the row's normal at the start and the end, over ξ,
+                        // and the true gap's length over ξ.)
+                        let (a0, a1) = (pos(self.x0, &pr.k), b);
+                        let nn = pr.nn;
+                        let corners = |x: &[Vec3; 4]| -> Vec<f32> { let mut v = Vec::new(); for i in 0..nn { for j in nn..4 { v.push(r.n.dot(x[j] - x[i])); } } v };
+                        let c0 = corners(&a0).iter().fold(f32::MAX, |m, &x| m.min(x));
+                        let c1 = corners(&a1).iter().fold(f32::MAX, |m, &x| m.min(x));
+                        eprintln!("CORNERS nn {nn} start-min/xi {:.3} end-min/xi {:.3} s_true/xi {:.3} |true|/xi {:.3} limit/xi {:.3}", c0 / pr.xi, c1 / pr.xi, s_true / pr.xi, closest(nn, a1).1.length() / pr.xi, relin_share() * r.s0.min(pr.xi) / pr.xi);
+                    }
                     if std::env::var("DAT_RELINWHY").is_ok() {
                         let lim = relin_share() * r.s0.min(pr.xi);
                         eprintln!("RELINWHY end {} true {} | s_end/lim {:.4} s_true/lim {:.4} s0/xi {:.3}", s_end <= 0.0 || s_end < lim, s_true <= 0.0 || s_true < lim, s_end / lim, s_true / lim, r.s0 / pr.xi);

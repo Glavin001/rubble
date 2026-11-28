@@ -1203,6 +1203,15 @@ Contact's work (rule 8), 2 runs each:
   `DAT_RELIN_ALL=1`; a rebuilt row counts as a change only where the old test fails): 3,245
   zones against 1,151. Rows that follow their pair's sliding closest points destabilise the
   rounds rather than end them.
+- **Corner rows along the frozen normal, a contact manifold** (Fable's proposal; its kill test,
+  `DAT_CORNERS=1`). For the 1,700 pairs the true gap alone sent back (head 100, 0.1 s):
+  - 84 % have a corner already below 0 at the start along the row's normal; the median corner
+    start separation is −19 ξ;
+  - 19 % would be ghost contacts (a corner under the limit while the true gap is at or past ξ).
+
+  The faces are tilted against the normal, and large against the 0.5–2 mm gap, so their far
+  corners start "inside" along it. Corner rows would hold separations the step starts far from.
+  Killed by its own test; not built.
 - **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
   ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
   adoptable as it stands.
