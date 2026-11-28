@@ -1246,6 +1246,9 @@ Contact's work (rule 8), 2 runs each:
     (bar 2): the CI guard fails.
 
   Not adopted.
+- **Without the zones** (`DAT_ZONES=0`, the exact solve and torque-free rows; head 100, 0.3 s):
+  61 crossings, 7,531 unresolved pairs, angular momentum 4.8 N·m·s in a step. The zones still keep
+  the collision meshes apart, not only the paint.
 - **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
   ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
   adoptable as it stands.
