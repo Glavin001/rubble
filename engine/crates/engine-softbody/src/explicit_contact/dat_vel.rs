@@ -86,6 +86,18 @@ fn sphere_pairs(balls: &[Ball], surf: &[Surface], x0: &[Vec<Vec3>], x1: &[Vec<Ve
                 out.push(super::super::ccd::CcdPair { k: [(nv + i, 0), (v, t[0]), (v, t[1]), (v, t[2])], nn: 1, xi: b.r + gap });
             }
         }
+        // And against the surface's edges (a window frame's members border no triangle on the
+        // opening's side: the ball passed between them and their paint sank into it, 131 mm,
+        // once zones no longer held the door rigid): the edge, then the centre as a segment of
+        // no length (edge against edge; its impulse lands on the centre twice).
+        for e in &surf[v].edges {
+            let (p, q) = (x0[v][e[0] as usize], x0[v][e[1] as usize]);
+            let reach = (c1 - c0).length() + e.iter().map(|&k| (x1[v][k as usize] - x0[v][k as usize]).length()).fold(0.0f32, f32::max);
+            let near = super::closest_segments(p, q, c0, c0).0.distance(c0);
+            if near < b.r + gap + 2.0 * reach + 0.02 {
+                out.push(super::super::ccd::CcdPair { k: [(v, e[0]), (v, e[1]), (nv + i, 0), (nv + i, 0)], nn: 2, xi: b.r + gap });
+            }
+        }
     }
     out
 }

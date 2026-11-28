@@ -1228,6 +1228,16 @@ Contact's work (rule 8), 2 runs each:
   - **At 0.9 with Newton's law on newly closing rows:** ball 5.8–6.5 %, side 3.7–3.9 %, head 100
     12.4–14.0 %. Head 100's remaining 518–572 zones remove 77–112 kJ.
   - **At 0.9 with 32 rounds:** 562 zones against 531. More rounds do not end them.
+- **The ball's 131 mm of paint was a coverage hole, not the exact solve** (`BALL_WHERE=1`). The
+  deepest paint sat on the front door's window frame (y 1.09–1.35 m), bound to frame and shell
+  nodes. The ball's centre was tested against triangles only, so it passed between the frame's
+  members, whose edges border no triangle on the opening's side, and their paint sank into it;
+  the zones had held the door rigid before.
+  - The ball's centre is now tested against the surface's edges too (`dat_vel::sphere_pairs`;
+    velocity contact only).
+  - Ball 100: with the exact solve and torque-free rows, 131 → 42.9 mm (guard 70); by default
+    41–45 → 38.6 mm, zones 150–234 → 58–69.
+  - The velocity CI guard passes (3 crashes, 2 runs).
 - **What remains:** the sliding contact's re-linearisation, which keeps head 100's rounds from
   ending. Its loose setting breaches the paint guard and the angular momentum bar, so it is not
   adoptable as it stands.
