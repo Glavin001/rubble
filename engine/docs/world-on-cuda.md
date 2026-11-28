@@ -211,11 +211,28 @@ separate host and is not ported: it stays on wgpu as a reference.
    pressure loading is ported as it is first (its blocking reads counted), then its face
    loads move to a kernel.
 
-Open before step 4: the loop audit of these kernels. Slang's CUDA for the 170 entries
-holds about 490 `for(;;)` loops (fracture 225, the wide solve 101, `blast_native` 66,
-`blast_motion` 52); the CAS union-find loops (`fracture.slang`, `blast_topology.slang`)
-and any other without a bound from its data get one, with a status bit, before any of
-them runs on a GPU that cannot be reset from here.
+The loop audit of these kernels (2026-11-28, the 13 modules and what they import). Of
+their 269 loops, 262 are `for` loops over a plain counter against a fixed limit or a
+size the host set. The other seven:
+
+| Loop | Ends because | Cap |
+|---|---|---|
+| `coupling.slang:348`, the insertion sort's inner `while` | `b` steps down to the segment's start | the segment's length |
+| `fracture.slang:498`, `find`, and `fr_uf_union`'s retry | the parent chain ends at a root; the hook succeeds | `guard < 2^20`; `guard < 4096` |
+| `blast_native.slang:290`, the solve's iterations | converged or failed | `params.max_iterations` |
+| `blast_topology.slang:335`, `sort_list`'s `span` | `span` doubles past `n` | none needed below 2^31 items |
+| **`blast_topology.slang:77`, `find`** | a parent only ever moves to a smaller root | **none** |
+| **`fracture.slang:2271`, `il_run`'s rounds** | every round passes a further interval's end, at most the tube's count of rounds | **none** |
+| **`blast_motion.slang:539`, the levels** | a round that levels no node ends it, at most the island's node count of rounds | **none** |
+
+The three without a cap end by an argument about their data, so a corrupted table (a
+parent cycle, a NaN that compares false is safe, a list that never empties) would run
+them for ever. Each gets a cap it can never reach when its data is sound (the node count,
+the tube's count, the island's node count; uniform across the group where the loop has
+barriers) and a status bit the host fails the step on. That is a kernel edit: the
+generated Metal and WGSL change, so it goes up the ladder (the stress suites, Chrome's
+validation) by itself. It does not block CUDA runs on Modal, whose containers are capped
+by time; the Mac already runs these loops today.
 
 Verdict: `stress-rubble/tests/fracture_models.rs` and the threshold tests on a T4; two
 CUDA runs of each scene bit for bit; CUDA against wgpu on the same scene (first break
