@@ -344,12 +344,19 @@ The specification is [beamng-structure-study.md](beamng-structure-study.md) §10
 
 **State: the rigger builds the car on the body definitions** (554 nodes, 3,467 JBeam beams, 131-node shell, 48 mechanical parts; shell and parts at built / rule stiffness 1.000, ω·h 1.85; 1,447.7 kg against a kerb mass of 1,450). The "not done" list of the section above is superseded by this one.
 
+**The default since 2026-11-27 is `real_crash`** (owner: a car's strength is calibrated to real
+crash data, NHTSA's instrumented tests and finite-element models of real cars, not to the ETK;
+the explicit 2 kHz step and its soft beams are accepted as BeamNG's own trade-off). The tables
+below were measured when `beamng_feel` was the default and the ETK the bar; `beamng_feel` stays
+as a preset for comparison. "Real steel to 2 kHz" below is the mapping as a table; the
+measurements against the Camry are in lessons §29 and `engine/docs/crash-reference/`.
+
 **The setting.** `Physics.crash` (`engine_vehiclegen::physics::CrashFeel`) is the car's crash character: multiples on the definitions' mean crush forces by zone and on the panels' yield strain, applied before the lattice is built (never beam by beam). A multiple `s` on a box section's crush force is the same section in a gauge `s^0.6` times as thick.
 
 | Preset | Front crush | Towers | Cabin | Rear | Panel yield strain | What it is |
 |---|---|---|---|---|---|---|
-| `beamng_feel` (default) | 1.8 (crash box 1.5 → 2.1 mm, rail 1.8 → 2.6 mm, or DP980-class steel) | 1.5 | 1.5 | 1.0 (not measured yet) | 2.0 (hood, fenders 6 %; doors 2.9 %) | the ETK's level in the same scenes |
-| `real_crash` | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | the members as defined; nearest the NHTSA full-frontal bands |
+| `beamng_feel` (the default until 2026-11-27) | 1.8 (crash box 1.5 → 2.1 mm, rail 1.8 → 2.6 mm, or DP980-class steel) | 1.5 | 1.5 | 1.0 (not measured yet) | 2.0 (hood, fenders 6 %; doors 2.9 %) | the ETK's level in the same scenes |
+| `real_crash` (default) | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | the members as defined; nearest the NHTSA full-frontal bands |
 
 **Side by side** (`examples/frontal_compare`, CPU reference, surface contact on, pressure wheels, 0.6 s after contact; ETK K-series `kc6`). There is no offset or centre-pole reference in `crash-reference-targets.md`; the full wall's NHTSA bands are crush 620–750 mm, peak 34–47 g, restitution 0.13–0.20.
 
@@ -385,6 +392,28 @@ The specification is [beamng-structure-study.md](beamng-structure-study.md) §10
 - **Side pole on raycast wheels.** A car launched sideways rides a carrier (`crash_rigs::on_carrier`, tyre grip 0.01): 31.7 km/h at the pole from a 32 km/h launch; before, its own tyres stopped it.
 
 **Not done:** stiffness against the ETK on the new body (`sedan_stiffness`: modes, kerb wobble, settle), the head-on (`vehicle_c2c_overlap` needs the new hub names and placement by the tyre's bottom), lint rules 2, 8, 11, 14–24 and the "nothing faked" rules, matched stills against the ETK, the rear's crash character, the fender bolts.
+
+## Real steel to 2 kHz: the mapping (2026-11-27)
+
+`cargo run --release -p engine-softbody-lab --example strength_map -- [DESIGN] [PRESET]` prints,
+from the generator, each boxed crush member's real section beside its lattice chords, and every
+zone of the shell lattice (spring, yield, stretch at yield, elastic energy with every beam at
+its yield). The rule it shows:
+
+- **Yield is the real member's.** A chord yields at its section's mean crush force
+  (`Member::crush_n`: σ₀·t^(5/3) folding of the stated section, gauge and grade), times the crash
+  character's multiple (1 by default).
+- **Stiffness is what the step allows.** At 0.5 ms a node's springs are bounded (Σk/m ≤ 8.5e6
+  s⁻², ω·h ≤ 1.85), so a chord's k·L is 24 to 76 times below the section's E·A (sedan: crash box
+  1.46 MN against 111.5, front rail 3.17 against 133.4, rear rail 4.17 against 98.6).
+- **So the chord stretches 1-3 % before it yields** where steel yields at 0.1-0.3 %, and stores
+  that much more elastic energy: 58.9 kJ in the sedan's shell with every beam at yield, 46 kJ of
+  it in the cabin and the sill and door-frame primaries. This is the explicit 2 kHz trade-off
+  (BeamNG's and Rigs of Rods' too) and the source of the rebound above a real car's
+  (lessons §29).
+
+What the mapping must carry from the real member is therefore its mean crush force and absorbed
+energy; its first peak and its elastic stiffness cannot be carried at this step.
 
 ## Jello against the ETK, and parts that collide inside one car (2026-11-13, `feat/sedan-body`)
 

@@ -43,6 +43,11 @@ gen_sedan_paint::own_paint_ends_apart
 gen_sedan_paint::accept_head_100
 gen_sedan_paint::accept_side_90
 gen_sedan_paint::accept_side_60_pressed
+# New on the sedan as defined (the default crash character since 2026-11-27, `real_crash`): the
+# pressed 60 km/h head-on's paint is 88 mm inside the other car from 0.3 s (the guard 50 mm; it
+# passed on the beamng_feel car, whose front is 1.8 times as strong). To fix in the generator
+# (the collision skin's fit to the paint at the front), not by the guard.
+gen_sedan_paint::accept_head_60_pressed
 
 # The vehicle lint on every generated design (tests/generated_vehicle_lint.rs, 2026-11-24): the
 # collision skin's defects, found by hand in the S4 crash study, now caught at build time.

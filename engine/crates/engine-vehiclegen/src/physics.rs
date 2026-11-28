@@ -9,13 +9,16 @@
 /// are against the body's definitions (`structure`: sections, gauges, grades).
 /// One setting, two documented presets, every number editable:
 ///
-/// * [`CrashFeel::beamng_feel`] (the default): the look and feel of a good
-///   BeamNG car (the ETK K-series, measured in the same scenes, same solver):
-///   shallower crush, more spring-back, panels that stay in shape away from
-///   the hit. Its front is stronger than the real crash bands.
-/// * [`CrashFeel::real_crash`]: the members as defined (their own section,
-///   gauge and grade), which is what the NHTSA full-frontal bands
-///   (`engine/docs/crash-reference-targets.md`) are measured against.
+/// * [`CrashFeel::real_crash`] (the default since 2026-11-27): the members as
+///   defined (their own section, gauge and grade). The target a car's strength
+///   is calibrated to is the real one: instrumented crash tests of real cars
+///   (NHTSA's, `engine/docs/crash-reference/`) and finite-element models of
+///   them, not another game's car (owner, 2026-11-27).
+/// * [`CrashFeel::beamng_feel`] (the default until then): the look and feel
+///   of a good BeamNG car (the ETK K-series, measured in the same scenes,
+///   same solver): shallower crush, more spring-back, panels that stay in
+///   shape away from the hit. Its front is 1.8 times as strong as defined,
+///   stronger than the real crash bands. Kept as a comparison.
 ///
 /// Each number is a multiple of a member's mean crush force or of a panel's
 /// yield strain, applied to the definitions before the lattice is built, so it
@@ -80,7 +83,7 @@ impl CrashFeel {
 
 impl Default for CrashFeel {
     fn default() -> Self {
-        Self::beamng_feel()
+        Self::real_crash()
     }
 }
 
@@ -360,7 +363,7 @@ pub struct Physics {
     /// triangle aerodynamics are set to give it: no per-node drag). 0.30: a
     /// current mid-size sedan (the 2011 Accord's published Cd is 0.30-0.31).
     pub drag_cd: f32,
-    /// The crash character ([`CrashFeel`]): `"beamng_feel"` (default),
+    /// The crash character ([`CrashFeel`]): `"real_crash"` (default),
     /// `"real_crash"`, or its numbers. Used by cars on the body definitions
     /// (`structure`); the earlier lattices have the zone yields above.
     pub crash: CrashFeel,

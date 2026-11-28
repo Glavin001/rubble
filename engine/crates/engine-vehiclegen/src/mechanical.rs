@@ -160,6 +160,9 @@ pub struct Gear {
     pub axle_r: f64,
     /// the floor pan's height (reference y)
     pub y_pan: f64,
+    /// the floor row (1 to 5) of the front seat's front cross member
+    /// (`structure::Lines::seat_row`)
+    pub seat_row: usize,
     /// the tail and nose faces (as built): z at (x, y)
     pub z_nose: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
     pub z_tail: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
@@ -608,8 +611,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     let y_pan = g.y_pan;
     let rows = {
         // (the floor rows the seat cross members stand on)
-        let c3 = st.node("sh_c3_3").unwrap().pos.z;
-        let c4 = st.node("sh_c3_4").unwrap().pos.z;
+        let c3 = st.node(&format!("sh_c3_{}", g.seat_row)).unwrap().pos.z;
+        let c4 = st.node(&format!("sh_c3_{}", g.seat_row + 1)).unwrap().pos.z;
         (c3, c4)
     };
     let y_xm = f.y(y_pan) + 0.060 + 0.006;
@@ -637,7 +640,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         // (At the study's 6 kN, an empty BeamNG seat's value, the driver's
         // seat slid 18 cm forward in the 56 km/h wall.)
         p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 38.0, 15_000.0, INF), deform_group: None });
-        for (foot, (row, lane)) in feet.iter().zip([(3, "o"), (3, "t"), (4, "o"), (4, "t")]) {
+        for (foot, (row, lane)) in feet.iter().zip([(g.seat_row, "o"), (g.seat_row, "t"), (g.seat_row + 1, "o"), (g.seat_row + 1, "t")]) {
             let to = vec![format!("sh_c1_{row}{lane}{s}"), format!("sh_c1_{row}{}{s}", if lane == "o" { "t" } else { "o" }), format!("sh_c2_{row}{s}"), format!("sh_c3_{row}")];
             let from = vec![foot.clone(), p.nodes[4].name.clone()];
             p.mounts.push(Mount { group: format!("seat_{}_{}", cn.to_lowercase(), &foot[foot.len() - 2..]), from, to, beams: 6, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 12_000.0, 45e3), precomp: 1.0 });

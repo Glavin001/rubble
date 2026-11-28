@@ -4,7 +4,9 @@
 the generated sedan in its default crash character, `beamng_feel` (`Physics.crash`,
 `engine/docs/generated-vehicles.md` "Crash character"): front members at 1.8 times their defined
 crush force, towers and cabin at 1.5, panels at twice their yield strain, set to match the ETK,
-not a real car. The car as defined (`real_crash`) is the one to hold against a Camry. CPU
+not a real car. The car as defined (`real_crash`) is the one to hold against a Camry, and
+since later on 2026-11-27 it is the default (with the front seats moved beside the front door:
+`generated-vehicles-lessons.md` §29); its 8-run ranges are in the paragraph below the table. CPU
 reference, run 0 (`out/crash-character/`; S11 and S13 edge contact, S14 discrete; S13 at its
 moved pole):
 
@@ -19,6 +21,13 @@ moved pole):
 | S13 thrown back (m/s) | 4.0 | 3.3 | 1.7-2.2 |
 | S14 crush, peak / residual (mm) | 156 / 51 | 276 / 165 | 258-275 residual |
 | S14 struck car, lateral speed change (m/s) | 9.27 | 8.98 | 6.6-6.8 (7.0-7.2 mass-scaled) |
+
+The car as it is now (as defined, seats moved, S13 re-aimed on its centre of mass), CPU
+reference, 8 jittered runs (`out/crash-reference/sweep/cpu/`): S11 dynamic crush 0.46-0.50 m,
+restitution 0.23-0.26, maximum crush at 57-58 ms, wall force 505-530 kN at 32-36 ms; S13 pole
+force 258-275 kN, crush 348-397 mm peak and 165-223 mm residual; S14 crush 171-293 mm peak and
+79-181 mm residual, struck car's lateral speed change 8.83-9.26 m/s. The timelines, sheets and
+detailed tables below are still the `beamng_feel` car's.
 
 The four real 2012–2014 Toyota Camry side tests from NHTSA's public database, read from their
 films, photos, reports and sensor curves, set beside Rubble's S14 and S13 on the CPU

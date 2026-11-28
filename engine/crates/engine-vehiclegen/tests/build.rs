@@ -77,7 +77,8 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 103);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 465_982);
+    // (465_982 until 2026-11-27: the front seat cross member is in two lengths at the longitudinal)
+    assert_eq!(total, 465_926);
     for (name, n) in [
         ("body_shell", 114_520),
         ("hood", 39_408),

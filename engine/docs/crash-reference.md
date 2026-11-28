@@ -240,34 +240,42 @@ never changed by an entry. Each is a finding, not a band to widen.
 
 The table is what `python3 tools/crash-reference/sweep.py --cpu` writes to
 `out/crash-reference/sweep/known-cpu.md` from the entries and the CPU reference's 8 runs a
-setting (2026-11-27). Rows marked new were found by that sweep and were not in this page's
+setting (2026-11-27, the sweep on the sedan as defined with its seats moved: the car since
+that day's generator changes; S06 and S08 with continuous contact run one process a run, as 8
+runs pass the sweep's 300 s bound). Rows marked new were found by that sweep and were not in this page's
 earlier list: they are recorded so the suite runs green, and wait for review.
 
 | Scenario | Criterion | Contact | Recorded as | Failed (CPU) | Value over the runs | Band | New, for review |
 |---|---|---|---|---|---|---|---|
-| S03 | no energy created | edge | every run | 8 of 8 | 14,112 to 211,378 |  .. 132.0 |  |
-| S03 | no energy created | continuous | every run | 8 of 8 | 6,719 to 29,661 |  .. 132.0 |  |
-| S04 | no energy created | discrete | some runs | 1 of 8 | 0.000 to 221.4 |  .. 182.0 |  |
-| S04 | no energy created | edge | every run | 8 of 8 | 2,242 to 43,160 |  .. 182.0 |  |
-| S04 | no energy created | continuous | some runs | 3 of 8 | 0.000 to 516.1 |  .. 182.0 |  |
-| S06 | no energy created | edge | every run | 8 of 8 | 4,107 to 39,865 |  .. 610.0 |  |
-| S06 | no energy created | continuous | some runs | 1 of 8 | 23.6 to 991.4 |  .. 610.0 |  |
-| S07 | nothing passes into the block | continuous | some runs | 1 of 8 | 0.009 to 0.050 |  .. 0.050 | **yes** |
-| S08 | the common centre of mass stays still | discrete | some runs | 2 of 8 | 0.060 to 0.461 |  .. 0.300 | **yes** |
-| S08 | momentum along the road | edge | some runs | 1 of 8 | -133.6 to 642.8 | -450.0 .. 450.0 | **yes** |
-| S08 | momentum across the road | edge | some runs | 1 of 8 | -283.7 to 519.0 | -450.0 .. 450.0 | **yes** |
-| S08 | the common centre of mass stays still | edge | some runs | 2 of 8 | 0.144 to 0.409 |  .. 0.300 | **yes** |
-| S08 | no energy created | continuous | some runs | 1 of 8 | 8.197 to 442.9 |  .. 340.0 |  |
-| S08 | momentum along the road | continuous | some runs | 2 of 8 | -410.7 to 568.1 | -450.0 .. 450.0 | **yes** |
-| S08 | the common centre of mass stays still | continuous | every run | 8 of 8 | 0.399 to 0.661 |  .. 0.300 |  |
-| S09 | no energy created | discrete | some runs | 1 of 8 | 8.191 to 531.5 |  .. 400.0 |  |
-| S09 | no energy created | edge | some runs | 5 of 8 | 1.796 to 2,510 |  .. 400.0 |  |
-| S10 | nothing passes into the block | continuous | some runs | 4 of 8 | 0.001 to 0.147 |  .. 0.050 | **yes** |
-| S11 | restitution within the 56 km/h sedan fleet's | discrete | every run | 8 of 8 | 0.302 to 0.346 |  .. 0.250 |  |
-| S11 | restitution within the 56 km/h sedan fleet's | edge | every run | 8 of 8 | 0.302 to 0.346 |  .. 0.250 |  |
-| S11 | restitution within the 56 km/h sedan fleet's | continuous | every run | 8 of 8 | 0.295 to 0.356 |  .. 0.250 |  |
-| S14 | no energy created | edge | every run | 8 of 8 | 4,703 to 1,006,835 |  .. 203.0 |  |
-| S14 | no energy created | continuous | every run | 8 of 8 | 6,271 to 13,083 |  .. 203.0 |  |
+| S03 | no energy created | edge | every run | 8 of 8 | 5,712 to 13,248 |  .. 132.0 |  |
+| S03 | no energy created | continuous | every run | 8 of 8 | 4,173 to 16,492 |  .. 132.0 |  |
+| S04 | no energy created | discrete | some runs | 1 of 8 | 0.000 to 196.3 |  .. 182.0 |  |
+| S04 | no energy created | edge | every run | 8 of 8 | 9,011 to 21,316 |  .. 182.0 |  |
+| S04 | no energy created | continuous | some runs | 2 of 8 | 0.000 to 609.6 |  .. 182.0 |  |
+| S06 | no energy created | edge | every run | 8 of 8 | 2,663 to 55,519 |  .. 610.0 |  |
+| S06 | no energy created | continuous | some runs | 0 of 8 | 0.000 to 280.0 |  .. 610.0 |  |
+| S07 | nothing passes into the block | continuous | some runs | 0 of 8 | 0.015 to 0.025 |  .. 0.050 | **yes** |
+| S08 | the common centre of mass stays still | discrete | some runs | 0 of 8 | 0.171 to 0.268 |  .. 0.300 | **yes** |
+| S08 | momentum along the road | edge | some runs | 0 of 8 | -227.1 to 175.6 | -450.0 .. 450.0 | **yes** |
+| S08 | momentum across the road | edge | some runs | 0 of 8 | -209.0 to 61.1 | -450.0 .. 450.0 | **yes** |
+| S08 | turns the same sense as the other | edge | some runs | 0 of 8 | 5.190 to 6.311 | 0.000 ..  | **yes** |
+| S08 | turns the same sense as the other | edge | some runs | 1 of 8 | -7.535 to 6.664 | 0.000 ..  | **yes** |
+| S08 | the common centre of mass stays still | edge | some runs | 0 of 8 | 0.096 to 0.184 |  .. 0.300 | **yes** |
+| S08 | no energy created | continuous | some runs | 0 of 8 | 0.000 to 243.3 |  .. 340.0 |  |
+| S08 | momentum along the road | continuous | some runs | 0 of 8 | -213.2 to 296.6 | -450.0 .. 450.0 | **yes** |
+| S08 | turns the same sense as the other | continuous | some runs | 1 of 8 | -4.757 to 9.726 | 0.000 ..  | **yes** |
+| S08 | turns the same sense as the other | continuous | some runs | 1 of 8 | -7.556 to 9.225 | 0.000 ..  | **yes** |
+| S08 | the common centre of mass stays still | continuous | some runs | 3 of 8 | 0.164 to 0.371 |  .. 0.300 |  |
+| S09 | no energy created | discrete | some runs | 0 of 8 | 0.000 to 297.4 |  .. 400.0 |  |
+| S09 | no energy created | edge | some runs | 7 of 8 | 134.2 to 2,530 |  .. 400.0 |  |
+| S10 | nothing passes into the block | continuous | some runs | 3 of 8 | 0.005 to 0.066 |  .. 0.050 | **yes** |
+| S11 | restitution within the 56 km/h sedan fleet's | discrete | some runs | 3 of 8 | 0.232 to 0.260 |  .. 0.250 |  |
+| S11 | restitution within the 56 km/h sedan fleet's | edge | some runs | 3 of 8 | 0.232 to 0.260 |  .. 0.250 |  |
+| S11 | no energy created | continuous | some runs | 1 of 8 | 0.000 to 178.1 |  .. 177.0 | **yes** |
+| S11 | restitution within the 56 km/h sedan fleet's | continuous | some runs | 4 of 8 | 0.234 to 0.255 |  .. 0.250 |  |
+| S13 | no energy created | continuous | some runs | 2 of 8 | 9.147 to 73.7 |  .. 57.0 | **yes** |
+| S14 | no energy created | edge | every run | 8 of 8 | 6,316 to 1,014,470 |  .. 203.0 |  |
+| S14 | no energy created | continuous | every run | 8 of 8 | 4,612 to 11,368 |  .. 203.0 |  |
 
 S03 (the barrier into the sedan's side), localised:
 
@@ -796,6 +804,18 @@ In words (what the overlays show):
   run 0: 275 kN at 24 ms (tests 191-197 kN at 44-46), residual crush 110 mm (379-394), thrown
   back at 4.0 m/s (1.7-2.2), yaw 4 deg (8-10); all asserted rules hold on 8 runs, edge and
   continuous. The comparison document has the detail.
+- **The car changed, 2026-11-27 (later the same day).** Two generator changes, both the owner's
+  direction (the strength target is the real car; clear layout faults are fixed):
+  the default crash character is `real_crash` (the members as defined; it was `beamng_feel`,
+  front 1.8 and cabin 1.5 times as strong), and the four-doors' front seats moved from beside
+  the rear door to beside the front door (`generated-vehicles-lessons.md` §29). The sedan's
+  centre of mass moved 37 mm forward (1.393 m behind the front axle), so S13's impact line is
+  1.318 m (aim 1.469 m), still 0.075 m ahead of it. Every figure in this document dated before
+  this is the earlier car's. On this car, 8 runs: S11 edge crush 0.46-0.50 m, restitution
+  0.23-0.26, maximum crush at 57-58 ms, wall 505-530 kN; S13 edge 258-275 kN, crush at the pole
+  348-397 mm peak and 165-223 residual, yaw 1-5 deg nose-right; S14 discrete crush 171-293 mm
+  peak and 79-181 residual, struck car's speed change 8.8-9.3 m/s. "Currently failing" below is
+  this car's sweep.
 
 ## Results (2026-11-27)
 

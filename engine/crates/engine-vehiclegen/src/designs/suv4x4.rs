@@ -330,6 +330,7 @@ impl Suv4x4 {
             well_r: WELL_R,
             wheel_y: WHEEL_Y,
             y_pan: f.yi(FLOOR_Y + PAN_ABOVE_FLOOR),
+            seat_row: 2,
         }
     }
 
@@ -349,6 +350,7 @@ impl Suv4x4 {
             axle_f: f.zi(ZF_AX),
             axle_r: f.zi(ZR_AX),
             y_pan: f.yi(FLOOR_Y + PAN_ABOVE_FLOOR),
+            seat_row: 2,
             z_nose: Rc::new(front_z),
             z_tail: Rc::new(rear_z),
             rear: None,

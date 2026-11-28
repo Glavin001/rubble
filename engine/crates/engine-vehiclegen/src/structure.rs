@@ -299,10 +299,17 @@ pub struct Lines {
     pub z_screen_top: f64,
     /// the B-pillar
     pub z_b: f64,
-    /// the front seat's front cross member: the floor rows' third (a
-    /// four-door's is its B-pillar's; a two-door's B-pillar stands behind
-    /// the seat)
+    /// the floor rows' third: a four-door's B-pillar (the front seat's rear
+    /// cross member); a two-door's front seat's front cross member (its
+    /// B-pillar stands behind the seat)
     pub z_seat: f64,
+    /// The floor row (1 to 5) the front seat's front cross member is on; its
+    /// rear one is on the next row. A four-door's is 2 (the seat stands
+    /// between mid footwell and the B-pillar, its occupant beside the front
+    /// door); a two-door's is 3. (It was 3 for every car until 2026-11-27:
+    /// the four-doors' front seats stood behind the B-pillar, beside the
+    /// rear door.)
+    pub seat_row: usize,
     /// the rear door's rear shut line (the C-pillar's foot; the floor pan's
     /// skin runs between the two door lines)
     pub z_door_rear: f64,
@@ -331,6 +338,17 @@ impl Lines {
         let r3 = self.z_seat;
         let r5 = self.z_door_rear + 0.035;
         [r1, 0.5 * (r1 + r3), r3, 0.5 * (r3 + r5), r5]
+    }
+}
+
+/// A seat cross member's lengths from `x0` (the tunnel) to `x1` (the sill): one, or two where it
+/// meets the floor longitudinal at `xr` (`meets`: it is ahead of the longitudinal's rear end),
+/// butted to the longitudinal's flanges (18 mm beyond its 60 mm hat) either side.
+fn cross_member_spans(x0: f64, x1: f64, xr: f64, meets: bool) -> Vec<(&'static str, f64, f64)> {
+    if meets {
+        vec![("i", x0, xr - 0.052), ("o", xr + 0.052, x1)]
+    } else {
+        vec![("", x0, x1)]
     }
 }
 
@@ -734,9 +752,8 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
         let path: Vec<DVec3> = zs.iter().map(|&z| mx(r(x_sill(z), y_sill, z), sg)).collect();
         sills[k] = b.boxed(&format!("sill_{s}"), "sill", "structure_floor", &path, up, sw, sh, 1.4, Grade::Hsla);
         b.hat(&format!("floor_longitudinal_{s}"), "floor_pan", "structure_floor", &[mx(r(xr, y_pan, rows[0] - 0.012), sg), mx(r(xr, y_pan, rows[2] + 0.050), sg)], up, 0.060, 0.045, 1.2, Grade::Hsla);
-        for (n, row) in [(3, 2), (4, 3)] {
-            let z = rows[row];
-            b.hat(&format!("seat_crossmember_{n}{s}"), "seat_crossmember", "structure_floor", &[mx(r(x_tf + 0.005, y_pan, z), sg), mx(r(x_sill(z) - sw / 2.0 - 0.004, y_pan, z), sg)], up, 0.050, 0.060, 1.2, Grade::Hsla);
+        for (n, z) in [(3, rows[l.seat_row - 1]), (4, rows[l.seat_row])] {
+            cross_member_spans(x_tf + 0.005, x_sill(z) - sw / 2.0 - 0.004, xr, z > rows[2] + 0.050).into_iter().for_each(|(t, a, c)| drop(b.hat(&format!("seat_crossmember_{n}{s}{t}"), "seat_crossmember", "structure_floor", &[mx(r(a, y_pan, z), sg), mx(r(c, y_pan, z), sg)], up, 0.050, 0.060, 1.2, Grade::Hsla)));
         }
     }
     for (k, &z) in rows.iter().enumerate() {

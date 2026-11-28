@@ -362,6 +362,7 @@ impl Mach1 {
             well_r: 0.366,
             wheel_y: WHEEL_Y,
             y_pan: Y_PAN,
+            seat_row: 3,
         }
     }
 
@@ -380,6 +381,7 @@ impl Mach1 {
             axle_f: ZF_AX,
             axle_r: ZR_AX,
             y_pan: Y_PAN,
+            seat_row: 3,
             z_nose: Rc::new(front_z),
             z_tail: Rc::new(rear_z_body),
             rear: (!self.run.uniform()).then(|| {

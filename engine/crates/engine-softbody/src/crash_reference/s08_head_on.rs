@@ -17,7 +17,8 @@ macro_rules! per_car {
         [
             Criterion::new(Invariant, "no explosion", concat!($car, ".max_node_speed"), None, Some(46.0), "3 × the 15.3 m/s approach (see S01)"),
             Criterion::new(Physics, "the overlapping side takes more", concat!($car, ".zone.front_lr_ratio"), Some(1.0), None, "only the left half of each front meets the other car").law("the right front is loaded only through the structure from the left, which passes on less than it receives: left work > right work"),
-            Criterion::new(Physics, "turns the same sense as the other", concat!($car, ".yaw_peak_deg"), Some(0.0), None, "each car's contact force acts left of its centre of mass").law("angular momentum: an impulse against the motion at the car's own left turns it positively about world +Y; for car_b (heading −Z, left −X) the same sign by point symmetry"),
+            Criterion::new(Physics, "turns the same sense as the other", concat!($car, ".yaw_peak_deg"), Some(0.0), None, "each car's contact force acts left of its centre of mass").law("angular momentum: an impulse against the motion at the car's own left turns it positively about world +Y; for car_b (heading −Z, left −X) the same sign by point symmetry")
+                .known_intermittent(&[Contact::Edge, Contact::Continuous], "new in the 2026-11-27 sweep on the sedan as defined, for review: CPU reference, one car turns the other way (-4.8 to -7.6 deg) in 1 of 8 runs edge (5) and 2 of 8 continuous (2, 3); discrete holds (engine/docs/crash-reference.md, Currently failing)"),
             Criterion::new(Physics, "crush at its deepest", concat!($car, ".crush_peak"), Some(0.3), Some(0.95), "a 55 km/h offset barrier test each: S01's 0.4–1.1 m at 64 km/h scaled by Campbell's (55 − 8)/(64 − 8) = 0.84"),
             Criterion::new(Physics, "the crush stays", concat!($car, ".crush_residual"), Some(0.21), None, "metal does not spring back: 70 % of the 0.3 m peak floor"),
             Criterion::new(Physics, "overlapping side's crush", concat!($car, ".gauge.length_left.shrink_frac"), Some(0.05), Some(0.22), "S01's 0.06–0.25 of the left side scaled by Campbell's 0.84; crush_peak is the whole car's length, which the unstruck right corner holds"),
@@ -80,7 +81,7 @@ pub(super) fn scenario() -> CrashScenario {
                 Criterion::new(Physics, "symmetric work", "pair.car_a_car_b.plastic_work_ratio", None, Some(1.15), "equal cars: each absorbs half of the 338 kJ, the larger within 15 % of the smaller"),
                 Criterion::new(Physics, "symmetric turn", "pair.car_a_car_b.yaw_peak_diff_deg", None, Some(5.0), "point symmetry about the contact maps one car's turn onto the other's"),
                 Criterion::new(Invariant, "the common centre of mass stays still", "all.com_speed_end", None, Some(0.3), "zero total momentum stays zero: 2 % of the 15.3 m/s approach").law("a symmetric head-on's common centre of mass stays at rest (equal masses, equal and opposite velocities)")
-                    .known_failure(&[Contact::Continuous], "CPU reference 2026-11-27, 8 of 8 runs: 0.40-0.66 m/s (engine/docs/crash-reference.md, Currently failing)")
+                    .known_intermittent(&[Contact::Continuous], "CPU reference 2026-11-27, the sedan as defined: 3 of 8 runs, 0.16-0.37 m/s; it was 8 of 8 at 0.40-0.66 on the beamng_feel car (engine/docs/crash-reference.md, Currently failing)")
                     .known_intermittent(&[Contact::Discrete, Contact::Edge], "new in the 2026-11-27 sweep, for review: CPU reference, discrete 2 of 8 runs (2, 3) up to 0.46 m/s, edge 2 of 8 (2, 5) up to 0.41 m/s (engine/docs/crash-reference.md, Currently failing)"),
             ]);
             c

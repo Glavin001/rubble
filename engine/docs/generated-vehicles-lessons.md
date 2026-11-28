@@ -1264,3 +1264,85 @@ Full account: [beam-yield-law.md](beam-yield-law.md) §9 (`front_fold`, `tools/b
 - 2026-11-12: first version.
 - 2026-11-12: linked the BeamNG structure study (`beamng-structure-study.md`): every node at Σk/m ≈ 7–10e6 s⁻² (whole-car ω·h 1.80–1.90), the 131-node shell specification and 24 lint rules.
 - 2026-11-13: section 12, the body rebuilt from definitions (structure, mechanical parts, shell lattice); the rigger integration and all measurements still to do.
+
+## 29. The strength target is the real car; real steel mapped to 2 kHz (2026-11-27, `claude/crash-reference-suite`)
+
+- **(Decision, owner, 2026-11-27) The target is real crash data, not another game's car.** "Real"
+  means instrumented tests of real cars (NHTSA's films, load-cell walls and accelerometers:
+  `engine/docs/crash-reference/`) and finite-element models of them. A car's strength is calibrated
+  to that. The solver stays explicit at 2 kHz, as BeamNG and Rigs of Rods are: that trade-off is
+  accepted, never worked around with an implicit solve or a smaller step. What the step cannot
+  carry (real steel's stiffness) is adjusted in the generator, as a stated mapping from the real
+  section to the lattice, never in the solver or in contact.
+- **(Change) The default crash character is `real_crash`** (`physics::CrashFeel::default`): every
+  member at its own section, gauge and grade. It was `beamng_feel` (front 1.8, towers and cabin
+  1.5, panel yield strain 2.0: the ETK's level, the 2026-11-13 bar). `beamng_feel` stays as a
+  named preset for comparison. This replaces §13's "the ETK's look and feel is the primary bar,
+  the real bands are the guard": the real bands are the bar.
+- **(Fix) The four-doors' front seats stand beside the front door.** `Lines::seat_row`
+  (`Gear::seat_row`): the floor row of the front seat's front cross member, 2 for the sedan,
+  wagon, police sedan and 4x4 (feet on rows 2 and 3: mid footwell and the B-pillar), 3 for the
+  two-door Mach 1 (as before). Until now every car used rows 3 and 4, which put a four-door's
+  front seats, and the driver's 75 kg, behind the B-pillar beside the rear door (the sedan's
+  seat 1.64-2.25 m behind the front axle; its front door 0.57-1.60 m). Now 1.10-1.64 m. The front
+  cross member meets the floor longitudinal there, so it is in two lengths butted to the
+  longitudinal's flanges. Found by the side pole (S13), whose aim had been read from the seat.
+  - Sedan mass centre: 1.430 m → 1.393 m behind the front axle (0.505 → 0.492 of the wheelbase);
+    1,409.7 kg unchanged. S13's pole moved with it (impact line 1.318 m, still 0.075 m ahead of
+    the centre of mass).
+  - `reference_sedan_is_pinned`'s triangle total 465,982 → 465,926 (the cross member's hidden
+    ends); every named part's count unchanged.
+- **(Measurement, not changed) The axle split is a rear-drive car's.** By part
+  (`sedan/*.jbeam`, node weights): body 487 kg at 0.60 of the wheelbase, engine 170 kg at −0.03,
+  transmission 45 kg at 0.21, differential 42 kg and rear subframe 42 kg at 1.0, tank 40 kg at
+  1.15. 50.8 % front. A front-drive Camry is 58 % front (centre of mass 0.42 of the wheelbase):
+  it has no rear differential or driveshaft and its transaxle sits on the front axle. This is the
+  sedan's layout (§22's open question), not a misplaced part, so it is not changed here; a
+  comparison with a front-drive car has to allow for it (S13 does, by aiming on the centre of
+  mass).
+- **(Measurement) The mapping, as a table** (`examples/strength_map`, the sedan as defined; it
+  reads the generator, changes nothing). A chord's yield force is its section's real mean crush
+  force; its spring is what the step allows (Σk/m ≤ 8.5e6 s⁻², ω·h ≤ 1.85), 24 to 76 times softer
+  than E·A of the section. So it stretches that much further before it yields:
+
+  | member | section, gauge | real E·A (MN) | real mean crush (kN) | real strain at that force | lattice k·L (MN) | lattice yield (kN) | lattice strain at yield | softer by |
+  |---|---|---|---|---|---|---|---|---|
+  | crash box | 70 × 110, 1.5 mm HSLA | 111.5 | 45.4 | 0.04 % | 1.46 | 45.4 | 3.1 % | 76 × |
+  | front rail | 70 × 110, 1.8 mm HSLA | 133.4 | 61.6 | 0.05 % | 3.17 | 61.6 | 1.9 % | 42 × |
+  | rear rail | 60 × 90, 1.6 mm HSLA | 98.6 | 47.6 | 0.05 % | 4.17 | 47.6 | 1.1 % | 24 × |
+
+  By zone, the elastic energy the shell holds with every beam at its yield (what it can give
+  back): crash box 0.3 kJ, front rail 2.3, towers 1.2, cabin 16.0, sill and door-frame primaries
+  29.8 (median yield 57.5 kN at 17 mm, 3.1 % of length), pillars 4.7, bows 0.7, rear rails 1.5,
+  tail 2.4: 58.9 kJ in all. The 56 km/h wall brings 175 kJ and the car leaves with 9-12 kJ
+  (restitution 0.23-0.26); a Camry leaves with 1-2 kJ (0.06-0.10).
+- **(Reading, not yet a fix)** The rebound is elastic energy stored at forces below yield, and
+  most of the capacity is in the cabin and the sill primaries, which in a frontal are loaded
+  well below their yield and so return all of it. Two things follow for the mapping, both in
+  the generator and both within BeamNG's method: (1) what a soft chord must carry over from the
+  real member is its mean crush force and the energy it absorbs, not its first peak, which it
+  cannot reach before buckling (§28); (2) the energy a zone returns is set by its beams'
+  damping and by how far below yield it works, so the cabin's rebound is a damping and
+  load-path question, not a strength one. Neither is changed here: the next step is to measure
+  the elastic energy by zone at maximum crush in S11 (`sedan_s11_stored_energy`) on this car
+  and set the cabin's return against it.
+- **(Results, CPU reference, 8 jittered runs, the sedan as defined with the seats moved)**
+  against the Camry tests (S11 and S13 edge contact, S14 discrete):
+
+  | | `beamng_feel`, run 0 (before) | as defined, 8 runs (now the default) | Camry |
+  |---|---|---|---|
+  | S11 dynamic crush (m) | 0.39 | 0.46-0.50 | 0.66-0.69 |
+  | S11 restitution | 0.34 | 0.23-0.26 | 0.06-0.10 |
+  | S11 time of maximum crush (ms) | 44 | 57-58 | 71-76 |
+  | S11 wall force peak (kN) | 661 at 20 ms | 505-530 at 32-36 ms | 829-921 |
+  | S13 pole force (kN) | 275 | 258-275 | 191-197 |
+  | S13 crush at the pole, peak / residual (mm) | 341 / 110 | 348-397 / 165-223 | 379-394 residual |
+  | S14 struck side's crush, peak / residual (mm) | 156 / 51 | 171-293 / 79-181 | 258-275 residual |
+  | S14 struck car's lateral speed change (m/s) | 9.27 | 8.83-9.26 | 6.6-6.8 |
+
+  S11's asserted restitution rule (at most 0.25) failed 8 of 8 runs before and now fails 3 of 8
+  (4 of 8 with continuous contact): recorded as intermittent. New on this car, recorded for
+  review: continuous contact creates energy over the 0.1 % allowance in S11 (1 run, 178 J against
+  177) and S13 (2 runs, 67-74 J against 57), and one car of S08's two turns the other way in 1
+  of 8 runs with edge contact and 2 of 8 with continuous (`engine/docs/crash-reference.md`,
+  "Currently failing").

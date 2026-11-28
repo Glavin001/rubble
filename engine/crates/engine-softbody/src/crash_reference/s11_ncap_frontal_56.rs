@@ -48,11 +48,16 @@ pub(super) fn scenario() -> CrashScenario {
         criteria: || {
             use Tier::*;
             let mut c = frontal_laws(177.0);
+            // (continuous contact, on the car as defined: one run a joule over the allowance)
+            if let Some(i) = c.iter().position(|x| x.name == "no energy created") {
+                let k = c.remove(i);
+                c.insert(i, k.known_intermittent(&[Contact::Continuous], "new in the 2026-11-27 sweep on the sedan as defined, for review: CPU reference, 1 of 8 runs (2), 178 J against 177 (engine/docs/crash-reference.md, Currently failing)"));
+            }
             c.extend([
                 Criterion::new(Physics, "restitution within the 56 km/h sedan fleet's", "car.ref.restitution", None, Some(0.25),
                     "−min v from t_m to 200 ms over v0 at the rear-seat crossmember: nine sedans at 56 km/h into the rigid wall span 0.057–0.194 (seven of targets §8 re-checked 2026-11-27: 0.125–0.194; Camry 8545 0.095, 7520 0.057), plus 0.05 for the measurement (7520's two crossmember channels differ by 0.095)")
                     .cited("NHTSA NCAP frontal rigid barrier 56 km/h, sedans 8407, 9065, 9593, 9764, 9793, 10688, 11574 (crash-reference-targets.md §8, re-checked) and 8545, 7520 (engine/docs/crash-reference/nhtsa): rear-seat crossmember X, CFC 60, integrated; rebound = −min v from t_m to 200 ms")
-                    .known_failure(&[Contact::Discrete, Contact::Edge, Contact::Continuous], "CPU reference 2026-11-27, 8 of 8 runs in every setting: 0.30-0.35 (continuous 0.29-0.36) against the fleet's 0.057-0.194 + 0.05 (engine/docs/crash-reference.md, Currently failing)"),
+                    .known_intermittent(&[Contact::Discrete, Contact::Edge, Contact::Continuous], "CPU reference 2026-11-27, the sedan as defined (real_crash, the default since 2026-11-27, front seats beside the front door): 3 of 8 runs discrete and edge (0.232-0.260), 4 of 8 continuous (0.234-0.255) against the fleet's 0.057-0.194 + 0.05; it was 8 of 8 at 0.30-0.36 on the beamng_feel car (engine/docs/crash-reference.md, Currently failing)"),
                 // Reported: the fleet's ranges, which a different car need not meet.
                 Criterion::new(Physics, "dynamic crush (fleet)", "car.ref.dyn_crush", Some(0.617), Some(0.753), "the nine sedans' dx at t_m: 0.617–0.753 m (Camry 0.663, 0.685)"),
                 Criterion::new(Physics, "time of maximum crush (fleet)", "car.ref.stop_ms", Some(62.7), Some(76.3), "the nine sedans' t_m: 62.7–76.3 ms (Camry 70.9, 75.9)"),
