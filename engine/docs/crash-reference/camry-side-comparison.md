@@ -1,5 +1,25 @@
 # Camry side tests beside Rubble (S14 side MDB, S13 side pole)
 
+**Which car this was measured on (added 2026-11-27).** Every Rubble number in this document is
+the generated sedan in its default crash character, `beamng_feel` (`Physics.crash`,
+`engine/docs/generated-vehicles.md` "Crash character"): front members at 1.8 times their defined
+crush force, towers and cabin at 1.5, panels at twice their yield strain, set to match the ETK,
+not a real car. The car as defined (`real_crash`) is the one to hold against a Camry. CPU
+reference, run 0 (`out/crash-character/`; S11 and S13 edge contact, S14 discrete; S13 at its
+moved pole):
+
+| | `beamng_feel` (default) | `real_crash` | Camry |
+|---|---|---|---|
+| S11 dynamic crush (m) | 0.39 | 0.48 | 0.66-0.69 |
+| S11 restitution | 0.34 | 0.24 | 0.06-0.10 |
+| S11 stop (ms) | 44 | 57 | 71-76 |
+| S11 wall force peak (kN) | 661 at 20 ms | 508 at 32 ms | 829-921 |
+| S13 pole force (kN) | 275 | 252 | 191-197 |
+| S13 crush, peak / residual (mm) | 341 / 110 | 364 / 164 | 379-394 residual |
+| S13 thrown back (m/s) | 4.0 | 3.3 | 1.7-2.2 |
+| S14 crush, peak / residual (mm) | 156 / 51 | 276 / 165 | 258-275 residual |
+| S14 struck car, lateral speed change (m/s) | 9.27 | 8.98 | 6.6-6.8 (7.0-7.2 mass-scaled) |
+
 The four real 2012–2014 Toyota Camry side tests from NHTSA's public database, read from their
 films, photos, reports and sensor curves, set beside Rubble's S14 and S13 on the CPU
 reference, with where Rubble differs over time and the most likely reason for each. Measured
